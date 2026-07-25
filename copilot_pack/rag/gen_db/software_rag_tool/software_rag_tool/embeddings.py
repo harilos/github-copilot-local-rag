@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from dataclasses import dataclass
 from typing import Literal, Protocol
-
-import numpy as np
-
 
 Mode = Literal["document", "query"]
 
@@ -23,13 +21,13 @@ class HashEmbedder:
         output: list[list[float]] = []
         for text in texts:
             digest = hashlib.sha256(f"{mode}:{text}".encode("utf-8", errors="replace")).digest()
-            arr = np.frombuffer(digest, dtype=np.uint8).astype(np.float32)
-            reps = int(np.ceil(self.dim / arr.size))
-            vec = np.tile(arr, reps)[: self.dim]
-            norm = float(np.linalg.norm(vec))
+            values = list(digest)
+            reps = math.ceil(self.dim / len(values))
+            vec = [float(value) for value in (values * reps)[: self.dim]]
+            norm = math.sqrt(sum(value * value for value in vec))
             if norm:
-                vec = vec / norm
-            output.append(vec.tolist())
+                vec = [value / norm for value in vec]
+            output.append(vec)
         return output
 
 

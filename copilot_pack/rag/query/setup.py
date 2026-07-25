@@ -12,6 +12,7 @@ def main() -> None:
     python = venv / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     subprocess.check_call([str(python), "-m", "pip", "install", "--upgrade", "pip"])
     subprocess.check_call([str(python), "-m", "pip", "install", "-r", str(here / "requirements.txt")])
+    (venv / ".rag-deps-installed").write_text("ok\n", encoding="utf-8")
     print(f"Ready: {python}")
 
 

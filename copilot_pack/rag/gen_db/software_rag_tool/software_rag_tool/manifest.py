@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import default_collection_name, index_dir, output_root
+from .tokenize import tokenizer_fingerprint
 
 
 def manifest_path() -> Path:
@@ -25,6 +26,9 @@ def build_manifest(record_count: int) -> dict[str, Any]:
         "collection": default_collection_name(),
         "chroma_space": "cosine",
         "chunker_version": "jp-sw-v1",
+        "catalog_schema_version": 1,
+        "tokenizer": tokenizer_fingerprint(),
+        "retrieval": "hybrid-rrf-v1",
     }
 
 

@@ -10,6 +10,8 @@ When a database name is explicit, call:
 python ~/.copilot/rag/query/search.py --db xxx-rag --include-db-hint "<question>"
 ```
 
+Pass the user's full question once. Do not split it into keywords, choose a retrieval mode, or run separate dense/BM25/exact searches. The Python tool handles retrieval strategy internally.
+
 When the user asks naturally for RAG but no DB name is provided, call:
 
 ```bash
@@ -43,6 +45,14 @@ Before starting a long build or add operation, inspect `status.py --json`.
 - During long operations, check `status.py` periodically rather than waiting only on stdout.
 
 Treat Markdown files as normal source documents. If converted Markdown files and original Office/PDF files both exist in the specified input folder, process both unless the user explicitly asks to exclude one.
+
+When upgrading an existing DB after tool changes, prefer:
+
+```bash
+python ~/.copilot/rag/gen_db/rebuild_component.py --db xxx-rag --component lexical
+```
+
+This rebuilds SQLite FTS/identifier/metadata indexes from clean records without recomputing embeddings.
 
 If Python or the virtual environment is missing, guide the user to run:
 

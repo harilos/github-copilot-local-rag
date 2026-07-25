@@ -54,6 +54,10 @@ def index_dir() -> Path:
     return output_root() / "index"
 
 
+def catalog_path() -> Path:
+    return output_root() / "catalog.sqlite"
+
+
 def logs_dir() -> Path:
     return output_root() / "logs"
 

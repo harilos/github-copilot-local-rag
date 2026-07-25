@@ -9,7 +9,7 @@ RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(TOOL_ROOT))
 
-from software_rag_tool.dbs import ensure_db_layout
+from software_rag_tool.dbs import ensure_db_layout, read_db_version
 
 
 def main() -> None:
@@ -21,6 +21,10 @@ def main() -> None:
     dbs_root = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().resolve()
     root = ensure_db_layout(dbs_root, args.db, title=args.title)
     print(f"Created DB layout: {root}")
+    version = read_db_version(root)
+    if version:
+        print(f"Version file: {root / 'VERSION.json'}")
+        print(f"DB hash: {version.get('db_hash')}")
 
 
 if __name__ == "__main__":

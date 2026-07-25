@@ -93,6 +93,7 @@ def build_records_for_file(
                     "language": _language(path),
                     "root": str(root),
                     "chunk_title": section.title,
+                    "chunk_index": chunk_index,
                     "content_hash": content_hash,
                     "chunk_hash": text_hash,
                     "text_hash": text_hash,

@@ -4,8 +4,12 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-import chromadb
+try:
+    import chromadb
+except ModuleNotFoundError:
+    chromadb = None  # type: ignore[assignment]
 
+from .catalog import reset_catalog, upsert_records as upsert_catalog_records
 from .embeddings import get_embedder
 from .jsonl import read_jsonl
 from .manifest import write_manifest
@@ -37,7 +41,9 @@ def build_index(reset: bool = True) -> int:
 
     if reset:
         reset_collection()
+        reset_catalog()
     upsert_records(records)
+    upsert_catalog_records(records)
     actual = collection_count()
     if reset and actual != len(records):
         raise RuntimeError(f"Index count mismatch: collection={actual}, records={len(records)}")
@@ -46,6 +52,7 @@ def build_index(reset: bool = True) -> int:
 
 
 def reset_collection() -> None:
+    _require_chromadb()
     cdir = chroma_dir()
     cdir.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(cdir))
@@ -57,6 +64,7 @@ def reset_collection() -> None:
 
 
 def _get_or_create_collection() -> Any:
+    _require_chromadb()
     cdir = chroma_dir()
     cdir.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(cdir))
@@ -110,7 +118,8 @@ def collection_count() -> int:
     return int(collection.count())
 
 
-def query(question: str, top_k: int, source: str = "any", fetch_k: int | None = None, max_per_doc: int = 2) -> list[dict[str, Any]]:
+def vector_query(question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+    _require_chromadb()
     client = chromadb.PersistentClient(path=str(chroma_dir()))
     collection = client.get_collection(name=collection_name())
     embedder = get_embedder()
@@ -118,7 +127,7 @@ def query(question: str, top_k: int, source: str = "any", fetch_k: int | None = 
     where = None if source == "any" else {"source": source}
     result = collection.query(
         query_embeddings=[q_embedding],
-        n_results=fetch_k or max(top_k * 4, top_k),
+        n_results=top_k,
         where=where,
         include=["documents", "metadatas", "distances"],
     )
@@ -136,9 +145,36 @@ def query(question: str, top_k: int, source: str = "any", fetch_k: int | None = 
                 "distance": distance,
                 "text": doc,
                 "metadata": meta,
+                "signals": ["dense"],
             }
         )
+    return rows
 
+
+def query(
+    question: str,
+    top_k: int,
+    source: str = "any",
+    fetch_k: int | None = None,
+    max_per_doc: int = 2,
+    budget_tokens: int | None = None,
+    explain: bool = False,
+) -> list[dict[str, Any]]:
+    from .retrieval import hybrid_query
+
+    return hybrid_query(
+        question,
+        top_k=top_k,
+        source=source,
+        fetch_k=fetch_k,
+        max_per_doc=max_per_doc,
+        budget_tokens=budget_tokens,
+        explain=explain,
+    )
+
+
+def semantic_query(question: str, top_k: int, source: str = "any", fetch_k: int | None = None, max_per_doc: int = 2) -> list[dict[str, Any]]:
+    rows = vector_query(question, top_k=fetch_k or max(top_k * 4, top_k), source=source)
     doc_counts: dict[str, int] = {}
     seen_chunk_hashes: set[str] = set()
     output: list[dict[str, Any]] = []
@@ -172,3 +208,8 @@ def _flat_metadata(meta: dict[str, Any]) -> dict[str, str | int | float | bool]:
         else:
             flat[key] = str(value)
     return flat
+
+
+def _require_chromadb() -> None:
+    if chromadb is None:
+        raise RuntimeError("chromadb is not installed. Run python ~/.copilot/rag/query/setup.py before dense search or DB generation.")

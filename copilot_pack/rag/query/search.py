@@ -19,16 +19,22 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("question", nargs="+")
+    parser.add_argument("question", nargs="*")
     parser.add_argument("--db", help="Target DB name, e.g. project-rag")
     parser.add_argument("--auto", action="store_true", help="Allow natural-language RAG trigger when DB name is omitted")
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--max-chars", type=int, default=900)
+    parser.add_argument("--budget-tokens", type=int, default=0)
+    parser.add_argument("--timeout", type=int, default=0)
+    parser.add_argument("--stdin", action="store_true", help="Read the question from stdin")
+    parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="prompt")
     parser.add_argument("--include-db-hint", action="store_true")
     args = parser.parse_args()
 
-    question = " ".join(args.question).strip()
+    question = sys.stdin.read().strip() if args.stdin else " ".join(args.question).strip()
+    if not question:
+        parser.error("question is required unless --stdin provides input")
     resolution = resolve_db_name(question, args.db, DBS_ROOT, args.auto)
     if not resolution.triggered:
         print(
@@ -61,26 +67,58 @@ def main() -> None:
 
     script = TOOL_ROOT / "scripts" / "query.py"
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
-    python = str(venv_python) if venv_python.exists() else sys.executable
+    marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
+    python = str(venv_python) if venv_python.exists() and marker.exists() else sys.executable
     env = os.environ.copy()
     env.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
     env.setdefault("PYTHONIOENCODING", "utf-8")
     cmd = [
         python,
         str(script),
-        question,
-        "--db",
-        resolution.db_name,
-        "--top-k",
-        str(args.top_k),
-        "--max-chars",
-        str(args.max_chars),
-        "--format",
-        args.format,
     ]
+    if not args.stdin:
+        cmd.append(question)
+    cmd.extend(
+        [
+            "--db",
+            resolution.db_name,
+            "--top-k",
+            str(args.top_k),
+            "--max-chars",
+            str(args.max_chars),
+            "--format",
+            args.format,
+        ]
+    )
+    if args.budget_tokens:
+        cmd.extend(["--budget-tokens", str(args.budget_tokens)])
+    if args.stdin:
+        cmd.append("--stdin")
+    if args.explain:
+        cmd.append("--explain")
     if args.include_db_hint:
         cmd.append("--include-db-hint")
-    raise SystemExit(subprocess.call(cmd, env=env))
+    try:
+        if args.stdin:
+            completed = subprocess.run(cmd, env=env, input=question, text=True, timeout=args.timeout or None)
+        else:
+            completed = subprocess.run(cmd, env=env, timeout=args.timeout or None)
+        raise SystemExit(completed.returncode)
+    except subprocess.TimeoutExpired:
+        print(
+            json.dumps(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "error",
+                    "error": f"search timed out after {args.timeout} seconds",
+                    "db": resolution.db_name,
+                    "query": question,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise SystemExit(124)
 
 
 if __name__ == "__main__":

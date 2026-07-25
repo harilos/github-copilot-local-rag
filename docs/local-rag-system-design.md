@@ -14,6 +14,26 @@ python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
 
 Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、ファイル名検索、RRF、rerank、重複排除、context組み立てはすべてPython側で隠蔽する。
 
+## 現在の実装範囲
+
+実装済み。
+
+- `catalog.sqlite` schema、WAL、chunk本文、metadata、FTS5、identifier table
+- SudachiPy A-mode tokenizerとfallback CJK n-gram tokenizer
+- build/add時の小バッチ catalog 更新
+- clean JSONLからの `rebuild_component.py --component lexical`
+- Chroma dense、BM25、metadata、exactのfamily ranking
+- weighted RRF、anchor rescue、duplicate collapse、文書多様化
+- final contextの隣接chunk展開、簡易token budget packing
+- `--stdin`、`--budget-tokens`、`--timeout`、`--explain`
+
+未実装または簡易実装。
+
+- generationによるSQLite/Chromaの原子的公開は `active_generation=1` の足場のみ
+- work item/lease/heartbeatの正本化は既存の `logs/index_state.json` / `progress.json` を継続利用
+- rerankerはCLI/設計上の拡張余地のみで初期OFF
+- 本文trigramとCAS objectsは未実装
+
 ## 基本方針
 
 - `$HOME/.copilot` に丸ごとコピーして使える構成にする。
@@ -88,10 +108,14 @@ RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照�
 
 ```text
 ~/.copilot/rag/dbs/xxx-rag/
-  manifest.json              # DB名、schema version、active_generation
+  VERSION.json               # 作成日時、DB hash、tool hash
+  db.json                    # DB名と短いprofile
   DB_PROFILE.md              # DB固有の短い説明。通常promptには常時入れない
   catalog.sqlite             # 正本。本文、メタデータ、状態、FTS、識別子
-  chroma/                    # Dense vector index。再構築可能な派生物
+  data/clean/                # 抽出済みclean JSONL
+  index/
+    manifest.json            # record count、model、tokenizer、retrieval
+    chroma/                  # Dense vector index。再構築可能な派生物
   objects/                   # 抽出済みテキスト等のCAS。任意
   logs/
     progress.json            # UI/AI表示用snapshot
@@ -101,6 +125,24 @@ RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照�
 ```
 
 `progress.json` と `events-*.jsonl` は正本にしない。resume判定、成功状態、失敗状態、generation、work itemは最終的に `catalog.sqlite` を正本にする。
+
+`VERSION.json` はDBレイアウト作成時に生成する。既存DBで欠けている場合は、次回 `ensure_db_layout` 実行時に補完する。形式は `local-rag.db-version.v1` とし、少なくとも次を含める。
+
+```json
+{
+  "schema": "local-rag.db-version.v1",
+  "db_name": "xxx-rag",
+  "created_at": "2026-07-26T00:00:00+00:00",
+  "hash_algorithm": "sha256",
+  "db_hash": "...",
+  "collection": "xxx_rag_ruri3_130m_v1",
+  "tool": {
+    "name": "software-rag-tool",
+    "version": "0.1.0",
+    "hash": "..."
+  }
+}
+```
 
 ## 採用コンポーネント
 

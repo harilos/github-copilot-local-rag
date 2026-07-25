@@ -12,6 +12,7 @@ from .manifest import write_manifest
 from .paths import clean_dir, logs_dir
 from .progress import emit_event, write_progress
 from .records import build_records_for_file, file_content_hash, iter_input_files, sha256_text
+from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
 from .store import collection_count, delete_ids, reset_collection, upsert_records
 
 
@@ -70,6 +71,7 @@ def add_or_update_root(
 
     if reset_db:
         reset_collection()
+        reset_catalog()
         emit_event("collection_reset")
 
     files = list(iter_input_files(root))
@@ -221,6 +223,7 @@ def _flush_batch(
         files_done=_files_done(summary),
     )
     deleted = delete_ids(delete_targets)
+    delete_catalog_chunks(delete_targets)
     write_progress(status="running", phase="embedding", deleted_records=summary["deleted_records"] + deleted)
 
     def on_upsert(done: int, total: int) -> None:
@@ -234,6 +237,8 @@ def _flush_batch(
         )
 
     upserted = upsert_records(records, progress_callback=on_upsert)
+    write_progress(status="running", phase="catalog", upserted_records=summary["upserted_records"] + upserted)
+    upsert_catalog_records(records)
     summary["deleted_records"] += deleted
     summary["upserted_records"] += upserted
     summary["indexed_files"] += len(items)
@@ -334,6 +339,7 @@ def _reset_clean_dir() -> None:
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    reset_catalog()
 
 
 def _progress_line(summary: dict[str, Any]) -> str:

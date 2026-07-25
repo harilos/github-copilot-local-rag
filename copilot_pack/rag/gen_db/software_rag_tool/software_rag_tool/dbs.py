@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 DB_NAME_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*-rag)(?![A-Za-z0-9_.-])")
 
@@ -106,7 +109,39 @@ def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None) -> 
             "DB固有の詳細指示は必要な時だけ参照してください。\n",
             encoding="utf-8",
         )
+    ensure_db_version(root, name)
     return root
+
+
+def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
+    path = db_root / "VERSION.json"
+    if path.exists():
+        return read_db_version(db_root)
+
+    created_at = datetime.now(timezone.utc).isoformat()
+    tool_hash = _tool_hash()
+    seed = {
+        "db_name": db_name,
+        "created_at": created_at,
+        "collection": collection_name_for_db(db_name),
+        "tool_hash": tool_hash,
+    }
+    db_hash = hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    payload = {
+        "schema": "local-rag.db-version.v1",
+        "db_name": db_name,
+        "created_at": created_at,
+        "hash_algorithm": "sha256",
+        "db_hash": db_hash,
+        "collection": collection_name_for_db(db_name),
+        "tool": {
+            "name": "software-rag-tool",
+            "version": "0.1.0",
+            "hash": tool_hash,
+        },
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
 
 
 def collection_name_for_db(db_name: str) -> str:
@@ -116,6 +151,13 @@ def collection_name_for_db(db_name: str) -> str:
 
 def read_db_config(db_root: Path) -> dict:
     path = db_root / "db.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def read_db_version(db_root: Path) -> dict[str, Any]:
+    path = db_root / "VERSION.json"
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8", errors="replace"))
@@ -131,3 +173,20 @@ def read_profile_hint(db_root: Path, max_chars: int = 500) -> str:
         text = text.split(marker, 1)[1]
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
     return " ".join(lines)[:max_chars]
+
+
+def _tool_hash() -> str:
+    root = Path(__file__).resolve().parents[1]
+    suffixes = {".py", ".toml", ".txt", ".md"}
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        if "__pycache__" in path.parts or ".venv" in path.parts:
+            continue
+        rel = path.relative_to(root).as_posix()
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()

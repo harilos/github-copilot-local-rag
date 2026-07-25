@@ -13,9 +13,10 @@ RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(TOOL_ROOT))
 
-from software_rag_tool.dbs import require_db_name
+from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
+from software_rag_tool.catalog import counts as catalog_counts
 
 
 def main() -> None:
@@ -30,13 +31,17 @@ def main() -> None:
     db_name = require_db_name(args.db)
     os.environ.setdefault("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))
     db_root = dbs_dir() / db_name
+    os.environ["RAG_DB_NAME"] = db_name
+    os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
     logs_root = db_root / "logs"
 
     progress = _load_json(logs_root / "progress.json")
     state = _load_json(logs_root / "index_state.json")
     manifest = _load_json(db_root / "index" / "manifest.json")
+    version = read_db_version(db_root)
     errors = _load_json(logs_root / "prepare_errors.json", default=[])
     events = _tail_jsonl(logs_root / "events.jsonl", args.tail_events)
+    catalog = catalog_counts()
 
     status = _effective_status(progress, args.stale_minutes)
     operation = str(progress.get("operation") or "")
@@ -51,6 +56,7 @@ def main() -> None:
         "db": db_name,
         "db_root": str(db_root),
         "exists": db_root.exists(),
+        "version": version,
         "status": status,
         "raw_status": progress.get("status") or "not_started",
         "phase": progress.get("phase") or "",
@@ -66,6 +72,7 @@ def main() -> None:
         "upserted_records": progress.get("upserted_records") or 0,
         "deleted_records": progress.get("deleted_records") or 0,
         "collection_count": progress.get("collection_count") or manifest.get("record_count") or 0,
+        "catalog": catalog,
         "current_file": progress.get("current_file") or "",
         "current_batch_files": progress.get("current_batch_files") or [],
         "current_batch_records_done": progress.get("current_batch_records_done") or 0,
@@ -186,6 +193,9 @@ def _format_command(command: list[str]) -> str:
 
 def _print_human(output: dict[str, Any]) -> None:
     print(f"DB: {output['db']}")
+    version = output.get("version") or {}
+    if version:
+        print(f"Version: created_at={version.get('created_at')} db_hash={version.get('db_hash')}")
     print(f"Status: {output['status']} phase={output['phase']} updated_at={output['updated_at']}")
     print(f"Root: {output['root']}")
     print(f"Source: {output['source_id']}")
@@ -198,6 +208,12 @@ def _print_human(output: dict[str, Any]) -> None:
         "Records: "
         f"upserted={output['upserted_records']} deleted={output['deleted_records']} "
         f"collection={output['collection_count']}"
+    )
+    catalog = output.get("catalog") or {}
+    print(
+        "Catalog: "
+        f"exists={catalog.get('exists')} chunks={catalog.get('chunks', 0)} "
+        f"fts={catalog.get('fts_rows', 0)} identifiers={catalog.get('identifiers', 0)}"
     )
     current = output.get("current_file")
     if current:
