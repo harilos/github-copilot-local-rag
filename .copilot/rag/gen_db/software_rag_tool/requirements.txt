@@ -9,6 +9,7 @@ sentencepiece>=0.2.0
 SudachiPy>=0.6.10
 SudachiDict-core>=20240716
 pypdf>=5.0.0
+cryptography>=3.1
 python-docx>=1.1.0
 python-pptx>=1.0.0
 openpyxl>=3.1.0

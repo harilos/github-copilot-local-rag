@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -71,7 +72,7 @@ class OnnxRuntimeEmbedder:
         options.inter_op_num_threads = 1
         print(f"Loading ONNX embedding model: {model_path}")
         self._session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-        self._tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        self._tokenizer = _load_tokenizer(AutoTokenizer, str(model_dir))
         self._input_names = {item.name for item in self._session.get_inputs()}
         self._output_names = [item.name for item in self._session.get_outputs()]
         print("ONNX embedding model loaded")
@@ -133,25 +134,51 @@ class SentenceTransformerEmbedder:
         return [v.tolist() for v in vecs]
 
 
+_EMBEDDER_CACHE: dict[tuple[str, str, int, str, str, str], Embedder] = {}
+_EMBEDDER_CACHE_LOCK = threading.Lock()
+
+
 def get_embedder() -> Embedder:
     model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip()
     backend = os.getenv("EMBEDDING_BACKEND", DEFAULT_EMBEDDING_BACKEND).strip().lower()
+    dimension = embedding_dimension()
+    document_prefix = os.getenv("EMBED_DOCUMENT_PREFIX", DEFAULT_DOCUMENT_PREFIX)
+    query_prefix = os.getenv("EMBED_QUERY_PREFIX", DEFAULT_QUERY_PREFIX)
+    model_dir = Path(os.getenv("EMBEDDING_ONNX_DIR", str(default_onnx_model_dir()))).expanduser().resolve()
+    key = (model, backend, dimension, str(model_dir), document_prefix, query_prefix)
+    with _EMBEDDER_CACHE_LOCK:
+        cached = _EMBEDDER_CACHE.get(key)
+        if cached is not None:
+            return cached
     if model == "__hash__":
-        return HashEmbedder(dim=embedding_dimension())
-    if backend in {"onnx", "onnx-int8", "onnxruntime"}:
-        model_dir = Path(os.getenv("EMBEDDING_ONNX_DIR", str(default_onnx_model_dir()))).expanduser().resolve()
-        return OnnxRuntimeEmbedder(
+        embedder: Embedder = HashEmbedder(dim=dimension)
+    elif backend in {"onnx", "onnx-int8", "onnxruntime"}:
+        embedder = OnnxRuntimeEmbedder(
             model_dir=model_dir,
-            document_prefix=os.getenv("EMBED_DOCUMENT_PREFIX", DEFAULT_DOCUMENT_PREFIX),
-            query_prefix=os.getenv("EMBED_QUERY_PREFIX", DEFAULT_QUERY_PREFIX),
+            document_prefix=document_prefix,
+            query_prefix=query_prefix,
         )
-    if backend not in {"pytorch", "sentence-transformers", "sentence_transformers"}:
+    elif backend in {"pytorch", "sentence-transformers", "sentence_transformers"}:
+        embedder = SentenceTransformerEmbedder(
+            model_name=model,
+            document_prefix=document_prefix,
+            query_prefix=query_prefix,
+        )
+    else:
         raise RuntimeError(f"Unsupported EMBEDDING_BACKEND: {backend}")
-    return SentenceTransformerEmbedder(
-        model_name=model,
-        document_prefix=os.getenv("EMBED_DOCUMENT_PREFIX", DEFAULT_DOCUMENT_PREFIX),
-        query_prefix=os.getenv("EMBED_QUERY_PREFIX", DEFAULT_QUERY_PREFIX),
-    )
+    with _EMBEDDER_CACHE_LOCK:
+        _EMBEDDER_CACHE[key] = embedder
+    return embedder
+
+
+def _load_tokenizer(auto_tokenizer: object, model: str) -> object:
+    try:
+        return auto_tokenizer.from_pretrained(model, fix_mistral_regex=True)  # type: ignore[attr-defined]
+    except TypeError:
+        try:
+            return auto_tokenizer.from_pretrained(model, fix_mistral_regex=False)  # type: ignore[attr-defined]
+        except TypeError:
+            return auto_tokenizer.from_pretrained(model)  # type: ignore[attr-defined]
 
 
 def embedding_dimension() -> int:

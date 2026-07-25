@@ -183,6 +183,7 @@ def read_profile_hint(db_root: Path, max_chars: int = 500) -> str:
     marker = "## Query Hint"
     if marker in text:
         text = text.split(marker, 1)[1]
+        text = re.split(r"\n##\s+", text, maxsplit=1)[0]
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
     return " ".join(lines)[:max_chars]
 

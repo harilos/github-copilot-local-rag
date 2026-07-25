@@ -213,7 +213,9 @@ def _print_human(output: dict[str, Any]) -> None:
     print(
         "Catalog: "
         f"exists={catalog.get('exists')} chunks={catalog.get('chunks', 0)} "
-        f"fts={catalog.get('fts_rows', 0)} identifiers={catalog.get('identifiers', 0)}"
+        f"documents={catalog.get('documents', 0)} fts={catalog.get('fts_rows', 0)} "
+        f"identifier_terms={catalog.get('identifier_terms', 0)} "
+        f"identifier_postings={catalog.get('identifier_postings', catalog.get('identifiers', 0))}"
     )
     current = output.get("current_file")
     if current:

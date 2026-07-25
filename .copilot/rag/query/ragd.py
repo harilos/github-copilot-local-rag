@@ -28,9 +28,10 @@ class RagDaemonServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address: tuple[str, int], token: str, idle_timeout: int, state_file: Path) -> None:
+    def __init__(self, server_address: tuple[str, int], token: str, idle_timeout: int, state_file: Path, generation: str) -> None:
         super().__init__(server_address, RagDaemonHandler)
         self.token = token
+        self.generation = generation
         self.idle_timeout = idle_timeout
         self.state_file = state_file
         self.started_at = datetime.now(timezone.utc).isoformat()
@@ -43,7 +44,7 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, socket_file: str, token: str, idle_timeout: int, state_file: Path) -> None:
+    def __init__(self, socket_file: str, token: str, idle_timeout: int, state_file: Path, generation: str) -> None:
         self.socket_file = socket_file
         try:
             Path(socket_file).unlink()
@@ -51,6 +52,7 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
             pass
         super().__init__(socket_file, RagUnixDaemonHandler)
         self.token = token
+        self.generation = generation
         self.idle_timeout = idle_timeout
         self.state_file = state_file
         self.started_at = datetime.now(timezone.utc).isoformat()
@@ -84,6 +86,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 "schema": "local-rag.ragd.health.v1",
                 "status": "ok",
                 "pid": os.getpid(),
+                "generation": self.server.generation,
                 "started_at": self.server.started_at,
                 "idle_timeout_seconds": self.server.idle_timeout,
             }
@@ -164,6 +167,9 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
         if request.get("token") != self.server.token:
             self._send_json({"status": "forbidden"})
             return
+        if request.get("generation") != self.server.generation:
+            self._send_json({"status": "forbidden"})
+            return
         op = request.get("op")
         if op == "health":
             self._send_json(
@@ -171,6 +177,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
                     "schema": "local-rag.ragd.health.v1",
                     "status": "ok",
                     "pid": os.getpid(),
+                    "generation": self.server.generation,
                     "started_at": self.server.started_at,
                     "idle_timeout_seconds": self.server.idle_timeout,
                 }
@@ -237,14 +244,15 @@ def main() -> None:
         _run_file_daemon(
             file_dir=Path(args.file_dir).expanduser().resolve(),
             token=args.token,
+            generation=args.token,
             idle_timeout=args.idle_timeout,
             state_file=state_file,
         )
         return
     if args.socket_file:
-        server = RagUnixDaemonServer(args.socket_file, args.token, args.idle_timeout, state_file)
+        server = RagUnixDaemonServer(args.socket_file, args.token, args.idle_timeout, state_file, generation=args.token)
     else:
-        server = RagDaemonServer((args.host, int(args.port)), args.token, args.idle_timeout, state_file)
+        server = RagDaemonServer((args.host, int(args.port)), args.token, args.idle_timeout, state_file, generation=args.token)
     _write_state(server)
     monitor = threading.Thread(target=_idle_monitor, args=(server,), daemon=True)
     monitor.start()
@@ -255,7 +263,7 @@ def main() -> None:
         _unlink_state(state_file)
 
 
-def _run_file_daemon(*, file_dir: Path, token: str, idle_timeout: int, state_file: Path) -> None:
+def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeout: int, state_file: Path) -> None:
     file_dir.mkdir(parents=True, exist_ok=True)
     requests_dir = file_dir / "requests"
     responses_dir = file_dir / "responses"
@@ -263,9 +271,10 @@ def _run_file_daemon(*, file_dir: Path, token: str, idle_timeout: int, state_fil
     responses_dir.mkdir(exist_ok=True)
     heartbeat_file = file_dir / "heartbeat.json"
     state = {
-        "schema": "local-rag.ragd.v1",
+        "schema": "local-rag.ragd.v2",
         "transport": "file",
         "pid": os.getpid(),
+        "generation": generation,
         "token": token,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "idle_timeout_seconds": idle_timeout,
@@ -283,6 +292,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, idle_timeout: int, state_fil
                 {
                     "schema": "local-rag.ragd.heartbeat.v1",
                     "pid": os.getpid(),
+                    "generation": generation,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "active_requests": active_requests,
                 },
@@ -307,11 +317,14 @@ def _run_file_daemon(*, file_dir: Path, token: str, idle_timeout: int, state_fil
                 response_file = responses_dir / Path(response_name).name
                 if request.get("token") != token:
                     result = {"status": "forbidden"}
+                elif request.get("generation") != generation:
+                    result = {"status": "forbidden"}
                 elif request.get("op") == "health":
                     result = {
                         "schema": "local-rag.ragd.health.v1",
                         "status": "ok",
                         "pid": os.getpid(),
+                        "generation": generation,
                         "started_at": state["started_at"],
                         "idle_timeout_seconds": idle_timeout,
                     }
@@ -367,8 +380,9 @@ def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _write_state(server: RagDaemonServer) -> None:
     payload = {
-        "schema": "local-rag.ragd.v1",
+        "schema": "local-rag.ragd.v2",
         "pid": os.getpid(),
+        "generation": server.generation,
         "token": server.token,
         "started_at": server.started_at,
         "idle_timeout_seconds": server.idle_timeout,
@@ -385,15 +399,19 @@ def _write_state(server: RagDaemonServer) -> None:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
 def _unlink_state(path: Path) -> None:
     try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        if data.get("pid") not in {None, os.getpid()}:
+            return
         path.unlink()
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         pass
 
 

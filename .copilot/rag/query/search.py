@@ -64,7 +64,7 @@ def main() -> None:
                 {
                     "status": "skipped",
                     "reason": resolution.reason,
-                    "message": "DB名（例: xxx-rag）を明示するか、RAG検索が必要な自然言語指示で --auto を使ってください。",
+                    "message": "DB名（例: xxx-rag）を明示するか、list_dbs.pyで候補DBを確認してから --db を指定してください。",
                     "available_dbs": resolution.candidates,
                 },
                 ensure_ascii=False,
@@ -89,6 +89,9 @@ def main() -> None:
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
+    if not (venv_python.exists() and marker.exists()):
+        _print_setup_required(args.format, resolution.db_name, question)
+        raise SystemExit(2)
     python = str(venv_python) if venv_python.exists() and marker.exists() else sys.executable
     env = os.environ.copy()
     env.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
@@ -193,6 +196,23 @@ def _run_sync_script(*, python: str, env: dict[str, str], args: argparse.Namespa
         raise SystemExit(124)
 
 
+def _print_setup_required(output_format: str, db_name: str, question: str) -> None:
+    payload = {
+        "schema": "local-rag.search.v1",
+        "status": "setup_required",
+        "db": db_name,
+        "query": question,
+        "message": "RAG runtime is not initialized. Run the initial setup, then retry the search.",
+        "required_action": "initial_setup",
+    }
+    if output_format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    print("## RAG setup required")
+    print("")
+    print("RAG runtime is not initialized. Run the initial setup, then retry the search.")
+
+
 def _try_fast_path(*, db_name: str, question: str, args: argparse.Namespace) -> dict | None:
     try:
         return try_cold_lexical_fast_path(
@@ -231,7 +251,11 @@ def _read_state() -> dict | None:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8", errors="replace"))
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+    if data.get("schema") != "local-rag.ragd.v2":
+        return None
     if not data.get("token"):
+        return None
+    if not data.get("generation"):
         return None
     if data.get("transport") == "unix":
         if not data.get("socket_file"):
@@ -300,7 +324,7 @@ def _start_daemon(
             port = _free_port()
             cmd.extend(["--host", "127.0.0.1", "--port", str(port)])
         else:
-            cmd.extend(["--file-dir", str(FILE_TRANSPORT_DIR)])
+            cmd.extend(["--file-dir", str(FILE_TRANSPORT_DIR / token)])
         popen_kwargs: dict = {}
         if sys.platform.startswith("win"):
             popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -393,9 +417,10 @@ def _file_request(state: dict, payload: dict, *, timeout: int | float | None) ->
         response_file = responses_dir / response_name
         payload = dict(payload)
         payload["token"] = str(state["token"])
+        payload["generation"] = str(state["generation"])
         payload["response"] = response_name
         request_file = requests_dir / f"{request_id}.request.json"
-        tmp = request_file.with_suffix(".tmp")
+        tmp = request_file.with_name(f"{request_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(request_file)
         deadline = time.monotonic() + float(timeout or 300)
@@ -417,6 +442,7 @@ def _unix_request(state: dict, payload: dict, *, timeout: int | float | None) ->
     try:
         payload = dict(payload)
         payload["token"] = str(state["token"])
+        payload["generation"] = str(state["generation"])
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             if timeout:

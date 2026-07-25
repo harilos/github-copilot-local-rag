@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from . import catalog
 from .manifest import ConfigMismatchError
@@ -15,6 +15,37 @@ DEFAULT_EXACT_K = 20
 DEFAULT_RRF_K = 12
 
 
+class SearchBackend(Protocol):
+    def vector_query(self, question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def fetch_rows_by_ids(self, ids: Any) -> dict[str, dict[str, Any]]: ...
+    def get_neighbor_rows(self, chunk_uid: str, *, window: int = 1) -> list[dict[str, Any]]: ...
+
+
+class _GlobalBackend:
+    def vector_query(self, question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        from .store import vector_query
+
+        return vector_query(question, top_k=top_k, source=source)
+
+    def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        return catalog.exact_search(question, top_k=top_k, source=source)
+
+    def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        return catalog.bm25_search(question, top_k=top_k, source=source)
+
+    def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        return catalog.metadata_search(question, top_k=top_k, source=source)
+
+    def fetch_rows_by_ids(self, ids: Any) -> dict[str, dict[str, Any]]:
+        return catalog.fetch_rows_by_ids(ids)
+
+    def get_neighbor_rows(self, chunk_uid: str, *, window: int = 1) -> list[dict[str, Any]]:
+        return catalog.get_neighbor_rows(chunk_uid, window=window)
+
+
 def hybrid_query(
     question: str,
     *,
@@ -25,23 +56,23 @@ def hybrid_query(
     budget_tokens: int | None = None,
     explain: bool = False,
     use_dense: bool = True,
+    backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]]:
-    from .store import vector_query
-
+    backend = backend or _GlobalBackend()
     dense_k = fetch_k or max(DEFAULT_DENSE_K, top_k * 4)
     family_rankings: list[tuple[str, float, list[dict[str, Any]]]] = []
     warnings: list[str] = []
 
     if use_dense:
         try:
-            family_rankings.append(("dense", 1.0, vector_query(question, top_k=dense_k, source=source)))
+            family_rankings.append(("dense", 1.0, backend.vector_query(question, top_k=dense_k, source=source)))
         except ConfigMismatchError:
             raise
         except Exception as exc:
             warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
 
     try:
-        exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source)
+        exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
         family_rankings.append(("lexical", 1.1, lexical_rows))
         family_rankings.append(("metadata", 0.7, metadata_rows))
         if exact_rows:
@@ -51,11 +82,11 @@ def hybrid_query(
         exact_rows = []
 
     fused = _weighted_rrf(family_rankings)
-    rows = _materialize(fused, family_rankings)
+    rows = _materialize(fused, family_rankings, backend=backend)
     rows = _anchor_rescue(rows, exact_rows, question)
     rows = rows[: max(DEFAULT_RRF_K, top_k)]
     rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
-    rows = _expand_neighbors(rows)
+    rows = _expand_neighbors(rows, backend=backend)
     rows = _pack_budget(rows, budget_tokens=budget_tokens)
     rows = rows[:top_k]
 
@@ -79,8 +110,10 @@ def cold_lexical_fast_path(
     max_per_doc: int = 2,
     budget_tokens: int | None = None,
     explain: bool = False,
+    backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]] | None:
-    exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source)
+    backend = backend or _GlobalBackend()
+    exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
     if not _strong_lexical_hit(question, exact_rows, lexical_rows, metadata_rows):
         return None
 
@@ -91,11 +124,11 @@ def cold_lexical_fast_path(
     if exact_rows:
         families.append(("exact", 1.4, exact_rows))
     fused = _weighted_rrf(families)
-    rows = _materialize(fused, families)
+    rows = _materialize(fused, families, backend=backend)
     rows = _anchor_rescue(rows, exact_rows, question)
     rows = rows[: max(DEFAULT_RRF_K, top_k)]
     rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
-    rows = _expand_neighbors(rows)
+    rows = _expand_neighbors(rows, backend=backend)
     rows = _pack_budget(rows, budget_tokens=budget_tokens)
     rows = rows[:top_k]
     for rank, row in enumerate(rows, start=1):
@@ -110,10 +143,15 @@ def cold_lexical_fast_path(
     return rows
 
 
-def _lexical_candidates(question: str, *, source: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    exact_rows = catalog.exact_search(question, top_k=DEFAULT_EXACT_K, source=source)
-    lexical_rows = catalog.bm25_search(question, top_k=DEFAULT_LEXICAL_K, source=source)
-    metadata_rows = catalog.metadata_search(question, top_k=DEFAULT_METADATA_K, source=source)
+def _lexical_candidates(
+    question: str,
+    *,
+    source: str,
+    backend: SearchBackend,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    exact_rows = backend.exact_search(question, top_k=DEFAULT_EXACT_K, source=source)
+    lexical_rows = backend.bm25_search(question, top_k=DEFAULT_LEXICAL_K, source=source)
+    metadata_rows = backend.metadata_search(question, top_k=DEFAULT_METADATA_K, source=source)
     return exact_rows, lexical_rows, metadata_rows
 
 
@@ -141,6 +179,8 @@ def _weighted_rrf(families: list[tuple[str, float, list[dict[str, Any]]]]) -> di
 def _materialize(
     fused: dict[str, dict[str, Any]],
     families: list[tuple[str, float, list[dict[str, Any]]]],
+    *,
+    backend: SearchBackend,
 ) -> list[dict[str, Any]]:
     rows_by_id: dict[str, dict[str, Any]] = {}
     for _family, _weight, rows in families:
@@ -149,7 +189,7 @@ def _materialize(
             if chunk_id and chunk_id not in rows_by_id:
                 rows_by_id[chunk_id] = row
 
-    catalog_rows = catalog.fetch_rows_by_ids(fused.keys())
+    catalog_rows = backend.fetch_rows_by_ids(fused.keys())
     output: list[dict[str, Any]] = []
     for chunk_id, item in fused.items():
         base = dict(catalog_rows.get(chunk_id) or item.get("best_row") or rows_by_id.get(chunk_id) or {})
@@ -236,10 +276,10 @@ def _dedupe_and_diversify(rows: list[dict[str, Any]], *, top_k: int, max_per_doc
     return output
 
 
-def _expand_neighbors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _expand_neighbors(rows: list[dict[str, Any]], *, backend: SearchBackend) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for row in rows:
-        neighbors = catalog.get_neighbor_rows(str(row.get("id") or ""), window=1)
+        neighbors = backend.get_neighbor_rows(str(row.get("id") or ""), window=1)
         if len(neighbors) <= 1:
             output.append(row)
             continue

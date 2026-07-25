@@ -1,8 +1,42 @@
 # RAG Instructions
 
-Use this only when the user explicitly names a RAG database such as `xxx-rag`, or when the user naturally asks to search local RAG knowledge, documents, past decisions, runbooks, incidents, or design history.
+Use RAG only when the user explicitly asks for RAG/local-document lookup, or when a non-general proper noun or local-looking identifier clearly matches an available RAG DB.
 
-Do not run RAG for ordinary questions unless the user asks for RAG-like lookup.
+When the user says `RAGの初期設定をして`, `RAG初期設定`, `RAGをセットアップして`, or equivalent, run:
+
+```bash
+python ~/.copilot/rag/query/setup.py
+```
+
+If the setup fails with proxy, SSL, certificate, or Hugging Face download errors, explain that corporate proxy/CA configuration is usually required. Ask the user to confirm the proxy URL and company CA certificate path, and suggest:
+
+```bash
+python ~/.copilot/rag/query/setup.py --proxy http://proxy.example:8080
+```
+
+Also mention that `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, or `PIP_CERT` may need to point to the company CA certificate. Do not suggest disabling certificate verification as the normal fix.
+
+Run RAG when any of these are true:
+
+- The user explicitly names a RAG database such as `xxx-rag`.
+- The user says `RAGあり`, `RAGを使って`, `RAGで`, `ローカルRAG`, or equivalent.
+- The user asks to search local/private material such as `ローカル資料`, `文書から`, `DBから`, `過去資料`, `設計書`, `議事録`, `runbook`, `incident`, `運用手順`, or `設計履歴`.
+
+When a non-general proper noun or local-looking identifier appears, first check whether a relevant RAG DB exists:
+
+- Project, product, system, service, component, feature, customer, or codename-like names.
+- Ticket IDs, incident IDs, error codes, repository names, internal API names, or unusual abbreviations.
+- Names that are unlikely to be answerable reliably from general knowledge alone.
+
+For this check, call:
+
+```bash
+python ~/.copilot/rag/query/list_dbs.py
+```
+
+If a DB name or hint clearly matches the proper noun or identifier, use that DB with `--db`. If the match is ambiguous, ask the user which DB to use. If no DB appears relevant, answer normally without RAG.
+
+Do not run RAG for ordinary general questions. A topic merely matching an available DB hint is not enough. Words like `調べて`, `教えて`, or a general topic such as laws, markets, regions, or technologies do not imply RAG by themselves. In those cases, answer normally without RAG unless the user asks for RAG-backed lookup.
 
 When a database name is explicit, call:
 
@@ -12,13 +46,27 @@ python ~/.copilot/rag/query/search.py --db xxx-rag --include-db-hint "<question>
 
 Pass the user's full question once. Do not split it into keywords, choose a retrieval mode, or run separate dense/BM25/exact searches. The Python tool handles retrieval strategy internally.
 
-When the user asks naturally for RAG but no DB name is provided, call:
+If `search.py` or `build_db.py` reports `setup_required`, do not retry immediately and do not show raw Python commands as the primary instruction. Tell the user:
 
-```bash
-python ~/.copilot/rag/query/search.py --auto --include-db-hint "<question>"
+```text
+RAGの初期設定をして。
 ```
 
-If multiple DBs are available and the tool asks for a DB choice, show the candidate DB names and ask the user which one to use.
+If the user wants manual commands or setup fails, then explain the proxy/certificate guidance above.
+
+When the user explicitly asks for RAG but no DB name is provided, or when checking a proper noun/identifier, list available databases first:
+
+```bash
+python ~/.copilot/rag/query/list_dbs.py
+```
+
+Choose the DB yourself from the DB names and short hints when there is a clearly relevant match, then call:
+
+```bash
+python ~/.copilot/rag/query/search.py --db chosen-rag --include-db-hint "<question>"
+```
+
+If exactly one DB is available and its hint is relevant to the user's RAG request or proper noun/identifier, use it. If the available DBs are ambiguous or none appear relevant, show the candidate DB names and ask the user which one to use when RAG was requested; otherwise answer normally without RAG. Do not use `--auto` for Copilot-facing searches; DB selection is the assistant's responsibility.
 
 DB-specific instructions live under `~/.copilot/rag/dbs/<db-name>/DB_PROFILE.md`. Do not load those files into every prompt. The query tool reads only a short hint when needed.
 

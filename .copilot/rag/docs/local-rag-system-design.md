@@ -31,7 +31,7 @@ Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、フ�
 
 - generationによるSQLite/Chromaの原子的公開は `active_generation=1` の足場のみ
 - work item/lease/heartbeatの正本化は既存の `logs/index_state.json` / `progress.json` を継続利用
-- Ruri-v3-30m、ONNX Runtime INT8、3時間常駐daemonは設計対象。現行実装はPyTorch経由の都度ロード
+- Ruri-v3-30m、ONNX Runtime INT8、3時間常駐daemonは実装済み。1つのdaemonが複数DBをリクエスト単位で切り替える
 - rerankerは採用しない
 - 本文trigramとCAS objectsは未実装
 
@@ -43,7 +43,10 @@ Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、フ�
 - 生成系と検索系を分離する。
 - DBは多数作れる前提にする。
 - 明示DB名 `xxx-rag` を最優先にする。
-- 自然言語で「過去資料」「ローカルRAG」「設計書から調べて」などと言われた場合もRAG起動できる。
+- 自然言語で「過去資料」「ローカルRAG」「設計書から調べて」など、ローカル文書検索またはRAG利用が明示された場合だけRAG起動できる。
+- 一般質問ではRAGを使わない。利用可能DBのヒントに話題が合うだけではRAG起動しない。
+- 一般用語ではない固有名詞、ローカル識別子、ticket ID、incident ID、error code、内部API名、repo名、codenameらしき語が出た場合は、RAG DBが存在するか `list_dbs.py` で確認する。DB名またはヒントが明確に一致する場合だけRAG検索する。曖昧ならユーザーに聞き、該当DBがなければ通常回答する。
+- RAG利用が明示され、DB名が未指定の場合、`--auto` には委ねず、CopilotがDB一覧とヒントを見て明示DBを選ぶ。
 - 最初からhybrid retrievalを前提にする。
 - 長時間生成は小さいwork item単位でcommitし、中断後にresumeできるようにする。
 - 実装はMITで新規作成する。外部I/Fと運用要件はこの設計書を正とする。
@@ -343,10 +346,12 @@ SQLiteを正本にする。Chromaは再構築可能な派生索引として扱�
 
 ```text
 database_meta
-source_file
-revision
+document
 chunk
-identifier_occurrence
+document_lookup
+identifier_term
+identifier_alias
+identifier_posting
 work_item
 generation
 ```
@@ -354,10 +359,28 @@ generation
 FTS。
 
 ```text
-fts_word(path_tokens, title_tokens, heading_tokens, body_tokens)
+fts_word(heading_tokens, body_tokens)
 file_fts(basename_tokens, stem_tokens, path_tokens, title_tokens)
 metadata_trigram(value, kind, chunk_uid)
 ```
+
+`catalog.sqlite` はschema v2を初期実装の正とする。旧schemaのin-place migrationは行わず、clean JSONLからのcatalog再構築またはDB再構築で対応する。
+
+`document` はpath、title、source、language、content_hashなど文書単位のmetadataを1回だけ持つ。`chunk` は `chunk_pk INTEGER PRIMARY KEY` と外部公開用 `chunk_uid TEXT UNIQUE` を持ち、本文、見出し、位置、chunk hashだけを保持する。`embedding_text` はSQLiteへ保存せず、vector rebuild時は `data/clean` のJSONLから読む。
+
+`document_lookup` はpath、basename、stem、titleの完全一致用。ファイル名検索はdocumentを取得してから、そのdocument内の代表chunkまたはBM25上位chunkを返す。
+
+identifier exact searchは「全出現保存」ではなく、辞書とpostingに分ける。
+
+```text
+identifier_term(canonical_value, kind, document_frequency, flags)
+identifier_alias(alias_value, term_id, match_kind)
+identifier_posting(term_id, chunk_pk, field, count)
+```
+
+postingは `(term_id, chunk_pk, field)` 単位で集約し、offsetは保存しない。必要な場合は検索後の候補chunk本文に対して再確認する。path/title由来のidentifierはchunkへ展開せず、document_lookup/file_ftsで扱う。
+
+body identifierは強い構文だけを保持する。英字+数字、UUID/hex、snake_case、camelCase、qualified name、path/URL、拡張子付きファイル名、`::`/`#`/`@` などを含むsymbol、大文字underscore定数は保持する。弱い大文字略語はdocument frequencyで高頻度なら削る。通常語と高頻度の一般略語はFTSへ任せる。
 
 `fts_word` はSudachiPy A-modeの `normalized_form` を空白区切りで格納する。原文は `chunk.text` に必ず残す。NFKC済みテキストだけを保存して、API名、大小文字、全半角、記号情報を失ってはいけない。
 
@@ -578,7 +601,8 @@ Copilot向け検索。
 ```bash
 python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
 python ~/.copilot/rag/query/search.py --db xxx-rag --stdin
-python ~/.copilot/rag/query/search.py --auto "<question>"
+python ~/.copilot/rag/query/list_dbs.py
+python ~/.copilot/rag/query/search.py --db chosen-rag "<question>"
 ```
 
 検索CLIオプション。
@@ -617,7 +641,11 @@ search(db_name, question, context_budget=None) -> SearchResponse
 `~/.copilot/instructions/rag.instructions.md` には短く書く。
 
 ```text
-ユーザーが xxx-rag というDB名を明示した場合、またはローカル資料、過去資料、設計書、議事録、障害、運用手順、RAG検索を求めた場合だけRAGを使う。
+ユーザーが xxx-rag というDB名を明示した場合、またはRAGあり、RAGを使って、ローカル資料、過去資料、設計書、議事録、障害、運用手順、RAG検索を求めた場合だけRAGを使う。
+
+一般質問ではRAGを使わない。話題がDBヒントに一致するだけではRAGを使わない。
+
+一般用語ではない固有名詞、ローカル識別子、ticket ID、incident ID、error code、内部API名、repo名、codenameらしき語が出た場合は、まず `list_dbs.py` でRAG DBの有無を確認する。DB名またはヒントが明確に一致する場合だけRAG検索する。曖昧ならユーザーに聞き、該当DBがなければ通常回答する。
 
 質問全体を変更せず、次のコマンドへ1回渡す。
 python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
@@ -627,10 +655,11 @@ python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
 根拠が不足する場合は、文書内に記載があると断定しない。
 ```
 
-自然言語でDB名がない場合。
+RAG利用が明示されているがDB名がない場合。CopilotがDB一覧とヒントから選ぶ。
 
 ```bash
-python ~/.copilot/rag/query/search.py --auto "<question>"
+python ~/.copilot/rag/query/list_dbs.py
+python ~/.copilot/rag/query/search.py --db chosen-rag "<question>"
 ```
 
 複数DB候補が返った場合、Copilotは勝手に選ばず候補名をユーザーに聞く。

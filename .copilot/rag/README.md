@@ -85,8 +85,11 @@ python ~/.copilot/rag/query/search.py --db project-rag "このAPIの設計意図
 
 Natural-language trigger:
 
+If the user does not name a DB, list DBs first and choose the most relevant one from the hints:
+
 ```bash
-python ~/.copilot/rag/query/search.py --auto "過去の設計書からこの仕様を調べて"
+python ~/.copilot/rag/query/list_dbs.py
+python ~/.copilot/rag/query/search.py --db project-rag "過去の設計書からこの仕様を調べて"
 ```
 
 If there are multiple DBs and no DB name is explicit, the tool returns candidates instead of guessing.
@@ -123,7 +126,9 @@ Each DB gets `VERSION.json` at creation time. It contains `created_at`, `db_hash
 
 `build_db.py` and `add_data.py` process files in small resumable batches. Use `status.py` before starting another long run. Use `build_db.py --force-rebuild` only when you intentionally want to discard prior clean records and recreate the Chroma collection.
 
-`rebuild_component.py --component lexical` rebuilds `catalog.sqlite` from existing clean JSONL without recomputing embeddings. Use it when upgrading an older DB to hybrid search.
+`catalog.sqlite` uses compact schema v2: document metadata is stored once per document, file lookup is document-level, and identifiers are stored as a term dictionary plus term-chunk postings. `embedding_text` is not stored in SQLite; vector rebuilds read it from clean JSONL.
+
+`rebuild_component.py --component lexical` rebuilds `catalog.sqlite` from existing clean JSONL without recomputing embeddings. There is no in-place migration for older catalog schemas; rebuild the catalog or rebuild the DB.
 
 Markdown files are treated as normal input. If `manual.md` and `manual.docx` both exist under the input root, both are processed; search output suppresses duplicate chunks by content hash where possible.
 
@@ -150,10 +155,20 @@ python ~/.copilot/rag/query/setup.py
 
 This creates the query virtual environment and prepares the default Ruri-v3-30m ONNX INT8 model.
 
+When using Copilot, `RAGの初期設定をして` means running the same setup command. If the query runtime has not been initialized, search and DB build commands return `setup_required` instead of starting setup automatically. Copilot-facing wording is handled by the instruction file, not by these CLI scripts.
+
 To install dependencies only:
 
 ```bash
 python ~/.copilot/rag/query/setup.py --no-prepare-model
 ```
+
+Corporate proxy/certificate environments:
+
+```bash
+python ~/.copilot/rag/query/setup.py --proxy http://proxy.example:8080
+```
+
+If SSL/certificate errors occur, configure the company CA certificate with `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, or `PIP_CERT`, then retry. Do not disable certificate verification as the normal fix.
 
 If Python cannot be installed locally, use `rag/query/proxy_client.py` to call a proxy RAG service on another machine.

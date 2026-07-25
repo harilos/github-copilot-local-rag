@@ -24,11 +24,12 @@ def main() -> None:
     if args.resume and args.force_rebuild:
         parser.error("--resume and --force-rebuild cannot be used together")
 
+    python = _runtime_python_or_exit()
     env = os.environ.copy()
     env.setdefault("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))
     add_data = RAG_ROOT / "gen_db" / "add_data.py"
     cmd = [
-        sys.executable,
+        python,
         str(add_data),
         "--db",
         args.db,
@@ -46,6 +47,18 @@ def main() -> None:
     if args.retry_errors:
         cmd.append("--retry-errors")
     subprocess.check_call(cmd, env=env)
+
+
+def _runtime_python_or_exit() -> str:
+    query_root = RAG_ROOT / "query"
+    venv_python = query_root / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+    marker = query_root / ".venv" / ".rag-deps-installed"
+    if venv_python.exists() and marker.exists():
+        return str(venv_python)
+    if os.getenv("RAG_ALLOW_UNINITIALIZED_RUNTIME", "").lower() in {"1", "true", "yes"}:
+        return sys.executable
+    print("RAG runtime is not initialized. Run the initial setup, then retry DB generation.", file=sys.stderr)
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":

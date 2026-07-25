@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
-from .dbs import collection_name_for_db, ensure_db_layout, read_profile_hint, require_db_name
+from .db_runtime import DbRegistry
+from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
-from .retrieval import cold_lexical_fast_path
-from .store import query
+from .retrieval import cold_lexical_fast_path, hybrid_query
 
 
-def configure_db(db_name: str) -> Path:
-    name = require_db_name(db_name)
-    root = ensure_db_layout(dbs_dir(), name)
-    os.environ["RAG_DB_NAME"] = name
-    os.environ["RAG_OUTPUT_ROOT"] = str(root)
-    os.environ.setdefault("CHROMA_COLLECTION", collection_name_for_db(name))
-    return root
+_REGISTRY: DbRegistry | None = None
+
+
+def registry() -> DbRegistry:
+    global _REGISTRY
+    root = dbs_dir()
+    if _REGISTRY is None or _REGISTRY.dbs_root != root.expanduser().resolve():
+        _REGISTRY = DbRegistry(root)
+    return _REGISTRY
 
 
 def run_search_payload(
@@ -34,17 +35,19 @@ def run_search_payload(
     use_dense: bool = True,
 ) -> dict[str, Any]:
     load_env()
-    db_root = configure_db(db_name)
-    rows = query(
+    name = require_db_name(db_name)
+    store = registry().get(name)
+    rows = hybrid_query(
         question,
         top_k=top_k,
         source=source,
         budget_tokens=budget_tokens,
         explain=explain,
         use_dense=use_dense,
+        backend=store,
     )
-    db_hint = read_profile_hint(db_root) if include_db_hint else ""
-    return json_payload(rows, question, db_name, max_chars, db_hint=db_hint)
+    db_hint = store.context.profile_hint if include_db_hint else ""
+    return json_payload(rows, question, name, max_chars, db_hint=db_hint)
 
 
 def try_cold_lexical_fast_path(
@@ -59,18 +62,20 @@ def try_cold_lexical_fast_path(
     include_db_hint: bool = False,
 ) -> dict[str, Any] | None:
     load_env()
-    db_root = configure_db(db_name)
+    name = require_db_name(db_name)
+    store = registry().get(name)
     rows = cold_lexical_fast_path(
         question,
         top_k=top_k,
         source=source,
         budget_tokens=budget_tokens,
         explain=explain,
+        backend=store,
     )
     if rows is None:
         return None
-    db_hint = read_profile_hint(db_root) if include_db_hint else ""
-    payload = json_payload(rows, question, db_name, max_chars, db_hint=db_hint)
+    db_hint = store.context.profile_hint if include_db_hint else ""
+    payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
     payload["fast_path"] = "cold_lexical"
     return payload
 

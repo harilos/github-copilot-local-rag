@@ -49,6 +49,12 @@ The lexical/source catalog is written to:
 $RAG_OUTPUT_ROOT/catalog.sqlite
 ```
 
+The catalog uses compact schema v2. Document-level values such as path, title,
+source, and file lookup terms are stored once per document. Identifier exact
+search uses `identifier_term`, `identifier_alias`, and `identifier_posting`
+instead of storing every raw occurrence. SQLite does not store `embedding_text`;
+the clean JSONL remains the source for vector rebuilds.
+
 The default model is `cl-nagoya/ruri-v3-30m` through ONNX Runtime INT8. For Ruri v3, the tool applies separate prefixes:
 
 ```text
@@ -56,7 +62,7 @@ EMBED_DOCUMENT_PREFIX=検索文書:
 EMBED_QUERY_PREFIX=検索クエリ: 
 ```
 
-Changing the embedding model or prefixes requires rebuilding the vector index. Changing the tokenizer can be handled by rebuilding the lexical catalog from clean JSONL.
+Changing the embedding model or prefixes requires rebuilding the vector index. Changing the tokenizer or catalog schema can be handled by rebuilding the lexical catalog from clean JSONL. Older catalog schemas are not migrated in place.
 
 Prepare the default ONNX INT8 model before dense indexing/search:
 

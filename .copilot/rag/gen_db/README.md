@@ -34,6 +34,8 @@ python ~/.copilot/rag/gen_db/add_data.py --db project-rag --root /path/to/source
 
 `add_data.py` keeps existing DB contents and only processes changed or new files. Progress is saved after each batch in `logs/index_state.json`, and current status is written to `logs/progress.json`, so rerunning the same command resumes instead of starting over. Each batch updates both Chroma and `catalog.sqlite`.
 
+New builds use compact catalog schema v2. Document metadata and file lookup terms are stored once per document, identifier exact search uses a term dictionary plus term-chunk postings, and `embedding_text` is omitted from SQLite. Older catalog schemas are not migrated in place; rebuild from clean JSONL or run a force rebuild.
+
 Check status at any time:
 
 ```bash

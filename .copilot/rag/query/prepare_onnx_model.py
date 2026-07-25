@@ -49,7 +49,7 @@ def main() -> None:
 
     print(f"Exporting {args.model} to ONNX fp32...")
     model = ORTModelForFeatureExtraction.from_pretrained(args.model, export=True)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = _load_tokenizer(AutoTokenizer, args.model)
     model.save_pretrained(tmp)
     tokenizer.save_pretrained(tmp)
 
@@ -84,6 +84,16 @@ def main() -> None:
     (output / "MODEL_MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     shutil.rmtree(tmp)
     print(f"Ready: {output}")
+
+
+def _load_tokenizer(auto_tokenizer: object, model: str) -> object:
+    try:
+        return auto_tokenizer.from_pretrained(model, fix_mistral_regex=True)  # type: ignore[attr-defined]
+    except TypeError:
+        try:
+            return auto_tokenizer.from_pretrained(model, fix_mistral_regex=False)  # type: ignore[attr-defined]
+        except TypeError:
+            return auto_tokenizer.from_pretrained(model)  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

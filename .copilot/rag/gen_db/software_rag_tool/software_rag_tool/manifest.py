@@ -27,7 +27,7 @@ def build_manifest(record_count: int) -> dict[str, Any]:
         "collection": default_collection_name(),
         "chroma_space": "cosine",
         "chunker_version": "jp-sw-v1",
-        "catalog_schema_version": 1,
+        "catalog_schema_version": 2,
         "tokenizer": tokenizer_fingerprint(),
         "retrieval": "hybrid-rrf-v1",
         **embedding,
@@ -41,20 +41,20 @@ def write_manifest(record_count: int) -> Path:
     return path
 
 
-def read_manifest() -> dict[str, Any]:
-    path = manifest_path()
+def read_manifest(path: Path | None = None) -> dict[str, Any]:
+    path = path or manifest_path()
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8", errors="replace"))
 
 
-def validate_embedding_manifest() -> None:
-    manifest = read_manifest()
+def validate_embedding_manifest(manifest: dict[str, Any] | None = None, *, collection: str | None = None) -> None:
+    manifest = manifest if manifest is not None else read_manifest()
     if not manifest:
         return
     expected = {
         **embedding_fingerprint(),
-        "collection": default_collection_name(),
+        "collection": collection or default_collection_name(),
     }
     keys = [
         "embedding_model",

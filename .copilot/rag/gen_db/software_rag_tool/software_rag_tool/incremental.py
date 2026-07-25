@@ -10,6 +10,7 @@ from typing import Any
 from .jsonl import write_jsonl
 from .manifest import write_manifest
 from .paths import clean_dir, logs_dir
+from .profile import update_profile_from_clean
 from .progress import emit_event, write_progress
 from .records import build_records_for_file, file_content_hash, iter_input_files, sha256_text
 from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
@@ -139,7 +140,9 @@ def add_or_update_root(
         write_progress(status="running", phase="verify", current_file="")
         count = collection_count()
         write_manifest(count)
+        profile_updated = update_profile_from_clean()
         summary["collection_count"] = count
+        summary["profile_updated"] = profile_updated
         summary["completed_at"] = datetime.now(timezone.utc).isoformat()
         _write_errors_report(state)
         write_progress(
