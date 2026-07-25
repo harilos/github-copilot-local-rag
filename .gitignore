@@ -1,0 +1,18 @@
+doc/
+
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+input/
+vendor_python/
+windows_ac_rag_job/
+*.zip
+.ssh_client_venv/
+
+# Generated / private RAG databases
+copilot_pack/rag/dbs/*/
+!copilot_pack/rag/dbs/
+!copilot_pack/rag/dbs/README.md
+!copilot_pack/rag/dbs/.gitkeep

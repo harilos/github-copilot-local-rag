@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+DB_NAME_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*-rag)(?![A-Za-z0-9_.-])")
+
+
+@dataclass(frozen=True)
+class DbResolution:
+    db_name: str | None
+    triggered: bool
+    reason: str
+    candidates: list[str]
+
+
+def is_db_name(value: str) -> bool:
+    return bool(DB_NAME_RE.fullmatch(value.strip()))
+
+
+def require_db_name(value: str) -> str:
+    name = value.strip()
+    if not is_db_name(name):
+        raise ValueError("DB name must match '<name>-rag'")
+    return name
+
+
+def list_db_names(dbs_root: Path) -> list[str]:
+    if not dbs_root.exists():
+        return []
+    return sorted(p.name for p in dbs_root.iterdir() if p.is_dir() and is_db_name(p.name))
+
+
+def extract_db_name(text: str) -> str | None:
+    match = DB_NAME_RE.search(text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def is_natural_rag_request(text: str) -> bool:
+    normalized = text.lower()
+    triggers = [
+        "rag",
+        "ローカル資料",
+        "資料から",
+        "ドキュメントから",
+        "ナレッジ",
+        "過去の",
+        "設計書",
+        "運用手順",
+        "根拠",
+        "検索して",
+        "参照して",
+        "関連情報",
+    ]
+    return any(trigger.lower() in normalized for trigger in triggers)
+
+
+def resolve_db_name(text: str, explicit_db: str | None, dbs_root: Path, auto: bool) -> DbResolution:
+    candidates = list_db_names(dbs_root)
+    if explicit_db:
+        return DbResolution(require_db_name(explicit_db), True, "explicit --db", candidates)
+
+    embedded = extract_db_name(text)
+    if embedded:
+        return DbResolution(embedded, True, "db name in request", candidates)
+
+    if not auto or not is_natural_rag_request(text):
+        return DbResolution(None, False, "no explicit db name or natural-language RAG trigger", candidates)
+
+    if len(candidates) == 1:
+        return DbResolution(candidates[0], True, "natural-language trigger with a single available db", candidates)
+
+    if not candidates:
+        return DbResolution(None, True, "natural-language trigger but no db exists", candidates)
+
+    return DbResolution(None, True, "natural-language trigger but multiple dbs exist", candidates)
+
+
+def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None) -> Path:
+    name = require_db_name(db_name)
+    root = dbs_root / name
+    for rel in ["data/raw", "data/clean", "index", "logs"]:
+        (root / rel).mkdir(parents=True, exist_ok=True)
+
+    config_path = root / "db.json"
+    if not config_path.exists():
+        config = {
+            "db_name": name,
+            "title": title or name,
+            "collection": collection_name_for_db(name),
+            "model": "cl-nagoya/ruri-v3-130m",
+            "profile": "DB_PROFILE.md",
+        }
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    profile_path = root / "DB_PROFILE.md"
+    if not profile_path.exists():
+        profile_path.write_text(
+            f"# {title or name}\n\n"
+            "## Query Hint\n\n"
+            "このDBは日本語中心の企画、開発、運用情報を検索するためのRAGです。"
+            "DB固有の詳細指示は必要な時だけ参照してください。\n",
+            encoding="utf-8",
+        )
+    return root
+
+
+def collection_name_for_db(db_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", db_name.strip("-").replace("-", "_")).strip("_")
+    return f"{safe}_ruri3_130m_v1"
+
+
+def read_db_config(db_root: Path) -> dict:
+    path = db_root / "db.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def read_profile_hint(db_root: Path, max_chars: int = 500) -> str:
+    path = db_root / "DB_PROFILE.md"
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    marker = "## Query Hint"
+    if marker in text:
+        text = text.split(marker, 1)[1]
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
+    return " ".join(lines)[:max_chars]
