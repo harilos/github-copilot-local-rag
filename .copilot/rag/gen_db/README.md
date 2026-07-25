@@ -9,6 +9,13 @@ python ~/.copilot/rag/gen_db/create_db.py --db project-rag --title "Project Know
 ```
 
 This creates `VERSION.json` in the DB root. The file records `created_at`, `db_hash`, collection name, and the tool hash used at layout creation time.
+Use `--query-hint` when the DB has a known domain and you want Copilot to see a short DB-specific hint during retrieval.
+
+The default vector profile is `cl-nagoya/ruri-v3-30m` with ONNX Runtime INT8. Prepare the query runtime before dense indexing:
+
+```bash
+python ~/.copilot/rag/query/setup.py
+```
 
 Build or rebuild from an input folder:
 

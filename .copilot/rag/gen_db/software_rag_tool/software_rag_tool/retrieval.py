@@ -3,10 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from . import catalog
+from .manifest import ConfigMismatchError
 from .tokenize import extract_anchors
 
 
 RRF_K = 60
+DEFAULT_DENSE_K = 30
+DEFAULT_LEXICAL_K = 30
+DEFAULT_METADATA_K = 20
+DEFAULT_EXACT_K = 20
+DEFAULT_RRF_K = 12
 
 
 def hybrid_query(
@@ -18,24 +24,28 @@ def hybrid_query(
     max_per_doc: int = 2,
     budget_tokens: int | None = None,
     explain: bool = False,
+    use_dense: bool = True,
 ) -> list[dict[str, Any]]:
     from .store import vector_query
 
-    dense_k = fetch_k or max(60, top_k * 8)
+    dense_k = fetch_k or max(DEFAULT_DENSE_K, top_k * 4)
     family_rankings: list[tuple[str, float, list[dict[str, Any]]]] = []
     warnings: list[str] = []
 
-    try:
-        family_rankings.append(("dense", 1.0, vector_query(question, top_k=dense_k, source=source)))
-    except Exception as exc:
-        warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
+    if use_dense:
+        try:
+            family_rankings.append(("dense", 1.0, vector_query(question, top_k=dense_k, source=source)))
+        except ConfigMismatchError:
+            raise
+        except Exception as exc:
+            warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
 
     try:
-        family_rankings.append(("lexical", 1.0, catalog.bm25_search(question, top_k=60, source=source)))
-        family_rankings.append(("metadata", 0.6, catalog.metadata_search(question, top_k=30, source=source)))
-        exact_rows = catalog.exact_search(question, top_k=30, source=source)
+        exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source)
+        family_rankings.append(("lexical", 1.1, lexical_rows))
+        family_rankings.append(("metadata", 0.7, metadata_rows))
         if exact_rows:
-            family_rankings.append(("exact", 1.2, exact_rows))
+            family_rankings.append(("exact", 1.4, exact_rows))
     except Exception as exc:
         warnings.append(f"catalog search unavailable: {type(exc).__name__}: {exc}")
         exact_rows = []
@@ -43,6 +53,7 @@ def hybrid_query(
     fused = _weighted_rrf(family_rankings)
     rows = _materialize(fused, family_rankings)
     rows = _anchor_rescue(rows, exact_rows, question)
+    rows = rows[: max(DEFAULT_RRF_K, top_k)]
     rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
     rows = _expand_neighbors(rows)
     rows = _pack_budget(rows, budget_tokens=budget_tokens)
@@ -58,6 +69,52 @@ def hybrid_query(
             row.pop("debug", None)
             row.pop("score", None)
     return rows
+
+
+def cold_lexical_fast_path(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    max_per_doc: int = 2,
+    budget_tokens: int | None = None,
+    explain: bool = False,
+) -> list[dict[str, Any]] | None:
+    exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source)
+    if not _strong_lexical_hit(question, exact_rows, lexical_rows, metadata_rows):
+        return None
+
+    families: list[tuple[str, float, list[dict[str, Any]]]] = [
+        ("lexical", 1.1, lexical_rows),
+        ("metadata", 0.7, metadata_rows),
+    ]
+    if exact_rows:
+        families.append(("exact", 1.4, exact_rows))
+    fused = _weighted_rrf(families)
+    rows = _materialize(fused, families)
+    rows = _anchor_rescue(rows, exact_rows, question)
+    rows = rows[: max(DEFAULT_RRF_K, top_k)]
+    rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
+    rows = _expand_neighbors(rows)
+    rows = _pack_budget(rows, budget_tokens=budget_tokens)
+    rows = rows[:top_k]
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+        debug = dict(row.get("debug") or {})
+        debug["cold_lexical_fast_path"] = True
+        if explain:
+            row["debug"] = debug
+        else:
+            row.pop("debug", None)
+            row.pop("score", None)
+    return rows
+
+
+def _lexical_candidates(question: str, *, source: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    exact_rows = catalog.exact_search(question, top_k=DEFAULT_EXACT_K, source=source)
+    lexical_rows = catalog.bm25_search(question, top_k=DEFAULT_LEXICAL_K, source=source)
+    metadata_rows = catalog.metadata_search(question, top_k=DEFAULT_METADATA_K, source=source)
+    return exact_rows, lexical_rows, metadata_rows
 
 
 def _weighted_rrf(families: list[tuple[str, float, list[dict[str, Any]]]]) -> dict[str, dict[str, Any]]:
@@ -114,6 +171,44 @@ def _anchor_rescue(rows: list[dict[str, Any]], exact_rows: list[dict[str, Any]],
     rescued["debug"] = dict(rescued.get("debug") or {})
     rescued["debug"]["anchor_rescue"] = True
     return [rescued] + [row for row in rows if row.get("id") != rescued.get("id")]
+
+
+def _strong_lexical_hit(
+    question: str,
+    exact_rows: list[dict[str, Any]],
+    lexical_rows: list[dict[str, Any]],
+    metadata_rows: list[dict[str, Any]],
+) -> bool:
+    anchors = extract_anchors(question, limit=5)
+    if not anchors or not exact_rows:
+        return False
+    if any(_strong_anchor(anchor) for anchor in anchors):
+        return True
+    exact_top = exact_rows[0]
+    lexical_top = lexical_rows[0] if lexical_rows else None
+    metadata_top = metadata_rows[0] if metadata_rows else None
+    if lexical_top and _same_doc(exact_top, lexical_top):
+        return True
+    if metadata_top and _same_doc(exact_top, metadata_top):
+        return True
+    exact_docs = {_doc_key(row) for row in exact_rows[:3]}
+    lexical_docs = {_doc_key(row) for row in lexical_rows[:3]}
+    return bool(exact_docs & lexical_docs)
+
+
+def _strong_anchor(anchor: str) -> bool:
+    if any(marker in anchor for marker in ["/", "\\", ".", ":", "_", "-"]):
+        return True
+    return any(char.isdigit() for char in anchor) and any(char.isalpha() for char in anchor)
+
+
+def _same_doc(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return bool(_doc_key(left) and _doc_key(left) == _doc_key(right))
+
+
+def _doc_key(row: dict[str, Any]) -> str:
+    meta = row.get("metadata") or {}
+    return str(meta.get("path") or meta.get("doc_id") or row.get("id") or "")
 
 
 def _dedupe_and_diversify(rows: list[dict[str, Any]], *, top_k: int, max_per_doc: int) -> list[dict[str, Any]]:

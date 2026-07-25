@@ -16,10 +16,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, help="New DB name, e.g. project-rag")
     parser.add_argument("--title")
+    parser.add_argument("--query-hint", help="Short DB-specific guidance written to DB_PROFILE.md")
     args = parser.parse_args()
 
     dbs_root = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().resolve()
-    root = ensure_db_layout(dbs_root, args.db, title=args.title)
+    root = ensure_db_layout(dbs_root, args.db, title=args.title, query_hint=args.query_hint)
     print(f"Created DB layout: {root}")
     version = read_db_version(root)
     if version:

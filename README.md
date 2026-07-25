@@ -1,12 +1,40 @@
 # GitHub Copilot Local RAG
 
-Local RAG utilities and instructions intended to be copied under `$HOME/.copilot`.
+Local RAG utilities and instructions intended to be copied under your user-level GitHub Copilot folder.
 
-## Copy
+The `.copilot/` directory in this repository is the installable payload. Copy its contents into your real `$HOME/.copilot` folder.
+
+## Install On macOS / Linux
 
 ```bash
-cp -R copilot_pack/instructions ~/.copilot/
-cp -R copilot_pack/rag ~/.copilot/
+./install.sh
+```
+
+This creates `~/.copilot` if it does not exist. To install to another folder:
+
+```bash
+COPILOT_HOME=/path/to/.copilot ./install.sh
+```
+
+Manual copy:
+
+```bash
+mkdir -p ~/.copilot
+cp -R .copilot/. ~/.copilot/
+```
+
+## Install On Windows
+
+PowerShell:
+
+```powershell
+.\install.ps1
+```
+
+This creates `$HOME\.copilot` if it does not exist. To install to another folder:
+
+```powershell
+.\install.ps1 -Target "C:\path\to\.copilot"
 ```
 
 Then add this short reference to your existing Copilot custom instructions when needed:
@@ -19,8 +47,8 @@ This repository does not ship a top-level `copilot-instructions.md`, so it will 
 
 ## Docs
 
-- [RAG pack README](copilot_pack/rag/README.md)
-- [System design](docs/local-rag-system-design.md)
+- [RAG pack README](.copilot/rag/README.md)
+- [System design](.copilot/rag/docs/local-rag-system-design.md)
 
 ## License
 

@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from software_rag_tool.search_api import payload_to_text, run_search_payload
+
+
+def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("question", nargs="?")
+    parser.add_argument("--db", required=True, help="Target DB name. Must match '<name>-rag'.")
+    parser.add_argument("--top-k", type=int, default=int(os.getenv("TOP_K", "8")))
+    parser.add_argument("--source", choices=["local", "confluence", "any"], default="any")
+    parser.add_argument("--max-chars", type=int, default=600)
+    parser.add_argument("--budget-tokens", type=int, default=0)
+    parser.add_argument("--stdin", action="store_true", help="Read the question from stdin")
+    parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
+    parser.add_argument("--format", choices=["json", "prompt"], default="json")
+    parser.add_argument("--include-db-hint", action="store_true")
+    parser.add_argument("--lexical-only", action="store_true", help="Skip dense vector search")
+    args = parser.parse_args()
+    question = sys.stdin.read().strip() if args.stdin else (args.question or "").strip()
+    if not question:
+        parser.error("question is required unless --stdin provides input")
+
+    payload = run_search_payload(
+        db_name=args.db,
+        question=question,
+        top_k=args.top_k,
+        source=args.source,
+        max_chars=args.max_chars,
+        budget_tokens=args.budget_tokens or None,
+        explain=args.explain,
+        include_db_hint=args.include_db_hint,
+        use_dense=not args.lexical_only,
+    )
+    print(payload_to_text(payload, args.format, explain=args.explain))
+
+
+if __name__ == "__main__":
+    main()

@@ -10,9 +10,9 @@ except ModuleNotFoundError:
     chromadb = None  # type: ignore[assignment]
 
 from .catalog import reset_catalog, upsert_records as upsert_catalog_records
-from .embeddings import get_embedder
+from .embeddings import embedding_fingerprint, get_embedder
 from .jsonl import read_jsonl
-from .manifest import write_manifest
+from .manifest import validate_embedding_manifest, write_manifest
 from .paths import chroma_dir, clean_dir, default_collection_name
 
 
@@ -70,10 +70,8 @@ def _get_or_create_collection() -> Any:
     client = chromadb.PersistentClient(path=str(cdir))
     name = collection_name()
     metadata = {
-        "embedding_model": os.getenv("EMBEDDING_MODEL", "cl-nagoya/ruri-v3-130m"),
-        "document_prefix": os.getenv("EMBED_DOCUMENT_PREFIX", "検索文書: "),
-        "query_prefix": os.getenv("EMBED_QUERY_PREFIX", "検索クエリ: "),
         "hnsw:space": "cosine",
+        **embedding_fingerprint(),
     }
     return client.get_or_create_collection(name=name, metadata=metadata)
 
@@ -120,6 +118,7 @@ def collection_count() -> int:
 
 def vector_query(question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]:
     _require_chromadb()
+    validate_embedding_manifest()
     client = chromadb.PersistentClient(path=str(chroma_dir()))
     collection = client.get_collection(name=collection_name())
     embedder = get_embedder()
@@ -159,6 +158,7 @@ def query(
     max_per_doc: int = 2,
     budget_tokens: int | None = None,
     explain: bool = False,
+    use_dense: bool = True,
 ) -> list[dict[str, Any]]:
     from .retrieval import hybrid_query
 
@@ -170,6 +170,7 @@ def query(
         max_per_doc=max_per_doc,
         budget_tokens=budget_tokens,
         explain=explain,
+        use_dense=use_dense,
     )
 
 

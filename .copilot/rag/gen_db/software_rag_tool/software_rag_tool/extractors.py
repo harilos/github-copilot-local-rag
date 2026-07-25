@@ -149,7 +149,7 @@ def _convert_doc_with_textutil(path: Path) -> str:
 
 
 def _convert_with_libreoffice(path: Path) -> str:
-    exe = shutil.which("soffice") or shutil.which("libreoffice")
+    exe = _find_libreoffice()
     if not exe:
         return ""
     with tempfile.TemporaryDirectory(prefix="ac-rag-office-") as tmp:
@@ -157,7 +157,7 @@ def _convert_with_libreoffice(path: Path) -> str:
         profile = tmp_path / "profile"
         cmd = [
             exe,
-            f"-env:UserInstallation=file://{profile}",
+            f"-env:UserInstallation={profile.resolve().as_uri()}",
             "--headless",
             "--convert-to",
             "txt:Text",
@@ -165,10 +165,24 @@ def _convert_with_libreoffice(path: Path) -> str:
             str(tmp_path),
             str(path),
         ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180)
         if proc.returncode != 0:
             return ""
         txt_files = sorted(tmp_path.glob("*.txt"))
         if not txt_files:
             return ""
         return normalize_text(txt_files[0].read_text(encoding="utf-8", errors="replace"))
+
+
+def _find_libreoffice() -> str | None:
+    candidates = [
+        shutil.which("soffice.exe"),
+        shutil.which("soffice"),
+        shutil.which("libreoffice"),
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return None

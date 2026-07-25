@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import DEFAULT_EMBEDDING_MODEL
+from .embeddings import embedding_fingerprint
+
 DB_NAME_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*-rag)(?![A-Za-z0-9_.-])")
 
 
@@ -83,7 +86,14 @@ def resolve_db_name(text: str, explicit_db: str | None, dbs_root: Path, auto: bo
     return DbResolution(None, True, "natural-language trigger but multiple dbs exist", candidates)
 
 
-def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None) -> Path:
+DEFAULT_QUERY_HINT = (
+    "このDBの内容は作成時に指定された文書に依存します。"
+    "回答では検索結果の根拠IDとsource locationを引用してください。"
+    "根拠が不足する場合は断定しないでください。"
+)
+
+
+def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None, query_hint: str | None = None) -> Path:
     name = require_db_name(db_name)
     root = dbs_root / name
     for rel in ["data/raw", "data/clean", "index", "logs"]:
@@ -95,7 +105,7 @@ def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None) -> 
             "db_name": name,
             "title": title or name,
             "collection": collection_name_for_db(name),
-            "model": "cl-nagoya/ruri-v3-130m",
+            "model": DEFAULT_EMBEDDING_MODEL,
             "profile": "DB_PROFILE.md",
         }
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -105,8 +115,7 @@ def ensure_db_layout(dbs_root: Path, db_name: str, title: str | None = None) -> 
         profile_path.write_text(
             f"# {title or name}\n\n"
             "## Query Hint\n\n"
-            "このDBは日本語中心の企画、開発、運用情報を検索するためのRAGです。"
-            "DB固有の詳細指示は必要な時だけ参照してください。\n",
+            f"{query_hint or DEFAULT_QUERY_HINT}\n",
             encoding="utf-8",
         )
     ensure_db_version(root, name)
@@ -120,11 +129,13 @@ def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
 
     created_at = datetime.now(timezone.utc).isoformat()
     tool_hash = _tool_hash()
+    embedding = embedding_fingerprint()
     seed = {
         "db_name": db_name,
         "created_at": created_at,
         "collection": collection_name_for_db(db_name),
         "tool_hash": tool_hash,
+        "embedding": embedding,
     }
     db_hash = hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     payload = {
@@ -134,6 +145,7 @@ def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
         "hash_algorithm": "sha256",
         "db_hash": db_hash,
         "collection": collection_name_for_db(db_name),
+        "embedding": embedding,
         "tool": {
             "name": "software-rag-tool",
             "version": "0.1.0",
@@ -146,7 +158,7 @@ def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
 
 def collection_name_for_db(db_name: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", db_name.strip("-").replace("-", "_")).strip("_")
-    return f"{safe}_ruri3_130m_v1"
+    return f"{safe}_ruri3_30m_int8_v1"
 
 
 def read_db_config(db_root: Path) -> dict:

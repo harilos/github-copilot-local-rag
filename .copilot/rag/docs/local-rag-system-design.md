@@ -12,7 +12,7 @@
 python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
 ```
 
-Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、ファイル名検索、RRF、rerank、重複排除、context組み立てはすべてPython側で隠蔽する。
+Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、ファイル名検索、RRF、重複排除、context組み立てはすべてPython側で隠蔽する。
 
 ## 現在の実装範囲
 
@@ -31,7 +31,8 @@ Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、フ�
 
 - generationによるSQLite/Chromaの原子的公開は `active_generation=1` の足場のみ
 - work item/lease/heartbeatの正本化は既存の `logs/index_state.json` / `progress.json` を継続利用
-- rerankerはCLI/設計上の拡張余地のみで初期OFF
+- Ruri-v3-30m、ONNX Runtime INT8、3時間常駐daemonは設計対象。現行実装はPyTorch経由の都度ロード
+- rerankerは採用しない
 - 本文trigramとCAS objectsは未実装
 
 ## 基本方針
@@ -52,7 +53,7 @@ Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、フ�
 配布元。
 
 ```text
-copilot_pack/
+.copilot/
   instructions/
     rag.instructions.md
   rag/
@@ -61,7 +62,6 @@ copilot_pack/
       .venv/                  # ローカル作成。配布しない
       requirements.txt
       setup.py
-      setup.ps1
       search.py               # Copilotが呼ぶ単一入口
       list_dbs.py
       proxy_client.py
@@ -135,7 +135,7 @@ RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照�
   "created_at": "2026-07-26T00:00:00+00:00",
   "hash_algorithm": "sha256",
   "db_hash": "...",
-  "collection": "xxx_rag_ruri3_130m_v1",
+  "collection": "xxx_rag_ruri3_30m_int8_v1",
   "tool": {
     "name": "software-rag-tool",
     "version": "0.1.0",
@@ -154,9 +154,11 @@ RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照�
 | 識別子・完全一致 | SQLite通常テーブル + index |
 | ファイル名・見出し検索 | SQLite FTS5 / metadata trigram |
 | 検索統合 | Python weighted RRF |
-| rerank | 任意。初期OFF、評価後ON |
-| embedding | `cl-nagoya/ruri-v3-130m` |
+| rerank | 採用しない |
+| embedding | `cl-nagoya/ruri-v3-30m` |
+| embedding backend | ONNX Runtime INT8 |
 | query/runtime venv | `~/.copilot/rag/query/.venv` |
+| query daemon | 自動起動、アイドル3時間で終了 |
 
 Ruri v3のprefixは固定する。
 
@@ -166,6 +168,115 @@ Ruri v3のprefixは固定する。
 ```
 
 prefix、model id、model revision、embedding dimension、tokenizer設定はfingerprintとして保存する。変更時はvector再構築対象にする。
+
+## i5向け軽量検索プロファイル
+
+標準プロファイルは低性能ノートでも常用できることを優先し、次に固定する。
+
+| 項目 | 値 |
+| --- | --- |
+| embedding model | `cl-nagoya/ruri-v3-30m` |
+| backend | ONNX Runtime |
+| quantization | dynamic INT8 |
+| vector dimension | 256 |
+| query上限 | 256-384 tokens |
+| Dense候補 | 30 |
+| BM25候補 | 30 |
+| exact/meta候補 | 20 |
+| RRF後候補 | 12 |
+| 最終context | 5-8 evidence blocks |
+| reranker | なし |
+| 本文trigram | 初期OFF |
+| CPU threads | 2-4 |
+| 常駐 | 自動起動、最終アクセスから3時間で終了 |
+
+30mを標準にする理由は、検索時の体感遅延とメモリ占有を優先するため。Dense単体の性能差はBM25、完全一致、metadata検索、RRFで補う。大規模な企画、開発、運用資料では、自然文の意味検索だけでなく、ファイル名、API名、エラーコード、ticket ID、設定キー、見出し一致が効くため、30m + lexical/exact強化を標準とする。
+
+DBごとにembedding空間は固定する。30mでqueryするDBは30mでindexする。別モデルで作ったvector indexへ30m query embeddingを投げてはいけない。`manifest.json` と `VERSION.json` に次を保存し、query時に一致しなければ検索を止めて再構築を促す。
+
+```json
+{
+  "embedding_model": "cl-nagoya/ruri-v3-30m",
+  "embedding_dimension": 256,
+  "embedding_backend": "onnxruntime",
+  "quantization": "dynamic-int8",
+  "document_prefix": "検索文書: ",
+  "query_prefix": "検索クエリ: ",
+  "collection": "xxx_rag_ruri3_30m_int8_v1"
+}
+```
+
+ONNX INT8モデルは公式モデルからローカルで変換して保持する。変換結果は `~/.copilot/rag/models/ruri-v3-30m-onnx-int8/` に置く。model revision、ONNX export opset、quantization方式、runtime version、CPU thread設定をfingerprintへ含める。
+
+索引時と検索時は同じONNX INT8モデルを使う。PyTorch F32で索引してONNX INT8で検索する運用は、実測で互換性を確認するまでは許可しない。安全側に倒し、fingerprintが一致するモデルだけを同一DBで使う。
+
+## Query Daemon
+
+外部I/Fは変えない。
+
+```bash
+python ~/.copilot/rag/query/search.py --db xxx-rag "<question>"
+```
+
+内部で `search.py` が `ragd` に接続する。
+
+```text
+search.py
+  -> run/ragd.json を読む
+  -> daemonが起動済みならlocal loopbackへ問い合わせる
+  -> 未起動または応答なしなら自動起動
+  -> ragdがRuri ONNX session、Sudachi、Chroma clientを保持
+  -> 最終アクセスから3時間経過したらgraceful shutdown
+```
+
+daemonはユーザー単位で1プロセスを基本にする。DBはリクエストごとに切り替えるが、直近利用DBのChroma collection handleとSQLite read connectionはキャッシュしてよい。SQLiteはWAL前提で、queryは短命read transactionにする。
+
+通信はローカル限定にする。
+
+- host: `127.0.0.1`
+- port: OS割当または設定値
+- state file: `~/.copilot/rag/query/run/ragd.json`
+- lock file: `~/.copilot/rag/query/run/ragd.lock`
+- token: state file内のランダムtoken
+
+Windowsでも同じ実装で動かすため、初期版はHTTP loopbackを使う。将来、必要ならUnix domain socketやWindows named pipeへ差し替える。
+
+3時間常駐の規則。
+
+- `idle_timeout_seconds = 10800`
+- 最終query完了時刻を `last_used_at` とする
+- 実行中queryがある間は終了しない
+- shutdown直前に新規requestが来たら継続する
+- daemon起動失敗時は `search.py` が従来の同期検索へfallbackできる
+
+常駐で保持するもの。
+
+- ONNX Runtime session
+- tokenizer
+- Chroma PersistentClient
+- 最近使ったcollection handle
+- DB manifest cache
+
+常駐で保持しないもの。
+
+- 大量の検索結果
+- chunk本文全件
+- build/add用writer state
+- ユーザー質問ログ本文の長期保存
+
+## Cold Lexical Fast Path
+
+daemonが未起動のときだけ、モデルを起動する前にSQLite検索を試す。これは品質低下を避けるため、強い一致がある場合だけ使う。
+
+Denseを省略してよい条件。
+
+- 引用符またはbacktick内の完全一致がある
+- ファイル名またはpathが完全一致する
+- 稀な識別子が1-3 chunkにだけ一致する
+- exact上位とBM25上位が同じchunkまたは同じ文書を指す
+- 最終contextに十分な根拠本文がある
+
+これらを満たさない場合はdaemonを起動してDenseも実行する。daemon起動済みなら毎回Denseも走らせる。Copilotはfast pathを判断しない。
 
 ## 入力ポリシー
 
@@ -220,9 +331,9 @@ chunk_hash, content_hash
 visible_from, visible_until
 ```
 
-最終contextでは、RRFまたはrerank後の上位chunkだけ親・隣接chunkを展開する。通常は前後±1、同一section内で最大1200-1600 tokens程度。コードは可能なら関数全体、表はheaderと該当行を返す。
+最終contextでは、RRF後の上位chunkだけ親・隣接chunkを展開する。通常は前後±1、同一section内で最大1200-1600 tokens程度。コードは可能なら関数全体、表はheaderと該当行を返す。
 
-先に隣接展開してからrerankしない。同一ファイルのchunkで候補が埋まりやすくなるため。
+先に隣接展開してからRRFしない。同一ファイルのchunkで候補が埋まりやすくなるため。
 
 ## catalog.sqlite
 
@@ -359,7 +470,6 @@ question
   -> exact search        identifier table
   -> family-level ranking
   -> weighted RRF
-  -> optional rerank
   -> anchor rescue
   -> duplicate collapse
   -> document diversity
@@ -372,14 +482,14 @@ question
 
 | 段階 | top |
 | --- | ---: |
-| Dense | 60 |
-| BM25本文 | 60 |
-| title/path/heading/symbol | 30 |
-| exact identifier | 30 |
-| RRF後 | 40-60 |
-| rerank対象 | 30-50 |
+| Dense | 30 |
+| BM25本文 | 30 |
+| title/path/heading/symbol | 20 |
+| exact identifier | 20 |
+| RRF後 | 12 |
+| 最終context | 5-8 blocks |
 
-BM25 score、cosine distance、reranker raw scoreは直接足さない。尺度と向きが違うため、rank統合を基本にする。
+BM25 score、cosine distanceは直接足さない。尺度と向きが違うため、rank統合を基本にする。
 
 ## BM25
 
@@ -401,12 +511,12 @@ weighted RRFの開始値。
 ```text
 score(d) =
   1.0 / (60 + rank_dense(d))
-+ 1.0 / (60 + rank_bm25(d))
-+ 0.6 / (60 + rank_metadata(d))
-+ 1.2 / (60 + rank_exact(d))
++ 1.1 / (60 + rank_bm25(d))
++ 0.7 / (60 + rank_metadata(d))
++ 1.4 / (60 + rank_exact(d))
 ```
 
-exactは強いanchorがある場合だけ参加させる。
+30m標準ではDenseを軽くする分、BM25、metadata、exactの寄与をやや強くする。exactは強いanchorがある場合だけ参加させる。
 
 注意点。
 
@@ -415,29 +525,18 @@ exactは強いanchorがある場合だけ参加させる。
 - k=60と重みは初期値であり、評価結果で調整する。
 - RRF順位を最終の「確信度」として表示しない。
 
-## rerank
+## Reranker
 
-rerankerは候補生成後にだけ使う。初期リリースではOFFでもよいが、設計とCLIは最初から対応する。
+標準構成ではrerankerを採用しない。低性能ノートではqueryごとのCross-Encoder推論が検索遅延の支配要因になりやすく、索引時へ移せないため。
 
-| 段階 | 構成 |
-| --- | --- |
-| 初期 | RRFのみ |
-| 軽量 | 日本語reranker small、上位20-30件 |
-| 品質重視 | `cl-nagoya/ruri-v3-reranker-310m`、上位40-50件 |
+検索品質は次で補う。
 
-rerankerに渡す文字列。
+- 索引時にSudachi tokens、identifier alias、path/title/heading tokensを作り込む
+- exact、metadata、BM25のRRF重みをDenseよりやや強める
+- anchor rescueでAPI名、エラーコード、ticket ID、ファイル名を保護する
+- context化前にduplicate collapseと文書多様化を行う
 
-```text
-<query>
-[path]
-[title]
-[heading]
-<chunk text>
-```
-
-embedding用の `検索クエリ:` / `検索文書:` prefixはrerankerへ流用しない。
-
-reranker有効時はreranker順位を主順位にし、RRF順位はguardまたはtie-breakに使う。identifier完全一致はanchor rescueで保護する。
+将来rerankerを追加する場合も、標準プロファイルには入れない。高性能PC用の別profileとしてDB単位で有効化し、30m標準DBとはmanifestで明確に分離する。
 
 ## 重複排除と文書多様化
 
@@ -583,9 +682,11 @@ index size
 8. duplicate collapse、document diversity、context packingを実装する。
 9. `--format json|prompt`、`--budget-tokens`、`--stdin`、`--explain` を実装する。
 10. progress/stateの正本をSQLiteへ移す。
-11. 評価で必要ならrerankerを追加する。
-12. 評価で必要なDBだけ本文trigramを有効化する。
-13. CLI cold startが問題になったらdaemon/proxyを追加する。
+11. Ruri-v3-30mのONNX INT8変換とfingerprint保存を実装する。
+12. `ragd` を実装し、`search.py` から自動起動、アイドル3時間終了にする。
+13. 冷間時だけのSQLite lexical fast pathを実装する。
+14. 評価で必要なDBだけ本文trigramを有効化する。
+15. 高性能PC用が必要になった場合だけ、別profileとしてrerankerを追加する。
 
 既存のChroma単体DBから移行する場合、最初にclean JSONLを使って `catalog.sqlite` とFTS/identifierだけを作る。embedding再計算は不要にする。
 
@@ -597,8 +698,11 @@ index size
 | FTS5標準tokenizerが日本語に弱い | SudachiPy A-mode normalized tokensを投入する |
 | Sudachiが複合語を分割しすぎる | raw完全一致、identifier、metadata trigramで補完する |
 | 本文trigramの容量増加 | 初期OFF、DB単位で有効化 |
-| rerankerの遅延 | 初期OFF、上位候補だけ処理 |
+| rerankerの遅延 | 標準構成では採用しない |
 | Ruriが日本語中心 | 英語subsetを評価し、lexical/exactでrecallを保護する |
+| 30m化によるDense品質低下 | BM25、metadata、exact、anchor rescueで補完する |
+| daemon常駐のメモリ占有 | アイドル3時間で終了し、起動失敗時は同期検索へfallbackする |
+| model fingerprint不一致 | queryを止め、vector rebuildを促す |
 | 小chunkで文脈不足 | 検索後に親・隣接chunkを展開する |
 | 同一ファイルが結果を占有 | document diversityとsoft penalty |
 | 重複排除で版違いを消す | provenance、revision、日付を保持する |
@@ -615,8 +719,8 @@ index size
 | 対象 | ライセンス方針 |
 | --- | --- |
 | 本実装 | MIT |
-| Ruri v3 130m | Apache-2.0 |
-| Ruri v3 reranker | Apache-2.0 |
+| Ruri v3 30m | Apache-2.0 |
+| ONNX Runtime | 採用versionのライセンスを固定して記録 |
 | SudachiPy | Apache-2.0 |
 | SQLite | public domain相当 |
 | Chroma | 採用versionのライセンスを固定して記録 |
