@@ -199,7 +199,7 @@ def main() -> None:
                 _discard_published_state(published_state)
         health_timeout = _bounded_timeout(work_deadline, 0.5)
         daemon_started_this_request = False
-        daemon_lifecycle, observed_state, _health = (
+        daemon_lifecycle, observed_state, observed_health = (
             _inspect_daemon_state(
                 timeout=health_timeout,
                 desired_transport=None if configured_transport == "auto" else desired_transport,
@@ -265,10 +265,15 @@ def main() -> None:
                     )
                     daemon_started_this_request = state is not None
         if state:
+            dense_runtime_cold = (
+                _request_may_use_dense(request)
+                and not bool((observed_health or {}).get("dense_ready"))
+            )
+            effective_cold_start = daemon_started_this_request or dense_runtime_cold
             daemon_timeout = _daemon_query_timeout(
                 attempt_timeout=args.daemon_attempt_timeout,
                 deadline=work_deadline,
-                cold_start=daemon_started_this_request,
+                cold_start=effective_cold_start,
                 require_daemon=args.require_daemon,
             )
             if daemon_timeout <= 0:
@@ -301,7 +306,9 @@ def main() -> None:
                             "route": "daemon",
                             "success": success,
                             "latency_seconds": round(attempt_elapsed, 6),
-                            "cold_start": daemon_started_this_request,
+                            "cold_start": effective_cold_start,
+                            "process_cold_start": daemon_started_this_request,
+                            "dense_runtime_cold_start": dense_runtime_cold,
                             **daemon_state_snapshot(state),
                         }
                     ],
@@ -314,7 +321,9 @@ def main() -> None:
                 "success": False,
                 "failure_kind": failure_kind,
                 "latency_seconds": round(attempt_elapsed, 6),
-                "cold_start": daemon_started_this_request,
+                "cold_start": effective_cold_start,
+                "process_cold_start": daemon_started_this_request,
+                "dense_runtime_cold_start": dense_runtime_cold,
                 **daemon_state_snapshot(state),
             }
             retire_timeout = _bounded_timeout(work_deadline, 1.0)
@@ -1060,6 +1069,10 @@ def _daemon_query_timeout(
     if cold_start and require_daemon:
         return remaining
     return min(soft_timeout, remaining)
+
+
+def _request_may_use_dense(request: dict) -> bool:
+    return str(request.get("retrieval_mode") or "hybrid") in {"hybrid", "dense"}
 
 
 def _state_pid(state: dict) -> int:

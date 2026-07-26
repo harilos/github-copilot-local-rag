@@ -840,6 +840,11 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                 ),
             )
 
+    def test_dense_readiness_is_tracked_separately_from_process_readiness(self) -> None:
+        self.assertTrue(SEARCH._request_may_use_dense({"retrieval_mode": "hybrid"}))
+        self.assertTrue(SEARCH._request_may_use_dense({"retrieval_mode": "dense"}))
+        self.assertFalse(SEARCH._request_may_use_dense({"retrieval_mode": "lexical"}))
+
     def test_process_is_alive_reaps_an_exited_child(self) -> None:
         with (
             mock.patch.object(SEARCH.os, "waitpid", return_value=(43210, 0)),

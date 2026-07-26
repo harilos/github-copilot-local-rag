@@ -46,6 +46,7 @@ class RagDaemonServer(ThreadingHTTPServer):
         self.active_requests = 0
         self.request_sequence = 0
         self.runtime_ready = False
+        self.dense_ready = False
         self.state_lock = threading.Lock()
 
 
@@ -71,6 +72,7 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
         self.active_requests = 0
         self.request_sequence = 0
         self.runtime_ready = False
+        self.dense_ready = False
         self.state_lock = threading.Lock()
 
     def server_close(self) -> None:
@@ -86,6 +88,7 @@ def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dic
         active_requests = server.active_requests
         request_sequence = server.request_sequence
         runtime_ready = server.runtime_ready
+        dense_ready = server.dense_ready
     lifecycle_state = (
         "BUSY"
         if active_requests > 0
@@ -101,6 +104,7 @@ def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dic
         "active_requests": active_requests,
         "request_sequence": request_sequence,
         "ready": lifecycle_state == "READY",
+        "dense_ready": dense_ready,
         "lifecycle_state": lifecycle_state,
         "code_fingerprint": server.code_fingerprint,
         "idle_timeout_seconds": server.idle_timeout,
@@ -166,6 +170,8 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             with self.server.state_lock:
                 if payload.get("status") != "error":
                     self.server.runtime_ready = True
+                    if payload.get("dense_used") is True:
+                        self.server.dense_ready = True
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
         payload["daemon_state"] = daemon_request_metadata(
@@ -178,6 +184,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             request_sequence=request_sequence,
             queue_depth=queue_depth,
             request_seconds=time.monotonic() - request_started,
+            dense_ready=self.server.dense_ready,
         )
         self._send_json(payload)
 
@@ -246,6 +253,8 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             with self.server.state_lock:
                 if result.get("status") != "error":
                     self.server.runtime_ready = True
+                    if result.get("dense_used") is True:
+                        self.server.dense_ready = True
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
         result["daemon_state"] = daemon_request_metadata(
@@ -258,6 +267,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             request_sequence=request_sequence,
             queue_depth=queue_depth,
             request_seconds=time.monotonic() - request_started,
+            dense_ready=self.server.dense_ready,
         )
         self._send_json(result)
 
@@ -334,6 +344,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
     active_requests = 0
     request_sequence = 0
     runtime_ready = False
+    dense_ready = False
 
     try:
         while True:
@@ -351,6 +362,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "active_requests": active_requests,
                     "request_sequence": request_sequence,
+                    "dense_ready": dense_ready,
                     "uptime_seconds": round(time.monotonic() - started_monotonic, 6),
                     "code_fingerprint": code_fingerprint,
                 },
@@ -396,6 +408,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         "active_requests": active_requests,
                         "request_sequence": request_sequence,
                         "ready": lifecycle_state == "READY",
+                        "dense_ready": dense_ready,
                         "lifecycle_state": lifecycle_state,
                         "code_fingerprint": code_fingerprint,
                         "idle_timeout_seconds": idle_timeout,
@@ -405,6 +418,8 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                     result = _run_search_request(payload)
                     if result.get("status") != "error":
                         runtime_ready = True
+                        if result.get("dense_used") is True:
+                            dense_ready = True
                     result["daemon_state"] = daemon_request_metadata(
                         pid=os.getpid(),
                         generation=generation,
@@ -415,6 +430,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         request_sequence=request_sequence,
                         queue_depth=max(0, len(request_files) - 1),
                         request_seconds=time.monotonic() - request_started,
+                        dense_ready=dense_ready,
                     )
                 elif request.get("op") == "shutdown":
                     result = {"schema": "local-rag.ragd.shutdown.v1", "status": "ok"}
@@ -527,6 +543,7 @@ def daemon_request_metadata(
     request_sequence: int,
     queue_depth: int,
     request_seconds: float,
+    dense_ready: bool,
 ) -> dict[str, Any]:
     return {
         "pid": pid,
@@ -538,6 +555,7 @@ def daemon_request_metadata(
         "request_sequence": request_sequence,
         "queue_depth": queue_depth,
         "request_seconds": round(request_seconds, 6),
+        "dense_ready": dense_ready,
     }
 
 

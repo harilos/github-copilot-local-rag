@@ -25,6 +25,7 @@ class DaemonOwnershipTests(unittest.TestCase):
             active_requests=0,
             request_sequence=0,
             runtime_ready=False,
+            dense_ready=False,
             generation="generation",
             started_at="now",
             started_monotonic=time.monotonic(),
@@ -32,8 +33,11 @@ class DaemonOwnershipTests(unittest.TestCase):
             idle_timeout=600,
         )
         self.assertEqual("STARTING", RAGD._server_health_payload(server)["lifecycle_state"])
+        self.assertFalse(RAGD._server_health_payload(server)["dense_ready"])
         server.runtime_ready = True
         self.assertEqual("READY", RAGD._server_health_payload(server)["lifecycle_state"])
+        server.dense_ready = True
+        self.assertTrue(RAGD._server_health_payload(server)["dense_ready"])
         server.active_requests = 1
         self.assertEqual("BUSY", RAGD._server_health_payload(server)["lifecycle_state"])
 
