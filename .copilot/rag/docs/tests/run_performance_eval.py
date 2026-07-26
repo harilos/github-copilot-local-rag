@@ -16,6 +16,7 @@ import time
 import uuid
 import urllib.request
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -550,7 +551,9 @@ def read_db_identity(db_name: str) -> dict[str, str]:
             digest.update(b"<missing-or-invalid>")
     catalog_path = db_dir / "catalog.sqlite"
     try:
-        with sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True) as connection:
+        with closing(
+            sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+        ) as connection:
             for row in connection.execute(
                 """
                 SELECT chunk_uid, chunk_hash, content_hash, text_hash, updated_at

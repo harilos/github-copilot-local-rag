@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("run_performance_eval.py")
@@ -375,6 +377,36 @@ class CleanMixedTests(unittest.TestCase):
             self.assertEqual("performance-report-release-sha.md", report.name)
             self.assertEqual(Path(directory).resolve(), results.parent)
             self.assertEqual(results.parent, report.parent)
+
+    def test_db_identity_closes_read_only_catalog_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rag_root = Path(directory) / "rag"
+            db_root = rag_root / "dbs" / "fixture-rag"
+            db_root.mkdir(parents=True)
+            catalog_path = db_root / "catalog.sqlite"
+            with sqlite3.connect(catalog_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE chunk (
+                      chunk_uid TEXT,
+                      chunk_hash TEXT,
+                      content_hash TEXT,
+                      text_hash TEXT,
+                      updated_at TEXT,
+                      visible_until INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO chunk VALUES (?, ?, ?, ?, ?, NULL)",
+                    ("chunk-1", "chunk-hash", "content-hash", "text-hash", "now"),
+                )
+            with mock.patch.object(MODULE, "RAG_ROOT", rag_root):
+                identity = MODULE.read_db_identity("fixture-rag")
+            self.assertNotEqual("unknown", identity["db_snapshot_hash"])
+            renamed = catalog_path.with_suffix(".renamed")
+            catalog_path.rename(renamed)
+            self.assertTrue(renamed.exists())
 
 
 class RouteIdentityTests(unittest.TestCase):
