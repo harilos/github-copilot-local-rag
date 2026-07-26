@@ -8,6 +8,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 QUERY_ROOT = Path(__file__).resolve().parent
@@ -64,6 +65,46 @@ class DaemonOwnershipTests(unittest.TestCase):
             self.assertTrue(
                 RAGD._state_is_superseded(path, generation="old", pid=123)
             )
+
+
+class DaemonRetrievalRouteTests(unittest.TestCase):
+    def test_default_hybrid_request_uses_adaptive_route(self) -> None:
+        request = {
+            "db": "ac-rag",
+            "question": "semantic question",
+            "retrieval_mode": "hybrid",
+            "adaptive_hybrid": True,
+        }
+        with (
+            patch.object(
+                RAGD,
+                "run_adaptive_search_payload",
+                return_value={"status": "ok"},
+            ) as adaptive,
+            patch.object(RAGD, "run_search_payload") as standard,
+        ):
+            self.assertEqual({"status": "ok"}, RAGD._execute_search_payload(request))
+        adaptive.assert_called_once()
+        standard.assert_not_called()
+
+    def test_explicit_lexical_request_keeps_evaluation_route(self) -> None:
+        request = {
+            "db": "ac-rag",
+            "question": "lexical question",
+            "retrieval_mode": "lexical",
+            "adaptive_hybrid": True,
+        }
+        with (
+            patch.object(RAGD, "run_adaptive_search_payload") as adaptive,
+            patch.object(
+                RAGD,
+                "run_search_payload",
+                return_value={"status": "ok"},
+            ) as standard,
+        ):
+            self.assertEqual({"status": "ok"}, RAGD._execute_search_payload(request))
+        adaptive.assert_not_called()
+        self.assertEqual("lexical", standard.call_args.kwargs["retrieval_mode"])
 
 
 if __name__ == "__main__":

@@ -172,6 +172,7 @@ def main() -> None:
         "explain": args.explain,
         "include_db_hint": args.include_db_hint,
         "retrieval_mode": args.retrieval_mode,
+        "adaptive_hybrid": args.retrieval_mode == "hybrid",
         "identifier_diagnostics": not args.disable_identifier_diagnostics,
     }
 

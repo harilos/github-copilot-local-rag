@@ -20,7 +20,11 @@ DBS_ROOT = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().r
 sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
-from software_rag_tool.search_api import normalize_search_contract, run_search_payload
+from software_rag_tool.search_api import (
+    normalize_search_contract,
+    run_adaptive_search_payload,
+    run_search_payload,
+)
 
 _UnixStreamServerBase = getattr(socketserver, "ThreadingUnixStreamServer", socketserver.ThreadingTCPServer)
 
@@ -147,18 +151,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             queue_depth = self.server.active_requests
             self.server.active_requests += 1
         try:
-            payload = run_search_payload(
-                db_name=str(request["db"]),
-                question=str(request["question"]),
-                top_k=int(request.get("top_k") or 8),
-                source=str(request.get("source") or "any"),
-                max_chars=int(request.get("max_chars") or 900),
-                budget_tokens=int(request["budget_tokens"]) if request.get("budget_tokens") else None,
-                explain=bool(request.get("explain")),
-                include_db_hint=bool(request.get("include_db_hint")),
-                retrieval_mode=str(request.get("retrieval_mode") or "hybrid"),
-                identifier_diagnostics=bool(request.get("identifier_diagnostics", True)),
-            )
+            payload = _execute_search_payload(request)
         except Exception as exc:
             payload = normalize_search_contract(
                 {
@@ -238,18 +231,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             queue_depth = self.server.active_requests
             self.server.active_requests += 1
         try:
-            result = run_search_payload(
-                db_name=str(payload["db"]),
-                question=str(payload["question"]),
-                top_k=int(payload.get("top_k") or 8),
-                source=str(payload.get("source") or "any"),
-                max_chars=int(payload.get("max_chars") or 900),
-                budget_tokens=int(payload["budget_tokens"]) if payload.get("budget_tokens") else None,
-                explain=bool(payload.get("explain")),
-                include_db_hint=bool(payload.get("include_db_hint")),
-                retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
-                identifier_diagnostics=bool(payload.get("identifier_diagnostics", True)),
-            )
+            result = _execute_search_payload(payload)
         except Exception as exc:
             result = normalize_search_contract(
                 {
@@ -474,18 +456,7 @@ def _cleanup_stale_transport_files(directory: Path, *, max_age_seconds: float) -
 
 def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        return run_search_payload(
-            db_name=str(payload["db"]),
-            question=str(payload["question"]),
-            top_k=int(payload.get("top_k") or 8),
-            source=str(payload.get("source") or "any"),
-            max_chars=int(payload.get("max_chars") or 900),
-            budget_tokens=int(payload["budget_tokens"]) if payload.get("budget_tokens") else None,
-            explain=bool(payload.get("explain")),
-            include_db_hint=bool(payload.get("include_db_hint")),
-            retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
-            identifier_diagnostics=bool(payload.get("identifier_diagnostics", True)),
-        )
+        return _execute_search_payload(payload)
     except Exception as exc:
         return normalize_search_contract(
             {
@@ -496,6 +467,31 @@ def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         )
+
+
+def _execute_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    retrieval_mode = str(payload.get("retrieval_mode") or "hybrid")
+    common = {
+        "db_name": str(payload["db"]),
+        "question": str(payload["question"]),
+        "top_k": int(payload.get("top_k") or 8),
+        "source": str(payload.get("source") or "any"),
+        "max_chars": int(payload.get("max_chars") or 900),
+        "budget_tokens": (
+            int(payload["budget_tokens"])
+            if payload.get("budget_tokens")
+            else None
+        ),
+        "explain": bool(payload.get("explain")),
+        "include_db_hint": bool(payload.get("include_db_hint")),
+        "identifier_diagnostics": bool(payload.get("identifier_diagnostics", True)),
+    }
+    if bool(payload.get("adaptive_hybrid")) and retrieval_mode == "hybrid":
+        return run_adaptive_search_payload(**common)
+    return run_search_payload(
+        **common,
+        retrieval_mode=retrieval_mode,
+    )
 
 
 def runtime_code_fingerprint() -> str:
