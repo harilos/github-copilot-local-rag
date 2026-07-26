@@ -103,7 +103,7 @@ class FakeBackend:
 
 
 class HybridAnchorContractTests(unittest.TestCase):
-    def test_adaptive_certified_anchor_collects_each_lexical_family_once(self) -> None:
+    def test_adaptive_uncorroborated_anchor_adds_dense_once(self) -> None:
         backend = FakeBackend()
         backend.lexical_rows.insert(
             0,
@@ -123,8 +123,41 @@ class HybridAnchorContractTests(unittest.TestCase):
             backend=backend,
         )
         self.assertEqual("poland", rows[0]["id"])
+        self.assertTrue(route["dense_used"])
+        self.assertIsNone(route["dense_skipped_reason"])
+        self.assertEqual(
+            {"dense": 1, "exact": 1, "lexical": 1, "anchor": 1, "metadata": 1},
+            backend.calls,
+        )
+
+    def test_adaptive_certified_anchor_requires_full_query_and_metadata(self) -> None:
+        backend = FakeBackend()
+        poland = result_row(
+            "poland",
+            "Poland air conditioning market evidence",
+            signals=["lexical"],
+        )
+        backend.lexical_rows.insert(0, poland)
+        backend.anchor_rows[0] = {
+            **poland,
+            "debug": {
+                "lexical_anchor": {
+                    "token": "Poland",
+                    "document_df": 1,
+                    "information_score": 2.0,
+                }
+            },
+        }
+        backend.metadata_rows = [poland]
+        rows, route = adaptive_hybrid_query(
+            "Poland air conditioning market",
+            top_k=2,
+            db_scope_confirmed=True,
+            backend=backend,
+        )
+        self.assertEqual("poland", rows[0]["id"])
         self.assertFalse(route["dense_used"])
-        self.assertEqual("db_scope_full_query_lexical", route["dense_skipped_reason"])
+        self.assertEqual("certified_low_df_anchor", route["dense_skipped_reason"])
         self.assertEqual(
             {"dense": 0, "exact": 1, "lexical": 1, "anchor": 1, "metadata": 1},
             backend.calls,
@@ -237,19 +270,28 @@ class HybridAnchorContractTests(unittest.TestCase):
     def test_cold_fast_path_keeps_rare_anchor_as_direct_evidence(self) -> None:
         backend = FakeBackend()
         backend.exact_rows = [result_row("rag", "RAG background", signals=["exact"])]
+        poland = result_row(
+            "poland",
+            "Poland air conditioning market evidence",
+            signals=["lexical"],
+        )
         backend.lexical_rows.insert(
             0,
-            result_row("poland", "Poland air-conditioning evidence", signals=["lexical"]),
+            poland,
         )
-        backend.anchor_rows[0]["debug"] = {
-            "lexical_anchor": {
-                "token": "Poland",
-                "document_df": 1,
-                "information_score": 2.0,
-            }
+        backend.metadata_rows = [poland]
+        backend.anchor_rows[0] = {
+            **poland,
+            "debug": {
+                "lexical_anchor": {
+                    "token": "Poland",
+                    "document_df": 1,
+                    "information_score": 2.0,
+                }
+            },
         }
         rows = cold_lexical_fast_path(
-            "RAGでポーランドの空調について教えて",
+            "Poland air conditioning market",
             top_k=2,
             db_scope_confirmed=True,
             backend=backend,

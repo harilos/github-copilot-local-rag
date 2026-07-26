@@ -2,6 +2,10 @@
 
 Gold data is span-based so that chunk length can vary without rewriting labels.
 
+For new semantic datasets, use `gold_groups`. Alternatives inside one group are
+OR matches for the same claim; multiple required groups are AND requirements.
+The legacy `gold_spans` field remains supported for existing datasets.
+
 ## JSONL Record
 
 ```json
@@ -38,6 +42,42 @@ Gold data is span-based so that chunk length can vary without rewriting labels.
 }
 ```
 
+## Grouped semantic gold
+
+```json
+{
+  "id": "AC_SEM_101",
+  "db": "ac-rag",
+  "db_snapshot_hash": "sha256:...",
+  "query": "A uniquely scoped semantic question",
+  "query_type": "semantic",
+  "answerable": true,
+  "gold_groups": [
+    {
+      "id": "claim-1",
+      "required": true,
+      "alternatives": [
+        {
+          "path": "report.pdf",
+          "span_text": "one short atomic supporting statement",
+          "span_text_sha256": "sha256:..."
+        },
+        {
+          "path": "another-report.pdf",
+          "span_text": "an independently valid wording of the same claim",
+          "span_text_sha256": "sha256:..."
+        }
+      ]
+    }
+  ]
+}
+```
+
+Every alternative must be selected before retrieval. An alternative is not a
+license to add the passage returned by a failed run. Each span should normally
+be an atomic 80–180 character statement; use a longer span only when the claim
+cannot be supported atomically.
+
 ## Matching Rules
 
 | Label | Meaning |
@@ -54,7 +94,7 @@ For negative questions, success means no unsupported answer is produced. Retriev
 - `query`
 - `query_type`
 - `answerable`
-- `gold_spans`
+- `gold_spans` or `gold_groups`
 - `gold_claims`
 - `db`
 - `db_snapshot_hash`

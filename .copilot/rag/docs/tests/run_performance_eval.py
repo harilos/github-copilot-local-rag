@@ -355,7 +355,7 @@ def validate_cases_for_run(cases: list[dict[str, Any]], args: argparse.Namespace
         for db_name in sorted({str(case["db"]) for case in cases})
     }
     for case in cases:
-        if not case.get("gold_spans"):
+        if not (case.get("gold_spans") or case.get("gold_groups")):
             continue
         expected = normalize_hash(case.get("db_snapshot_hash"))
         actual = normalize_hash(db_identities[str(case["db"])]["db_snapshot_hash"])
@@ -391,12 +391,18 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{path}:{index}: negative Exact requires expected_unmatched_identifiers")
         if case["expect_exact_positive"] and not case.get("expected_matched_identifiers"):
             raise ValueError(f"{path}:{index}: positive Exact requires expected_matched_identifiers")
-        for span in case.get("gold_spans") or []:
+        semantic_spans = list(case.get("gold_spans") or [])
+        for group in case.get("gold_groups") or []:
+            alternatives = group.get("alternatives") or []
+            if not alternatives:
+                raise ValueError(f"{path}:{index}: every gold group requires alternatives")
+            semantic_spans.extend(alternatives)
+        for span in semantic_spans:
             if not span.get("span_text") and not span.get("text"):
                 raise ValueError(f"{path}:{index}: every gold span requires span_text")
             if not span.get("path") and not span.get("document_id"):
                 raise ValueError(f"{path}:{index}: every gold span requires path or document_id")
-        if case.get("gold_spans") and not case.get("db_snapshot_hash"):
+        if semantic_spans and not case.get("db_snapshot_hash"):
             raise ValueError(f"{path}:{index}: semantic gold requires db_snapshot_hash")
     return cases
 
@@ -412,7 +418,7 @@ def case_matches_quality_channel(case: dict[str, Any], channel: str) -> bool:
     if channel == "exact":
         return bool(case.get("expect_exact_positive") or case.get("expect_exact_negative"))
     if channel == "dense":
-        return bool(case.get("gold_spans"))
+        return bool(case.get("gold_spans") or case.get("gold_groups"))
     if channel == "no-hit":
         return case.get("answerable") is False
     return False
@@ -1081,6 +1087,7 @@ def expectation_snapshot(case: dict[str, Any]) -> dict[str, Any]:
         "answerable": case.get("answerable"),
         "db_snapshot_hash_expected": case.get("db_snapshot_hash"),
         "gold_spans": list(case.get("gold_spans") or []),
+        "gold_groups": list(case.get("gold_groups") or []),
     }
 
 
@@ -1126,8 +1133,40 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
             and ((row.get("exact_candidate_count") or 0) > 0 or row.get("exact_signal_count", 0) > 0)
             and flags["matched_identifier_pass"]
         )
+    gold_groups = list(case.get("gold_groups") or [])
     gold_spans = list(case.get("gold_spans") or [])
-    if gold_spans:
+    if gold_groups:
+        group_matches = [
+            any(
+                gold_span_matches_context(span, context)
+                for span in group.get("alternatives") or []
+                for context in row.get("retrieved_contexts") or []
+            )
+            for group in gold_groups
+        ]
+        group_top5_matches = [
+            any(
+                gold_span_matches_context(span, context)
+                for span in group.get("alternatives") or []
+                for context in (row.get("retrieved_contexts") or [])[:5]
+            )
+            for group in gold_groups
+        ]
+        required = [
+            index
+            for index, group in enumerate(gold_groups)
+            if group.get("required", True)
+        ]
+        required_matches = [group_matches[index] for index in required]
+        required_top5_matches = [group_top5_matches[index] for index in required]
+        flags["semantic_gold_applicable"] = True
+        flags["semantic_hit_at_5"] = any(required_top5_matches)
+        flags["context_recall"] = (
+            sum(1 for value in required_matches if value) / len(required_matches)
+            if required_matches
+            else None
+        )
+    elif gold_spans:
         matched = [
             any(gold_span_matches_context(span, context) for context in row.get("retrieved_contexts") or [])
             for span in gold_spans
@@ -1292,6 +1331,7 @@ def build_report(run_id: str, rows: list[dict[str, Any]], args: argparse.Namespa
                 "expect_exact_negative",
                 "expected_unmatched_identifiers",
                 "gold_spans",
+                "gold_groups",
             )
         )
         case = case_from_row(row) if has_snapshot else case_by_id.get(str(row.get("case_id")))
@@ -1353,6 +1393,7 @@ def case_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "answerable": row.get("answerable"),
         "db_snapshot_hash": row.get("db_snapshot_hash_expected"),
         "gold_spans": row.get("gold_spans") or [],
+        "gold_groups": row.get("gold_groups") or [],
     }
 
 

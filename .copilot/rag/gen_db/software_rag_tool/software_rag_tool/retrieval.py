@@ -253,11 +253,16 @@ def adaptive_hybrid_query(
     rows = _weighted_rrf(family_rankings)
     materialized = _materialize(rows, family_rankings, backend=backend)
     materialized = _without_test_fixtures(materialized)
+    rescue_anchor_ids = list(anchor_ids)
+    if dense_used and anchor_rows:
+        raw_anchor_id = str(anchor_rows[0].get("id") or "")
+        if raw_anchor_id:
+            rescue_anchor_ids = [raw_anchor_id]
     materialized = _anchor_rescue(
         materialized,
         verified_exact_rows,
         question,
-        anchor_ids=anchor_ids,
+        anchor_ids=rescue_anchor_ids,
     )
     materialized = materialized[: max(DEFAULT_RRF_K, top_k)]
     materialized = _dedupe_and_diversify(
@@ -473,13 +478,11 @@ def _certified_anchor_rows(
     question: str,
     db_scope_confirmed: bool,
 ) -> list[dict[str, Any]]:
-    """Accept one low-DF anchor under a conservative generic certificate.
+    """Accept one low-DF anchor only under a conservative certificate.
 
-    The strict certificate requires topic confirmation from metadata. Some
-    existing databases contain no metadata rows; for those databases the
-    fallback certificate is limited to the selected DB and requires the
-    candidate document to be a top-three result of the complete query's BM25
-    ranking. The fallback still promotes only the verified seed chunk.
+    A rare term by itself is not enough to skip dense retrieval. The complete
+    query must cover the candidate, another informative term must match, and
+    metadata must independently confirm the same document.
     """
     if not db_scope_confirmed or not anchor_rows:
         return []
@@ -533,12 +536,10 @@ def _certified_anchor_rows(
         ),
         None,
     )
-    strict = (
-        coverage >= 0.5
-        and non_anchor_confirmed
-        and metadata_rank is not None
-    )
-    kind = "certified_low_df_anchor" if strict else "db_scope_full_query_lexical"
+    strict = coverage >= 0.5 and non_anchor_confirmed and metadata_rank is not None
+    if not strict:
+        return []
+    kind = "certified_low_df_anchor"
     debug["fast_path_certificate"] = {
         "kind": kind,
         "token": token,
@@ -705,9 +706,15 @@ def _query_term_coverage(
     *,
     anchor_token: str,
 ) -> tuple[float, bool]:
+    # Sudachi can transliterate an ASCII query (for example, ``Poland`` to
+    # ``ポーランド``). Keep the original ASCII terms as a second view so a
+    # same-language source can still satisfy the conservative certificate.
     informative = [
         token
-        for token in tokens_for_fts(question)
+        for token in [
+            *tokens_for_fts(question),
+            *re.findall(r"[A-Za-z0-9][A-Za-z0-9_/-]*", question or ""),
+        ]
         if len(canonicalize(token)) >= 2
     ]
     if not informative:

@@ -532,6 +532,68 @@ class SemanticMetricTests(unittest.TestCase):
         self.assertFalse(row["semantic_hit_at_5"])
         self.assertEqual(0.0, row["context_recall"])
 
+    def test_gold_group_accepts_any_alternative_span(self) -> None:
+        case = {
+            "id": "semantic-group-or",
+            "db": "ac-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_groups": [
+                {
+                    "id": "claim-1",
+                    "required": True,
+                    "alternatives": [
+                        {"path": "first.txt", "span_text": "first wording"},
+                        {"path": "second.txt", "span_text": "second wording"},
+                    ],
+                }
+            ],
+        }
+        row = {
+            "request_success": True,
+            "profile": "H",
+            "retrieved_contexts": [
+                {"path": "second.txt", "text": "The second wording is supported."}
+            ],
+        }
+        flags = MODULE.quality_flags(case, row)
+        self.assertTrue(flags["semantic_hit_at_5"])
+        self.assertEqual(1.0, flags["context_recall"])
+
+    def test_required_gold_groups_use_and_recall(self) -> None:
+        case = {
+            "id": "semantic-group-and",
+            "db": "ac-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_groups": [
+                {
+                    "id": "claim-1",
+                    "required": True,
+                    "alternatives": [
+                        {"path": "one.txt", "span_text": "supported one"}
+                    ],
+                },
+                {
+                    "id": "claim-2",
+                    "required": True,
+                    "alternatives": [
+                        {"path": "two.txt", "span_text": "missing two"}
+                    ],
+                },
+            ],
+        }
+        row = {
+            "request_success": True,
+            "profile": "H",
+            "retrieved_contexts": [
+                {"path": "one.txt", "text": "supported one"}
+            ],
+        }
+        flags = MODULE.quality_flags(case, row)
+        self.assertTrue(flags["semantic_hit_at_5"])
+        self.assertEqual(0.5, flags["context_recall"])
+
 
 if __name__ == "__main__":
     unittest.main()

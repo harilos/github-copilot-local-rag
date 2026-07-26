@@ -2,6 +2,18 @@
 
 This is the frozen, span-based semantic retrieval pilot for the 1.0.1 release.
 
+## Diagnostic status
+
+`INVALID_FOR_RELEASE_GATE`
+
+The Windows H/L/V run completed 90/90 requests with pure JSON and no timeout,
+but an independent review found that this dataset cannot decide release quality.
+Several questions admit valid evidence outside the single labeled document,
+some labels require long paragraph containment rather than atomic claim support,
+and the evaluated AC snapshot included six unlabelled ingestion-test documents.
+The raw result remains a frozen diagnostic artifact and must not be re-labeled
+or used as a failed retrieval baseline.
+
 ## Freeze identity
 
 - Dataset: `semantic-gold-v1.jsonl`
