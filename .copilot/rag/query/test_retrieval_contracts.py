@@ -122,7 +122,9 @@ class HybridAnchorContractTests(unittest.TestCase):
             db_scope_confirmed=True,
             backend=backend,
         )
-        self.assertEqual("poland", rows[0]["id"])
+        self.assertIn("poland", [row["id"] for row in rows])
+        poland = next(row for row in rows if row["id"] == "poland")
+        self.assertNotIn("lexical_anchor", poland["signals"])
         self.assertTrue(route["dense_used"])
         self.assertIsNone(route["dense_skipped_reason"])
         self.assertEqual(
@@ -180,6 +182,36 @@ class HybridAnchorContractTests(unittest.TestCase):
             {"dense": 1, "exact": 1, "lexical": 1, "anchor": 1, "metadata": 1},
             backend.calls,
         )
+
+    def test_semantic_ipv6_term_does_not_skip_dense_as_an_identifier(self) -> None:
+        backend = FakeBackend()
+        backend.anchor_rows = []
+        backend.exact_rows = [
+            result_row("ipv6", "General IPv6 background", signals=["exact"])
+        ]
+        _rows, route = adaptive_hybrid_query(
+            "How are IPv6 extension headers exported by IPFIX?",
+            top_k=2,
+            db_scope_confirmed=True,
+            backend=backend,
+        )
+        self.assertTrue(route["dense_used"])
+        self.assertIsNone(route["dense_skipped_reason"])
+
+    def test_hyphenated_common_word_does_not_skip_dense_as_an_identifier(self) -> None:
+        backend = FakeBackend()
+        backend.anchor_rows = []
+        backend.exact_rows = [
+            result_row("common", "air-conditioner background", signals=["exact"])
+        ]
+        _rows, route = adaptive_hybrid_query(
+            "Why can an air-conditioner motor use a neodymium magnet?",
+            top_k=2,
+            db_scope_confirmed=True,
+            backend=backend,
+        )
+        self.assertTrue(route["dense_used"])
+        self.assertIsNone(route["dense_skipped_reason"])
 
     def test_adaptive_anchor_does_not_double_vote_an_existing_lexical_row(self) -> None:
         backend = FakeBackend()

@@ -10,6 +10,8 @@ This is the frozen release-gate semantic retrieval dataset for version 1.0.1.
 - Languages: 24 Japanese, 6 English
 - Required claim groups: 48
 - Token budget: 1200
+- Maximum characters per evidence item: 6000 (prevents a second, unintended
+  1200-character cap from clipping a 1200-token evaluation)
 
 | Database | Snapshot SHA-256 |
 |---|---|

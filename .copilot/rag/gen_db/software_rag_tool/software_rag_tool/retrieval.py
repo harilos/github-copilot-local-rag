@@ -253,16 +253,11 @@ def adaptive_hybrid_query(
     rows = _weighted_rrf(family_rankings)
     materialized = _materialize(rows, family_rankings, backend=backend)
     materialized = _without_test_fixtures(materialized)
-    rescue_anchor_ids = list(anchor_ids)
-    if dense_used and anchor_rows:
-        raw_anchor_id = str(anchor_rows[0].get("id") or "")
-        if raw_anchor_id:
-            rescue_anchor_ids = [raw_anchor_id]
     materialized = _anchor_rescue(
         materialized,
         verified_exact_rows,
         question,
-        anchor_ids=rescue_anchor_ids,
+        anchor_ids=anchor_ids,
     )
     materialized = materialized[: max(DEFAULT_RRF_K, top_k)]
     materialized = _dedupe_and_diversify(
@@ -623,9 +618,17 @@ def _strong_lexical_hit(
 
 
 def _strong_anchor(anchor: str) -> bool:
-    if any(marker in anchor for marker in ["/", "\\", ".", ":", "_", "-"]):
+    if any(marker in anchor for marker in ["/", "\\", ".", ":", "_"]):
         return True
-    return any(char.isdigit() for char in anchor) and any(char.isalpha() for char in anchor)
+    uppercase_count = sum(1 for char in anchor if char.isupper())
+    if "-" in anchor:
+        return any(char.isdigit() for char in anchor) or uppercase_count >= 2
+    if re.fullmatch(r"RFC ?\d{2,}", anchor, re.IGNORECASE):
+        return True
+    return bool(
+        re.fullmatch(r"[A-Z]+\d{2,}[A-Z0-9]*", anchor)
+        or re.fullmatch(r"[A-Z]+\d+[A-Z]+", anchor)
+    )
 
 
 def _has_strong_exact_anchor(question: str, exact_rows: list[dict[str, Any]]) -> bool:
