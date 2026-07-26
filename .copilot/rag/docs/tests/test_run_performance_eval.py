@@ -5,6 +5,7 @@ import importlib.util
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -384,23 +385,24 @@ class CleanMixedTests(unittest.TestCase):
             db_root = rag_root / "dbs" / "fixture-rag"
             db_root.mkdir(parents=True)
             catalog_path = db_root / "catalog.sqlite"
-            with sqlite3.connect(catalog_path) as connection:
-                connection.execute(
-                    """
-                    CREATE TABLE chunk (
-                      chunk_uid TEXT,
-                      chunk_hash TEXT,
-                      content_hash TEXT,
-                      text_hash TEXT,
-                      updated_at TEXT,
-                      visible_until INTEGER
+            with closing(sqlite3.connect(catalog_path)) as connection:
+                with connection:
+                    connection.execute(
+                        """
+                        CREATE TABLE chunk (
+                          chunk_uid TEXT,
+                          chunk_hash TEXT,
+                          content_hash TEXT,
+                          text_hash TEXT,
+                          updated_at TEXT,
+                          visible_until INTEGER
+                        )
+                        """
                     )
-                    """
-                )
-                connection.execute(
-                    "INSERT INTO chunk VALUES (?, ?, ?, ?, ?, NULL)",
-                    ("chunk-1", "chunk-hash", "content-hash", "text-hash", "now"),
-                )
+                    connection.execute(
+                        "INSERT INTO chunk VALUES (?, ?, ?, ?, ?, NULL)",
+                        ("chunk-1", "chunk-hash", "content-hash", "text-hash", "now"),
+                    )
             with mock.patch.object(MODULE, "RAG_ROOT", rag_root):
                 identity = MODULE.read_db_identity("fixture-rag")
             self.assertNotEqual("unknown", identity["db_snapshot_hash"])
