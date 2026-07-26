@@ -459,6 +459,106 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         self.assertEqual("no-daemon", metadata["actual_execution"])
         self.assertEqual(2, len(metadata["attempts"]))
 
+    def test_windows_bounded_fallback_degrades_hybrid_to_lexical(self) -> None:
+        with mock.patch.object(SEARCH.sys, "platform", "win32"):
+            self.assertEqual(
+                "lexical",
+                SEARCH._fallback_retrieval_mode(
+                    "hybrid",
+                    remaining_seconds=7.5,
+                ),
+            )
+            self.assertEqual(
+                "hybrid",
+                SEARCH._fallback_retrieval_mode(
+                    "hybrid",
+                    remaining_seconds=10.0,
+                ),
+            )
+            self.assertEqual(
+                "dense",
+                SEARCH._fallback_retrieval_mode(
+                    "dense",
+                    remaining_seconds=7.5,
+                ),
+            )
+
+    def test_deadline_bounded_fallback_reports_lexical_degradation(self) -> None:
+        args = argparse.Namespace(
+            stdin=False,
+            top_k=8,
+            max_chars=1200,
+            format="json",
+            budget_tokens=1200,
+            retrieval_mode="hybrid",
+            explain=False,
+            include_db_hint=False,
+            disable_identifier_diagnostics=False,
+            timeout=15,
+        )
+        completed = subprocess.CompletedProcess(
+            args=["query"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "no_hit",
+                    "warnings": [],
+                }
+            ),
+            stderr="",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                SEARCH,
+                "_run_sync_child",
+                return_value=completed,
+            ) as child,
+            contextlib.redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                SEARCH._run_sync_script(
+                    python="python",
+                    env={},
+                    args=args,
+                    question="q",
+                    db_name="incident-rag",
+                    timeout_override=7.5,
+                    retrieval_mode_override="lexical",
+                    execution_metadata={
+                        "requested_execution": "daemon",
+                        "first_attempt_success": False,
+                        "fallback_used": True,
+                        "fallback_retrieval_mode": "lexical",
+                        "fallback_dense_skipped": True,
+                        "fallback_dense_skipped_reason": (
+                            "deadline_bounded_windows_fallback"
+                        ),
+                        "attempts": [
+                            {"route": "daemon", "success": False}
+                        ],
+                    },
+                )
+        self.assertEqual(0, raised.exception.code)
+        command = child.call_args.args[0]
+        self.assertIn("--retrieval-mode", command)
+        self.assertIn("lexical", command)
+        self.assertNotIn("--adaptive-hybrid", command)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["dense_used"])
+        self.assertEqual(
+            "deadline_bounded_windows_fallback",
+            payload["dense_skipped_reason"],
+        )
+        self.assertIn(SEARCH.DEADLINE_FALLBACK_WARNING, payload["warnings"])
+        self.assertEqual(
+            "lexical",
+            payload["execution_metadata"]["attempts"][-1][
+                "retrieval_mode"
+            ],
+        )
+
     def test_deadline_exhaustion_does_not_spawn_fallback(self) -> None:
         args = argparse.Namespace(
             stdin=False,

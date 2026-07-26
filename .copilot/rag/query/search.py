@@ -41,6 +41,11 @@ COMPACT_JSON_OUTPUT_RESERVE_SECONDS = 0.5
 COMPACT_JSON_DEFAULT_BUDGET_TOKENS = 1200
 SYNC_TIMEOUT_CLEANUP_SECONDS = 0.25
 WINDOWS_TASKKILL_TIMEOUT_SECONDS = 0.15
+WINDOWS_FALLBACK_DENSE_MIN_SECONDS = 10.0
+DEADLINE_FALLBACK_WARNING = (
+    "Dense retrieval was skipped during daemon timeout recovery to meet "
+    "the outer deadline."
+)
 
 
 def main() -> None:
@@ -364,6 +369,18 @@ def main() -> None:
                 "daemon_restart": restart,
                 "outer_timeout_seconds": args.timeout or None,
             }
+            fallback_retrieval_mode = _fallback_retrieval_mode(
+                args.retrieval_mode,
+                remaining_seconds=remaining_timeout,
+            )
+            if fallback_retrieval_mode != args.retrieval_mode:
+                execution_metadata["fallback_retrieval_mode"] = (
+                    fallback_retrieval_mode
+                )
+                execution_metadata["fallback_dense_skipped"] = True
+                execution_metadata["fallback_dense_skipped_reason"] = (
+                    "deadline_bounded_windows_fallback"
+                )
             _run_sync_script(
                 python=python,
                 env=env,
@@ -372,6 +389,7 @@ def main() -> None:
                 db_name=resolution.db_name,
                 timeout_override=remaining_timeout,
                 execution_metadata=execution_metadata,
+                retrieval_mode_override=fallback_retrieval_mode,
                 request_started=request_started,
             )
         first_attempt = {
@@ -455,6 +473,7 @@ def _run_sync_script(
     db_name: str,
     timeout_override: float | None = None,
     execution_metadata: dict | None = None,
+    retrieval_mode_override: str | None = None,
     request_started: float | None = None,
 ) -> None:
     script = TOOL_ROOT / "scripts" / "query.py"
@@ -479,8 +498,9 @@ def _run_sync_script(
     effective_budget_tokens = _effective_budget_tokens(args)
     if effective_budget_tokens:
         cmd.extend(["--budget-tokens", str(effective_budget_tokens)])
-    if args.retrieval_mode != "hybrid":
-        cmd.extend(["--retrieval-mode", args.retrieval_mode])
+    retrieval_mode = retrieval_mode_override or args.retrieval_mode
+    if retrieval_mode != "hybrid":
+        cmd.extend(["--retrieval-mode", retrieval_mode])
     else:
         cmd.append("--adaptive-hybrid")
     if args.stdin:
@@ -568,6 +588,7 @@ def _run_sync_script(
                     "route": "no-daemon",
                     "success": completed.returncode == 0 and payload.get("status") != "error",
                     "latency_seconds": round(time.monotonic() - started, 6),
+                    "retrieval_mode": retrieval_mode,
                 }
                 metadata.setdefault("request_id", uuid.uuid4().hex)
                 metadata.setdefault("requested_execution", "no-daemon")
@@ -580,6 +601,15 @@ def _run_sync_script(
                 metadata["outer_timeout_seconds"] = args.timeout or None
                 if request_started is not None:
                     metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+                if metadata.get("fallback_dense_skipped"):
+                    warnings = list(payload.get("warnings") or [])
+                    if DEADLINE_FALLBACK_WARNING not in warnings:
+                        warnings.append(DEADLINE_FALLBACK_WARNING)
+                    payload["warnings"] = warnings
+                    payload["dense_used"] = False
+                    payload["dense_skipped_reason"] = metadata.get(
+                        "fallback_dense_skipped_reason"
+                    )
                 payload["execution_metadata"] = metadata
                 _print_search_payload(payload, args=args)
         else:
@@ -657,6 +687,21 @@ def _configure_standard_streams() -> None:
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _fallback_retrieval_mode(
+    requested_mode: str,
+    *,
+    remaining_seconds: float | None,
+) -> str:
+    if (
+        sys.platform.startswith("win")
+        and requested_mode == "hybrid"
+        and remaining_seconds is not None
+        and remaining_seconds < WINDOWS_FALLBACK_DENSE_MIN_SECONDS
+    ):
+        return "lexical"
+    return requested_mode
 
 
 def _run_sync_child(
