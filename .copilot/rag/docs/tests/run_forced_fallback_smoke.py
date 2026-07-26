@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import multiprocessing
+import os
 import platform
 import subprocess
 import sys
@@ -37,10 +38,13 @@ class HangingDaemonServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         token: str,
+        generation: str,
         hang_seconds: float,
         shutdown_ack: bool,
     ) -> None:
         self.token = token
+        self.generation = generation
+        self.code_fingerprint = "injected-timeout"
         self.hang_seconds = hang_seconds
         self.shutdown_ack = shutdown_ack
         super().__init__(address, HangingDaemonHandler)
@@ -70,7 +74,7 @@ class HangingDaemonHandler(BaseHTTPRequestHandler):
         if self.path != "/health" or not self._authorized():
             self._send_json(403, {"status": "error"})
             return
-        self._send_json(200, {"status": "ok"})
+        self._send_json(200, hanging_daemon_health(self.server))
 
     def do_POST(self) -> None:
         if not self._authorized():
@@ -92,6 +96,7 @@ class HangingDaemonHandler(BaseHTTPRequestHandler):
 
 def serve_hanging_daemon(
     token: str,
+    generation: str,
     hang_seconds: float,
     shutdown_ack: bool,
     port_queue: Any,
@@ -99,10 +104,11 @@ def serve_hanging_daemon(
     server = HangingDaemonServer(
         ("127.0.0.1", 0),
         token,
+        generation,
         hang_seconds,
         shutdown_ack,
     )
-    port_queue.put(server.server_port)
+    port_queue.put({"port": server.server_port, "pid": os.getpid()})
     try:
         server.serve_forever()
     finally:
@@ -179,11 +185,19 @@ def run_case(
     port_queue = process_context.Queue()
     server_process = process_context.Process(
         target=serve_hanging_daemon,
-        args=(token, daemon_attempt_timeout + 2.0, shutdown_ack, port_queue),
+        args=(
+            token,
+            old_generation,
+            daemon_attempt_timeout + 2.0,
+            shutdown_ack,
+            port_queue,
+        ),
         daemon=False,
     )
     server_process.start()
-    server_port = int(port_queue.get(timeout=5.0))
+    server_identity = port_queue.get(timeout=5.0)
+    server_port = int(server_identity["port"])
+    server_pid = int(server_identity["pid"])
     port_queue.close()
     port_queue.join_thread()
     reaped = threading.Event()
@@ -196,7 +210,7 @@ def run_case(
     reaper.start()
     state = {
         "schema": "local-rag.ragd.v2",
-        "pid": server_process.pid,
+        "pid": server_pid,
         "generation": old_generation,
         "transport": "tcp",
         "host": "127.0.0.1",
@@ -318,6 +332,19 @@ def run_case(
         "followup_execution_metadata": followup_metadata,
         "checks": checks,
         "contract_pass": all(checks.values()),
+    }
+
+
+def hanging_daemon_health(server: HangingDaemonServer) -> dict[str, Any]:
+    return {
+        "schema": "local-rag.ragd.health.v1",
+        "status": "ok",
+        "pid": os.getpid(),
+        "generation": server.generation,
+        "code_fingerprint": server.code_fingerprint,
+        "ready": True,
+        "lifecycle_state": "READY",
+        "active_requests": 0,
     }
 
 
