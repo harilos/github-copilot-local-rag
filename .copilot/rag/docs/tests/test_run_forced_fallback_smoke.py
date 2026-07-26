@@ -21,12 +21,12 @@ class HangingDaemonContractTests(unittest.TestCase):
     def test_health_publishes_authenticated_runtime_identity(self) -> None:
         server = SimpleNamespace(
             generation="injected-generation",
-            code_fingerprint="injected-timeout",
+            code_fingerprint="runtime-fingerprint",
         )
         health = MODULE.hanging_daemon_health(server)
         self.assertEqual(os.getpid(), health["pid"])
         self.assertEqual("injected-generation", health["generation"])
-        self.assertEqual("injected-timeout", health["code_fingerprint"])
+        self.assertEqual("runtime-fingerprint", health["code_fingerprint"])
         self.assertTrue(health["ready"])
         self.assertEqual("READY", health["lifecycle_state"])
 

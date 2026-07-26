@@ -39,12 +39,13 @@ class HangingDaemonServer(ThreadingHTTPServer):
         address: tuple[str, int],
         token: str,
         generation: str,
+        code_fingerprint: str,
         hang_seconds: float,
         shutdown_ack: bool,
     ) -> None:
         self.token = token
         self.generation = generation
-        self.code_fingerprint = "injected-timeout"
+        self.code_fingerprint = code_fingerprint
         self.hang_seconds = hang_seconds
         self.shutdown_ack = shutdown_ack
         super().__init__(address, HangingDaemonHandler)
@@ -97,6 +98,7 @@ class HangingDaemonHandler(BaseHTTPRequestHandler):
 def serve_hanging_daemon(
     token: str,
     generation: str,
+    code_fingerprint: str,
     hang_seconds: float,
     shutdown_ack: bool,
     port_queue: Any,
@@ -105,6 +107,7 @@ def serve_hanging_daemon(
         ("127.0.0.1", 0),
         token,
         generation,
+        code_fingerprint,
         hang_seconds,
         shutdown_ack,
     )
@@ -181,6 +184,7 @@ def run_case(
 ) -> dict[str, Any]:
     token = uuid.uuid4().hex
     old_generation = f"injected-{uuid.uuid4().hex}"
+    code_fingerprint = performance.expected_daemon_code_fingerprint()
     process_context = multiprocessing.get_context("spawn")
     port_queue = process_context.Queue()
     server_process = process_context.Process(
@@ -188,6 +192,7 @@ def run_case(
         args=(
             token,
             old_generation,
+            code_fingerprint,
             daemon_attempt_timeout + 2.0,
             shutdown_ack,
             port_queue,
@@ -217,7 +222,7 @@ def run_case(
         "port": server_port,
         "token": token,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "code_fingerprint": "injected-timeout",
+        "code_fingerprint": code_fingerprint,
     }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
