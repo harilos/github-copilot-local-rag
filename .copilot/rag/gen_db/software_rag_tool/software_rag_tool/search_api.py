@@ -9,6 +9,7 @@ from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
 from .retrieval import cold_lexical_fast_path, hybrid_query
+from .tokenize import extract_anchors
 
 
 _REGISTRY: DbRegistry | None = None
@@ -52,6 +53,7 @@ def run_search_payload(
     )
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
+    _add_identifier_diagnostics(payload, store, question, source=source)
     payload["retrieval_mode"] = mode
     return payload
 
@@ -82,6 +84,7 @@ def try_cold_lexical_fast_path(
         return None
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
+    _add_identifier_diagnostics(payload, store, question, source=source)
     payload["fast_path"] = "cold_lexical"
     payload["retrieval_mode"] = "hybrid"
     return payload
@@ -144,6 +147,40 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
     }
 
 
+def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: str, *, source: str) -> None:
+    anchors = extract_anchors(question, limit=30)
+    if not anchors:
+        return
+    unmatched = []
+    for anchor in anchors:
+        try:
+            exact_rows = store.exact_search(anchor, top_k=1, source=source)
+        except Exception:
+            exact_rows = []
+        if not exact_rows:
+            unmatched.append(anchor)
+    try:
+        exact_candidate_count = len(store.exact_search(question, top_k=100, source=source))
+    except Exception:
+        exact_candidate_count = 0
+    payload["identifiers"] = {
+        "anchors": anchors,
+        "unmatched_identifiers": unmatched,
+        "exact_candidate_count": exact_candidate_count,
+    }
+    payload["unmatched_identifiers"] = unmatched
+    payload["exact_candidate_count"] = exact_candidate_count
+    if unmatched:
+        payload["status"] = "partial" if payload.get("evidence") else "no_evidence"
+        warnings = list(payload.get("warnings") or [])
+        warnings.append(
+            "Exact identifier match not found for: "
+            + ", ".join(unmatched)
+            + ". Returned evidence, if any, is related context and not proof of those identifiers."
+        )
+        payload["warnings"] = sorted(set(warnings))
+
+
 def payload_to_text(payload: dict[str, Any], output_format: str, *, explain: bool = False) -> str:
     if output_format == "json":
         return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -161,6 +198,16 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
         lines.extend(["Status: error", "", str(payload.get("error") or "unknown error"), "", "## Question", question])
         return "\n".join(lines)
     evidence = payload.get("evidence") or []
+    unmatched = payload.get("unmatched_identifiers") or []
+    if unmatched:
+        lines.extend(
+            [
+                "## Identifier notice",
+                "DB内では次の識別子の完全一致を確認できませんでした: " + ", ".join(str(value) for value in unmatched),
+                "以下の候補は関連検索結果であり、その識別子そのものの根拠とは限りません。",
+                "",
+            ]
+        )
     if not evidence:
         lines.extend(["Status: no_evidence", "", "根拠が不足している場合は断定しないこと。", "", "## Question", question])
         return "\n".join(lines)

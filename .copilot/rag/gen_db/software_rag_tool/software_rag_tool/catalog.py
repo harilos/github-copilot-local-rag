@@ -353,9 +353,11 @@ def exact_search(question: str, *, top_k: int, source: str = "any", path: Path |
     with connect(path) as conn:
         for row in _document_lookup_search(conn, lookup_values, top_k=top_k, source=source):
             item = _row_to_result(row, signal="exact", score=-0.1)
+            _set_exact_debug(item, row, match_kind="document_lookup")
             rows[item["id"]] = item
         for row in _identifier_search(conn, lookup_values, top_k=top_k, source=source):
             item = _row_to_result(row, signal="exact", score=-float(row["match_count"]))
+            _set_exact_debug(item, row, match_kind="casefold_exact")
             current = rows.get(item["id"])
             if current is None or float(item["score"]) < float(current.get("score") or 0):
                 rows[item["id"]] = item
@@ -698,12 +700,13 @@ def _identifier_search(conn: sqlite3.Connection, values: list[str], *, top_k: in
         SELECT {_RESULT_COLUMNS},
           SUM(p.count) AS match_count,
           MIN(p.field) AS field_rank,
+          GROUP_CONCAT(DISTINCT t.canonical_value) AS matched_terms,
           -CAST(SUM(p.count) AS REAL) AS score
-        FROM identifier_alias a
-        JOIN identifier_posting p ON p.term_id = a.term_id
+        FROM identifier_term t
+        JOIN identifier_posting p ON p.term_id = t.term_id
         JOIN chunk c ON c.chunk_pk = p.chunk_pk
         JOIN document d ON d.doc_pk = c.doc_pk
-        WHERE a.alias_value IN ({placeholders})
+        WHERE t.canonical_value IN ({placeholders})
           AND c.visible_until IS NULL
           AND d.visible_until IS NULL
           {source_sql}
@@ -719,8 +722,19 @@ def _lookup_values_for_anchors(anchors: list[str]) -> list[str]:
     values: list[str] = []
     for anchor in anchors:
         values.append(canonicalize(anchor))
-        values.extend(canonicalize(alias) for alias in identifier_aliases(anchor))
     return _unique(value for value in values if value)
+
+
+def _set_exact_debug(item: dict[str, Any], row: sqlite3.Row, *, match_kind: str) -> None:
+    matched_terms = ""
+    if "matched_terms" in row.keys():
+        matched_terms = str(row["matched_terms"] or "")
+    debug = dict(item.get("debug") or {})
+    debug["exact_match"] = {
+        "match_kind": match_kind,
+        "matched_terms": [value for value in matched_terms.split(",") if value],
+    }
+    item["debug"] = debug
 
 
 def _query_variants(question: str, tokens: list[str]) -> list[str]:

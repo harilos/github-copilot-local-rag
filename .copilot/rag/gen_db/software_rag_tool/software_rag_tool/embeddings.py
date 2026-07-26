@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,12 +71,12 @@ class OnnxRuntimeEmbedder:
         options = ort.SessionOptions()
         options.intra_op_num_threads = env_int("RAG_ONNX_THREADS", env_int("OMP_NUM_THREADS", 4))
         options.inter_op_num_threads = 1
-        print(f"Loading ONNX embedding model: {model_path}")
+        print(f"Loading ONNX embedding model: {model_path}", file=sys.stderr)
         self._session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
         self._tokenizer = _load_tokenizer(AutoTokenizer, str(model_dir))
         self._input_names = {item.name for item in self._session.get_inputs()}
         self._output_names = [item.name for item in self._session.get_outputs()]
-        print("ONNX embedding model loaded")
+        print("ONNX embedding model loaded", file=sys.stderr)
 
     def encode(self, texts: list[str], mode: Mode) -> list[list[float]]:
         prefix = self.document_prefix if mode == "document" else self.query_prefix
@@ -123,9 +124,9 @@ class SentenceTransformerEmbedder:
         self.model_name = model_name
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
-        print(f"Loading embedding model: {model_name}")
+        print(f"Loading embedding model: {model_name}", file=sys.stderr)
         self._model = SentenceTransformer(model_name)
-        print("Embedding model loaded")
+        print("Embedding model loaded", file=sys.stderr)
 
     def encode(self, texts: list[str], mode: Mode) -> list[list[float]]:
         prefix = self.document_prefix if mode == "document" else self.query_prefix
