@@ -21,7 +21,20 @@ SEARCH_SPEC.loader.exec_module(SEARCH)
 
 TOOL_ROOT = QUERY_ROOT.parent / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(TOOL_ROOT))
-from software_rag_tool.search_api import _add_identifier_diagnostics, _raw_identifier_occurs, payload_to_prompt
+QUERY_SCRIPT_SPEC = importlib.util.spec_from_file_location(
+    "rag_query_script",
+    TOOL_ROOT / "scripts" / "query.py",
+)
+assert QUERY_SCRIPT_SPEC and QUERY_SCRIPT_SPEC.loader
+QUERY_SCRIPT = importlib.util.module_from_spec(QUERY_SCRIPT_SPEC)
+QUERY_SCRIPT_SPEC.loader.exec_module(QUERY_SCRIPT)
+from software_rag_tool.search_api import (
+    _add_identifier_diagnostics,
+    _conservative_token_count,
+    _raw_identifier_occurs,
+    compact_search_contract,
+    payload_to_prompt,
+)
 
 
 class FakeStore:
@@ -92,6 +105,50 @@ class NoHitContractTests(unittest.TestCase):
     def test_raw_occurrence_uses_identifier_boundaries(self) -> None:
         self.assertTrue(_raw_identifier_occurs({"text": "A2L is supported", "metadata": {}}, "A2L"))
         self.assertFalse(_raw_identifier_occurs({"text": "XA2LY", "metadata": {}}, "A2L"))
+        self.assertFalse(_raw_identifier_occurs({"text": "A2L-extra", "metadata": {}}, "A2L"))
+        self.assertFalse(_raw_identifier_occurs({"text": "A2L_extra", "metadata": {}}, "A2L"))
+
+    def test_mixed_identifier_query_preserves_supported_exact_evidence(self) -> None:
+        evidence = {
+            "id": "R1",
+            "text": "A2L is supported",
+            "source": {"path": "supported.txt"},
+        }
+        payload = {
+            "status": "ok",
+            "evidence": [evidence],
+            "contexts": [evidence],
+            "background_context": [{"id": "R2", "text": "related"}],
+            "results": [
+                {
+                    "id": "raw-1",
+                    "text": "A2L is supported",
+                    "metadata": {"path": "supported.txt"},
+                },
+                {"id": "raw-2", "text": "related"},
+            ],
+            "background_results": [{"id": "raw-2", "text": "related"}],
+            "warnings": [],
+        }
+        _add_identifier_diagnostics(
+            payload,
+            BrokenStore(),
+            "A2LとA2Wについて教えて",
+            source="any",
+            precomputed_exact_rows=[
+                {
+                    "id": "raw-1",
+                    "text": "A2L is supported",
+                    "metadata": {"path": "supported.txt"},
+                }
+            ],
+        )
+        self.assertEqual("partial", payload["status"])
+        self.assertEqual("partial", payload["answerability"])
+        self.assertEqual([evidence], payload["evidence"])
+        self.assertEqual(["A2W"], payload["unmatched_identifiers"])
+        self.assertEqual(["raw-1"], [row["id"] for row in payload["results"]])
+        self.assertEqual(["raw-2"], [row["id"] for row in payload["related_results"]])
 
     def test_identifier_backend_exception_is_not_reported_as_no_match(self) -> None:
         payload = {
@@ -113,6 +170,140 @@ class NoHitContractTests(unittest.TestCase):
         self.assertEqual(6, match["candidate_count"])
         self.assertEqual(5, match["verified_candidate_count"])
         self.assertFalse(match["raw_occurrence_verified"])
+        self.assertEqual(6, payload["exact_candidate_count"])
+
+    def test_precomputed_exact_bundle_avoids_diagnostic_requery(self) -> None:
+        payload = {"status": "ok", "evidence": [], "contexts": [], "warnings": []}
+        _add_identifier_diagnostics(
+            payload,
+            BrokenStore(),
+            "A2L",
+            source="any",
+            precomputed_exact_rows=[
+                {"id": "verified", "text": "A2L evidence", "metadata": {"path": "a.txt"}},
+                {"id": "false", "text": "A2W only", "metadata": {"path": "b.txt"}},
+            ],
+        )
+        match = payload["identifiers"]["matches"][0]
+        self.assertTrue(match["matched"])
+        self.assertEqual(2, match["candidate_count"])
+        self.assertEqual(1, match["verified_candidate_count"])
+        self.assertFalse(match["raw_occurrence_verified"])
+        self.assertEqual(2, payload["exact_candidate_count"])
+        self.assertTrue(payload["identifiers"]["diagnostics_complete"])
+
+    def test_selected_db_name_is_not_treated_as_unmatched_query_identifier(self) -> None:
+        payload = {
+            "status": "ok",
+            "evidence": [{"text": "A2L evidence"}],
+            "contexts": [{"text": "A2L evidence"}],
+            "warnings": [],
+        }
+        _add_identifier_diagnostics(
+            payload,
+            SixCandidateStore(),
+            "ac-ragを使って、A2Lについて教えて",
+            source="any",
+            excluded_identifiers={"ac-rag"},
+        )
+        self.assertEqual([], payload["unmatched_identifiers"])
+        self.assertEqual(["A2L"], payload["identifiers"]["anchors"])
+        self.assertEqual("ok", payload["status"])
+
+    def test_compact_contract_omits_duplicate_legacy_result_arrays(self) -> None:
+        evidence = [{"id": "R1", "text": "evidence"}]
+        payload = compact_search_contract(
+            {
+                "schema": "local-rag.search.v1",
+                "db": "incident-rag",
+                "query": "question",
+                "status": "ok",
+                "evidence": evidence,
+                "contexts": evidence,
+                "background_context": [],
+                "related_context": [],
+                "results": [{"large": "legacy"}],
+                "background_results": [{"large": "legacy"}],
+                "warnings": [],
+            }
+        )
+        self.assertEqual(evidence, payload["evidence"])
+        self.assertNotIn("contexts", payload)
+        self.assertNotIn("results", payload)
+        self.assertNotIn("background_results", payload)
+
+    def test_compact_cli_output_stays_below_lightweight_tool_limit(self) -> None:
+        evidence = [{"id": "R1", "text": "x" * 900}]
+        payload = {
+            "schema": "local-rag.search.v1",
+            "db": "incident-rag",
+            "query": "question",
+            "status": "ok",
+            "evidence": evidence,
+            "contexts": evidence,
+            "background_context": [
+                {"id": f"R{index}", "text": "x" * 900}
+                for index in range(2, 9)
+            ],
+            "related_context": [],
+            "results": [{"text": "x" * 900} for _ in range(8)],
+            "background_results": [{"text": "x" * 900} for _ in range(7)],
+            "warnings": [],
+        }
+        args = argparse.Namespace(format="json", compact_json=True, explain=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            SEARCH._print_search_payload(payload, args=args)
+        rendered = output.getvalue()
+        parsed = json.loads(rendered)
+        self.assertLess(len(rendered.encode("utf-8")), 10_000)
+        self.assertEqual(2, len(parsed["background_context"]))
+        self.assertEqual(0, len(parsed["related_context"]))
+        self.assertNotIn("contexts", parsed)
+        self.assertNotIn("results", parsed)
+
+    def test_compact_contract_has_absolute_utf8_cap_and_debug_is_opt_in(self) -> None:
+        context = {
+            "id": "R1",
+            "source": {"path": "資料/" + "長" * 500, "title": "題" * 500},
+            "location": {"section": "節" * 500},
+            "text": "日本語の根拠" * 2_000,
+            "signals": ["exact"],
+            "debug": {"huge": "x" * 20_000},
+        }
+        payload = {
+            "schema": "local-rag.search.v1",
+            "db": "ac-rag",
+            "query": "質問" * 2_000,
+            "status": "ok",
+            "answerability": "full",
+            "evidence": [context],
+            "background_context": [context] * 5,
+            "related_context": [context] * 5,
+            "warnings": ["警告" * 1_000] * 20,
+        }
+        compact = compact_search_contract(payload, explain=False)
+        rendered = json.dumps(compact, ensure_ascii=False, indent=2).encode("utf-8")
+        self.assertLessEqual(len(rendered), 10_240)
+        self.assertEqual("R1", compact["evidence"][0]["id"])
+        self.assertIn("path", compact["evidence"][0]["source"])
+        self.assertNotIn("debug", compact["evidence"][0])
+        self.assertLessEqual(
+            _conservative_token_count(
+                json.dumps(compact["evidence"], ensure_ascii=False, separators=(",", ":"))
+            ),
+            1_200,
+        )
+        self.assertIn("compact_output_truncated", compact["warnings"])
+
+        explained = compact_search_contract(
+            {
+                "status": "ok",
+                "evidence": [{"id": "R1", "text": "evidence", "debug": {"rank": 1}}],
+            },
+            explain=True,
+        )
+        self.assertEqual({"rank": 1}, explained["evidence"][0]["debug"])
 
     def test_no_hit_prompt_marks_related_context_as_non_evidence(self) -> None:
         prompt = payload_to_prompt(
@@ -132,6 +323,96 @@ class NoHitContractTests(unittest.TestCase):
 
 
 class SyncFallbackMetadataTests(unittest.TestCase):
+    def test_adaptive_child_keeps_runtime_messages_off_json_stdout(self) -> None:
+        def noisy_payload(**_kwargs: object) -> dict:
+            print("runtime initialization message")
+            return {
+                "schema": "local-rag.search.v1",
+                "db": "incident-rag",
+                "status": "ok",
+                "evidence": [],
+                "background_context": [],
+                "related_context": [],
+                "warnings": [],
+            }
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = [
+            "query.py",
+            "--db",
+            "incident-rag",
+            "--adaptive-hybrid",
+            "--format",
+            "json",
+            "question",
+        ]
+        with (
+            mock.patch.object(QUERY_SCRIPT, "run_adaptive_search_payload", side_effect=noisy_payload),
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            QUERY_SCRIPT.main()
+        json.loads(stdout.getvalue())
+        self.assertNotIn("runtime initialization message", stdout.getvalue())
+        self.assertIn("runtime initialization message", stderr.getvalue())
+
+    def test_default_hybrid_child_runs_one_adaptive_operation_under_timeout(self) -> None:
+        args = argparse.Namespace(
+            stdin=False,
+            top_k=8,
+            max_chars=900,
+            format="json",
+            compact_json=True,
+            budget_tokens=0,
+            retrieval_mode="hybrid",
+            explain=False,
+            include_db_hint=False,
+            disable_identifier_diagnostics=False,
+            timeout=15,
+        )
+        completed = subprocess.CompletedProcess(
+            args=["query"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "ok",
+                    "db": "ac-rag",
+                    "evidence": [],
+                    "retrieval_route": "adaptive_hybrid_dense",
+                    "dense_used": True,
+                }
+            ),
+            stderr="",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(SEARCH, "_run_sync_child", return_value=completed) as child,
+            contextlib.redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                SEARCH._run_sync_script(
+                    python="python",
+                    env={},
+                    args=args,
+                    db_name="ac-rag",
+                    question="original complete question",
+                    timeout_override=14.5,
+                    execution_metadata={
+                        "requested_execution": "daemon",
+                        "route_selection": "cold_local_adaptive",
+                    },
+                )
+        self.assertEqual(0, raised.exception.code)
+        command = child.call_args.args[0]
+        self.assertIn("--adaptive-hybrid", command)
+        self.assertEqual(1, command.count("original complete question"))
+        self.assertEqual(14.5, child.call_args.kwargs["timeout"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual("no-daemon", payload["execution_metadata"]["actual_execution"])
+
     def test_sync_success_preserves_first_attempt_and_marks_final_success(self) -> None:
         args = argparse.Namespace(
             stdin=False,
@@ -298,7 +579,50 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             self.assertEqual(2.0, SEARCH._bounded_timeout(102.0, 5.0))
             self.assertEqual(0.0, SEARCH._bounded_timeout(99.0, 5.0))
 
-    def test_cold_daemon_uses_outer_remaining_but_warm_uses_soft_timeout(self) -> None:
+    def test_compact_json_reserves_only_bounded_serialization_time(self) -> None:
+        self.assertEqual(
+            0.5,
+            SEARCH._output_reserve_seconds(
+                output_format="json",
+                compact_json=True,
+            ),
+        )
+        self.assertEqual(
+            2.0,
+            SEARCH._output_reserve_seconds(
+                output_format="json",
+                compact_json=False,
+            ),
+        )
+
+    def test_compact_json_defaults_to_1200_token_retrieval_budget(self) -> None:
+        compact_args = argparse.Namespace(
+            format="json",
+            compact_json=True,
+            budget_tokens=0,
+        )
+        legacy_args = argparse.Namespace(
+            format="json",
+            compact_json=False,
+            budget_tokens=0,
+        )
+        explicit_args = argparse.Namespace(
+            format="json",
+            compact_json=True,
+            budget_tokens=700,
+        )
+        self.assertEqual(1200, SEARCH._effective_budget_tokens(compact_args))
+        self.assertIsNone(SEARCH._effective_budget_tokens(legacy_args))
+        self.assertEqual(700, SEARCH._effective_budget_tokens(explicit_args))
+        self.assertEqual(
+            2.0,
+            SEARCH._output_reserve_seconds(
+                output_format="prompt",
+                compact_json=True,
+            ),
+        )
+
+    def test_only_required_cold_daemon_receives_the_remaining_deadline(self) -> None:
         with mock.patch.object(SEARCH.time, "monotonic", return_value=100.0):
             self.assertEqual(
                 12.0,
@@ -306,6 +630,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                     attempt_timeout=5.0,
                     deadline=112.0,
                     cold_start=True,
+                    require_daemon=True,
                 ),
             )
             self.assertEqual(
@@ -314,8 +639,77 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                     attempt_timeout=5.0,
                     deadline=112.0,
                     cold_start=False,
+                    require_daemon=True,
                 ),
             )
+            self.assertEqual(
+                5.0,
+                SEARCH._daemon_query_timeout(
+                    attempt_timeout=5.0,
+                    deadline=112.0,
+                    cold_start=True,
+                    require_daemon=False,
+                ),
+            )
+
+    def test_process_is_alive_reaps_an_exited_child(self) -> None:
+        with (
+            mock.patch.object(SEARCH.os, "waitpid", return_value=(43210, 0)),
+            mock.patch.object(SEARCH.os, "kill") as kill,
+        ):
+            self.assertFalse(SEARCH._process_is_alive(43210))
+        kill.assert_not_called()
+
+    def test_windows_liveness_probe_never_calls_os_kill(self) -> None:
+        with (
+            mock.patch.object(SEARCH.sys, "platform", "win32"),
+            mock.patch.object(SEARCH, "_windows_process_is_alive", return_value=True) as probe,
+            mock.patch.object(SEARCH.os, "kill") as kill,
+        ):
+            self.assertTrue(SEARCH._process_is_alive(43210))
+        probe.assert_called_once_with(43210)
+        kill.assert_not_called()
+
+    def test_sync_child_uses_utf8_for_japanese_stdin_stdout_and_stderr(self) -> None:
+        child = (
+            "import json,sys;"
+            "question=sys.stdin.buffer.read().decode('utf-8');"
+            "sys.stdout.buffer.write(json.dumps("
+            "{'question':question,'message':'根拠'},ensure_ascii=False).encode('utf-8'));"
+            "sys.stderr.buffer.write('診断'.encode('utf-8'))"
+        )
+        with mock.patch("locale.getpreferredencoding", return_value="cp932"):
+            completed = SEARCH._run_sync_child(
+                [sys.executable, "-c", child],
+                env={},
+                input_text="日本語の質問",
+                timeout=2.0,
+            )
+        self.assertEqual(
+            {"question": "日本語の質問", "message": "根拠"},
+            json.loads(completed.stdout),
+        )
+        self.assertEqual("診断", completed.stderr)
+
+    def test_windows_timeout_cleanup_is_bounded_by_output_reserve(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with (
+            mock.patch.object(SEARCH.sys, "platform", "win32"),
+            mock.patch.object(SEARCH.subprocess, "run") as run,
+        ):
+            SEARCH._terminate_process_tree(
+                process,
+                timeout=SEARCH.WINDOWS_TASKKILL_TIMEOUT_SECONDS,
+            )
+        self.assertLessEqual(
+            run.call_args.kwargs["timeout"],
+            SEARCH.WINDOWS_TASKKILL_TIMEOUT_SECONDS,
+        )
+        self.assertLess(
+            SEARCH.WINDOWS_TASKKILL_TIMEOUT_SECONDS,
+            SEARCH.COMPACT_JSON_OUTPUT_RESERVE_SECONDS,
+        )
 
     def test_sync_timeout_terminates_process_group_without_pipe_hang(self) -> None:
         child = (
@@ -335,6 +729,63 @@ class SyncFallbackMetadataTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_non_ready_states_select_local_route_unless_daemon_is_required(self) -> None:
+        for lifecycle in ("MISSING", "STARTING", "BUSY", "DEAD"):
+            with self.subTest(lifecycle=lifecycle):
+                self.assertEqual(
+                    "cold_local",
+                    SEARCH._select_daemon_route(lifecycle, require_daemon=False),
+                )
+                self.assertEqual(
+                    "daemon_required",
+                    SEARCH._select_daemon_route(lifecycle, require_daemon=True),
+                )
+        self.assertEqual(
+            "daemon_ready",
+            SEARCH._select_daemon_route("READY", require_daemon=False),
+        )
+
+    def test_retirement_failure_is_recorded_for_fallback_gate(self) -> None:
+        attempt = SEARCH._record_retirement_outcome(
+            {"route": "daemon", "success": False},
+            {"process_exited": False},
+        )
+        self.assertTrue(attempt["retirement_failed"])
+
+    def test_daemon_state_machine_requires_ready_and_distinguishes_busy(self) -> None:
+        state = {
+            "schema": "local-rag.ragd.v2",
+            "pid": 43210,
+            "generation": "generation",
+            "transport": "tcp",
+            "host": "127.0.0.1",
+            "port": 12345,
+            "token": "token",
+            "code_fingerprint": "current",
+        }
+        with (
+            mock.patch.object(SEARCH, "_read_state", return_value=state),
+            mock.patch.object(SEARCH, "_runtime_code_fingerprint", return_value="current"),
+            mock.patch.object(
+                SEARCH,
+                "_daemon_health_payload",
+                return_value={
+                    "status": "ok",
+                    "pid": 43210,
+                    "generation": "generation",
+                    "code_fingerprint": "current",
+                    "ready": False,
+                    "lifecycle_state": "BUSY",
+                    "active_requests": 1,
+                },
+            ),
+        ):
+            lifecycle, observed, _health = SEARCH._inspect_daemon_state(timeout=0.5)
+            active = SEARCH._active_daemon_state(timeout=0.5)
+        self.assertEqual("BUSY", lifecycle)
+        self.assertEqual(state, observed)
+        self.assertIsNone(active)
+
     def test_active_daemon_rejects_stale_runtime_fingerprint_before_healthcheck(self) -> None:
         state = {
             "schema": "local-rag.ragd.v2",

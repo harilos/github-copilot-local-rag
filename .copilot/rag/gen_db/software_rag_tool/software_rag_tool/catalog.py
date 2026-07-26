@@ -17,6 +17,7 @@ from .tokenize import (
     extract_anchors,
     fts_query_from_tokens,
     identifier_aliases,
+    identifier_match_keys,
     phrase_queries,
     tokenizer_fingerprint,
     tokenize_for_fts,
@@ -765,7 +766,7 @@ def _identifier_search(conn: sqlite3.Connection, values: list[str], *, top_k: in
 def _lookup_values_for_anchors(anchors: list[str]) -> list[str]:
     values: list[str] = []
     for anchor in anchors:
-        values.append(canonicalize(anchor))
+        values.extend(identifier_match_keys(anchor))
     return _unique(value for value in values if value)
 
 

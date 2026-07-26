@@ -8,6 +8,19 @@ description: Performs one read-only lookup against installed local RAG databases
 This workflow is intentionally simple and must be usable by a lightweight,
 fast model selected by Auto. No particular model is required or guaranteed.
 
+## One-command decision
+
+Before running any command, inspect the original question for an explicit
+database name ending in `-rag`.
+
+| Original question | Required action |
+| --- | --- |
+| Contains an explicit `<name>-rag` database | Use that exact database. Do not run `list_dbs.py`. Run `search.py` exactly once. |
+| Does not contain an explicit database | Run `list_dbs.py` exactly once. Then either choose one clear match and run `search.py` once, or ask the user to choose without searching. |
+
+This decision is mandatory. Never run `list_dbs.py` merely to confirm a
+database already named by the user.
+
 ## Rules
 
 - Perform only read-only RAG lookup.
@@ -39,6 +52,7 @@ On macOS or Linux:
   ~/.copilot/rag/query/search.py \
   --db <selected-db> \
   --include-db-hint \
+  --compact-json \
   --format json \
   "<complete-user-question>"
 ```
@@ -56,6 +70,7 @@ On Windows PowerShell:
   "$HOME\.copilot\rag\query\search.py" `
   --db <selected-db> `
   --include-db-hint `
+  --compact-json `
   --format json `
   "<complete-user-question>"
 ```
@@ -91,6 +106,11 @@ After selecting a database:
 4. Do not retry after `ok`, `partial`, `no_hit`, or `error`.
 5. A new search is allowed only when the user explicitly requests additional
    investigation or provides a meaningful clarification.
+6. Treat the `search.py` output as the complete retrieval result. Do not run
+   `jq`, `grep`, `head`, `tail`, or another tool to inspect or re-extract it.
+7. If the shell tool still reports that compact output was truncated or
+   offloaded to a file, do not open that file. Briefly report the error and
+   stop.
 
 Dense, lexical, Exact, metadata, and fusion candidate retrieval performed
 inside that one Hybrid call are not additional searches.
@@ -106,9 +126,15 @@ Follow the returned status:
 - `error`: Briefly report the error and stop. Do not retry automatically.
 
 Use only `evidence` for factual claims.
+Identify the supporting evidence ID, source path, and available location in
+the answer.
 Treat `background_context` as background information only.
 Never use `related_context` as proof.
 Obey every item in `warnings`.
+Preserve source severity and uncertainty when translating. Do not strengthen
+labels: for example, render `Substantial` damage as "substantial damage"
+with the source label preserved, not "destroyed", unless the evidence
+explicitly uses the stronger term.
 
 Do not infer missing table headers, column meanings, comparisons, rankings,
 maximums, minimums, or qualitative labels such as "large", "small", or

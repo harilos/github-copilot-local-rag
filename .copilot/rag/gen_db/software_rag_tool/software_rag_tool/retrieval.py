@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Protocol
 
 from . import catalog
 from .manifest import ConfigMismatchError
-from .tokenize import canonicalize, extract_anchors
+from .tokenize import (
+    canonicalize,
+    extract_anchors,
+    identifier_match_keys,
+    tokens_for_fts,
+)
 
 
 RRF_K = 60
@@ -84,8 +90,9 @@ def hybrid_query(
     anchor_ids: list[str] = []
     if use_lexical:
         try:
-            exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
-            exact_rows = _without_test_fixtures(exact_rows)
+            raw_exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
+            raw_exact_rows = _without_test_fixtures(raw_exact_rows)
+            exact_rows = _matching_strong_exact_rows(question, raw_exact_rows)
             lexical_rows = _without_test_fixtures(lexical_rows)
             metadata_rows = _without_test_fixtures(metadata_rows)
             if use_dense and not _has_strong_exact_anchor(question, exact_rows):
@@ -123,6 +130,173 @@ def hybrid_query(
     return rows
 
 
+def adaptive_hybrid_query(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    fetch_k: int | None = None,
+    max_per_doc: int = 2,
+    budget_tokens: int | None = None,
+    explain: bool = False,
+    db_scope_confirmed: bool = False,
+    excluded_identifiers: set[str] | None = None,
+    backend: SearchBackend | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run one local retrieval operation with a single lexical collection.
+
+    Exact, BM25, metadata, and low-DF anchor candidates are collected once.
+    Dense is added exactly once only when the lexical bundle cannot produce a
+    conservative certificate.
+    """
+    backend = backend or _GlobalBackend()
+    dense_k = fetch_k or max(DEFAULT_DENSE_K, top_k * 4)
+    raw_exact_rows, lexical_rows, metadata_rows = _lexical_candidates(
+        question,
+        source=source,
+        backend=backend,
+    )
+    raw_exact_rows = _without_test_fixtures(raw_exact_rows)
+    lexical_rows = _without_test_fixtures(lexical_rows)
+    metadata_rows = _without_test_fixtures(metadata_rows)
+    anchor_rows = _anchor_candidates(question, source=source, backend=backend)
+    verified_exact_rows = _matching_strong_exact_rows(question, raw_exact_rows)
+
+    strong_anchors = _strong_query_anchors(
+        question,
+        excluded_identifiers=excluded_identifiers,
+    )
+    unmatched_anchors = [
+        anchor
+        for anchor in strong_anchors
+        if not any(_raw_anchor_occurs(row, anchor) for row in raw_exact_rows)
+    ]
+    certificate: dict[str, Any] | None = None
+    certified_anchor_rows: list[dict[str, Any]] = []
+    if unmatched_anchors and verified_exact_rows:
+        certificate = {
+            **(_exact_certificate(question, verified_exact_rows) or {}),
+            "kind": "verified_identifier_partial",
+            "unmatched_identifiers": unmatched_anchors,
+        }
+        _mark_fast_path_exact_certificate(
+            verified_exact_rows,
+            certificate=certificate,
+        )
+    elif unmatched_anchors:
+        certificate = {
+            "kind": "verified_identifier_no_hit",
+            "unmatched_identifiers": unmatched_anchors,
+        }
+    elif verified_exact_rows:
+        certificate = _exact_certificate(question, verified_exact_rows)
+        _mark_fast_path_exact_certificate(
+            verified_exact_rows,
+            certificate=certificate,
+        )
+    else:
+        certified_anchor_rows = _certified_anchor_rows(
+            anchor_rows,
+            lexical_rows,
+            metadata_rows,
+            question=question,
+            db_scope_confirmed=db_scope_confirmed,
+        )
+        if certified_anchor_rows:
+            certificate = dict(
+                ((certified_anchor_rows[0].get("debug") or {}).get("fast_path_certificate") or {})
+            )
+
+    direct_anchor_rows = certified_anchor_rows
+    lexical_family, anchor_ids = _merge_anchor_rows(
+        lexical_rows,
+        direct_anchor_rows,
+    )
+    family_rankings: list[tuple[str, float, list[dict[str, Any]]]] = [
+        ("lexical", 1.1, lexical_family),
+        ("metadata", 0.7, metadata_rows),
+    ]
+    if verified_exact_rows:
+        family_rankings.append(("exact", 1.4, verified_exact_rows))
+
+    dense_rows: list[dict[str, Any]] = []
+    dense_used = certificate is None
+    warnings: list[str] = []
+    if dense_used:
+        try:
+            dense_rows = _without_test_fixtures(
+                backend.vector_query(question, top_k=dense_k, source=source)
+            )
+            family_rankings.insert(0, ("dense", 1.0, dense_rows))
+        except ConfigMismatchError:
+            raise
+        except Exception as exc:
+            warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
+        # Keep the already-collected anchor candidate in fusion without
+        # granting it a direct-evidence signal. The anchor search is another
+        # lexical view, so do not give the same row a second RRF vote when it
+        # is already present in the ordinary lexical family.
+        if anchor_rows:
+            lexical_ids = {
+                str(row.get("id") or "")
+                for row in lexical_family
+                if row.get("id")
+            }
+            novel_anchor_rows = [
+                row
+                for row in anchor_rows[:1]
+                if str(row.get("id") or "") not in lexical_ids
+            ]
+            if novel_anchor_rows:
+                family_rankings.append(("anchor_candidate", 1.1, novel_anchor_rows))
+
+    rows = _weighted_rrf(family_rankings)
+    materialized = _materialize(rows, family_rankings, backend=backend)
+    materialized = _without_test_fixtures(materialized)
+    materialized = _anchor_rescue(
+        materialized,
+        verified_exact_rows,
+        question,
+        anchor_ids=anchor_ids,
+    )
+    materialized = materialized[: max(DEFAULT_RRF_K, top_k)]
+    materialized = _dedupe_and_diversify(
+        materialized,
+        top_k=max(top_k * 3, top_k),
+        max_per_doc=max_per_doc,
+    )
+    materialized = _expand_neighbors(materialized, backend=backend)
+    materialized = _without_test_fixtures(materialized)
+    materialized = _pack_budget(materialized, budget_tokens=budget_tokens)
+    materialized = _without_test_fixtures(materialized)[:top_k]
+    for rank, row in enumerate(materialized, start=1):
+        row["rank"] = rank
+        if explain:
+            debug = dict(row.get("debug") or {})
+            debug["warnings"] = warnings
+            row["debug"] = debug
+        else:
+            row.pop("debug", None)
+            row.pop("score", None)
+
+    reason = str((certificate or {}).get("kind") or "") or None
+    return materialized, {
+        "retrieval_route": (
+            "adaptive_lexical_certified"
+            if certificate is not None
+            else "adaptive_hybrid_dense"
+        ),
+        "dense_used": dense_used,
+        "dense_skipped_reason": reason,
+        "certificate": certificate,
+        "raw_exact_rows": raw_exact_rows,
+        "verified_exact_rows": verified_exact_rows,
+        "lexical_rows": lexical_rows,
+        "metadata_rows": metadata_rows,
+        "anchor_rows": anchor_rows,
+    }
+
+
 def cold_lexical_fast_path(
     question: str,
     *,
@@ -131,22 +305,45 @@ def cold_lexical_fast_path(
     max_per_doc: int = 2,
     budget_tokens: int | None = None,
     explain: bool = False,
+    db_scope_confirmed: bool = False,
     backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]] | None:
     backend = backend or _GlobalBackend()
     exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
-    if not _strong_lexical_hit(question, exact_rows, lexical_rows, metadata_rows):
+    exact_rows = _without_test_fixtures(exact_rows)
+    lexical_rows = _without_test_fixtures(lexical_rows)
+    metadata_rows = _without_test_fixtures(metadata_rows)
+    anchor_rows = _anchor_candidates(question, source=source, backend=backend)
+    matching_exact_rows = _matching_strong_exact_rows(question, exact_rows)
+    exact_certificate = (
+        _exact_certificate(question, matching_exact_rows)
+        if matching_exact_rows
+        else None
+    )
+    _mark_fast_path_exact_certificate(
+        matching_exact_rows,
+        certificate=exact_certificate,
+    )
+    certified_anchor_rows = _certified_anchor_rows(
+        anchor_rows,
+        lexical_rows,
+        metadata_rows,
+        question=question,
+        db_scope_confirmed=db_scope_confirmed,
+    )
+    lexical_rows, anchor_ids = _merge_anchor_rows(lexical_rows, certified_anchor_rows)
+    if not anchor_ids and not matching_exact_rows:
         return None
 
     families: list[tuple[str, float, list[dict[str, Any]]]] = [
         ("lexical", 1.1, lexical_rows),
         ("metadata", 0.7, metadata_rows),
     ]
-    if exact_rows:
-        families.append(("exact", 1.4, exact_rows))
+    if matching_exact_rows:
+        families.append(("exact", 1.4, matching_exact_rows))
     fused = _weighted_rrf(families)
     rows = _materialize(fused, families, backend=backend)
-    rows = _anchor_rescue(rows, exact_rows, question)
+    rows = _anchor_rescue(rows, matching_exact_rows, question, anchor_ids=anchor_ids)
     rows = rows[: max(DEFAULT_RRF_K, top_k)]
     rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
     rows = _expand_neighbors(rows, backend=backend)
@@ -215,7 +412,7 @@ def _materialize(
                 selected = {
                     key: value
                     for key, value in debug.items()
-                    if key in {"exact_match", "lexical_anchor"}
+                    if key in {"exact_match", "lexical_anchor", "fast_path_certificate"}
                 }
                 if selected:
                     retrieval_debug_by_id.setdefault(chunk_id, {}).update(selected)
@@ -266,6 +463,110 @@ def _merge_anchor_rows(
     merged = [anchor]
     merged.extend(row for row in lexical_rows if str(row.get("id") or "") != anchor_id)
     return merged, [anchor_id]
+
+
+def _certified_anchor_rows(
+    anchor_rows: list[dict[str, Any]],
+    lexical_rows: list[dict[str, Any]],
+    metadata_rows: list[dict[str, Any]],
+    *,
+    question: str,
+    db_scope_confirmed: bool,
+) -> list[dict[str, Any]]:
+    """Accept one low-DF anchor under a conservative generic certificate.
+
+    The strict certificate requires topic confirmation from metadata. Some
+    existing databases contain no metadata rows; for those databases the
+    fallback certificate is limited to the selected DB and requires the
+    candidate document to be a top-three result of the complete query's BM25
+    ranking. The fallback still promotes only the verified seed chunk.
+    """
+    if not db_scope_confirmed or not anchor_rows:
+        return []
+    candidate = dict(anchor_rows[0])
+    debug = dict(candidate.get("debug") or {})
+    anchor_debug = debug.get("lexical_anchor") if isinstance(debug, dict) else {}
+    token = str((anchor_debug or {}).get("token") or "")
+    try:
+        document_df = int((anchor_debug or {}).get("document_df") or 0)
+        information_score = float((anchor_debug or {}).get("information_score") or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if (
+        not token
+        or document_df <= 0
+        or information_score < 0.5
+        or not _raw_anchor_occurs(candidate, token)
+    ):
+        return []
+    lexical_match = next(
+        (
+            (rank, row)
+            for rank, row in enumerate(lexical_rows[:3], start=1)
+            if str(row.get("id") or "") == str(candidate.get("id") or "")
+            or _same_doc(candidate, row)
+        ),
+        None,
+    )
+    if lexical_match is None:
+        return []
+    lexical_rank, lexical_row = lexical_match
+    try:
+        lexical_score = float(lexical_row.get("score"))
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(lexical_score):
+        return []
+
+    coverage, non_anchor_confirmed = _query_term_coverage(
+        question,
+        candidate,
+        lexical_row,
+        anchor_token=token,
+    )
+    metadata_rank = next(
+        (
+            rank
+            for rank, row in enumerate(metadata_rows[:3], start=1)
+            if str(row.get("id") or "") == str(candidate.get("id") or "")
+            or _same_doc(candidate, row)
+        ),
+        None,
+    )
+    strict = (
+        coverage >= 0.5
+        and non_anchor_confirmed
+        and metadata_rank is not None
+    )
+    kind = "certified_low_df_anchor" if strict else "db_scope_full_query_lexical"
+    debug["fast_path_certificate"] = {
+        "kind": kind,
+        "token": token,
+        "raw_occurrence_verified": True,
+        "document_frequency": document_df,
+        "information_score": round(information_score, 6),
+        "lexical_rank": lexical_rank,
+        "lexical_score_finite": True,
+        "query_term_coverage": round(coverage, 6),
+        "non_anchor_term_confirmed": non_anchor_confirmed,
+        "metadata_rank": metadata_rank,
+        "db_scope_confirmed": True,
+    }
+    candidate["debug"] = debug
+    return [candidate]
+
+
+def _mark_fast_path_exact_certificate(
+    rows: list[dict[str, Any]],
+    *,
+    certificate: dict[str, Any] | None,
+) -> None:
+    if not certificate:
+        return
+    for row in rows:
+        debug = dict(row.get("debug") or {})
+        debug["fast_path_certificate"] = dict(certificate)
+        row["debug"] = debug
 
 
 def _anchor_rescue(
@@ -341,22 +642,110 @@ def _matching_strong_exact_rows(
     ]
     if not anchors:
         return []
-    canonical_anchors = {canonicalize(anchor) for anchor in anchors}
     matching: list[dict[str, Any]] = []
     for row in exact_rows:
-        debug = row.get("debug") or {}
-        exact_debug = debug.get("exact_match") if isinstance(debug, dict) else {}
-        matched_terms = {
-            canonicalize(str(term))
-            for term in (exact_debug or {}).get("matched_terms", [])
-            if term
-        }
-        if canonical_anchors & matched_terms:
-            matching.append(row)
-            continue
         if any(_raw_anchor_occurs(row, anchor) for anchor in anchors):
             matching.append(row)
     return matching
+
+
+def _strong_query_anchors(
+    question: str,
+    *,
+    excluded_identifiers: set[str] | None = None,
+) -> list[str]:
+    excluded_keys = {
+        key
+        for identifier in (excluded_identifiers or set())
+        if identifier
+        for key in identifier_match_keys(identifier)
+    }
+    output: list[str] = []
+    for anchor in extract_anchors(question, limit=30):
+        if not _strong_anchor(anchor):
+            continue
+        if set(identifier_match_keys(anchor)) & excluded_keys:
+            continue
+        if anchor not in output:
+            output.append(anchor)
+    return output
+
+
+def _exact_certificate(
+    question: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    anchors = _strong_query_anchors(question)
+    matched = [
+        anchor
+        for anchor in anchors
+        if any(_raw_anchor_occurs(row, anchor) for row in rows)
+    ]
+    if not matched:
+        return None
+    if any(re.fullmatch(r"RFC ?\d{2,}", anchor, re.IGNORECASE) for anchor in matched):
+        kind = "verified_rfc_exact"
+    elif any(any(marker in anchor for marker in ["/", "\\", ".", ":", "_"]) for anchor in matched):
+        kind = "verified_path_exact"
+    else:
+        kind = "verified_identifier_exact"
+    return {
+        "kind": kind,
+        "matched_identifiers": matched,
+        "raw_occurrence_verified": True,
+    }
+
+
+def _query_term_coverage(
+    question: str,
+    candidate: dict[str, Any],
+    lexical_row: dict[str, Any],
+    *,
+    anchor_token: str,
+) -> tuple[float, bool]:
+    informative = [
+        token
+        for token in tokens_for_fts(question)
+        if len(canonicalize(token)) >= 2
+    ]
+    if not informative:
+        return 0.0, False
+    anchor_keys = set(identifier_match_keys(anchor_token))
+    haystack = "\n".join(
+        [
+            _row_haystack(candidate),
+            _row_haystack(lexical_row),
+        ]
+    )
+    haystack_canonical = canonicalize(haystack)
+    matched = 0
+    non_anchor_confirmed = False
+    seen: set[str] = set()
+    for token in informative:
+        key = canonicalize(token)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        token_matches = key in haystack_canonical
+        if token_matches:
+            matched += 1
+            if not (set(identifier_match_keys(token)) & anchor_keys):
+                non_anchor_confirmed = True
+    return matched / max(1, len(seen)), non_anchor_confirmed
+
+
+def _row_haystack(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") or {}
+    return "\n".join(
+        [
+            str(row.get("text") or ""),
+            str(metadata.get("path") or ""),
+            str(metadata.get("title") or ""),
+            str(metadata.get("section_path") or ""),
+        ]
+    )
 
 
 def _raw_anchor_occurs(row: dict[str, Any], anchor: str) -> bool:
@@ -369,8 +758,16 @@ def _raw_anchor_occurs(row: dict[str, Any], anchor: str) -> bool:
             str(metadata.get("uri") or ""),
         ]
     )
+    anchor_keys = set(identifier_match_keys(anchor))
+    haystack_keys = {
+        key
+        for candidate in extract_anchors(haystack, limit=500)
+        for key in identifier_match_keys(candidate)
+    }
+    if anchor_keys & haystack_keys:
+        return True
     pattern = re.compile(
-        rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])",
+        rf"(?<![A-Za-z0-9_-]){re.escape(anchor)}(?![A-Za-z0-9_-])",
         re.IGNORECASE,
     )
     return bool(pattern.search(haystack))
@@ -412,31 +809,31 @@ def _dedupe_and_diversify(rows: list[dict[str, Any]], *, top_k: int, max_per_doc
 
 def _expand_neighbors(rows: list[dict[str, Any]], *, backend: SearchBackend) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for row in rows:
-        neighbors = _without_test_fixtures(
-            backend.get_neighbor_rows(str(row.get("id") or ""), window=1)
-        )
-        if len(neighbors) <= 1:
+        row_id = str(row.get("id") or "")
+        if row_id not in seen_ids:
             output.append(row)
-            continue
-        texts: list[str] = []
-        seen_text: set[str] = set()
-        ordered_neighbors = neighbors
-        if {"lexical_anchor", "exact"} & set(row.get("signals") or []):
-            ordered_neighbors = [row, *neighbors]
-        for neighbor in ordered_neighbors:
-            text = str(neighbor.get("text") or "").strip()
-            if not text or text in seen_text:
+            seen_ids.add(row_id)
+        neighbors = _without_test_fixtures(
+            backend.get_neighbor_rows(row_id, window=1)
+        )
+        for neighbor in neighbors:
+            neighbor_id = str(neighbor.get("id") or "")
+            if not neighbor_id or neighbor_id in seen_ids:
                 continue
-            seen_text.add(text)
-            texts.append(text)
-        copy = dict(row)
-        if texts:
-            copy["text"] = "\n\n".join(texts)
-            signals = set(copy.get("signals") or [])
-            signals.add("neighbor")
-            copy["signals"] = sorted(signals)
-        output.append(copy)
+            copy = dict(neighbor)
+            copy["signals"] = ["neighbor"]
+            debug = dict(copy.get("debug") or {})
+            debug.pop("exact_match", None)
+            debug.pop("lexical_anchor", None)
+            debug.pop("fast_path_certificate", None)
+            if debug:
+                copy["debug"] = debug
+            else:
+                copy.pop("debug", None)
+            output.append(copy)
+            seen_ids.add(neighbor_id)
     return output
 
 

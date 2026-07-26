@@ -22,7 +22,11 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
 from software_rag_tool.dbs import resolve_db_name
-from software_rag_tool.search_api import normalize_search_contract, payload_to_text
+from software_rag_tool.search_api import (
+    compact_search_contract,
+    normalize_search_contract,
+    payload_to_text,
+)
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
 STATE_FILE = RUN_DIR / "ragd.json"
@@ -33,6 +37,10 @@ FILE_TRANSPORT_DIR = RUN_DIR / "file-transport"
 DEFAULT_OUTER_TIMEOUT_SECONDS = float(os.getenv("RAG_QUERY_TIMEOUT_SECONDS", "15"))
 DEFAULT_DAEMON_ATTEMPT_TIMEOUT_SECONDS = float(os.getenv("RAGD_QUERY_TIMEOUT_SECONDS", "5"))
 DEADLINE_OUTPUT_RESERVE_SECONDS = 2.0
+COMPACT_JSON_OUTPUT_RESERVE_SECONDS = 0.5
+COMPACT_JSON_DEFAULT_BUDGET_TOKENS = 1200
+SYNC_TIMEOUT_CLEANUP_SECONDS = 0.25
+WINDOWS_TASKKILL_TIMEOUT_SECONDS = 0.15
 
 
 def main() -> None:
@@ -54,6 +62,11 @@ def main() -> None:
     parser.add_argument("--stdin", action="store_true", help="Read the question from stdin")
     parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="prompt")
+    parser.add_argument(
+        "--compact-json",
+        action="store_true",
+        help="For JSON output, omit duplicate legacy result arrays and return the evidence-first contract.",
+    )
     parser.add_argument("--include-db-hint", action="store_true")
     parser.add_argument(
         "--retrieval-mode",
@@ -99,11 +112,11 @@ def main() -> None:
         parser.error("question is required unless --stdin provides input")
     request_started = time.monotonic()
     outer_deadline = _deadline_from_timeout(args.timeout, started=request_started)
-    work_deadline = (
-        outer_deadline - DEADLINE_OUTPUT_RESERVE_SECONDS
-        if outer_deadline is not None
-        else None
+    output_reserve = _output_reserve_seconds(
+        output_format=args.format,
+        compact_json=args.compact_json,
     )
+    work_deadline = outer_deadline - output_reserve if outer_deadline is not None else None
     resolution = resolve_db_name(question, args.db, DBS_ROOT, args.auto)
     if not resolution.triggered:
         print(
@@ -151,7 +164,7 @@ def main() -> None:
         "top_k": args.top_k,
         "source": "any",
         "max_chars": args.max_chars,
-        "budget_tokens": args.budget_tokens,
+        "budget_tokens": _effective_budget_tokens(args),
         "explain": args.explain,
         "include_db_hint": args.include_db_hint,
         "retrieval_mode": args.retrieval_mode,
@@ -179,17 +192,48 @@ def main() -> None:
                 )
             else:
                 _discard_published_state(published_state)
-        health_timeout = _bounded_timeout(work_deadline, 3.0)
+        health_timeout = _bounded_timeout(work_deadline, 0.5)
         daemon_started_this_request = False
-        state = (
-            _active_daemon_state(
+        daemon_lifecycle, observed_state, _health = (
+            _inspect_daemon_state(
                 timeout=health_timeout,
                 desired_transport=None if configured_transport == "auto" else desired_transport,
             )
             if health_timeout is None or health_timeout > 0
-            else None
+            else ("DEADLINE_EXHAUSTED", None, None)
         )
-        if not state:
+        daemon_route = _select_daemon_route(
+            daemon_lifecycle,
+            require_daemon=args.require_daemon,
+        )
+        state = observed_state if daemon_route == "daemon_ready" else None
+        if daemon_route == "cold_local":
+            _run_sync_script(
+                python=python,
+                env=env,
+                args=args,
+                db_name=resolution.db_name,
+                question=question,
+                timeout_override=_remaining_seconds(work_deadline),
+                execution_metadata={
+                    "request_id": request["request_id"],
+                    "requested_execution": "daemon",
+                    "actual_execution": "no-daemon",
+                    "fallback_used": False,
+                    "daemon_lifecycle_state": daemon_lifecycle,
+                    "route_selection": "cold_local_adaptive",
+                    "outer_timeout_seconds": args.timeout or None,
+                    "attempts": [],
+                },
+                request_started=request_started,
+            )
+        if daemon_route == "daemon_required" and state is None:
+            state = (
+                observed_state
+                if daemon_lifecycle in {"STARTING", "BUSY"}
+                else None
+            )
+        if state is None:
             startup_timeout = _bounded_timeout(work_deadline, 10.0)
             if startup_timeout is None or startup_timeout > 0:
                 state = _start_daemon(
@@ -220,6 +264,7 @@ def main() -> None:
                 attempt_timeout=args.daemon_attempt_timeout,
                 deadline=work_deadline,
                 cold_start=daemon_started_this_request,
+                require_daemon=args.require_daemon,
             )
             if daemon_timeout <= 0:
                 _print_deadline_failure(
@@ -256,7 +301,7 @@ def main() -> None:
                         }
                     ],
                 }
-                print(payload_to_text(payload, args.format, explain=args.explain))
+                _print_search_payload(payload, args=args)
                 raise SystemExit(1 if payload.get("status") == "error" else 0)
             failure_kind = "timeout" if attempt_elapsed >= daemon_timeout * 0.95 else "transport_error"
             first_attempt = {
@@ -274,18 +319,19 @@ def main() -> None:
                 failure_kind=failure_kind,
                 shutdown_timeout=retire_timeout or 0.0,
             )
-            if not restart.get("process_exited"):
+            first_attempt = _record_retirement_outcome(first_attempt, restart)
+            if args.require_daemon or args.daemon_fallback == "off":
                 _print_daemon_failure(
                     args=args,
                     db_name=resolution.db_name,
                     question=question,
                     request_id=str(request["request_id"]),
-                    first_attempt={**first_attempt, "retirement_failed": True},
+                    first_attempt=first_attempt,
                     restart=restart,
                     request_started=request_started,
                 )
-                raise SystemExit(1)
-            if args.require_daemon or args.daemon_fallback == "off":
+                raise SystemExit(124 if failure_kind == "timeout" else 1)
+            if not restart.get("process_exited"):
                 _print_daemon_failure(
                     args=args,
                     db_name=resolution.db_name,
@@ -431,10 +477,13 @@ def _run_sync_script(
             args.format,
         ]
     )
-    if args.budget_tokens:
-        cmd.extend(["--budget-tokens", str(args.budget_tokens)])
+    effective_budget_tokens = _effective_budget_tokens(args)
+    if effective_budget_tokens:
+        cmd.extend(["--budget-tokens", str(effective_budget_tokens)])
     if args.retrieval_mode != "hybrid":
         cmd.extend(["--retrieval-mode", args.retrieval_mode])
+    else:
+        cmd.append("--adaptive-hybrid")
     if args.stdin:
         cmd.append("--stdin")
     if args.explain:
@@ -533,7 +582,7 @@ def _run_sync_script(
                 if request_started is not None:
                     metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
                 payload["execution_metadata"] = metadata
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                _print_search_payload(payload, args=args)
         else:
             print(completed.stdout, end="")
         raise SystemExit(completed.returncode)
@@ -617,6 +666,8 @@ def _run_sync_child(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     if sys.platform.startswith("win"):
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -626,9 +677,19 @@ def _run_sync_child(
     try:
         stdout, stderr = process.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(process)
+        cleanup_deadline = time.monotonic() + SYNC_TIMEOUT_CLEANUP_SECONDS
+        _terminate_process_tree(
+            process,
+            timeout=min(
+                WINDOWS_TASKKILL_TIMEOUT_SECONDS,
+                max(0.0, cleanup_deadline - time.monotonic()),
+            ),
+        )
+        cleanup_remaining = max(0.0, cleanup_deadline - time.monotonic())
         try:
-            stdout, stderr = process.communicate(timeout=0.5)
+            if cleanup_remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, cleanup_remaining)
+            stdout, stderr = process.communicate(timeout=cleanup_remaining)
         except subprocess.TimeoutExpired:
             stdout, stderr = "", ""
         raise subprocess.TimeoutExpired(
@@ -640,7 +701,11 @@ def _run_sync_child(
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+def _terminate_process_tree(
+    process: subprocess.Popen[str],
+    *,
+    timeout: float = WINDOWS_TASKKILL_TIMEOUT_SECONDS,
+) -> None:
     if process.poll() is not None:
         return
     if sys.platform.startswith("win"):
@@ -649,7 +714,7 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
-                timeout=1.0,
+                timeout=max(0.01, timeout),
             )
         except (OSError, subprocess.TimeoutExpired):
             try:
@@ -867,6 +932,15 @@ def _print_deadline_failure(
 
 
 def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
+    if args.format == "json" and getattr(args, "compact_json", False):
+        print(
+            json.dumps(
+                compact_search_contract(payload, explain=args.explain),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
     print(payload_to_text(payload, args.format, explain=args.explain))
 
 
@@ -875,6 +949,24 @@ def _deadline_from_timeout(timeout: float | int | None, *, started: float | None
     if value <= 0:
         return None
     return (time.monotonic() if started is None else started) + value
+
+
+def _output_reserve_seconds(*, output_format: str, compact_json: bool) -> float:
+    if output_format == "json" and compact_json:
+        return COMPACT_JSON_OUTPUT_RESERVE_SECONDS
+    return DEADLINE_OUTPUT_RESERVE_SECONDS
+
+
+def _effective_budget_tokens(args: argparse.Namespace) -> int | None:
+    configured = int(getattr(args, "budget_tokens", 0) or 0)
+    if configured > 0:
+        return configured
+    if (
+        getattr(args, "format", "prompt") == "json"
+        and getattr(args, "compact_json", False)
+    ):
+        return COMPACT_JSON_DEFAULT_BUDGET_TOKENS
+    return None
 
 
 def _remaining_seconds(deadline: float | None) -> float | None:
@@ -895,12 +987,15 @@ def _daemon_query_timeout(
     attempt_timeout: float,
     deadline: float | None,
     cold_start: bool,
+    require_daemon: bool,
 ) -> float:
     soft_timeout = max(0.1, float(attempt_timeout))
     remaining = _remaining_seconds(deadline)
     if remaining is None:
         return soft_timeout
-    return remaining if cold_start else min(soft_timeout, remaining)
+    if cold_start and require_daemon:
+        return remaining
+    return min(soft_timeout, remaining)
 
 
 def _state_pid(state: dict) -> int:
@@ -910,9 +1005,28 @@ def _state_pid(state: dict) -> int:
         return 0
 
 
+def _record_retirement_outcome(first_attempt: dict, restart: dict | None) -> dict:
+    outcome = dict(first_attempt)
+    if restart and not restart.get("process_exited"):
+        outcome["retirement_failed"] = True
+    return outcome
+
+
 def _process_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform.startswith("win"):
+        return _windows_process_is_alive(pid)
+    if not sys.platform.startswith("win") and hasattr(os, "waitpid"):
+        try:
+            reaped_pid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        except OSError:
+            pass
+        else:
+            if reaped_pid == pid:
+                return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -922,6 +1036,45 @@ def _process_is_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    """Query a Windows process without using os.kill(pid, 0).
+
+    Python implements non-console os.kill signals on Windows with
+    TerminateProcess, so signal 0 is not a safe liveness probe there.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            # Access denied means the PID exists but cannot be inspected.
+            return ctypes.get_last_error() == 5
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, ValueError):
+        # A failed non-mutating query must not be replaced with os.kill.
+        return False
 
 
 def _wait_for_process_exit(pid: int, *, timeout: float) -> bool:
@@ -991,16 +1144,45 @@ def _daemon_code_is_current(state: dict) -> bool:
 
 
 def _active_daemon_state(*, timeout: int | float, desired_transport: str | None = None) -> dict | None:
+    lifecycle, state, _health = _inspect_daemon_state(
+        timeout=timeout,
+        desired_transport=desired_transport,
+    )
+    return state if lifecycle == "READY" else None
+
+
+def _inspect_daemon_state(
+    *,
+    timeout: int | float,
+    desired_transport: str | None = None,
+) -> tuple[str, dict | None, dict | None]:
     state = _read_state()
     if not state:
-        return None
+        return "MISSING", None, None
     if not _daemon_code_is_current(state):
-        return None
+        return "DEAD", state, None
     if desired_transport and state.get("transport", "tcp") != desired_transport:
-        return None
-    if _healthcheck(state, timeout=timeout):
-        return state
-    return None
+        return "DEAD", state, None
+    health = _daemon_health_payload(state, timeout=timeout)
+    if not _daemon_identity_matches(state, health):
+        return "DEAD", state, health
+    lifecycle = str((health or {}).get("lifecycle_state") or "").upper()
+    if lifecycle not in {"STARTING", "READY", "BUSY"}:
+        if int((health or {}).get("active_requests") or 0) > 0:
+            lifecycle = "BUSY"
+        elif (health or {}).get("ready") is True:
+            lifecycle = "READY"
+        else:
+            lifecycle = "STARTING"
+    return lifecycle, state, health
+
+
+def _select_daemon_route(lifecycle: str, *, require_daemon: bool) -> str:
+    if lifecycle == "READY":
+        return "daemon_ready"
+    if require_daemon:
+        return "daemon_required"
+    return "cold_local"
 
 
 def _daemon_health_payload(state: dict, *, timeout: int | float) -> dict | None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,41 @@ from .db_runtime import DbRegistry
 from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
-from .retrieval import cold_lexical_fast_path, hybrid_query
-from .tokenize import canonicalize, extract_anchors
+from .retrieval import adaptive_hybrid_query, cold_lexical_fast_path, hybrid_query
+from .tokenize import canonicalize, extract_anchors, identifier_match_keys
 
 
 _REGISTRY: DbRegistry | None = None
 RETRIEVAL_MODES = {"hybrid", "lexical", "dense"}
+COMPACT_BACKGROUND_LIMIT = 2
+COMPACT_RELATED_LIMIT = 2
+COMPACT_MAX_UTF8_BYTES = 10_240
+COMPACT_EVIDENCE_TOKEN_LIMIT = 1_200
+COMPACT_AUXILIARY_TOKEN_LIMIT = 160
+COMPACT_TRUNCATION_WARNING = "compact_output_truncated"
+COMPACT_SEARCH_FIELDS = (
+    "schema",
+    "db",
+    "selected_db",
+    "query",
+    "status",
+    "legacy_status",
+    "answerability",
+    "evidence",
+    "background_context",
+    "related_context",
+    "warnings",
+    "unmatched_identifiers",
+    "exact_candidate_count",
+    "retrieval_mode",
+    "retrieval_route",
+    "dense_used",
+    "dense_skipped_reason",
+    "error",
+    "message",
+    "required_action",
+    "execution_metadata",
+)
 
 
 def registry() -> DbRegistry:
@@ -56,11 +86,78 @@ def run_search_payload(
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
     if identifier_diagnostics:
-        _add_identifier_diagnostics(payload, store, question, source=source)
+        _add_identifier_diagnostics(
+            payload,
+            store,
+            question,
+            source=source,
+            excluded_identifiers={name},
+        )
         payload.setdefault("identifier_diagnostics_enabled", True)
     else:
         payload["identifier_diagnostics_enabled"] = False
     payload["retrieval_mode"] = mode
+    payload["retrieval_route"] = mode
+    payload["dense_used"] = mode in {"hybrid", "dense"}
+    return normalize_search_contract(payload)
+
+
+def run_adaptive_search_payload(
+    *,
+    db_name: str,
+    question: str,
+    top_k: int,
+    source: str = "any",
+    max_chars: int = 900,
+    budget_tokens: int | None = None,
+    explain: bool = False,
+    include_db_hint: bool = False,
+    identifier_diagnostics: bool = True,
+) -> dict[str, Any]:
+    """Run the default one-operation hybrid route without repeating lexical work."""
+    load_env()
+    name = require_db_name(db_name)
+    store = registry().get(name)
+    rows, route = adaptive_hybrid_query(
+        question,
+        top_k=top_k,
+        source=source,
+        budget_tokens=budget_tokens,
+        explain=explain,
+        db_scope_confirmed=True,
+        excluded_identifiers={name},
+        backend=store,
+    )
+    db_hint = store.context.profile_hint if include_db_hint else ""
+    payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
+    if identifier_diagnostics:
+        _add_identifier_diagnostics(
+            payload,
+            store,
+            question,
+            source=source,
+            excluded_identifiers={name},
+            precomputed_exact_rows=list(route.get("raw_exact_rows") or []),
+        )
+        payload.setdefault("identifier_diagnostics_enabled", True)
+    else:
+        payload["identifier_diagnostics_enabled"] = False
+    payload["retrieval_mode"] = "hybrid"
+    payload["retrieval_route"] = route["retrieval_route"]
+    payload["dense_used"] = bool(route["dense_used"])
+    payload["dense_skipped_reason"] = route.get("dense_skipped_reason")
+    certificate = route.get("certificate") or {}
+    if certificate.get("kind") == "db_scope_full_query_lexical":
+        warnings = list(payload.get("warnings") or [])
+        warnings.append(
+            "Direct evidence is limited to one DB-scoped low-frequency anchor "
+            "confirmed by the complete-query lexical ranking. Background context "
+            "is not proof, and missing table headers or comparisons must not be inferred."
+        )
+        payload["warnings"] = sorted(set(warnings))
+        if payload.get("evidence"):
+            payload["status"] = "partial"
+            payload["answerability"] = "partial"
     return normalize_search_contract(payload)
 
 
@@ -85,19 +182,50 @@ def try_cold_lexical_fast_path(
         source=source,
         budget_tokens=budget_tokens,
         explain=explain,
+        db_scope_confirmed=True,
         backend=store,
     )
     if rows is None:
-        return None
+        if not identifier_diagnostics:
+            return None
+        payload = json_payload([], question, name, max_chars, db_hint="")
+        _add_identifier_diagnostics(
+            payload,
+            store,
+            question,
+            source=source,
+            excluded_identifiers={name},
+        )
+        diagnostics = payload.get("identifiers") or {}
+        if (
+            not payload.get("unmatched_identifiers")
+            or diagnostics.get("diagnostics_complete") is not True
+        ):
+            return None
+        payload["fast_path"] = "cold_identifier_no_hit"
+        payload["retrieval_mode"] = "hybrid"
+        payload["retrieval_route"] = "cold_identifier_no_hit"
+        payload["dense_used"] = False
+        payload["dense_skipped_reason"] = "cold_lexical_fast_path"
+        return normalize_search_contract(payload)
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
     if identifier_diagnostics:
-        _add_identifier_diagnostics(payload, store, question, source=source)
+        _add_identifier_diagnostics(
+            payload,
+            store,
+            question,
+            source=source,
+            excluded_identifiers={name},
+        )
         payload.setdefault("identifier_diagnostics_enabled", True)
     else:
         payload["identifier_diagnostics_enabled"] = False
     payload["fast_path"] = "cold_lexical"
     payload["retrieval_mode"] = "hybrid"
+    payload["retrieval_route"] = "cold_lexical_fast_path"
+    payload["dense_used"] = False
+    payload["dense_skipped_reason"] = "cold_lexical_fast_path"
     return normalize_search_contract(payload)
 
 
@@ -210,11 +338,25 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
     return payload
 
 
-def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: str, *, source: str) -> None:
+def _add_identifier_diagnostics(
+    payload: dict[str, Any],
+    store: Any,
+    question: str,
+    *,
+    source: str,
+    excluded_identifiers: set[str] | None = None,
+    precomputed_exact_rows: list[dict[str, Any]] | None = None,
+) -> None:
+    excluded = {
+        canonicalize(identifier)
+        for identifier in (excluded_identifiers or set())
+        if identifier
+    }
     anchors = [
         anchor
         for anchor in extract_anchors(question, limit=30)
         if _diagnostic_identifier_anchor(anchor)
+        and canonicalize(anchor) not in excluded
     ]
     if not anchors:
         return
@@ -222,38 +364,43 @@ def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: s
     matches = []
     diagnostic_errors = []
     for anchor in anchors:
-        try:
-            exact_rows = store.exact_search(anchor, top_k=1000, source=source)
-        except Exception as exc:
-            diagnostic_errors.append(
-                {
-                    "identifier": anchor,
-                    "operation": "exact_search",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            matches.append(
-                {
-                    "identifier": anchor,
-                    "matched": None,
-                    "candidate_count": None,
-                    "verified_candidate_count": None,
-                    "raw_occurrence_verified": False,
-                    "paths": [],
-                    "diagnostic_error": True,
-                }
-            )
-            continue
-        if not exact_rows:
-            unmatched.append(anchor)
+        if precomputed_exact_rows is None:
+            try:
+                exact_rows = store.exact_search(anchor, top_k=1000, source=source)
+            except Exception as exc:
+                diagnostic_errors.append(
+                    {
+                        "identifier": anchor,
+                        "operation": "exact_search",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                matches.append(
+                    {
+                        "identifier": anchor,
+                        "matched": None,
+                        "candidate_count": None,
+                        "verified_candidate_count": None,
+                        "raw_occurrence_verified": False,
+                        "paths": [],
+                        "diagnostic_error": True,
+                    }
+                )
+                continue
+        else:
+            exact_rows = precomputed_exact_rows
         verified_rows = [row for row in exact_rows if _raw_identifier_occurs(row, anchor)]
+        if not verified_rows:
+            unmatched.append(anchor)
         matches.append(
             {
                 "identifier": anchor,
-                "matched": bool(exact_rows),
+                "matched": bool(verified_rows),
                 "candidate_count": len(exact_rows),
                 "verified_candidate_count": len(verified_rows),
-                "raw_occurrence_verified": bool(exact_rows) and len(verified_rows) == len(exact_rows),
+                "raw_occurrence_verified": (
+                    bool(exact_rows) and len(verified_rows) == len(exact_rows)
+                ),
                 "paths": sorted(
                     {
                         str((row.get("metadata") or {}).get("path") or "")
@@ -263,17 +410,21 @@ def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: s
                 ),
             }
         )
-    try:
-        exact_candidate_count = len(store.exact_search(question, top_k=1000, source=source))
-    except Exception as exc:
-        exact_candidate_count = None
-        diagnostic_errors.append(
-            {
-                "identifier": question,
-                "operation": "query_exact_search",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
+    if precomputed_exact_rows is not None:
+        exact_candidate_count = len(precomputed_exact_rows)
+    else:
+        try:
+            query_rows = store.exact_search(question, top_k=1000, source=source)
+            exact_candidate_count = len(query_rows)
+        except Exception as exc:
+            exact_candidate_count = None
+            diagnostic_errors.append(
+                {
+                    "identifier": question,
+                    "operation": "query_exact_search",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
     payload["identifiers"] = {
         "anchors": anchors,
         "unmatched_identifiers": unmatched,
@@ -292,20 +443,45 @@ def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: s
     payload["unmatched_identifiers"] = unmatched
     payload["exact_candidate_count"] = exact_candidate_count
     if unmatched and not diagnostic_errors:
+        matched_identifiers = [
+            str(match.get("identifier") or "")
+            for match in matches
+            if match.get("matched") is True
+        ]
+        direct_evidence = [
+            item
+            for item in (payload.get("evidence") or [])
+            if _context_matches_identifier(item, matched_identifiers)
+        ]
+        unsupported_evidence = [
+            item
+            for item in (payload.get("evidence") or [])
+            if not _context_matches_identifier(item, matched_identifiers)
+        ]
         related = _dedupe_contexts(
             [
-                *(payload.get("evidence") or []),
+                *unsupported_evidence,
                 *(payload.get("background_context") or []),
             ]
         )
-        payload["status"] = "partial" if related else "no_hit"
-        payload["answerability"] = "none"
+        payload["status"] = "partial" if (direct_evidence or related) else "no_hit"
+        payload["answerability"] = "partial" if direct_evidence else "none"
         payload["related_context"] = related
-        payload["contexts"] = []
-        payload["evidence"] = []
+        payload["contexts"] = direct_evidence
+        payload["evidence"] = direct_evidence
         payload["background_context"] = []
-        payload["related_results"] = list(payload.get("results") or [])
-        payload["results"] = []
+        raw_results = list(payload.get("results") or [])
+        direct_results = [
+            row
+            for row in raw_results
+            if any(_raw_identifier_occurs(row, identifier) for identifier in matched_identifiers)
+        ]
+        payload["related_results"] = [
+            row
+            for row in raw_results
+            if row not in direct_results
+        ]
+        payload["results"] = direct_results
         payload["background_results"] = []
         if payload["status"] == "no_hit":
             payload["legacy_status"] = "no_evidence"
@@ -332,13 +508,18 @@ def _diagnostic_identifier_anchor(anchor: str) -> bool:
 def _context_matches_identifier(item: dict[str, Any], anchors: list[str]) -> bool:
     if not anchors:
         return False
-    canonical_anchors = {canonicalize(anchor) for anchor in anchors}
+    canonical_anchors = {
+        key
+        for anchor in anchors
+        for key in identifier_match_keys(anchor)
+    }
     debug = item.get("debug") or {}
     exact_debug = debug.get("exact_match") if isinstance(debug, dict) else {}
     matched_terms = {
-        canonicalize(str(term))
+        key
         for term in (exact_debug or {}).get("matched_terms", [])
         if term
+        for key in identifier_match_keys(str(term))
     }
     if canonical_anchors & matched_terms:
         return True
@@ -350,9 +531,16 @@ def _context_matches_identifier(item: dict[str, Any], anchors: list[str]) -> boo
             str(source.get("title") or ""),
         ]
     )
+    haystack_keys = {
+        key
+        for candidate in extract_anchors(haystack, limit=500)
+        for key in identifier_match_keys(candidate)
+    }
+    if canonical_anchors & haystack_keys:
+        return True
     return any(
         re.search(
-            rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])",
+            rf"(?<![A-Za-z0-9_-]){re.escape(anchor)}(?![A-Za-z0-9_-])",
             haystack,
             re.IGNORECASE,
         )
@@ -370,7 +558,18 @@ def _raw_identifier_occurs(row: dict[str, Any], identifier: str) -> bool:
             str(metadata.get("section_path") or ""),
         ]
     )
-    pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(identifier)}(?![A-Za-z0-9])", re.IGNORECASE)
+    identifier_keys = set(identifier_match_keys(identifier))
+    haystack_keys = {
+        key
+        for candidate in extract_anchors(haystack, limit=500)
+        for key in identifier_match_keys(candidate)
+    }
+    if identifier_keys & haystack_keys:
+        return True
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_-]){re.escape(identifier)}(?![A-Za-z0-9_-])",
+        re.IGNORECASE,
+    )
     return bool(pattern.search(haystack))
 
 
@@ -465,6 +664,276 @@ def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
         normalized["evidence"] = []
         normalized["contexts"] = []
     return normalized
+
+
+def compact_search_contract(
+    payload: dict[str, Any],
+    *,
+    explain: bool = False,
+) -> dict[str, Any]:
+    """Return the evidence-first view used by ordinary assistant lookup.
+
+    The full payload remains the default for backward compatibility. This
+    additive view removes duplicate legacy result arrays so a single tool
+    response stays small enough for lightweight assistants to consume.
+    """
+    normalized = normalize_search_contract(payload)
+    compact = {
+        key: normalized[key]
+        for key in COMPACT_SEARCH_FIELDS
+        if key in normalized
+    }
+    projection_truncated = False
+    compact["evidence"], evidence_truncated = _project_contexts(
+        list(normalized.get("evidence") or []),
+        total_token_limit=COMPACT_EVIDENCE_TOKEN_LIMIT,
+        item_limit=None,
+        explain=explain,
+    )
+    compact["background_context"], background_truncated = _project_contexts(
+        list(normalized.get("background_context") or []),
+        total_token_limit=COMPACT_AUXILIARY_TOKEN_LIMIT * COMPACT_BACKGROUND_LIMIT,
+        item_limit=COMPACT_BACKGROUND_LIMIT,
+        explain=explain,
+    )
+    compact["related_context"], related_truncated = _project_contexts(
+        list(normalized.get("related_context") or []),
+        total_token_limit=COMPACT_AUXILIARY_TOKEN_LIMIT * COMPACT_RELATED_LIMIT,
+        item_limit=COMPACT_RELATED_LIMIT,
+        explain=explain,
+    )
+    projection_truncated = evidence_truncated or background_truncated or related_truncated
+    if isinstance(compact.get("execution_metadata"), dict):
+        metadata = compact["execution_metadata"]
+        compact["execution_metadata"] = {
+            key: metadata[key]
+            for key in (
+                "actual_execution",
+                "first_attempt_success",
+                "final_user_visible_success",
+                "fallback_used",
+                "total_latency_seconds",
+            )
+            if key in metadata
+        }
+    for key in (
+        "evidence",
+        "background_context",
+        "related_context",
+        "warnings",
+    ):
+        compact.setdefault(key, [])
+    compact.setdefault("answerability", "none")
+    compact["warnings"] = [
+        str(value)[:160]
+        for value in compact.get("warnings", [])[:6]
+    ]
+    if len(str(compact.get("query") or "")) > 2_000:
+        compact["query"] = str(compact["query"])[:1_980] + "...[truncated]"
+        projection_truncated = True
+    return _fit_compact_utf8_limit(
+        compact,
+        projection_truncated=projection_truncated,
+    )
+
+
+def _project_contexts(
+    contexts: list[dict[str, Any]],
+    *,
+    total_token_limit: int,
+    item_limit: int | None,
+    explain: bool,
+) -> tuple[list[dict[str, Any]], bool]:
+    projected: list[dict[str, Any]] = []
+    remaining = total_token_limit
+    truncated = item_limit is not None and len(contexts) > item_limit
+    selected = contexts if item_limit is None else contexts[:item_limit]
+    for context in selected:
+        item = _project_context(context, explain=explain)
+        overhead = dict(item)
+        overhead["text"] = ""
+        overhead_tokens = _conservative_token_count(
+            json.dumps(overhead, ensure_ascii=False, separators=(",", ":"))
+        )
+        if overhead_tokens >= remaining:
+            truncated = True
+            break
+        text = str(item.get("text") or "")
+        text_budget = max(0, remaining - overhead_tokens - 30)
+        if item_limit is not None:
+            text_budget = min(
+                text_budget,
+                max(0, COMPACT_AUXILIARY_TOKEN_LIMIT - overhead_tokens - 20),
+            )
+        if _conservative_token_count(text) > text_budget:
+            text = _truncate_to_token_limit(text, text_budget)
+            item["text"] = text
+            item["truncated"] = True
+            truncated = True
+        used = _conservative_token_count(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        )
+        if used > remaining:
+            truncated = True
+            break
+        projected.append(item)
+        remaining -= used
+    if len(projected) < len(selected):
+        truncated = True
+    return projected, truncated
+
+
+def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any]:
+    source = context.get("source") or {}
+    projected: dict[str, Any] = {
+        "id": str(context.get("id") or "")[:120],
+        "text": str(context.get("text") or ""),
+    }
+    source_limits = {"path": 400, "title": 160, "revision": 100}
+    filtered_source = {}
+    for key, limit in source_limits.items():
+        if source.get(key):
+            value = str(source[key])
+            filtered_source[key] = (
+                value
+                if len(value) <= limit
+                else value[: limit - 15] + "...[truncated]"
+            )
+    if filtered_source:
+        projected["source"] = filtered_source
+    location = context.get("location") or {}
+    filtered_location = {}
+    for key in ("section", "lines", "page", "slide"):
+        if location.get(key) in (None, ""):
+            continue
+        value = location[key]
+        if isinstance(value, str) and len(value) > 160:
+            value = value[:145] + "...[truncated]"
+        filtered_location[key] = value
+    if filtered_location:
+        projected["location"] = filtered_location
+    if context.get("signals"):
+        projected["signals"] = list(context["signals"])
+    if explain and context.get("debug"):
+        projected["debug"] = context["debug"]
+    return projected
+
+
+def _conservative_token_count(text: str) -> int:
+    count = 0
+    ascii_buffer = ""
+    for char in text:
+        if "\u3040" <= char <= "\u30ff" or "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff":
+            if ascii_buffer:
+                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
+                ascii_buffer = ""
+            count += 1
+        elif char.isspace():
+            if ascii_buffer:
+                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
+                ascii_buffer = ""
+        elif char.isalnum() or char in "_-":
+            ascii_buffer += char
+        else:
+            if ascii_buffer:
+                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
+                ascii_buffer = ""
+            count += 1
+    if ascii_buffer:
+        count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
+    return count
+
+
+def _truncate_to_token_limit(text: str, limit: int) -> str:
+    if limit <= 8:
+        return ""
+    low, high = 0, len(text)
+    suffix = "...[truncated]"
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = text[:middle].rstrip() + suffix
+        if _conservative_token_count(candidate) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + suffix if low else ""
+
+
+def _compact_utf8_size(payload: dict[str, Any]) -> int:
+    # CLI print() appends one newline; include it in the stdout purity cap.
+    return len(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")) + 1
+
+
+def _fit_compact_utf8_limit(
+    compact: dict[str, Any],
+    *,
+    projection_truncated: bool,
+) -> dict[str, Any]:
+    if projection_truncated:
+        compact["warnings"] = sorted(
+            set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
+        )
+    if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+        return compact
+
+    compact["warnings"] = sorted(
+        set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
+    )
+    for key in ("related_context", "background_context"):
+        while compact.get(key) and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+            compact[key].pop()
+    for key in ("query", "error", "message"):
+        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+            return compact
+        if key in compact:
+            compact[key] = str(compact[key])[:500] + "...[truncated]"
+    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        compact["warnings"] = [
+            COMPACT_TRUNCATION_WARNING,
+            *[
+                str(value)[:120]
+                for value in compact.get("warnings", [])
+                if value != COMPACT_TRUNCATION_WARNING
+            ][:3],
+        ]
+    while len(compact.get("evidence") or []) > 1 and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        compact["evidence"].pop()
+    for contexts_key in ("evidence", "background_context", "related_context"):
+        for item in compact.get(contexts_key) or []:
+            if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+                return compact
+            item.pop("debug", None)
+            item.pop("signals", None)
+            item.pop("location", None)
+            text = str(item.get("text") or "")
+            item["text"] = _truncate_to_token_limit(
+                text,
+                max(32, _conservative_token_count(text) // 2),
+            )
+    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        compact["warnings"] = [COMPACT_TRUNCATION_WARNING]
+        compact.pop("execution_metadata", None)
+        compact["background_context"] = []
+        compact["related_context"] = []
+    while compact.get("evidence") and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        item = compact["evidence"][-1]
+        text = str(item.get("text") or "")
+        if len(text) <= 64:
+            compact["evidence"].pop()
+        else:
+            item["text"] = text[: max(32, len(text) // 2)] + "...[truncated]"
+    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        compact = {
+            "schema": str(compact.get("schema") or "local-rag.search.v1"),
+            "selected_db": str(compact.get("selected_db") or compact.get("db") or ""),
+            "status": str(compact.get("status") or "error"),
+            "answerability": str(compact.get("answerability") or "none"),
+            "evidence": [],
+            "background_context": [],
+            "related_context": [],
+            "warnings": [COMPACT_TRUNCATION_WARNING],
+        }
+    return compact
 
 
 def _dedupe_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:

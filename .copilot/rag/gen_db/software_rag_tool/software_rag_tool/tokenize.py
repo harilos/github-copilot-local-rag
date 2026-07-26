@@ -13,6 +13,7 @@ _ANCHOR_RE = re.compile(
     r"https?://[^\s)>\]}]+"
     r"|/[A-Za-z0-9_./:-]{2,}"
     r"|[A-Za-z0-9_.:/-]+\.(?:md|txt|log|pdf|docx?|pptx?|xlsx|json|ya?ml|toml|ini|py|js|jsx|ts|tsx|java|go|rs|cs|sql)"
+    r"|[Rr][Ff][Cc] \d{2,}"
     r"|[A-Z]{2,}-\d{2,}"
     r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     r"|[0-9a-fA-F]{12,}"
@@ -47,6 +48,16 @@ _STOP_TOKENS = {
 def canonicalize(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def identifier_match_keys(text: str) -> list[str]:
+    """Return conservative formatting variants for identifier comparison."""
+    canonical = canonicalize(text)
+    keys = [canonical]
+    rfc = re.fullmatch(r"rfc ?(\d{2,})", canonical)
+    if rfc:
+        keys.extend([f"rfc {rfc.group(1)}", f"rfc{rfc.group(1)}"])
+    return _unique(key for key in keys if key)
 
 
 def tokenizer_fingerprint() -> str:

@@ -3,7 +3,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import threading
+import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -15,6 +18,24 @@ RAGD_SPEC.loader.exec_module(RAGD)
 
 
 class DaemonOwnershipTests(unittest.TestCase):
+    def test_health_lifecycle_distinguishes_starting_ready_and_busy(self) -> None:
+        server = SimpleNamespace(
+            state_lock=threading.Lock(),
+            active_requests=0,
+            request_sequence=0,
+            runtime_ready=False,
+            generation="generation",
+            started_at="now",
+            started_monotonic=time.monotonic(),
+            code_fingerprint="fingerprint",
+            idle_timeout=600,
+        )
+        self.assertEqual("STARTING", RAGD._server_health_payload(server)["lifecycle_state"])
+        server.runtime_ready = True
+        self.assertEqual("READY", RAGD._server_health_payload(server)["lifecycle_state"])
+        server.active_requests = 1
+        self.assertEqual("BUSY", RAGD._server_health_payload(server)["lifecycle_state"])
+
     def test_current_generation_owns_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ragd.json"

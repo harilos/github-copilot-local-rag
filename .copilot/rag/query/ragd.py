@@ -41,6 +41,7 @@ class RagDaemonServer(ThreadingHTTPServer):
         self.last_used_at = time.monotonic()
         self.active_requests = 0
         self.request_sequence = 0
+        self.runtime_ready = False
         self.state_lock = threading.Lock()
 
 
@@ -65,6 +66,7 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
         self.last_used_at = time.monotonic()
         self.active_requests = 0
         self.request_sequence = 0
+        self.runtime_ready = False
         self.state_lock = threading.Lock()
 
     def server_close(self) -> None:
@@ -73,6 +75,32 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
             Path(self.socket_file).unlink()
         except FileNotFoundError:
             pass
+
+
+def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dict[str, Any]:
+    with server.state_lock:
+        active_requests = server.active_requests
+        request_sequence = server.request_sequence
+        runtime_ready = server.runtime_ready
+    lifecycle_state = (
+        "BUSY"
+        if active_requests > 0
+        else ("READY" if runtime_ready else "STARTING")
+    )
+    return {
+        "schema": "local-rag.ragd.health.v1",
+        "status": "ok",
+        "pid": os.getpid(),
+        "generation": server.generation,
+        "started_at": server.started_at,
+        "uptime_seconds": round(time.monotonic() - server.started_monotonic, 6),
+        "active_requests": active_requests,
+        "request_sequence": request_sequence,
+        "ready": lifecycle_state == "READY",
+        "lifecycle_state": lifecycle_state,
+        "code_fingerprint": server.code_fingerprint,
+        "idle_timeout_seconds": server.idle_timeout,
+    }
 
 
 class RagDaemonHandler(BaseHTTPRequestHandler):
@@ -88,20 +116,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send_json({"status": "forbidden"}, status=403)
             return
-        self._send_json(
-            {
-                "schema": "local-rag.ragd.health.v1",
-                "status": "ok",
-                "pid": os.getpid(),
-                "generation": self.server.generation,
-                "started_at": self.server.started_at,
-                "uptime_seconds": round(time.monotonic() - self.server.started_monotonic, 6),
-                "active_requests": self.server.active_requests,
-                "request_sequence": self.server.request_sequence,
-                "code_fingerprint": self.server.code_fingerprint,
-                "idle_timeout_seconds": self.server.idle_timeout,
-            }
-        )
+        self._send_json(_server_health_payload(self.server))
 
     def do_POST(self) -> None:
         if self.path == "/shutdown":
@@ -156,6 +171,8 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             )
         finally:
             with self.server.state_lock:
+                if payload.get("status") != "error":
+                    self.server.runtime_ready = True
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
         payload["daemon_state"] = daemon_request_metadata(
@@ -203,20 +220,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             return
         op = request.get("op")
         if op == "health":
-            self._send_json(
-                {
-                    "schema": "local-rag.ragd.health.v1",
-                    "status": "ok",
-                    "pid": os.getpid(),
-                    "generation": self.server.generation,
-                    "started_at": self.server.started_at,
-                    "uptime_seconds": round(time.monotonic() - self.server.started_monotonic, 6),
-                    "active_requests": self.server.active_requests,
-                    "request_sequence": self.server.request_sequence,
-                    "code_fingerprint": self.server.code_fingerprint,
-                    "idle_timeout_seconds": self.server.idle_timeout,
-                }
-            )
+            self._send_json(_server_health_payload(self.server))
             return
         if op == "shutdown":
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
@@ -258,6 +262,8 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             )
         finally:
             with self.server.state_lock:
+                if result.get("status") != "error":
+                    self.server.runtime_ready = True
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
         result["daemon_state"] = daemon_request_metadata(
@@ -335,6 +341,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
         "token": token,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "code_fingerprint": code_fingerprint,
+        "lifecycle_state": "STARTING",
         "idle_timeout_seconds": idle_timeout,
         "file_dir": str(file_dir),
         "heartbeat_file": str(heartbeat_file),
@@ -344,6 +351,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
     last_cleanup_at = 0.0
     active_requests = 0
     request_sequence = 0
+    runtime_ready = False
 
     try:
         while True:
@@ -391,6 +399,11 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                 elif request.get("generation") != generation:
                     result = {"status": "forbidden"}
                 elif request.get("op") == "health":
+                    lifecycle_state = (
+                        "BUSY"
+                        if active_requests > 1
+                        else ("READY" if runtime_ready else "STARTING")
+                    )
                     result = {
                         "schema": "local-rag.ragd.health.v1",
                         "status": "ok",
@@ -400,12 +413,16 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         "uptime_seconds": round(time.monotonic() - started_monotonic, 6),
                         "active_requests": active_requests,
                         "request_sequence": request_sequence,
+                        "ready": lifecycle_state == "READY",
+                        "lifecycle_state": lifecycle_state,
                         "code_fingerprint": code_fingerprint,
                         "idle_timeout_seconds": idle_timeout,
                     }
                 elif request.get("op") == "search":
                     payload = request.get("payload") or {}
                     result = _run_search_request(payload)
+                    if result.get("status") != "error":
+                        runtime_ready = True
                     result["daemon_state"] = daemon_request_metadata(
                         pid=os.getpid(),
                         generation=generation,
@@ -536,6 +553,7 @@ def _write_state(server: RagDaemonServer) -> None:
         "token": server.token,
         "started_at": server.started_at,
         "code_fingerprint": server.code_fingerprint,
+        "lifecycle_state": "STARTING",
         "idle_timeout_seconds": server.idle_timeout,
     }
     if isinstance(server, RagUnixDaemonServer):
