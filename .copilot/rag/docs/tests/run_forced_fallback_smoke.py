@@ -222,6 +222,8 @@ def run_case(
             cwd=str(RAG_ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=outer_timeout + 1.0,
         )
     finally:
@@ -251,6 +253,8 @@ def run_case(
         cwd=str(RAG_ROOT),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=outer_timeout + 1.0,
     )
     followup_payload = parse_json(followup.stdout)

@@ -691,6 +691,22 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         )
         self.assertEqual("診断", completed.stderr)
 
+    def test_cli_standard_streams_are_forced_to_utf8(self) -> None:
+        stdin = mock.Mock()
+        stdout = mock.Mock()
+        stderr = mock.Mock()
+        with (
+            mock.patch.object(SEARCH.sys, "stdin", stdin),
+            mock.patch.object(SEARCH.sys, "stdout", stdout),
+            mock.patch.object(SEARCH.sys, "stderr", stderr),
+        ):
+            SEARCH._configure_standard_streams()
+        for stream in (stdin, stdout, stderr):
+            stream.reconfigure.assert_called_once_with(
+                encoding="utf-8",
+                errors="replace",
+            )
+
     def test_windows_timeout_cleanup_is_bounded_by_output_reserve(self) -> None:
         process = mock.Mock()
         process.poll.return_value = None

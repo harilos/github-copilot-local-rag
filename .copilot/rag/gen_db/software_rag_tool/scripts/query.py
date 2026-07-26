@@ -16,8 +16,7 @@ from software_rag_tool.search_api import (
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _configure_standard_streams()
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="?")
     parser.add_argument("--db", required=True, help="Target DB name. Must match '<name>-rag'.")
@@ -76,6 +75,13 @@ def main() -> None:
                 identifier_diagnostics=not args.disable_identifier_diagnostics,
             )
     print(payload_to_text(payload, args.format, explain=args.explain))
+
+
+def _configure_standard_streams() -> None:
+    """Keep the CLI UTF-8 contract independent of the Windows code page."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 if __name__ == "__main__":

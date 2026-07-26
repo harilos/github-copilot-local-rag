@@ -506,6 +506,8 @@ def git_value(arguments: list[str], *, allow_empty: bool = False) -> str:
             cwd=str(RAG_ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
@@ -789,7 +791,16 @@ def run_list_dbs(python: str, env: dict[str, str], *, repeats: int, timeout: int
     cmd = [python, str(QUERY_ROOT / "list_dbs.py")]
     for repeat in range(repeats):
         started = time.perf_counter()
-        completed = subprocess.run(cmd, cwd=str(RAG_ROOT), env=env, capture_output=True, text=True, timeout=timeout)
+        completed = subprocess.run(
+            cmd,
+            cwd=str(RAG_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
         elapsed = time.perf_counter() - started
         payload, json_ok, parse_error = parse_json(completed.stdout)
         rows.append(
@@ -863,6 +874,8 @@ def run_search_case(
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=args.timeout + 1,
         )
         elapsed = time.perf_counter() - started

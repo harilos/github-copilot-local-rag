@@ -44,8 +44,7 @@ WINDOWS_TASKKILL_TIMEOUT_SECONDS = 0.15
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _configure_standard_streams()
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="*")
     parser.add_argument("--db", help="Target DB name, e.g. project-rag")
@@ -651,6 +650,13 @@ def _run_sync_script(
             args=args,
         )
         raise SystemExit(1)
+
+
+def _configure_standard_streams() -> None:
+    """Keep the CLI UTF-8 contract independent of the Windows code page."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _run_sync_child(
