@@ -308,7 +308,7 @@ def anchor_lexical_search(
     source: str = "any",
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Return a few low-chunk-frequency lexical candidates for one Hybrid call."""
+    """Return a few low-document-frequency lexical candidates for one Hybrid call."""
     path = path or catalog_path()
     if not path.exists() or top_k <= 0:
         return []
@@ -317,7 +317,7 @@ def anchor_lexical_search(
             anchors = _informative_anchor_tokens(conn, question, limit=1)
             if not anchors:
                 return []
-            token, chunk_df, information_score = anchors[0]
+            token, document_df, information_score = anchors[0]
             query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
             if not query_text:
                 return []
@@ -328,7 +328,7 @@ def anchor_lexical_search(
                 debug = dict(item.get("debug") or {})
                 debug["lexical_anchor"] = {
                     "token": token,
-                    "chunk_df": chunk_df,
+                    "document_df": document_df,
                     "information_score": round(information_score, 6),
                 }
                 item["debug"] = debug
@@ -819,22 +819,44 @@ def _informative_anchor_tokens(
         f"SELECT term, doc FROM temp.fts_word_vocab WHERE term IN ({placeholders})",
         tokens,
     )
-    chunk_count_row = conn.execute(
-        "SELECT COUNT(*) AS count FROM chunk WHERE visible_until IS NULL"
+    document_count_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT d.doc_pk) AS count
+        FROM document d
+        JOIN chunk c ON c.doc_pk = d.doc_pk
+        WHERE d.visible_until IS NULL
+          AND c.visible_until IS NULL
+        """
     ).fetchone()
-    chunk_count = int(chunk_count_row["count"] if chunk_count_row else 0)
-    if chunk_count <= 0:
+    document_count = int(document_count_row["count"] if document_count_row else 0)
+    if document_count <= 0:
         return []
     token_order = {token: index for index, token in enumerate(tokens)}
     ranked: list[tuple[str, int, float]] = []
     for row in rows:
         token = str(row["term"])
-        chunk_df = int(row["doc"] or 0)
-        if chunk_df <= 0 or chunk_df / chunk_count > 0.05:
+        query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
+        if not query_text:
             continue
-        idf = math.log((chunk_count + 1) / (chunk_df + 1))
+        document_df_row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT c.doc_pk) AS count
+            FROM fts_word
+            JOIN chunk c ON c.chunk_pk = fts_word.rowid
+            JOIN document d ON d.doc_pk = c.doc_pk
+            WHERE fts_word MATCH ?
+              AND c.visible_until IS NULL
+              AND d.visible_until IS NULL
+            """,
+            (query_text,),
+        ).fetchone()
+        document_df = int(document_df_row["count"] if document_df_row else 0)
+        rare_document_limit = max(2, int(document_count * 0.05))
+        if document_df <= 0 or document_df > rare_document_limit:
+            continue
+        idf = math.log((document_count + 1) / (document_df + 1))
         length_bonus = 1.0 + min(len(token), 12) / 12.0
-        ranked.append((token, chunk_df, idf * length_bonus))
+        ranked.append((token, document_df, idf * length_bonus))
     ranked.sort(
         key=lambda item: (
             -item[2],

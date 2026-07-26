@@ -10,7 +10,7 @@ from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
 from .retrieval import cold_lexical_fast_path, hybrid_query
-from .tokenize import extract_anchors
+from .tokenize import canonicalize, extract_anchors
 
 
 _REGISTRY: DbRegistry | None = None
@@ -146,16 +146,27 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
         converted.append((item, result, signals))
 
     has_lexical_anchor = any("lexical_anchor" in signals for _item, _result, signals in converted)
-    if has_lexical_anchor:
+    strong_identifiers = [
+        anchor
+        for anchor in extract_anchors(question, limit=30)
+        if _diagnostic_identifier_anchor(anchor)
+    ]
+    has_matched_strong_exact = any(
+        "exact" in signals and _context_matches_identifier(item, strong_identifiers)
+        for item, _result, signals in converted
+    )
+    if has_lexical_anchor or has_matched_strong_exact:
         evidence = [
             item
             for item, _result, signals in converted
-            if "lexical_anchor" in signals or "exact" in signals
+            if "lexical_anchor" in signals
+            or ("exact" in signals and _context_matches_identifier(item, strong_identifiers))
         ]
         background_context = [
             item
             for item, _result, signals in converted
-            if "lexical_anchor" not in signals and "exact" not in signals
+            if "lexical_anchor" not in signals
+            and not ("exact" in signals and _context_matches_identifier(item, strong_identifiers))
         ]
         background_ids = {item["id"] for item in background_context}
     else:
@@ -200,7 +211,11 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
 
 
 def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: str, *, source: str) -> None:
-    anchors = extract_anchors(question, limit=30)
+    anchors = [
+        anchor
+        for anchor in extract_anchors(question, limit=30)
+        if _diagnostic_identifier_anchor(anchor)
+    ]
     if not anchors:
         return
     unmatched = []
@@ -305,6 +320,44 @@ def _add_identifier_diagnostics(payload: dict[str, Any], store: Any, question: s
         warnings = list(payload.get("warnings") or [])
         warnings.append("Identifier diagnostics did not complete; Exact/no-hit conclusions are unavailable.")
         payload["warnings"] = sorted(set(warnings))
+
+
+def _diagnostic_identifier_anchor(anchor: str) -> bool:
+    """Avoid treating ordinary all-letter acronyms as conclusive no-hit identifiers."""
+    if any(marker in anchor for marker in ["/", "\\", ".", ":", "_", "-"]):
+        return True
+    return any(char.isdigit() for char in anchor) and any(char.isalpha() for char in anchor)
+
+
+def _context_matches_identifier(item: dict[str, Any], anchors: list[str]) -> bool:
+    if not anchors:
+        return False
+    canonical_anchors = {canonicalize(anchor) for anchor in anchors}
+    debug = item.get("debug") or {}
+    exact_debug = debug.get("exact_match") if isinstance(debug, dict) else {}
+    matched_terms = {
+        canonicalize(str(term))
+        for term in (exact_debug or {}).get("matched_terms", [])
+        if term
+    }
+    if canonical_anchors & matched_terms:
+        return True
+    source = item.get("source") or {}
+    haystack = "\n".join(
+        [
+            str(item.get("text") or ""),
+            str(source.get("path") or ""),
+            str(source.get("title") or ""),
+        ]
+    )
+    return any(
+        re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])",
+            haystack,
+            re.IGNORECASE,
+        )
+        for anchor in anchors
+    )
 
 
 def _raw_identifier_occurs(row: dict[str, Any], identifier: str) -> bool:

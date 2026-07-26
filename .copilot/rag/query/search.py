@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -161,6 +162,23 @@ def main() -> None:
     if daemon_enabled:
         desired_transport = _desired_transport()
         configured_transport = os.getenv("RAGD_TRANSPORT", "auto").lower()
+        published_state = _read_state()
+        if published_state and not _daemon_code_is_current(published_state):
+            retirement_timeout = _bounded_timeout(work_deadline, 1.0)
+            identity = _daemon_health_payload(
+                published_state,
+                timeout=min(0.5, retirement_timeout or 0.0),
+            )
+            if _daemon_identity_matches(published_state, identity):
+                _retire_daemon(
+                    published_state,
+                    request_id=str(request["request_id"]),
+                    failure_kind="code_changed",
+                    shutdown_timeout=retirement_timeout or 0.0,
+                    record_failure=False,
+                )
+            else:
+                _discard_published_state(published_state)
         health_timeout = _bounded_timeout(work_deadline, 3.0)
         daemon_started_this_request = False
         state = (
@@ -691,6 +709,7 @@ def _retire_daemon(
     request_id: str,
     failure_kind: str,
     shutdown_timeout: float = 0.5,
+    record_failure: bool = True,
 ) -> dict:
     snapshot = {
         "schema": "local-rag.daemon-failure.v1",
@@ -700,11 +719,12 @@ def _retire_daemon(
         **daemon_state_snapshot(state),
     }
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        with (RUN_DIR / "daemon-failures.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(snapshot, ensure_ascii=False, sort_keys=True) + "\n")
-    except OSError:
-        pass
+    if record_failure:
+        try:
+            with (RUN_DIR / "daemon-failures.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(snapshot, ensure_ascii=False, sort_keys=True) + "\n")
+        except OSError:
+            pass
     started = time.monotonic()
     ack_timeout = min(0.25, max(0.0, shutdown_timeout))
     acknowledged = (
@@ -947,15 +967,85 @@ def _desired_transport() -> str:
     return "tcp"
 
 
+def _runtime_code_fingerprint() -> str:
+    digest = hashlib.sha256()
+    package_root = TOOL_ROOT / "software_rag_tool"
+    paths = [
+        Path(__file__).resolve().parent / "ragd.py",
+        TOOL_ROOT / "pyproject.toml",
+        TOOL_ROOT / "requirements.txt",
+        *package_root.rglob("*.py"),
+    ]
+    for path in sorted(set(paths), key=lambda item: str(item.relative_to(RAG_ROOT))):
+        digest.update(str(path.relative_to(RAG_ROOT)).encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def _daemon_code_is_current(state: dict) -> bool:
+    published = str(state.get("code_fingerprint") or "")
+    return bool(published) and published == _runtime_code_fingerprint()
+
+
 def _active_daemon_state(*, timeout: int | float, desired_transport: str | None = None) -> dict | None:
     state = _read_state()
     if not state:
+        return None
+    if not _daemon_code_is_current(state):
         return None
     if desired_transport and state.get("transport", "tcp") != desired_transport:
         return None
     if _healthcheck(state, timeout=timeout):
         return state
     return None
+
+
+def _daemon_health_payload(state: dict, *, timeout: int | float) -> dict | None:
+    if timeout <= 0:
+        return None
+    if state.get("transport") == "file":
+        return _file_request(state, {"op": "health"}, timeout=timeout)
+    if state.get("transport") == "unix":
+        return _unix_request(state, {"op": "health"}, timeout=timeout)
+    try:
+        request = urllib.request.Request(
+            f"http://{state['host']}:{state['port']}/health",
+            headers={"X-RAGD-Token": str(state["token"])},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+
+
+def _daemon_identity_matches(state: dict, identity: dict | None) -> bool:
+    return bool(
+        identity
+        and identity.get("status") == "ok"
+        and identity.get("pid") == state.get("pid")
+        and identity.get("generation") == state.get("generation")
+        and identity.get("code_fingerprint") == state.get("code_fingerprint")
+    )
+
+
+def _discard_published_state(state: dict) -> None:
+    current = _read_state()
+    if not current:
+        return
+    if (
+        current.get("pid") != state.get("pid")
+        or current.get("generation") != state.get("generation")
+        or current.get("token") != state.get("token")
+    ):
+        return
+    try:
+        STATE_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _read_state() -> dict | None:
@@ -981,25 +1071,8 @@ def _read_state() -> dict | None:
 
 
 def _healthcheck(state: dict, *, timeout: int | float) -> bool:
-    if state.get("transport") == "file":
-        try:
-            heartbeat = Path(str(state["heartbeat_file"]))
-            return heartbeat.exists() and time.time() - heartbeat.stat().st_mtime <= max(float(timeout) + 2.0, 5.0)
-        except OSError:
-            return False
-    if state.get("transport") == "unix":
-        payload = _unix_request(state, {"op": "health"}, timeout=timeout)
-        return bool(payload and payload.get("status") == "ok")
-    try:
-        request = urllib.request.Request(
-            f"http://{state['host']}:{state['port']}/health",
-            headers={"X-RAGD-Token": str(state["token"])},
-            method="GET",
-        )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status == 200
-    except Exception:
-        return False
+    payload = _daemon_health_payload(state, timeout=timeout)
+    return _daemon_identity_matches(state, payload)
 
 
 def _start_daemon(

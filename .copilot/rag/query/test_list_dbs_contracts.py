@@ -62,8 +62,14 @@ class ListDbsContractTests(unittest.TestCase):
 
     def test_json_errors_are_structured_and_stdout_remains_json(self) -> None:
         (self.dbs_root / "ac-rag" / "db.json").write_text("{", encoding="utf-8")
-        with self.assertRaises(SystemExit) as raised:
-            output = self._run_main(["--format", "json"], allow_exit=True)
+        output = io.StringIO()
+        with (
+            mock.patch.object(LIST_DBS, "DBS_ROOT", self.dbs_root),
+            mock.patch.object(sys, "argv", ["list_dbs.py", "--format", "json"]),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            LIST_DBS.main()
         self.assertEqual(1, raised.exception.code)
         payload = json.loads(output.getvalue())
         self.assertEqual("error", payload["status"])
@@ -81,8 +87,7 @@ class ListDbsContractTests(unittest.TestCase):
         arguments: list[str],
         *,
         patch_root: bool = True,
-        allow_exit: bool = False,
-    ) -> str | io.StringIO:
+    ) -> str:
         output = io.StringIO()
         root_patch = (
             mock.patch.object(LIST_DBS, "DBS_ROOT", self.dbs_root)
@@ -91,14 +96,8 @@ class ListDbsContractTests(unittest.TestCase):
         )
         with root_patch, mock.patch.object(sys, "argv", ["list_dbs.py", *arguments]):
             with contextlib.redirect_stdout(output):
-                if allow_exit:
-                    try:
-                        LIST_DBS.main()
-                    except SystemExit:
-                        raise
-                else:
-                    LIST_DBS.main()
-        return output if allow_exit else output.getvalue()
+                LIST_DBS.main()
+        return output.getvalue()
 
     def _create_db(self, name: str, *, title: str, hint: str) -> None:
         root = self.dbs_root / name

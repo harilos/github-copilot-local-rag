@@ -52,6 +52,24 @@ class SixCandidateStore:
 
 
 class NoHitContractTests(unittest.TestCase):
+    def test_plain_acronym_is_not_treated_as_conclusive_unmatched_identifier(self) -> None:
+        evidence = [{"id": "R1", "source": {"path": "related.txt"}, "text": "related"}]
+        payload = {
+            "status": "ok",
+            "evidence": list(evidence),
+            "contexts": list(evidence),
+            "warnings": [],
+        }
+        _add_identifier_diagnostics(
+            payload,
+            FakeStore(),
+            "RAGでポーランドについて教えて",
+            source="any",
+        )
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual(evidence, payload["evidence"])
+        self.assertNotIn("unmatched_identifiers", payload)
+
     def test_unmatched_identifier_isolated_from_normal_contexts(self) -> None:
         evidence = [{"id": "R1", "source": {"path": "related.txt"}, "text": "related"}]
         payload = {
@@ -317,6 +335,55 @@ class SyncFallbackMetadataTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_active_daemon_rejects_stale_runtime_fingerprint_before_healthcheck(self) -> None:
+        state = {
+            "schema": "local-rag.ragd.v2",
+            "pid": 43210,
+            "generation": "generation",
+            "transport": "file",
+            "file_dir": "/tmp/file-transport",
+            "heartbeat_file": "/tmp/heartbeat.json",
+            "token": "token",
+            "code_fingerprint": "old",
+        }
+        with (
+            mock.patch.object(SEARCH, "_read_state", return_value=state),
+            mock.patch.object(SEARCH, "_runtime_code_fingerprint", return_value="new"),
+            mock.patch.object(SEARCH, "_healthcheck") as healthcheck,
+        ):
+            active = SEARCH._active_daemon_state(timeout=1.0)
+        self.assertIsNone(active)
+        healthcheck.assert_not_called()
+
+    def test_daemon_identity_requires_authenticated_matching_process(self) -> None:
+        state = {
+            "pid": 43210,
+            "generation": "generation",
+            "code_fingerprint": "fingerprint",
+        }
+        self.assertTrue(
+            SEARCH._daemon_identity_matches(
+                state,
+                {
+                    "status": "ok",
+                    "pid": 43210,
+                    "generation": "generation",
+                    "code_fingerprint": "fingerprint",
+                },
+            )
+        )
+        self.assertFalse(
+            SEARCH._daemon_identity_matches(
+                state,
+                {
+                    "status": "ok",
+                    "pid": 43210,
+                    "generation": "other",
+                    "code_fingerprint": "fingerprint",
+                },
+            )
+        )
+
     def test_start_timeout_rejects_foreign_state_and_reaps_spawned_process(self) -> None:
         process = mock.Mock()
         process.pid = 43210

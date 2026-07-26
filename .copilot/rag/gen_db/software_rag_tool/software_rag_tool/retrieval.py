@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 from . import catalog
 from .manifest import ConfigMismatchError
-from .tokenize import extract_anchors
+from .tokenize import canonicalize, extract_anchors
 
 
 RRF_K = 60
@@ -87,7 +88,7 @@ def hybrid_query(
             exact_rows = _without_test_fixtures(exact_rows)
             lexical_rows = _without_test_fixtures(lexical_rows)
             metadata_rows = _without_test_fixtures(metadata_rows)
-            if use_dense and not exact_rows:
+            if use_dense and not _has_strong_exact_anchor(question, exact_rows):
                 anchor_rows = _anchor_candidates(question, source=source, backend=backend)
                 lexical_rows, anchor_ids = _merge_anchor_rows(lexical_rows, anchor_rows)
             family_rankings.append(("lexical", 1.1, lexical_rows))
@@ -203,11 +204,21 @@ def _materialize(
     backend: SearchBackend,
 ) -> list[dict[str, Any]]:
     rows_by_id: dict[str, dict[str, Any]] = {}
+    retrieval_debug_by_id: dict[str, dict[str, Any]] = {}
     for _family, _weight, rows in families:
         for row in rows:
             chunk_id = str(row.get("id") or "")
             if chunk_id and chunk_id not in rows_by_id:
                 rows_by_id[chunk_id] = row
+            debug = row.get("debug") or {}
+            if chunk_id and isinstance(debug, dict):
+                selected = {
+                    key: value
+                    for key, value in debug.items()
+                    if key in {"exact_match", "lexical_anchor"}
+                }
+                if selected:
+                    retrieval_debug_by_id.setdefault(chunk_id, {}).update(selected)
 
     catalog_rows = backend.fetch_rows_by_ids(fused.keys())
     output: list[dict[str, Any]] = []
@@ -216,7 +227,11 @@ def _materialize(
         base["id"] = chunk_id
         base["signals"] = sorted(item["signals"])
         base["score"] = item["rrf_score"]
-        base["debug"] = {"rrf_score": item["rrf_score"], "family_ranks": dict(item["family_ranks"])}
+        base["debug"] = {
+            "rrf_score": item["rrf_score"],
+            "family_ranks": dict(item["family_ranks"]),
+            **retrieval_debug_by_id.get(chunk_id, {}),
+        }
         output.append(base)
     output.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
     return output
@@ -262,8 +277,9 @@ def _anchor_rescue(
 ) -> list[dict[str, Any]]:
     rescue_id = ""
     rescue_signal = ""
-    if extract_anchors(question, limit=5) and exact_rows:
-        rescue_id = str(exact_rows[0].get("id") or "")
+    matching_exact_rows = _matching_strong_exact_rows(question, exact_rows)
+    if matching_exact_rows:
+        rescue_id = str(matching_exact_rows[0].get("id") or "")
         rescue_signal = "exact"
     elif anchor_ids:
         rescue_id = str(anchor_ids[0] or "")
@@ -308,6 +324,56 @@ def _strong_anchor(anchor: str) -> bool:
     if any(marker in anchor for marker in ["/", "\\", ".", ":", "_", "-"]):
         return True
     return any(char.isdigit() for char in anchor) and any(char.isalpha() for char in anchor)
+
+
+def _has_strong_exact_anchor(question: str, exact_rows: list[dict[str, Any]]) -> bool:
+    return bool(_matching_strong_exact_rows(question, exact_rows))
+
+
+def _matching_strong_exact_rows(
+    question: str,
+    exact_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    anchors = [
+        anchor
+        for anchor in extract_anchors(question, limit=30)
+        if _strong_anchor(anchor)
+    ]
+    if not anchors:
+        return []
+    canonical_anchors = {canonicalize(anchor) for anchor in anchors}
+    matching: list[dict[str, Any]] = []
+    for row in exact_rows:
+        debug = row.get("debug") or {}
+        exact_debug = debug.get("exact_match") if isinstance(debug, dict) else {}
+        matched_terms = {
+            canonicalize(str(term))
+            for term in (exact_debug or {}).get("matched_terms", [])
+            if term
+        }
+        if canonical_anchors & matched_terms:
+            matching.append(row)
+            continue
+        if any(_raw_anchor_occurs(row, anchor) for anchor in anchors):
+            matching.append(row)
+    return matching
+
+
+def _raw_anchor_occurs(row: dict[str, Any], anchor: str) -> bool:
+    metadata = row.get("metadata") or {}
+    haystack = "\n".join(
+        [
+            str(row.get("text") or ""),
+            str(metadata.get("path") or ""),
+            str(metadata.get("title") or ""),
+            str(metadata.get("uri") or ""),
+        ]
+    )
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(haystack))
 
 
 def _same_doc(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -355,7 +421,10 @@ def _expand_neighbors(rows: list[dict[str, Any]], *, backend: SearchBackend) -> 
             continue
         texts: list[str] = []
         seen_text: set[str] = set()
-        for neighbor in neighbors:
+        ordered_neighbors = neighbors
+        if {"lexical_anchor", "exact"} & set(row.get("signals") or []):
+            ordered_neighbors = [row, *neighbors]
+        for neighbor in ordered_neighbors:
             text = str(neighbor.get("text") or "").strip()
             if not text or text in seen_text:
                 continue

@@ -124,6 +124,70 @@ class HybridAnchorContractTests(unittest.TestCase):
         self.assertEqual("exact", rows[0]["id"])
         self.assertEqual(0, backend.calls["anchor"])
 
+    def test_plain_acronym_exact_candidate_does_not_block_rare_anchor(self) -> None:
+        backend = FakeBackend()
+        backend.exact_rows = [result_row("rag", "RAG background", signals=["exact"])]
+        rows = hybrid_query(
+            "RAGでポーランドの空調について教えて",
+            top_k=1,
+            backend=backend,
+        )
+        self.assertEqual("poland", rows[0]["id"])
+        self.assertEqual(1, backend.calls["anchor"])
+
+    def test_unmatched_strong_identifier_does_not_promote_weak_exact_row(self) -> None:
+        backend = FakeBackend()
+        backend.exact_rows = [
+            {
+                **result_row("rag", "RAG background", signals=["exact"]),
+                "debug": {
+                    "exact_match": {
+                        "matched_terms": ["rag"],
+                    }
+                },
+            }
+        ]
+        rows = hybrid_query(
+            "RAGでA2Wとポーランドの空調について教えて",
+            top_k=1,
+            backend=backend,
+        )
+        self.assertEqual("poland", rows[0]["id"])
+        self.assertEqual(1, backend.calls["anchor"])
+
+    def test_anchor_text_precedes_neighbors_before_budget_truncation(self) -> None:
+        backend = FakeBackend()
+        previous = result_row("previous", "x" * 2_000)
+        anchor = backend.anchor_rows[0]
+        following = result_row("following", "y" * 2_000)
+        backend.get_neighbor_rows = (  # type: ignore[method-assign]
+            lambda _chunk_uid, *, window=1: [previous, anchor, following]
+        )
+        rows = hybrid_query(
+            "RAGでポーランドの空調について教えて",
+            top_k=1,
+            budget_tokens=200,
+            backend=backend,
+        )
+        self.assertIn("Poland", rows[0]["text"])
+
+    def test_exact_text_precedes_neighbors_before_budget_truncation(self) -> None:
+        backend = FakeBackend()
+        exact = result_row("exact", "A2L direct evidence", signals=["exact"])
+        backend.exact_rows = [exact]
+        previous = result_row("previous", "x" * 2_000)
+        following = result_row("following", "y" * 2_000)
+        backend.get_neighbor_rows = (  # type: ignore[method-assign]
+            lambda _chunk_uid, *, window=1: [previous, exact, following]
+        )
+        rows = hybrid_query(
+            "A2Lについて",
+            top_k=1,
+            budget_tokens=200,
+            backend=backend,
+        )
+        self.assertIn("A2L", rows[0]["text"])
+
     def test_anchor_rescue_is_disabled_for_lexical_only_evaluation(self) -> None:
         backend = FakeBackend()
         rows = hybrid_query(
@@ -166,7 +230,7 @@ class HybridAnchorContractTests(unittest.TestCase):
 
 
 class CatalogAnchorContractTests(unittest.TestCase):
-    def test_low_chunk_frequency_token_is_selected_without_schema_migration(self) -> None:
+    def test_low_document_frequency_token_is_selected_without_schema_migration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.sqlite"
             with catalog.connect(path) as connection:
@@ -176,10 +240,23 @@ class CatalogAnchorContractTests(unittest.TestCase):
                         f"generic-{index}",
                         "空調 冷房 efficiency general",
                     )
-                self._insert_record(
+                poland_doc_pk = self._insert_record(
                     connection,
                     "poland",
                     "ポーランド 空調 market evidence",
+                )
+                for index in range(1, 7):
+                    self._insert_chunk(
+                        connection,
+                        poland_doc_pk,
+                        f"poland-chunk-{index}",
+                        "poland",
+                        "ポーランド additional evidence",
+                    )
+                self._insert_record(
+                    connection,
+                    "poland-second-document",
+                    "ポーランド regional evidence",
                 )
                 connection.commit()
             rows = catalog.anchor_lexical_search(
@@ -187,7 +264,7 @@ class CatalogAnchorContractTests(unittest.TestCase):
                 top_k=1,
                 path=path,
             )
-            self.assertEqual("poland-chunk", rows[0]["id"])
+            self.assertTrue(str(rows[0]["id"]).startswith("poland-chunk"))
             self.assertIn("ポーランド", rows[0]["text"])
             self.assertEqual(
                 0,
@@ -195,7 +272,7 @@ class CatalogAnchorContractTests(unittest.TestCase):
             )
 
     @staticmethod
-    def _insert_record(connection: Any, record_id: str, text: str) -> None:
+    def _insert_record(connection: Any, record_id: str, text: str) -> int:
         cursor = connection.execute(
             """
             INSERT INTO document(doc_id, path, metadata_json, updated_at)
@@ -204,6 +281,23 @@ class CatalogAnchorContractTests(unittest.TestCase):
             (record_id, f"{record_id}.txt"),
         )
         doc_pk = int(cursor.lastrowid)
+        CatalogAnchorContractTests._insert_chunk(
+            connection,
+            doc_pk,
+            f"{record_id}-chunk",
+            record_id,
+            text,
+        )
+        return doc_pk
+
+    @staticmethod
+    def _insert_chunk(
+        connection: Any,
+        doc_pk: int,
+        chunk_uid: str,
+        doc_id: str,
+        text: str,
+    ) -> None:
         cursor = connection.execute(
             """
             INSERT INTO chunk(
@@ -211,7 +305,7 @@ class CatalogAnchorContractTests(unittest.TestCase):
             )
             VALUES(?, ?, ?, ?, '{}', '{}', 'now')
             """,
-            (f"{record_id}-chunk", doc_pk, record_id, text),
+            (chunk_uid, doc_pk, doc_id, text),
         )
         chunk_pk = int(cursor.lastrowid)
         connection.execute(
@@ -256,6 +350,63 @@ class LightweightJsonContractTests(unittest.TestCase):
         self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
         self.assertEqual(["R2"], [item["id"] for item in payload["background_context"]])
         self.assertTrue(payload["warnings"])
+
+    def test_plain_acronym_exact_result_is_background_when_anchor_exists(self) -> None:
+        rows = [
+            {
+                **result_row("poland", "ポーランド evidence", signals=["lexical_anchor"]),
+                "rank": 1,
+            },
+            {
+                **result_row("rag", "RAG background", signals=["exact"]),
+                "rank": 2,
+            },
+        ]
+        payload = json_payload(
+            rows,
+            "RAGでポーランドの空調について教えて",
+            "ac-rag",
+            900,
+        )
+        self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
+        self.assertEqual(["R2"], [item["id"] for item in payload["background_context"]])
+
+    def test_unmatched_strong_identifier_does_not_make_weak_exact_direct_evidence(self) -> None:
+        rows = [
+            {
+                **result_row("poland", "ポーランド evidence", signals=["lexical_anchor"]),
+                "rank": 1,
+            },
+            {
+                **result_row("rag", "RAG background", signals=["exact"]),
+                "rank": 2,
+                "debug": {"exact_match": {"matched_terms": ["rag"]}},
+            },
+        ]
+        payload = json_payload(
+            rows,
+            "RAGでA2Wとポーランドの空調について教えて",
+            "ac-rag",
+            900,
+        )
+        self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
+        self.assertEqual(["R2"], [item["id"] for item in payload["background_context"]])
+
+    def test_matching_strong_exact_is_separated_from_dense_background(self) -> None:
+        rows = [
+            {
+                **result_row("exact", "A2L evidence", signals=["exact"]),
+                "rank": 1,
+                "debug": {"exact_match": {"matched_terms": ["a2l"]}},
+            },
+            {
+                **result_row("general", "General cooling background", signals=["dense"]),
+                "rank": 2,
+            },
+        ]
+        payload = json_payload(rows, "A2Lについて", "ac-rag", 900)
+        self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
+        self.assertEqual(["R2"], [item["id"] for item in payload["background_context"]])
 
     def test_empty_result_is_no_hit_with_legacy_status(self) -> None:
         payload = json_payload([], "question", "ac-rag", 900)
