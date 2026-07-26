@@ -726,6 +726,9 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             SEARCH.WINDOWS_TASKKILL_TIMEOUT_SECONDS,
             SEARCH.COMPACT_JSON_OUTPUT_RESERVE_SECONDS,
         )
+        self.assertIs(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertNotIn("text", run.call_args.kwargs)
 
     def test_sync_timeout_terminates_process_group_without_pipe_hang(self) -> None:
         child = (

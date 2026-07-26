@@ -718,8 +718,8 @@ def _terminate_process_tree(
         try:
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=max(0.01, timeout),
             )
         except (OSError, subprocess.TimeoutExpired):
