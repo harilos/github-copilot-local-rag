@@ -112,6 +112,16 @@ Developer diagnostics:
 python ~/.copilot/rag/query/search.py --db project-rag --explain --format json "A2Wに関する情報を教えて"
 ```
 
+Evaluation-only retrieval modes:
+
+```bash
+python ~/.copilot/rag/query/search.py --db project-rag --retrieval-mode lexical "質問"
+python ~/.copilot/rag/query/search.py --db project-rag --retrieval-mode dense "質問"
+python ~/.copilot/rag/query/search.py --db project-rag --retrieval-mode hybrid "質問"
+```
+
+Omitting `--retrieval-mode` keeps the normal hybrid behavior.
+
 ## Create Or Update A DB
 
 ```bash
@@ -125,6 +135,14 @@ python ~/.copilot/rag/gen_db/rebuild_component.py --db project-rag --component l
 Each DB gets `VERSION.json` at creation time. It contains `created_at`, `db_hash`, the Chroma collection name, and the tool hash used to create the DB layout.
 
 `build_db.py` and `add_data.py` process files in small resumable batches. Use `status.py` before starting another long run. Use `build_db.py --force-rebuild` only when you intentionally want to discard prior clean records and recreate the Chroma collection.
+
+Evaluation-only chunk variants can be built without changing defaults:
+
+```bash
+python ~/.copilot/rag/gen_db/build_db.py --db project-c1000-rag --root /path/to/docs --source-id project --force-rebuild --chunk-max-chars 1000 --chunk-overlap 120
+```
+
+Omitting these options keeps the normal `1400` character chunk size and `160` character overlap.
 
 `catalog.sqlite` uses compact schema v2: document metadata is stored once per document, file lookup is document-level, and identifiers are stored as a term dictionary plus term-chunk postings. `embedding_text` is not stored in SQLite; vector rebuilds read it from clean JSONL.
 

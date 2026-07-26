@@ -32,6 +32,14 @@ python ~/.copilot/rag/gen_db/add_data.py --db project-rag --root /path/to/source
 
 `build_db.py` defaults to resumable behavior. It creates or continues a build without discarding previous progress. Use `--force-rebuild` only when you intentionally want to delete clean records and recreate the Chroma collection and SQLite catalog.
 
+Evaluation-only chunk variants can be created with optional chunker settings:
+
+```bash
+python ~/.copilot/rag/gen_db/build_db.py --db project-c1000-rag --root /path/to/source --source-id project --force-rebuild --chunk-max-chars 1000 --chunk-overlap 120
+```
+
+If omitted, the default chunker remains `1400` characters with `160` character overlap.
+
 `add_data.py` keeps existing DB contents and only processes changed or new files. Progress is saved after each batch in `logs/index_state.json`, and current status is written to `logs/progress.json`, so rerunning the same command resumes instead of starting over. Each batch updates both Chroma and `catalog.sqlite`.
 
 New builds use compact catalog schema v2. Document metadata and file lookup terms are stored once per document, identifier exact search uses a term dictionary plus term-chunk postings, and `embedding_text` is omitted from SQLite. Older catalog schemas are not migrated in place; rebuild from clean JSONL or run a force rebuild.

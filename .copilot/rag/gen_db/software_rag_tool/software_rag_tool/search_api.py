@@ -12,6 +12,7 @@ from .retrieval import cold_lexical_fast_path, hybrid_query
 
 
 _REGISTRY: DbRegistry | None = None
+RETRIEVAL_MODES = {"hybrid", "lexical", "dense"}
 
 
 def registry() -> DbRegistry:
@@ -33,21 +34,26 @@ def run_search_payload(
     explain: bool = False,
     include_db_hint: bool = False,
     use_dense: bool = True,
+    retrieval_mode: str = "hybrid",
 ) -> dict[str, Any]:
     load_env()
     name = require_db_name(db_name)
     store = registry().get(name)
+    mode = _normalize_retrieval_mode(retrieval_mode, use_dense=use_dense)
     rows = hybrid_query(
         question,
         top_k=top_k,
         source=source,
         budget_tokens=budget_tokens,
         explain=explain,
-        use_dense=use_dense,
+        use_dense=mode in {"hybrid", "dense"},
+        use_lexical=mode in {"hybrid", "lexical"},
         backend=store,
     )
     db_hint = store.context.profile_hint if include_db_hint else ""
-    return json_payload(rows, question, name, max_chars, db_hint=db_hint)
+    payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
+    payload["retrieval_mode"] = mode
+    return payload
 
 
 def try_cold_lexical_fast_path(
@@ -77,7 +83,17 @@ def try_cold_lexical_fast_path(
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
     payload["fast_path"] = "cold_lexical"
+    payload["retrieval_mode"] = "hybrid"
     return payload
+
+
+def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
+    if not use_dense and mode == "hybrid":
+        return "lexical"
+    normalized = (mode or "hybrid").strip().lower()
+    if normalized not in RETRIEVAL_MODES:
+        raise ValueError(f"retrieval_mode must be one of {sorted(RETRIEVAL_MODES)}")
+    return normalized
 
 
 def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_chars: int, *, db_hint: str = "") -> dict[str, Any]:

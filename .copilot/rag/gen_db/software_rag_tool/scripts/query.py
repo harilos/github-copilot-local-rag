@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="json")
     parser.add_argument("--include-db-hint", action="store_true")
+    parser.add_argument("--retrieval-mode", choices=["hybrid", "lexical", "dense"], default="hybrid")
     parser.add_argument("--lexical-only", action="store_true", help="Skip dense vector search")
     args = parser.parse_args()
     question = sys.stdin.read().strip() if args.stdin else (args.question or "").strip()
@@ -40,6 +41,7 @@ def main() -> None:
         explain=args.explain,
         include_db_hint=args.include_db_hint,
         use_dense=not args.lexical_only,
+        retrieval_mode="lexical" if args.lexical_only else args.retrieval_mode,
     )
     print(payload_to_text(payload, args.format, explain=args.explain))
 

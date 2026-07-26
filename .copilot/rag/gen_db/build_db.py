@@ -20,6 +20,8 @@ def main() -> None:
     parser.add_argument("--force-rebuild", action="store_true", help="Delete clean records and recreate the Chroma collection")
     parser.add_argument("--append", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
+    parser.add_argument("--chunk-max-chars", type=int, default=1400, help="Optional chunk size for evaluation builds")
+    parser.add_argument("--chunk-overlap", type=int, default=160, help="Optional chunk overlap for evaluation builds")
     args = parser.parse_args()
     if args.resume and args.force_rebuild:
         parser.error("--resume and --force-rebuild cannot be used together")
@@ -41,6 +43,10 @@ def main() -> None:
         str(args.batch_size_files),
         "--operation",
         "build",
+        "--chunk-max-chars",
+        str(args.chunk_max_chars),
+        "--chunk-overlap",
+        str(args.chunk_overlap),
     ]
     if args.force_rebuild:
         cmd.extend(["--reset-db", "--reset-clean"])

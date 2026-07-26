@@ -26,6 +26,8 @@ def main() -> None:
     parser.add_argument("--reset-db", action="store_true", help="Delete and recreate the Chroma collection before adding data")
     parser.add_argument("--reset-clean", action="store_true", help="Delete clean records and resume state before adding data")
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
+    parser.add_argument("--chunk-max-chars", type=int, default=1400, help="Optional chunk size for evaluation builds")
+    parser.add_argument("--chunk-overlap", type=int, default=160, help="Optional chunk overlap for evaluation builds")
     parser.add_argument("--operation", default="add", choices=["add", "build"], help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -43,6 +45,8 @@ def main() -> None:
         reset_clean=args.reset_clean,
         retry_errors=args.retry_errors,
         operation=args.operation,
+        chunk_max_chars=args.chunk_max_chars,
+        chunk_overlap=args.chunk_overlap,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 

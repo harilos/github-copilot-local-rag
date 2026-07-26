@@ -58,13 +58,16 @@ def build_records_for_file(
     path: Path,
     source_id: str = "local",
     content_hash: str | None = None,
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
 ) -> list[dict[str, Any]]:
     root = root.resolve()
     path = path.resolve()
     rel = str(path.relative_to(root))
-    sections = extract_sections(path)
+    sections = extract_sections(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     content_hash = content_hash or file_content_hash(path)
     doc_id = sha256_text(f"{source_id}:{rel}:{content_hash}")
+    chunker_version = f"jp-sw-v1:max_chars={chunk_max_chars}:overlap={chunk_overlap}"
 
     records: list[dict[str, Any]] = []
     chunk_index = 0
@@ -73,7 +76,7 @@ def build_records_for_file(
         if not text:
             continue
         text_hash = sha256_text(text)
-        chunk_id = sha256_text(f"{doc_id}:jp-sw-v1:{chunk_index}")
+        chunk_id = sha256_text(f"{doc_id}:{chunker_version}:{chunk_index}")
         embedding_text = f"{rel}\n{section.title}\n{text}"
         records.append(
             {
@@ -97,7 +100,9 @@ def build_records_for_file(
                     "content_hash": content_hash,
                     "chunk_hash": text_hash,
                     "text_hash": text_hash,
-                    "chunker_version": "jp-sw-v1",
+                    "chunker_version": chunker_version,
+                    "chunk_max_chars": chunk_max_chars,
+                    "chunk_overlap": chunk_overlap,
                 },
             }
         )
@@ -105,7 +110,12 @@ def build_records_for_file(
     return records
 
 
-def build_records(root: Path, source_id: str = "local") -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def build_records(
+    root: Path,
+    source_id: str = "local",
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     root = root.resolve()
@@ -113,7 +123,15 @@ def build_records(root: Path, source_id: str = "local") -> tuple[list[dict[str, 
     for path in iter_input_files(root):
         rel = str(path.relative_to(root))
         try:
-            records.extend(build_records_for_file(root, path, source_id=source_id))
+            records.extend(
+                build_records_for_file(
+                    root,
+                    path,
+                    source_id=source_id,
+                    chunk_max_chars=chunk_max_chars,
+                    chunk_overlap=chunk_overlap,
+                )
+            )
         except Exception as exc:
             errors.append({"path": rel, "error": f"{type(exc).__name__}: {exc}"})
             continue

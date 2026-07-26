@@ -40,42 +40,42 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
-def extract_sections(path: Path) -> list[TextSection]:
+def extract_sections(path: Path, *, chunk_max_chars: int = 1400, chunk_overlap: int = 160) -> list[TextSection]:
     ext = path.suffix.lower()
     if ext in {".md", ".txt", ".log", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".cs", ".rb", ".php", ".sh", ".ps1", ".sql", ".json", ".yaml", ".yml", ".toml", ".ini"}:
-        return _extract_plain(path)
+        return _extract_plain(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     if ext == ".pdf":
-        return _extract_pdf(path)
+        return _extract_pdf(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     if ext == ".docx":
-        return _extract_docx(path)
+        return _extract_docx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     if ext == ".pptx":
-        return _extract_pptx(path)
+        return _extract_pptx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     if ext == ".xlsx":
-        return _extract_xlsx(path)
+        return _extract_xlsx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     if ext in {".doc", ".ppt"}:
-        return _extract_legacy_office(path)
+        return _extract_legacy_office(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
     return []
 
 
-def _extract_plain(path: Path) -> list[TextSection]:
+def _extract_plain(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    return chunk_text(path.name, text)
+    return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
 
 
-def _extract_pdf(path: Path) -> list[TextSection]:
+def _extract_pdf(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
     sections: list[TextSection] = []
     for i, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        sections.extend(chunk_text(f"Page {i}", text))
+        sections.extend(chunk_text(f"Page {i}", text, max_chars=chunk_max_chars, overlap=chunk_overlap))
     if sections:
         return sections
     return [TextSection(title=path.name, text="")]
 
 
-def _extract_docx(path: Path) -> list[TextSection]:
+def _extract_docx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     from docx import Document
 
     doc = Document(str(path))
@@ -88,10 +88,10 @@ def _extract_docx(path: Path) -> list[TextSection]:
             cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if cells:
                 parts.append(" | ".join(cells))
-    return chunk_text(path.name, "\n".join(parts))
+    return chunk_text(path.name, "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap)
 
 
-def _extract_pptx(path: Path) -> list[TextSection]:
+def _extract_pptx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     from pptx import Presentation
 
     prs = Presentation(str(path))
@@ -101,11 +101,11 @@ def _extract_pptx(path: Path) -> list[TextSection]:
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text.strip():
                 parts.append(shape.text)
-        sections.extend(chunk_text(f"Slide {i}", "\n".join(parts)))
+        sections.extend(chunk_text(f"Slide {i}", "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap))
     return sections
 
 
-def _extract_xlsx(path: Path) -> list[TextSection]:
+def _extract_xlsx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     from openpyxl import load_workbook
 
     wb = load_workbook(str(path), read_only=True, data_only=True)
@@ -116,19 +116,19 @@ def _extract_xlsx(path: Path) -> list[TextSection]:
             values = [str(v) for v in row if v is not None and str(v).strip()]
             if values:
                 rows.append("\t".join(values))
-        sections.extend(chunk_text(sheet.title, "\n".join(rows)))
+        sections.extend(chunk_text(sheet.title, "\n".join(rows), max_chars=chunk_max_chars, overlap=chunk_overlap))
     return sections
 
 
-def _extract_legacy_office(path: Path) -> list[TextSection]:
+def _extract_legacy_office(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
     if path.suffix.lower() == ".doc" and platform.system() == "Darwin":
         text = _convert_doc_with_textutil(path)
         if text:
-            return chunk_text(path.name, text)
+            return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
 
     text = _convert_with_libreoffice(path)
     if text:
-        return chunk_text(path.name, text)
+        return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
     raise RuntimeError(f"Failed to extract legacy Office file: {path}")
 
 

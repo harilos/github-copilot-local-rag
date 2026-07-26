@@ -45,6 +45,12 @@ def main() -> None:
     parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="prompt")
     parser.add_argument("--include-db-hint", action="store_true")
+    parser.add_argument(
+        "--retrieval-mode",
+        choices=["hybrid", "lexical", "dense"],
+        default="hybrid",
+        help="Optional evaluation mode. Default hybrid preserves normal behavior.",
+    )
     parser.add_argument("--no-daemon", action="store_true", help="Run synchronously without ragd")
     parser.add_argument(
         "--daemon-idle-timeout",
@@ -106,6 +112,7 @@ def main() -> None:
         "budget_tokens": args.budget_tokens,
         "explain": args.explain,
         "include_db_hint": args.include_db_hint,
+        "retrieval_mode": args.retrieval_mode,
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
@@ -113,14 +120,15 @@ def main() -> None:
         desired_transport = _desired_transport()
         state = _active_daemon_state(timeout=min(args.timeout or 3, 3), desired_transport=desired_transport)
         if not state:
-            fast_payload = _try_fast_path(
-                db_name=resolution.db_name,
-                question=question,
-                args=args,
-            )
-            if fast_payload:
-                print(payload_to_text(fast_payload, args.format, explain=args.explain))
-                return
+            if args.retrieval_mode == "hybrid":
+                fast_payload = _try_fast_path(
+                    db_name=resolution.db_name,
+                    question=question,
+                    args=args,
+                )
+                if fast_payload:
+                    print(payload_to_text(fast_payload, args.format, explain=args.explain))
+                    return
             state = _start_daemon(
                 python=python,
                 env=env,
@@ -167,6 +175,8 @@ def _run_sync_script(*, python: str, env: dict[str, str], args: argparse.Namespa
     )
     if args.budget_tokens:
         cmd.extend(["--budget-tokens", str(args.budget_tokens)])
+    if args.retrieval_mode != "hybrid":
+        cmd.extend(["--retrieval-mode", args.retrieval_mode])
     if args.stdin:
         cmd.append("--stdin")
     if args.explain:

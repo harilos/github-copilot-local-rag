@@ -82,6 +82,16 @@ python search.py --db project-rag --explain --format json "A2W"
 python search.py --db project-rag --no-daemon "同期実行したい質問"
 ```
 
+Evaluation-only retrieval modes:
+
+```bash
+python search.py --db project-rag --retrieval-mode lexical "質問"
+python search.py --db project-rag --retrieval-mode dense "質問"
+python search.py --db project-rag --retrieval-mode hybrid "質問"
+```
+
+The default remains `hybrid`.
+
 List DBs:
 
 ```bash

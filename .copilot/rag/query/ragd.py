@@ -126,7 +126,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 budget_tokens=int(request["budget_tokens"]) if request.get("budget_tokens") else None,
                 explain=bool(request.get("explain")),
                 include_db_hint=bool(request.get("include_db_hint")),
-                use_dense=True,
+                retrieval_mode=str(request.get("retrieval_mode") or "hybrid"),
             )
         except Exception as exc:
             payload = {
@@ -204,7 +204,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
                 budget_tokens=int(payload["budget_tokens"]) if payload.get("budget_tokens") else None,
                 explain=bool(payload.get("explain")),
                 include_db_hint=bool(payload.get("include_db_hint")),
-                use_dense=True,
+                retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
             )
         except Exception as exc:
             result = {
@@ -366,7 +366,7 @@ def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
             budget_tokens=int(payload["budget_tokens"]) if payload.get("budget_tokens") else None,
             explain=bool(payload.get("explain")),
             include_db_hint=bool(payload.get("include_db_hint")),
-            use_dense=True,
+            retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
         )
     except Exception as exc:
         return {

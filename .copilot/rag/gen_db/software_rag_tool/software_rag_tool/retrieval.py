@@ -56,6 +56,7 @@ def hybrid_query(
     budget_tokens: int | None = None,
     explain: bool = False,
     use_dense: bool = True,
+    use_lexical: bool = True,
     backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]]:
     backend = backend or _GlobalBackend()
@@ -71,15 +72,17 @@ def hybrid_query(
         except Exception as exc:
             warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
 
-    try:
-        exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
-        family_rankings.append(("lexical", 1.1, lexical_rows))
-        family_rankings.append(("metadata", 0.7, metadata_rows))
-        if exact_rows:
-            family_rankings.append(("exact", 1.4, exact_rows))
-    except Exception as exc:
-        warnings.append(f"catalog search unavailable: {type(exc).__name__}: {exc}")
-        exact_rows = []
+    exact_rows: list[dict[str, Any]] = []
+    if use_lexical:
+        try:
+            exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
+            family_rankings.append(("lexical", 1.1, lexical_rows))
+            family_rankings.append(("metadata", 0.7, metadata_rows))
+            if exact_rows:
+                family_rankings.append(("exact", 1.4, exact_rows))
+        except Exception as exc:
+            warnings.append(f"catalog search unavailable: {type(exc).__name__}: {exc}")
+            exact_rows = []
 
     fused = _weighted_rrf(family_rankings)
     rows = _materialize(fused, family_rankings, backend=backend)

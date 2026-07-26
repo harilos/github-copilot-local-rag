@@ -25,9 +25,15 @@ def add_or_update_root(
     reset_clean: bool = False,
     retry_errors: bool = False,
     operation: str = "add",
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
 ) -> dict[str, Any]:
     if batch_size_files <= 0:
         raise ValueError("batch_size_files must be positive")
+    if chunk_max_chars <= 0:
+        raise ValueError("chunk_max_chars must be positive")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be zero or positive")
 
     root = root.resolve()
     if not root.exists():
@@ -44,6 +50,8 @@ def add_or_update_root(
         reset_db=reset_db,
         reset_clean=reset_clean,
         retry_errors=retry_errors,
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
         files_total=0,
         files_done=0,
         indexed_files=0,
@@ -62,6 +70,8 @@ def add_or_update_root(
         source_id=source_id,
         reset_db=reset_db,
         reset_clean=reset_clean,
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
     )
 
     if reset_clean:
@@ -95,7 +105,16 @@ def add_or_update_root(
         for path in files:
             rel = str(path.resolve().relative_to(root))
             write_progress(status="running", phase="extract", current_file=rel)
-            item = _prepare_file(root, path, source_id, state, retry_errors, force_index=force_index)
+            item = _prepare_file(
+                root,
+                path,
+                source_id,
+                state,
+                retry_errors,
+                force_index=force_index,
+                chunk_max_chars=chunk_max_chars,
+                chunk_overlap=chunk_overlap,
+            )
             status = item["status"]
             if status == "skip":
                 summary["skipped_files"] += 1
@@ -168,20 +187,30 @@ def _prepare_file(
     state: dict[str, Any],
     retry_errors: bool,
     force_index: bool = False,
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
 ) -> dict[str, Any]:
     rel = str(path.resolve().relative_to(root))
     key = _state_key(source_id, rel)
     content_hash = file_content_hash(path)
     prev = state["files"].get(key)
+    chunker_config = {"max_chars": chunk_max_chars, "overlap": chunk_overlap}
 
-    if not force_index and prev and prev.get("content_hash") == content_hash:
+    if not force_index and prev and prev.get("content_hash") == content_hash and prev.get("chunker_config") == chunker_config:
         if prev.get("status") == "indexed":
             return {"status": "skip", "rel": rel}
         if prev.get("status") == "error" and not retry_errors:
             return {"status": "skip", "rel": rel}
 
     try:
-        records = build_records_for_file(root, path, source_id=source_id, content_hash=content_hash)
+        records = build_records_for_file(
+            root,
+            path,
+            source_id=source_id,
+            content_hash=content_hash,
+            chunk_max_chars=chunk_max_chars,
+            chunk_overlap=chunk_overlap,
+        )
     except Exception as exc:
         return {
             "status": "error",
@@ -189,6 +218,7 @@ def _prepare_file(
             "rel": rel,
             "source_id": source_id,
             "content_hash": content_hash,
+            "chunker_config": chunker_config,
             "previous_record_ids": list((prev or {}).get("record_ids") or []),
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -199,6 +229,7 @@ def _prepare_file(
         "rel": rel,
         "source_id": source_id,
         "content_hash": content_hash,
+        "chunker_config": chunker_config,
         "previous_record_ids": list((prev or {}).get("record_ids") or []),
         "records": records,
     }
@@ -265,6 +296,7 @@ def _flush_batch(
             "source_id": item["source_id"],
             "path": item["rel"],
             "content_hash": item["content_hash"],
+            "chunker_config": item.get("chunker_config") or {},
             "record_ids": record_ids,
             "record_count": len(record_ids),
             "records_path": str(record_path),
