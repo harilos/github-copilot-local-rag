@@ -1327,9 +1327,12 @@ def _start_daemon(
             state = _read_state()
             if (
                 state
-                and state.get("generation") == token
-                and state.get("pid") == process.pid
-                and state.get("transport", "tcp") == transport
+                and _spawned_daemon_state_matches(
+                    state,
+                    generation=token,
+                    launcher_pid=process.pid,
+                    transport=transport,
+                )
                 and _healthcheck(state, timeout=min(1.0, remaining))
             ):
                 return state
@@ -1343,7 +1346,7 @@ def _start_daemon(
         if (
             state
             and state.get("generation") == token
-            and state.get("pid") == process.pid
+            and state.get("transport", "tcp") == transport
         ):
             try:
                 STATE_FILE.unlink()
@@ -1360,6 +1363,35 @@ def _start_daemon(
         return None
     finally:
         _release_start_lock(lock_fd)
+
+
+def _spawned_daemon_state_matches(
+    state: dict,
+    *,
+    generation: str,
+    launcher_pid: int,
+    transport: str,
+) -> bool:
+    """Validate the state published by the daemon spawned for this attempt.
+
+    A Windows virtual-environment launcher can keep its own PID while the
+    actual interpreter publishes a child PID. The unguessable per-attempt
+    generation is also the authenticated daemon token, so the child PID is
+    accepted only on Windows and is still verified by the health response.
+    """
+    if (
+        state.get("generation") != generation
+        or state.get("token") != generation
+        or state.get("transport", "tcp") != transport
+    ):
+        return False
+    try:
+        daemon_pid = int(state.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if daemon_pid <= 0:
+        return False
+    return sys.platform.startswith("win") or daemon_pid == launcher_pid
 
 
 def _acquire_start_lock() -> int | None:

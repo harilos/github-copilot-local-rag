@@ -925,6 +925,62 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(expected_state, state)
         terminate.assert_not_called()
 
+    def test_windows_start_accepts_authenticated_venv_launcher_child_pid(self) -> None:
+        process = mock.Mock()
+        process.pid = 43210
+        process.poll.return_value = None
+        child_state = {
+            "schema": "local-rag.ragd.v2",
+            "pid": 54321,
+            "generation": "expected-generation",
+            "transport": "tcp",
+            "host": "127.0.0.1",
+            "port": 12345,
+            "token": "expected-generation",
+        }
+        with (
+            mock.patch.object(SEARCH.sys, "platform", "win32"),
+            mock.patch.object(SEARCH, "_acquire_start_lock", return_value=99),
+            mock.patch.object(SEARCH, "_release_start_lock"),
+            mock.patch.object(SEARCH, "_free_port", return_value=12345),
+            mock.patch.object(
+                SEARCH.secrets,
+                "token_hex",
+                return_value="expected-generation",
+            ),
+            mock.patch.object(SEARCH.subprocess, "Popen", return_value=process),
+            mock.patch.object(SEARCH, "_read_state", return_value=child_state),
+            mock.patch.object(SEARCH, "_healthcheck", return_value=True),
+            mock.patch.object(SEARCH, "_terminate_process_tree") as terminate,
+            mock.patch.object(Path, "open", mock.mock_open()),
+        ):
+            state = SEARCH._start_daemon(
+                python="python",
+                env={},
+                idle_timeout=60,
+                startup_timeout=1.0,
+                transport="tcp",
+            )
+        self.assertEqual(child_state, state)
+        terminate.assert_not_called()
+
+    def test_non_windows_start_rejects_different_launcher_and_daemon_pids(self) -> None:
+        state = {
+            "pid": 54321,
+            "generation": "generation",
+            "token": "generation",
+            "transport": "tcp",
+        }
+        with mock.patch.object(SEARCH.sys, "platform", "darwin"):
+            self.assertFalse(
+                SEARCH._spawned_daemon_state_matches(
+                    state,
+                    generation="generation",
+                    launcher_pid=43210,
+                    transport="tcp",
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
