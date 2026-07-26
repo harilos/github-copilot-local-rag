@@ -477,6 +477,12 @@ def _run_sync_script(
     request_started: float | None = None,
 ) -> None:
     script = TOOL_ROOT / "scripts" / "query.py"
+    child_format = (
+        "json"
+        if args.format == "prompt"
+        and bool((execution_metadata or {}).get("fallback_dense_skipped"))
+        else args.format
+    )
     cmd = [
         python,
         str(script),
@@ -492,7 +498,7 @@ def _run_sync_script(
             "--max-chars",
             str(args.max_chars),
             "--format",
-            args.format,
+            child_format,
         ]
     )
     effective_budget_tokens = _effective_budget_tokens(args)
@@ -547,7 +553,7 @@ def _run_sync_script(
         )
         if completed.stderr:
             print(completed.stderr, file=sys.stderr, end="")
-        if args.format == "json":
+        if child_format == "json":
             try:
                 payload = json.loads(completed.stdout)
             except json.JSONDecodeError:
@@ -761,7 +767,7 @@ def _terminate_process_tree(
         return
     if sys.platform.startswith("win"):
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -772,6 +778,12 @@ def _terminate_process_tree(
                 process.kill()
             except OSError:
                 pass
+        else:
+            if completed.returncode != 0 and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
         return
     try:
         os.killpg(process.pid, signal.SIGKILL)

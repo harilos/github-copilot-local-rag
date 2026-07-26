@@ -149,6 +149,19 @@ class NoHitContractTests(unittest.TestCase):
         self.assertEqual(["A2W"], payload["unmatched_identifiers"])
         self.assertEqual(["raw-1"], [row["id"] for row in payload["results"]])
         self.assertEqual(["raw-2"], [row["id"] for row in payload["related_results"]])
+        prompt = payload_to_prompt(payload)
+        evidence_section, related_section = prompt.split(
+            "## Related search candidates (not exact evidence)",
+            maxsplit=1,
+        )
+        self.assertIn("## Retrieved evidence", evidence_section)
+        self.assertIn("A2L is supported", evidence_section)
+        self.assertIn("related", related_section)
+        self.assertIn("A2W", prompt)
+        self.assertIn(
+            "Direct evidence may support matched portions",
+            prompt,
+        )
 
     def test_identifier_backend_exception_is_not_reported_as_no_match(self) -> None:
         payload = {
@@ -559,6 +572,81 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             ],
         )
 
+    def test_prompt_fallback_reports_lexical_degradation(self) -> None:
+        args = argparse.Namespace(
+            stdin=False,
+            top_k=8,
+            max_chars=1200,
+            format="prompt",
+            budget_tokens=1200,
+            retrieval_mode="hybrid",
+            explain=False,
+            include_db_hint=False,
+            disable_identifier_diagnostics=False,
+            timeout=15,
+        )
+        completed = subprocess.CompletedProcess(
+            args=["query"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "partial",
+                    "db": "incident-rag",
+                    "query": "q",
+                    "evidence": [
+                        {
+                            "id": "R1",
+                            "source": {"path": "incident.txt"},
+                            "text": "supported evidence",
+                        }
+                    ],
+                    "warnings": [],
+                }
+            ),
+            stderr="",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                SEARCH,
+                "_run_sync_child",
+                return_value=completed,
+            ) as child,
+            contextlib.redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                SEARCH._run_sync_script(
+                    python="python",
+                    env={},
+                    args=args,
+                    question="q",
+                    db_name="incident-rag",
+                    timeout_override=7.5,
+                    retrieval_mode_override="lexical",
+                    execution_metadata={
+                        "requested_execution": "daemon",
+                        "first_attempt_success": False,
+                        "fallback_used": True,
+                        "fallback_retrieval_mode": "lexical",
+                        "fallback_dense_skipped": True,
+                        "fallback_dense_skipped_reason": (
+                            "deadline_bounded_windows_fallback"
+                        ),
+                        "attempts": [
+                            {"route": "daemon", "success": False}
+                        ],
+                    },
+                )
+        self.assertEqual(0, raised.exception.code)
+        command = child.call_args.args[0]
+        format_index = command.index("--format")
+        self.assertEqual("json", command[format_index + 1])
+        prompt = output.getvalue()
+        self.assertIn("## Warnings", prompt)
+        self.assertIn(SEARCH.DEADLINE_FALLBACK_WARNING, prompt)
+        self.assertIn("supported evidence", prompt)
+
     def test_deadline_exhaustion_does_not_spawn_fallback(self) -> None:
         args = argparse.Namespace(
             stdin=False,
@@ -812,7 +900,14 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         process.poll.return_value = None
         with (
             mock.patch.object(SEARCH.sys, "platform", "win32"),
-            mock.patch.object(SEARCH.subprocess, "run") as run,
+            mock.patch.object(
+                SEARCH.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    args=["taskkill"],
+                    returncode=0,
+                ),
+            ) as run,
         ):
             SEARCH._terminate_process_tree(
                 process,
@@ -829,6 +924,40 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
         self.assertNotIn("text", run.call_args.kwargs)
+
+    def test_windows_failed_taskkill_falls_back_to_process_kill(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        with (
+            mock.patch.object(SEARCH.sys, "platform", "win32"),
+            mock.patch.object(
+                SEARCH.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    args=["taskkill"],
+                    returncode=1,
+                ),
+            ),
+        ):
+            SEARCH._terminate_process_tree(process)
+        process.kill.assert_called_once_with()
+
+    def test_windows_failed_taskkill_does_not_kill_exited_process(self) -> None:
+        process = mock.Mock()
+        process.poll.side_effect = [None, 0]
+        with (
+            mock.patch.object(SEARCH.sys, "platform", "win32"),
+            mock.patch.object(
+                SEARCH.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    args=["taskkill"],
+                    returncode=1,
+                ),
+            ),
+        ):
+            SEARCH._terminate_process_tree(process)
+        process.kill.assert_not_called()
 
     def test_sync_timeout_terminates_process_group_without_pipe_hang(self) -> None:
         child = (

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
@@ -472,6 +474,63 @@ class SemanticMetricTests(unittest.TestCase):
         report = "\n".join(MODULE.semantic_summary(rows))
         self.assertIn("Vector Rescue Rate: 1.0 (1/1 L misses)", report)
         self.assertIn("Vector Harm Rate: 0.5 (1/2 L hits)", report)
+
+    def test_related_context_is_not_scored_as_semantic_gold(self) -> None:
+        case = {
+            "id": "semantic-related-only",
+            "db": "ac-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_spans": [
+                {
+                    "path": "gold.txt",
+                    "span_text": "authoritative gold text",
+                }
+            ],
+        }
+        payload = {
+            "status": "partial",
+            "evidence": [],
+            "related_context": [
+                {
+                    "id": "R1",
+                    "source": {"path": "gold.txt"},
+                    "text": "authoritative gold text",
+                }
+            ],
+            "execution_metadata": {},
+        }
+        completed = subprocess.CompletedProcess(
+            args=["search"],
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+        args = argparse.Namespace(
+            stage_timing=False,
+            timeout=15.0,
+            run_metadata={},
+        )
+        row = MODULE.summarize_search(
+            case,
+            "H",
+            "no-daemon",
+            0,
+            completed,
+            payload,
+            True,
+            None,
+            0.5,
+            warmup=False,
+            args=args,
+            explain_enabled=False,
+            sequence_index=0,
+        )
+        self.assertEqual(0, row["evidence_count"])
+        self.assertEqual(1, row["related_context_count"])
+        self.assertEqual([], row["retrieved_contexts"])
+        self.assertFalse(row["semantic_hit_at_5"])
+        self.assertEqual(0.0, row["context_recall"])
 
 
 if __name__ == "__main__":

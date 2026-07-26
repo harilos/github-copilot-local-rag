@@ -489,7 +489,9 @@ def _add_identifier_diagnostics(
         warnings.append(
             "Exact identifier match not found for: "
             + ", ".join(unmatched)
-            + ". Returned evidence, if any, is related context and not proof of those identifiers."
+            + ". Direct evidence may support matched portions of the question, "
+            "but it is not proof of the unmatched identifiers. Related context "
+            "is never proof."
         )
         payload["warnings"] = sorted(set(warnings))
     elif diagnostic_errors:
@@ -585,12 +587,11 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
     db_name = str(payload.get("db") or "")
     db_hint = str(payload.get("db_hint") or "")
     unmatched = payload.get("unmatched_identifiers") or []
-    background = [] if unmatched else list(payload.get("background_context") or [])
-    evidence = (payload.get("related_context") or payload.get("evidence") or []) if unmatched else (
-        payload.get("contexts") or payload.get("evidence") or []
-    )
-    heading = "## Related search candidates (not exact evidence)" if unmatched else "## Retrieved evidence"
-    lines = [heading, f"Database: {db_name}", ""]
+    evidence = list(payload.get("evidence") or payload.get("contexts") or [])
+    background = list(payload.get("background_context") or [])
+    related = list(payload.get("related_context") or [])
+    warnings = [str(value) for value in payload.get("warnings") or [] if value]
+    lines = ["## Retrieved evidence", f"Database: {db_name}", ""]
     if db_hint:
         lines.extend(["## DB hint", db_hint, ""])
     if payload.get("status") == "error":
@@ -605,9 +606,19 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
                 "",
             ]
         )
+    if warnings:
+        lines.extend(["## Warnings", ""])
+        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
     if not evidence:
-        lines.extend(["Status: no_hit", "", "根拠が不足している場合は断定しないこと。", "", "## Question", question])
-        return "\n".join(lines)
+        lines.extend(
+            [
+                f"Status: {payload.get('status') or 'no_hit'}",
+                "",
+                "直接根拠が不足しているため、断定しないこと。",
+                "",
+            ]
+        )
     if payload.get("fast_path"):
         lines.extend([f"Fast path: {payload['fast_path']}", ""])
     for item in evidence:
@@ -629,8 +640,18 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
             lines.append("")
         lines.append("Do not use background context as direct proof.")
         lines.append("")
+    if related:
+        lines.extend(["## Related search candidates (not exact evidence)", ""])
+        for item in related:
+            source = item.get("source") or {}
+            lines.append(f"[{item.get('id')}] {source.get('path') or ''}")
+            lines.append(str(item.get("text") or ""))
+            lines.append("")
+        lines.append("Do not use related search candidates as direct proof.")
+        lines.append("")
     if unmatched:
-        lines.append("上記候補を、未一致識別子そのものの根拠として引用しないこと。")
+        lines.append("取得済みの直接根拠は、根拠がある部分の回答にだけ使用すること。")
+        lines.append("背景情報や関連候補を、未一致識別子そのものの根拠として引用しないこと。")
         lines.append("DB内では完全一致を確認できない旨を明示し、断定しないこと。")
     else:
         lines.append("回答では根拠IDとsource locationを引用すること。")

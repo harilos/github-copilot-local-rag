@@ -948,7 +948,7 @@ def summarize_search(
 ) -> dict[str, Any]:
     authoritative_evidence = payload.get("evidence") or []
     related_context = payload.get("related_context") or []
-    evidence = authoritative_evidence or related_context
+    evidence = authoritative_evidence
     results = payload.get("results") or []
     top = evidence[0] if evidence else {}
     signals = sorted({signal for item in evidence for signal in item.get("signals", [])})
