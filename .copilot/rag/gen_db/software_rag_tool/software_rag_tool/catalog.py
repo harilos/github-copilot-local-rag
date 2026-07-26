@@ -6,9 +6,10 @@ import math
 import re
 import sqlite3
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from .jsonl import read_jsonl
 from .paths import catalog_path, clean_dir
@@ -63,15 +64,20 @@ _RESULT_COLUMNS = """
 """
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
+@contextmanager
+def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     path = path or catalog_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    init_catalog(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        init_catalog(conn)
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_catalog(conn: sqlite3.Connection | None = None) -> None:
