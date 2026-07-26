@@ -1,5 +1,7 @@
 # GitHub Copilot Local RAG
 
+**Current release: 1.0.1**
+
 GitHub Copilotから、ローカル文書や社内資料を自然な日本語で検索するためのRAGパックです。
 
 Copilotへ「RAGの初期設定をして」「RAGを使ってローカル資料から検索して」「このフォルダからRAG DBを作って」のように依頼すると、Copilotが内部のPythonツールを実行します。
