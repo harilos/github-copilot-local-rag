@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -20,7 +21,7 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
 from software_rag_tool.dbs import resolve_db_name
-from software_rag_tool.search_api import payload_to_text, try_cold_lexical_fast_path
+from software_rag_tool.search_api import normalize_search_contract, payload_to_text
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
 STATE_FILE = RUN_DIR / "ragd.json"
@@ -28,6 +29,9 @@ LOCK_FILE = RUN_DIR / "ragd.lock"
 LOG_FILE = RUN_DIR / "ragd.log"
 SOCKET_FILE = RUN_DIR / "ragd.sock"
 FILE_TRANSPORT_DIR = RUN_DIR / "file-transport"
+DEFAULT_OUTER_TIMEOUT_SECONDS = float(os.getenv("RAG_QUERY_TIMEOUT_SECONDS", "15"))
+DEFAULT_DAEMON_ATTEMPT_TIMEOUT_SECONDS = float(os.getenv("RAGD_QUERY_TIMEOUT_SECONDS", "5"))
+DEADLINE_OUTPUT_RESERVE_SECONDS = 2.0
 
 
 def main() -> None:
@@ -40,7 +44,12 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--max-chars", type=int, default=900)
     parser.add_argument("--budget-tokens", type=int, default=0)
-    parser.add_argument("--timeout", type=int, default=0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_OUTER_TIMEOUT_SECONDS,
+        help="Outer user-visible deadline in seconds. Use 0 to disable the deadline.",
+    )
     parser.add_argument("--stdin", action="store_true", help="Read the question from stdin")
     parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="prompt")
@@ -51,6 +60,11 @@ def main() -> None:
         default="hybrid",
         help="Optional evaluation mode. Default hybrid preserves normal behavior.",
     )
+    parser.add_argument(
+        "--disable-identifier-diagnostics",
+        action="store_true",
+        help="Skip identifier diagnostics for pure retrieval benchmarking.",
+    )
     parser.add_argument("--no-daemon", action="store_true", help="Run synchronously without ragd")
     parser.add_argument(
         "--daemon-idle-timeout",
@@ -58,11 +72,37 @@ def main() -> None:
         default=int(os.getenv("RAGD_IDLE_TIMEOUT_SECONDS", str(DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS))),
         help="Seconds before an idle ragd exits",
     )
+    parser.add_argument(
+        "--daemon-attempt-timeout",
+        type=float,
+        default=DEFAULT_DAEMON_ATTEMPT_TIMEOUT_SECONDS,
+        help="Maximum seconds for the first daemon attempt before one synchronous fallback.",
+    )
+    parser.add_argument(
+        "--daemon-fallback",
+        choices=["on", "off"],
+        default=os.getenv("RAGD_FALLBACK", "on").lower(),
+        help="Allow one read-only synchronous retry after a daemon transport failure.",
+    )
+    parser.add_argument(
+        "--require-daemon",
+        action="store_true",
+        help="Require an actual daemon response; disables cold fast path and synchronous fallback.",
+    )
     args = parser.parse_args()
+    if args.daemon_fallback not in {"on", "off"}:
+        parser.error("--daemon-fallback must be on or off")
 
     question = sys.stdin.read().strip() if args.stdin else " ".join(args.question).strip()
     if not question:
         parser.error("question is required unless --stdin provides input")
+    request_started = time.monotonic()
+    outer_deadline = _deadline_from_timeout(args.timeout, started=request_started)
+    work_deadline = (
+        outer_deadline - DEADLINE_OUTPUT_RESERVE_SECONDS
+        if outer_deadline is not None
+        else None
+    )
     resolution = resolve_db_name(question, args.db, DBS_ROOT, args.auto)
     if not resolution.triggered:
         print(
@@ -104,6 +144,7 @@ def main() -> None:
     env.setdefault("PYTHONIOENCODING", "utf-8")
 
     request = {
+        "request_id": uuid.uuid4().hex,
         "db": resolution.db_name,
         "question": question,
         "top_k": args.top_k,
@@ -113,47 +154,246 @@ def main() -> None:
         "explain": args.explain,
         "include_db_hint": args.include_db_hint,
         "retrieval_mode": args.retrieval_mode,
+        "identifier_diagnostics": not args.disable_identifier_diagnostics,
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
     if daemon_enabled:
         desired_transport = _desired_transport()
-        state = _active_daemon_state(timeout=min(args.timeout or 3, 3), desired_transport=desired_transport)
-        if not state:
-            if args.retrieval_mode == "hybrid":
-                fast_payload = _try_fast_path(
-                    db_name=resolution.db_name,
-                    question=question,
-                    args=args,
-                )
-                if fast_payload:
-                    print(payload_to_text(fast_payload, args.format, explain=args.explain))
-                    return
-            state = _start_daemon(
-                python=python,
-                env=env,
-                idle_timeout=args.daemon_idle_timeout,
-                startup_timeout=min(args.timeout or 10, 10),
-                transport=desired_transport,
+        configured_transport = os.getenv("RAGD_TRANSPORT", "auto").lower()
+        health_timeout = _bounded_timeout(work_deadline, 3.0)
+        daemon_started_this_request = False
+        state = (
+            _active_daemon_state(
+                timeout=health_timeout,
+                desired_transport=None if configured_transport == "auto" else desired_transport,
             )
-            if not state and desired_transport == "tcp" and os.getenv("RAGD_TRANSPORT", "auto").lower() == "auto":
+            if health_timeout is None or health_timeout > 0
+            else None
+        )
+        if not state:
+            startup_timeout = _bounded_timeout(work_deadline, 10.0)
+            if startup_timeout is None or startup_timeout > 0:
                 state = _start_daemon(
                     python=python,
                     env=env,
                     idle_timeout=args.daemon_idle_timeout,
-                    startup_timeout=min(args.timeout or 10, 10),
-                    transport="file",
+                    startup_timeout=startup_timeout if startup_timeout is not None else 10.0,
+                    transport=desired_transport,
                 )
+                daemon_started_this_request = state is not None
+            if (
+                not state
+                and desired_transport == "tcp"
+                and os.getenv("RAGD_TRANSPORT", "auto").lower() == "auto"
+            ):
+                retry_timeout = _bounded_timeout(work_deadline, 10.0)
+                if retry_timeout is None or retry_timeout > 0:
+                    state = _start_daemon(
+                        python=python,
+                        env=env,
+                        idle_timeout=args.daemon_idle_timeout,
+                        startup_timeout=retry_timeout if retry_timeout is not None else 10.0,
+                        transport="file",
+                    )
+                    daemon_started_this_request = state is not None
         if state:
-            payload = _query_daemon(state, request, timeout=args.timeout or None)
+            daemon_timeout = _daemon_query_timeout(
+                attempt_timeout=args.daemon_attempt_timeout,
+                deadline=work_deadline,
+                cold_start=daemon_started_this_request,
+            )
+            if daemon_timeout <= 0:
+                _print_deadline_failure(
+                    args=args,
+                    db_name=resolution.db_name,
+                    question=question,
+                    request_id=str(request["request_id"]),
+                    request_started=request_started,
+                    attempts=[],
+                    restart=None,
+                )
+                raise SystemExit(124)
+            attempt_started = time.monotonic()
+            payload = _query_daemon(state, request, timeout=daemon_timeout)
+            attempt_elapsed = time.monotonic() - attempt_started
             if payload:
+                success = payload.get("status") != "error"
+                payload["execution_metadata"] = {
+                    "request_id": request["request_id"],
+                    "requested_execution": "daemon",
+                    "actual_execution": "daemon",
+                    "first_attempt_success": success,
+                    "final_user_visible_success": success,
+                    "fallback_used": False,
+                    "outer_timeout_seconds": args.timeout or None,
+                    "total_latency_seconds": round(time.monotonic() - request_started, 6),
+                    "attempts": [
+                        {
+                            "route": "daemon",
+                            "success": success,
+                            "latency_seconds": round(attempt_elapsed, 6),
+                            "cold_start": daemon_started_this_request,
+                            **daemon_state_snapshot(state),
+                        }
+                    ],
+                }
                 print(payload_to_text(payload, args.format, explain=args.explain))
                 raise SystemExit(1 if payload.get("status") == "error" else 0)
+            failure_kind = "timeout" if attempt_elapsed >= daemon_timeout * 0.95 else "transport_error"
+            first_attempt = {
+                "route": "daemon",
+                "success": False,
+                "failure_kind": failure_kind,
+                "latency_seconds": round(attempt_elapsed, 6),
+                "cold_start": daemon_started_this_request,
+                **daemon_state_snapshot(state),
+            }
+            retire_timeout = _bounded_timeout(work_deadline, 1.0)
+            restart = _retire_daemon(
+                state,
+                request_id=str(request["request_id"]),
+                failure_kind=failure_kind,
+                shutdown_timeout=retire_timeout or 0.0,
+            )
+            if not restart.get("process_exited"):
+                _print_daemon_failure(
+                    args=args,
+                    db_name=resolution.db_name,
+                    question=question,
+                    request_id=str(request["request_id"]),
+                    first_attempt={**first_attempt, "retirement_failed": True},
+                    restart=restart,
+                    request_started=request_started,
+                )
+                raise SystemExit(1)
+            if args.require_daemon or args.daemon_fallback == "off":
+                _print_daemon_failure(
+                    args=args,
+                    db_name=resolution.db_name,
+                    question=question,
+                    request_id=str(request["request_id"]),
+                    first_attempt=first_attempt,
+                    restart=restart,
+                    request_started=request_started,
+                )
+                raise SystemExit(124 if failure_kind == "timeout" else 1)
+            remaining_timeout = _remaining_seconds(work_deadline)
+            if remaining_timeout is not None and remaining_timeout <= 0:
+                _print_deadline_failure(
+                    args=args,
+                    db_name=resolution.db_name,
+                    question=question,
+                    request_id=str(request["request_id"]),
+                    request_started=request_started,
+                    attempts=[first_attempt],
+                    restart=restart,
+                )
+                raise SystemExit(124)
+            execution_metadata = {
+                "request_id": request["request_id"],
+                "requested_execution": "daemon",
+                "actual_execution": "no-daemon",
+                "first_attempt_success": False,
+                "final_user_visible_success": False,
+                "fallback_used": True,
+                "attempts": [first_attempt],
+                "daemon_restart": restart,
+                "outer_timeout_seconds": args.timeout or None,
+            }
+            _run_sync_script(
+                python=python,
+                env=env,
+                args=args,
+                question=question,
+                db_name=resolution.db_name,
+                timeout_override=remaining_timeout,
+                execution_metadata=execution_metadata,
+                request_started=request_started,
+            )
+        first_attempt = {
+            "route": "daemon",
+            "success": False,
+            "failure_kind": "startup_failed",
+            "latency_seconds": round(time.monotonic() - request_started, 6),
+        }
+        if args.require_daemon or args.daemon_fallback == "off":
+            _print_daemon_failure(
+                args=args,
+                db_name=resolution.db_name,
+                question=question,
+                request_id=str(request["request_id"]),
+                first_attempt=first_attempt,
+                restart=None,
+                request_started=request_started,
+            )
+            raise SystemExit(1)
+        remaining_timeout = _remaining_seconds(work_deadline)
+        if remaining_timeout is not None and remaining_timeout <= 0:
+            _print_deadline_failure(
+                args=args,
+                db_name=resolution.db_name,
+                question=question,
+                request_id=str(request["request_id"]),
+                request_started=request_started,
+                attempts=[first_attempt],
+                restart=None,
+            )
+            raise SystemExit(124)
+        _run_sync_script(
+            python=python,
+            env=env,
+            args=args,
+            question=question,
+            db_name=resolution.db_name,
+            timeout_override=remaining_timeout,
+            execution_metadata={
+                "request_id": request["request_id"],
+                "requested_execution": "daemon",
+                "actual_execution": "no-daemon",
+                "first_attempt_success": False,
+                "final_user_visible_success": False,
+                "fallback_used": True,
+                "attempts": [first_attempt],
+                "outer_timeout_seconds": args.timeout or None,
+            },
+            request_started=request_started,
+        )
 
-    _run_sync_script(python=python, env=env, args=args, question=question, db_name=resolution.db_name)
+    remaining_timeout = _remaining_seconds(work_deadline)
+    if remaining_timeout is not None and remaining_timeout <= 0:
+        _print_deadline_failure(
+            args=args,
+            db_name=resolution.db_name,
+            question=question,
+            request_id=str(request["request_id"]),
+            request_started=request_started,
+            attempts=[],
+            restart=None,
+        )
+        raise SystemExit(124)
+    _run_sync_script(
+        python=python,
+        env=env,
+        args=args,
+        question=question,
+        db_name=resolution.db_name,
+        timeout_override=remaining_timeout,
+        request_started=request_started,
+    )
 
 
-def _run_sync_script(*, python: str, env: dict[str, str], args: argparse.Namespace, question: str, db_name: str) -> None:
+def _run_sync_script(
+    *,
+    python: str,
+    env: dict[str, str],
+    args: argparse.Namespace,
+    question: str,
+    db_name: str,
+    timeout_override: float | None = None,
+    execution_metadata: dict | None = None,
+    request_started: float | None = None,
+) -> None:
     script = TOOL_ROOT / "scripts" / "query.py"
     cmd = [
         python,
@@ -183,38 +423,242 @@ def _run_sync_script(*, python: str, env: dict[str, str], args: argparse.Namespa
         cmd.append("--explain")
     if args.include_db_hint:
         cmd.append("--include-db-hint")
-    try:
-        if args.stdin:
-            completed = subprocess.run(cmd, env=env, input=question, text=True, timeout=args.timeout or None)
-        else:
-            completed = subprocess.run(cmd, env=env, timeout=args.timeout or None)
-        raise SystemExit(completed.returncode)
-    except subprocess.TimeoutExpired:
-        print(
-            json.dumps(
-                {
-                    "schema": "local-rag.search.v1",
-                    "status": "error",
-                    "error": f"search timed out after {args.timeout} seconds",
-                    "db": db_name,
-                    "query": question,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+    if args.disable_identifier_diagnostics:
+        cmd.append("--disable-identifier-diagnostics")
+    timeout = timeout_override if timeout_override is not None else (args.timeout or None)
+    if timeout is not None and timeout <= 0:
+        metadata = dict(execution_metadata or {})
+        metadata.setdefault("request_id", uuid.uuid4().hex)
+        metadata.setdefault("requested_execution", "no-daemon")
+        metadata["actual_execution"] = "no-daemon"
+        metadata.setdefault("first_attempt_success", False)
+        metadata["final_user_visible_success"] = False
+        metadata.setdefault("fallback_used", bool(execution_metadata))
+        metadata.setdefault("attempts", [])
+        metadata["deadline_exhausted"] = True
+        metadata["outer_timeout_seconds"] = args.timeout or None
+        if request_started is not None:
+            metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+        _print_search_payload(
+            {
+                "schema": "local-rag.search.v1",
+                "status": "error",
+                "error": "outer search deadline exhausted before synchronous search could start",
+                "db": db_name,
+                "query": question,
+                "execution_metadata": metadata,
+            },
+            args=args,
         )
         raise SystemExit(124)
+    started = time.monotonic()
+    try:
+        completed = _run_sync_child(
+            cmd,
+            env=env,
+            input_text=question if args.stdin else None,
+            timeout=timeout,
+        )
+        if completed.stderr:
+            print(completed.stderr, file=sys.stderr, end="")
+        if args.format == "json":
+            try:
+                payload = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                metadata = dict(execution_metadata or {})
+                attempt = {
+                    "route": "no-daemon",
+                    "success": False,
+                    "failure_kind": "invalid_json",
+                    "latency_seconds": round(time.monotonic() - started, 6),
+                }
+                metadata.setdefault("request_id", uuid.uuid4().hex)
+                metadata.setdefault("requested_execution", "no-daemon")
+                metadata["actual_execution"] = "no-daemon"
+                metadata.setdefault("first_attempt_success", False)
+                metadata["final_user_visible_success"] = False
+                metadata.setdefault("fallback_used", bool(execution_metadata))
+                metadata.setdefault("attempts", [])
+                metadata["attempts"].append(attempt)
+                metadata["outer_timeout_seconds"] = args.timeout or None
+                if request_started is not None:
+                    metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+                _print_search_payload(
+                    {
+                        "schema": "local-rag.search.v1",
+                        "status": "error",
+                        "error": "synchronous search returned invalid JSON",
+                        "db": db_name,
+                        "query": question,
+                        "execution_metadata": metadata,
+                    },
+                    args=args,
+                )
+                raise SystemExit(completed.returncode or 1)
+            else:
+                payload = normalize_search_contract(payload)
+                metadata = dict(execution_metadata or {})
+                attempt = {
+                    "route": "no-daemon",
+                    "success": completed.returncode == 0 and payload.get("status") != "error",
+                    "latency_seconds": round(time.monotonic() - started, 6),
+                }
+                metadata.setdefault("request_id", uuid.uuid4().hex)
+                metadata.setdefault("requested_execution", "no-daemon")
+                metadata["actual_execution"] = "no-daemon"
+                metadata.setdefault("first_attempt_success", attempt["success"])
+                metadata["final_user_visible_success"] = attempt["success"]
+                metadata.setdefault("fallback_used", False)
+                metadata.setdefault("attempts", [])
+                metadata["attempts"].append(attempt)
+                metadata["outer_timeout_seconds"] = args.timeout or None
+                if request_started is not None:
+                    metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+                payload["execution_metadata"] = metadata
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(completed.stdout, end="")
+        raise SystemExit(completed.returncode)
+    except subprocess.TimeoutExpired:
+        metadata = dict(execution_metadata or {})
+        metadata.setdefault("request_id", uuid.uuid4().hex)
+        metadata.setdefault("requested_execution", "no-daemon")
+        metadata["actual_execution"] = "no-daemon"
+        metadata.setdefault("first_attempt_success", False)
+        metadata["final_user_visible_success"] = False
+        metadata.setdefault("fallback_used", bool(execution_metadata))
+        metadata.setdefault("attempts", [])
+        metadata["attempts"].append(
+            {
+                "route": "no-daemon",
+                "success": False,
+                "failure_kind": "timeout",
+                "latency_seconds": round(time.monotonic() - started, 6),
+            }
+        )
+        metadata["deadline_exhausted"] = True
+        metadata["outer_timeout_seconds"] = args.timeout or None
+        if request_started is not None:
+            metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+        _print_search_payload(
+            {
+                "schema": "local-rag.search.v1",
+                "status": "error",
+                "error": f"search timed out after {timeout} seconds",
+                "db": db_name,
+                "query": question,
+                "execution_metadata": metadata,
+            },
+            args=args,
+        )
+        raise SystemExit(124)
+    except OSError as exc:
+        metadata = dict(execution_metadata or {})
+        metadata.setdefault("request_id", uuid.uuid4().hex)
+        metadata.setdefault("requested_execution", "no-daemon")
+        metadata["actual_execution"] = "no-daemon"
+        metadata.setdefault("first_attempt_success", False)
+        metadata["final_user_visible_success"] = False
+        metadata.setdefault("fallback_used", bool(execution_metadata))
+        metadata.setdefault("attempts", [])
+        metadata["attempts"].append(
+            {
+                "route": "no-daemon",
+                "success": False,
+                "failure_kind": "spawn_error",
+                "latency_seconds": round(time.monotonic() - started, 6),
+            }
+        )
+        metadata["outer_timeout_seconds"] = args.timeout or None
+        if request_started is not None:
+            metadata["total_latency_seconds"] = round(time.monotonic() - request_started, 6)
+        _print_search_payload(
+            {
+                "schema": "local-rag.search.v1",
+                "status": "error",
+                "error": f"synchronous search could not start: {exc}",
+                "db": db_name,
+                "query": question,
+                "execution_metadata": metadata,
+            },
+            args=args,
+        )
+        raise SystemExit(1)
+
+
+def _run_sync_child(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    input_text: str | None,
+    timeout: float | None,
+) -> subprocess.CompletedProcess[str]:
+    popen_kwargs: dict = {
+        "env": env,
+        "stdin": subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if sys.platform.startswith("win"):
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output=stdout or exc.output,
+            stderr=stderr or exc.stderr,
+        ) from exc
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if sys.platform.startswith("win"):
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def _print_setup_required(output_format: str, db_name: str, question: str) -> None:
-    payload = {
-        "schema": "local-rag.search.v1",
-        "status": "setup_required",
-        "db": db_name,
-        "query": question,
-        "message": "RAG runtime is not initialized. Run the initial setup, then retry the search.",
-        "required_action": "initial_setup",
-    }
+    payload = normalize_search_contract(
+        {
+            "schema": "local-rag.search.v1",
+            "status": "setup_required",
+            "db": db_name,
+            "query": question,
+            "message": "RAG runtime is not initialized. Run the initial setup, then retry the search.",
+            "required_action": "initial_setup",
+        }
+    )
     if output_format == "json":
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
@@ -223,19 +667,277 @@ def _print_setup_required(output_format: str, db_name: str, question: str) -> No
     print("RAG runtime is not initialized. Run the initial setup, then retry the search.")
 
 
-def _try_fast_path(*, db_name: str, question: str, args: argparse.Namespace) -> dict | None:
+def daemon_state_snapshot(state: dict) -> dict:
+    snapshot = {
+        "daemon_pid": state.get("pid"),
+        "daemon_generation": state.get("generation"),
+        "daemon_transport": state.get("transport", "tcp"),
+        "daemon_started_at": state.get("started_at"),
+        "daemon_code_fingerprint": state.get("code_fingerprint"),
+    }
+    if state.get("transport") == "file" and state.get("heartbeat_file"):
+        try:
+            heartbeat = json.loads(Path(str(state["heartbeat_file"])).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            heartbeat = {}
+        snapshot["daemon_active_requests"] = heartbeat.get("active_requests")
+        snapshot["daemon_heartbeat_at"] = heartbeat.get("updated_at")
+    return snapshot
+
+
+def _retire_daemon(
+    state: dict,
+    *,
+    request_id: str,
+    failure_kind: str,
+    shutdown_timeout: float = 0.5,
+) -> dict:
+    snapshot = {
+        "schema": "local-rag.daemon-failure.v1",
+        "recorded_at": datetime_now(),
+        "request_id": request_id,
+        "failure_kind": failure_kind,
+        **daemon_state_snapshot(state),
+    }
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        return try_cold_lexical_fast_path(
-            db_name=db_name,
-            question=question,
-            top_k=args.top_k,
-            max_chars=args.max_chars,
-            budget_tokens=args.budget_tokens or None,
-            explain=args.explain,
-            include_db_hint=args.include_db_hint,
+        with (RUN_DIR / "daemon-failures.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(snapshot, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        pass
+    started = time.monotonic()
+    ack_timeout = min(0.25, max(0.0, shutdown_timeout))
+    acknowledged = (
+        _request_daemon_shutdown(state, timeout=ack_timeout)
+        if ack_timeout > 0
+        else False
+    )
+    current = _read_state()
+    state_owned = bool(
+        current
+        and current.get("generation") == state.get("generation")
+        and current.get("pid") == state.get("pid")
+        and current.get("token") == state.get("token")
+    )
+    if state_owned and not acknowledged:
+        try:
+            STATE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    pid = _state_pid(state)
+    remaining = max(0.0, shutdown_timeout - (time.monotonic() - started))
+    process_exited = not _process_is_alive(pid)
+    if not process_exited and remaining > 0:
+        process_exited = _wait_for_process_exit(pid, timeout=min(0.25, remaining))
+    force_attempted = False
+    if not process_exited and (acknowledged or state_owned):
+        force_attempted = True
+        remaining = max(0.0, shutdown_timeout - (time.monotonic() - started))
+        process_exited = _terminate_daemon_process(state, timeout=remaining)
+    current = _read_state()
+    if (
+        current
+        and current.get("generation") == state.get("generation")
+        and current.get("pid") == state.get("pid")
+        and (process_exited or state_owned)
+    ):
+        try:
+            STATE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    return {
+        "attempted": True,
+        "shutdown_acknowledged": acknowledged,
+        "force_attempted": force_attempted,
+        "force_terminated": force_attempted and process_exited,
+        "process_exited": process_exited,
+        "state_identity_verified": state_owned,
+        "old_generation": state.get("generation"),
+        "next_start_required": True,
+    }
+
+
+def _request_daemon_shutdown(state: dict, *, timeout: float) -> bool:
+    if state.get("transport") == "file":
+        payload = _file_request(state, {"op": "shutdown"}, timeout=timeout)
+        return bool(payload and payload.get("status") == "ok")
+    if state.get("transport") == "unix":
+        payload = _unix_request(state, {"op": "shutdown"}, timeout=timeout)
+        return bool(payload and payload.get("status") == "ok")
+    try:
+        request = urllib.request.Request(
+            f"http://{state['host']}:{state['port']}/shutdown",
+            data=b"{}",
+            headers={"X-RAGD-Token": str(state["token"])},
+            method="POST",
         )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200
     except Exception:
+        return False
+
+
+def _print_daemon_failure(
+    *,
+    args: argparse.Namespace,
+    db_name: str,
+    question: str,
+    request_id: str,
+    first_attempt: dict,
+    restart: dict | None,
+    request_started: float | None = None,
+) -> None:
+    payload = {
+        "schema": "local-rag.search.v1",
+        "status": "error",
+        "error": f"required daemon attempt failed: {first_attempt.get('failure_kind')}",
+        "db": db_name,
+        "query": question,
+        "execution_metadata": {
+            "request_id": request_id,
+            "requested_execution": "daemon",
+            "actual_execution": "daemon",
+            "first_attempt_success": False,
+            "final_user_visible_success": False,
+            "fallback_used": False,
+            "attempts": [first_attempt],
+            "daemon_restart": restart,
+            "outer_timeout_seconds": args.timeout or None,
+            "total_latency_seconds": (
+                round(time.monotonic() - request_started, 6)
+                if request_started is not None
+                else None
+            ),
+        },
+    }
+    _print_search_payload(payload, args=args)
+
+
+def _print_deadline_failure(
+    *,
+    args: argparse.Namespace,
+    db_name: str,
+    question: str,
+    request_id: str,
+    request_started: float,
+    attempts: list[dict],
+    restart: dict | None,
+) -> None:
+    payload = {
+        "schema": "local-rag.search.v1",
+        "status": "error",
+        "error": f"outer search deadline exhausted after {args.timeout} seconds",
+        "db": db_name,
+        "query": question,
+        "execution_metadata": {
+            "request_id": request_id,
+            "requested_execution": "daemon" if attempts else "no-daemon",
+            "actual_execution": attempts[-1]["route"] if attempts else "no-daemon",
+            "first_attempt_success": False,
+            "final_user_visible_success": False,
+            "fallback_used": any(attempt.get("route") == "no-daemon" for attempt in attempts),
+            "attempts": attempts,
+            "daemon_restart": restart,
+            "deadline_exhausted": True,
+            "outer_timeout_seconds": args.timeout or None,
+            "total_latency_seconds": round(time.monotonic() - request_started, 6),
+        },
+    }
+    _print_search_payload(payload, args=args)
+
+
+def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
+    print(payload_to_text(payload, args.format, explain=args.explain))
+
+
+def _deadline_from_timeout(timeout: float | int | None, *, started: float | None = None) -> float | None:
+    value = float(timeout or 0)
+    if value <= 0:
         return None
+    return (time.monotonic() if started is None else started) + value
+
+
+def _remaining_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _bounded_timeout(deadline: float | None, cap: float) -> float | None:
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        return cap
+    return min(max(0.0, float(cap)), remaining)
+
+
+def _daemon_query_timeout(
+    *,
+    attempt_timeout: float,
+    deadline: float | None,
+    cold_start: bool,
+) -> float:
+    soft_timeout = max(0.1, float(attempt_timeout))
+    remaining = _remaining_seconds(deadline)
+    if remaining is None:
+        return soft_timeout
+    return remaining if cold_start else min(soft_timeout, remaining)
+
+
+def _state_pid(state: dict) -> int:
+    try:
+        return int(state.get("pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _wait_for_process_exit(pid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if not _process_is_alive(pid):
+            return True
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    return not _process_is_alive(pid)
+
+
+def _terminate_daemon_process(state: dict, *, timeout: float) -> bool:
+    pid = _state_pid(state)
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return not _process_is_alive(pid)
+    grace = min(0.25, max(0.0, timeout))
+    if _wait_for_process_exit(pid, timeout=grace):
+        return True
+    if not sys.platform.startswith("win") and hasattr(signal, "SIGKILL"):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            return not _process_is_alive(pid)
+        remaining = max(0.0, timeout - grace)
+        return _wait_for_process_exit(pid, timeout=remaining)
+    return not _process_is_alive(pid)
+
+
+def datetime_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _desired_transport() -> str:
@@ -308,17 +1010,23 @@ def _start_daemon(
     startup_timeout: int | float,
     transport: str,
 ) -> dict | None:
+    if startup_timeout <= 0:
+        return None
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + startup_timeout
     lock_fd = _acquire_start_lock()
     if lock_fd is None:
-        deadline = time.monotonic() + startup_timeout
         while time.monotonic() < deadline:
-            state = _active_daemon_state(timeout=1, desired_transport=transport)
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            state = _active_daemon_state(timeout=min(1.0, remaining), desired_transport=transport)
             if state:
                 return state
-            time.sleep(0.2)
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         return None
     token = secrets.token_hex(24)
+    process: subprocess.Popen[bytes] | None = None
     try:
         cmd = [
             python,
@@ -341,18 +1049,56 @@ def _start_daemon(
         else:
             popen_kwargs["start_new_session"] = True
         with LOG_FILE.open("ab") as log:
-            subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **popen_kwargs)
+            process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                **popen_kwargs,
+            )
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            state = _read_state()
+            if (
+                state
+                and state.get("generation") == token
+                and state.get("pid") == process.pid
+                and state.get("transport", "tcp") == transport
+                and _healthcheck(state, timeout=min(1.0, remaining))
+            ):
+                return state
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        _terminate_process_tree(process)
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        state = _read_state()
+        if (
+            state
+            and state.get("generation") == token
+            and state.get("pid") == process.pid
+        ):
+            try:
+                STATE_FILE.unlink()
+            except FileNotFoundError:
+                pass
+        return None
     except OSError:
+        if process is not None:
+            _terminate_process_tree(process)
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
         return None
     finally:
         _release_start_lock(lock_fd)
-    deadline = time.monotonic() + startup_timeout
-    while time.monotonic() < deadline:
-        state = _active_daemon_state(timeout=1, desired_transport=transport)
-        if state:
-            return state
-        time.sleep(0.2)
-    return None
 
 
 def _acquire_start_lock() -> int | None:
@@ -433,7 +1179,8 @@ def _file_request(state: dict, payload: dict, *, timeout: int | float | None) ->
         tmp = request_file.with_name(f"{request_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(request_file)
-        deadline = time.monotonic() + float(timeout or 300)
+        request_timeout = 300.0 if timeout is None else max(0.0, float(timeout))
+        deadline = time.monotonic() + request_timeout
         while time.monotonic() < deadline:
             if response_file.exists():
                 data = json.loads(response_file.read_text(encoding="utf-8", errors="replace"))
@@ -443,6 +1190,11 @@ def _file_request(state: dict, payload: dict, *, timeout: int | float | None) ->
                     pass
                 return data
             time.sleep(0.05)
+        for path in (request_file, response_file):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
     except (OSError, TimeoutError, json.JSONDecodeError):
         return None
     return None

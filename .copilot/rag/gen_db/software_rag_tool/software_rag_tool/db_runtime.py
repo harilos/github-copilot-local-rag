@@ -90,6 +90,15 @@ class DbStore:
         self._last_used_at = time.monotonic()
         return catalog.bm25_search(question, top_k=top_k, source=source, path=self.context.catalog_path)
 
+    def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        self._last_used_at = time.monotonic()
+        return catalog.anchor_lexical_search(
+            question,
+            top_k=top_k,
+            source=source,
+            path=self.context.catalog_path,
+        )
+
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
         return catalog.metadata_search(question, top_k=top_k, source=source, path=self.context.catalog_path)

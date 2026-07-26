@@ -1,0 +1,92 @@
+@startuml
+!pragma layout smetana
+
+title コピーしたら、あとはRAGと日本語で頼むだけ
+
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 12
+skinparam defaultFontName "Noto Sans JP"
+skinparam defaultFontSize 15
+skinparam titleFontSize 24
+skinparam titleFontStyle bold
+skinparam ArrowColor #52606D
+skinparam ArrowFontColor #364152
+skinparam ArrowFontSize 12
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam actorBorderColor #52606D
+skinparam actorFontColor #202938
+skinparam rectangleBorderColor #52606D
+skinparam rectangleFontColor #202938
+skinparam folderBorderColor #9A6700
+skinparam folderFontColor #202938
+skinparam artifactBorderColor #52606D
+skinparam artifactFontColor #202938
+skinparam noteBorderColor #8A94A6
+skinparam noteBackgroundColor #F7F8FA
+skinparam noteFontColor #202938
+
+frame "1. 導入" as Install {
+  folder "<b>配布フォルダ rag/</b>\n.copilot/\ninstall.sh\ninstall.ps1" as Distribution #FFF4DE
+
+  rectangle "<b>インストーラーを実行</b>\nmacOS / Linux: install.sh\nWindows: install.ps1" as Installer #E7F6EF
+
+  rectangle "<b>手動コピーの場合</b>\n既存の$HOME/.copilotを削除せず\n.copilotの中身だけをマージ" as Manual #F1F3F5
+
+  frame "$HOME/.copilot/ へマージコピー" as CopilotHome {
+    artifact "<b>copilot-instructions.md</b>\n既存ファイルへ参照を1行追加\n（インストーラーは上書きしない）" as UserInstructions #F1F3F5
+    artifact "<b>instructions/</b>\nrag.instructions.md\n日本語の依頼とCLIを結ぶ" as Instructions #DDEBFF
+    folder "<b>rag/</b>\nREADME・query・gen_db\nDB・model・docs" as RagHome #FFF4DE
+    UserInstructions -[hidden]right- Instructions
+    Instructions -[hidden]right- RagHome
+  }
+
+  Distribution --> Installer : 隠し.copilotも含む
+  Installer ..> UserInstructions : 参照行は利用者が追加
+  Installer --> Instructions
+  Installer --> RagHome
+  Installer -[hidden]right- Manual
+  Manual ..> Instructions
+  Manual ..> RagHome
+}
+
+actor "利用者" as User
+rectangle "<b>Copilot / Codex Agent</b>\nrag.instructions.mdを読み\n内部CLIを実行する" as Agent #E8F1FF
+
+UserInstructions --> Agent : RAG指示の場所
+Instructions --> Agent : 操作ルール
+RagHome --> Agent : README・実行ファイル
+User --> Agent : 日本語で依頼
+
+frame "2. 利用者が言うこと" as Commands {
+  rectangle "<b>「RAGの初期設定をして」</b>\nquery/setup.py\n→ venv・依存・ONNXモデル準備\n→ list_dbs.pyで確認" as Setup #E7F6EF
+
+  rectangle "<b>「project-ragで〈質問〉を調べて」</b>\n必要時だけlist_dbs.py\n→ search.py --db ... --include-db-hint\n→ 本文・出典を使って回答" as Search #DDEBFF
+
+  rectangle "<b>「docsからproject-ragを作って」</b>\nタイトル・source-idも伝える\ngen_db/create_db.py → build_db.py --resume\n→ status.pyで完了確認" as Build #FFF4DE
+
+  rectangle "<b>「RAGの使い方とDB一覧を教えて」</b>\nREADME・list_dbs.py\nstatus.py・各コマンドの--help\nモデルはロードしない" as Help #F1F3F5
+
+  Setup -[hidden]right- Search
+  Setup -[hidden]down- Build
+  Search -[hidden]down- Help
+  Build -[hidden]right- Help
+}
+
+Agent --> Setup
+Agent --> Search
+Agent --> Build
+Agent --> Help
+
+legend bottom
+  <b>利用者が選ばなくてよいもの</b>
+  Vector / BM25 / Exact / RRFなどの検索戦略
+  ----
+  <b>Agentが確認する場合</b>
+  DBを一意に選べない場合
+  既存DBへ上書きする可能性がある場合
+endlegend
+
+@enduml

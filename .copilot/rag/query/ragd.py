@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socketserver
@@ -19,7 +20,7 @@ DBS_ROOT = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().r
 sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
-from software_rag_tool.search_api import run_search_payload
+from software_rag_tool.search_api import normalize_search_contract, run_search_payload
 
 _UnixStreamServerBase = getattr(socketserver, "ThreadingUnixStreamServer", socketserver.ThreadingTCPServer)
 
@@ -35,8 +36,11 @@ class RagDaemonServer(ThreadingHTTPServer):
         self.idle_timeout = idle_timeout
         self.state_file = state_file
         self.started_at = datetime.now(timezone.utc).isoformat()
+        self.started_monotonic = time.monotonic()
+        self.code_fingerprint = runtime_code_fingerprint()
         self.last_used_at = time.monotonic()
         self.active_requests = 0
+        self.request_sequence = 0
         self.state_lock = threading.Lock()
 
 
@@ -56,8 +60,11 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
         self.idle_timeout = idle_timeout
         self.state_file = state_file
         self.started_at = datetime.now(timezone.utc).isoformat()
+        self.started_monotonic = time.monotonic()
+        self.code_fingerprint = runtime_code_fingerprint()
         self.last_used_at = time.monotonic()
         self.active_requests = 0
+        self.request_sequence = 0
         self.state_lock = threading.Lock()
 
     def server_close(self) -> None:
@@ -88,6 +95,10 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 "pid": os.getpid(),
                 "generation": self.server.generation,
                 "started_at": self.server.started_at,
+                "uptime_seconds": round(time.monotonic() - self.server.started_monotonic, 6),
+                "active_requests": self.server.active_requests,
+                "request_sequence": self.server.request_sequence,
+                "code_fingerprint": self.server.code_fingerprint,
                 "idle_timeout_seconds": self.server.idle_timeout,
             }
         )
@@ -114,7 +125,11 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             self._send_json({"schema": "local-rag.search.v1", "status": "error", "error": f"invalid request: {exc}"})
             return
 
+        request_started = time.monotonic()
         with self.server.state_lock:
+            self.server.request_sequence += 1
+            request_sequence = self.server.request_sequence
+            queue_depth = self.server.active_requests
             self.server.active_requests += 1
         try:
             payload = run_search_payload(
@@ -127,25 +142,41 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 explain=bool(request.get("explain")),
                 include_db_hint=bool(request.get("include_db_hint")),
                 retrieval_mode=str(request.get("retrieval_mode") or "hybrid"),
+                identifier_diagnostics=bool(request.get("identifier_diagnostics", True)),
             )
         except Exception as exc:
-            payload = {
-                "schema": "local-rag.search.v1",
-                "status": "error",
-                "db": request.get("db") if isinstance(request, dict) else "",
-                "query": request.get("question") if isinstance(request, dict) else "",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            payload = normalize_search_contract(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "error",
+                    "db": request.get("db") if isinstance(request, dict) else "",
+                    "query": request.get("question") if isinstance(request, dict) else "",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
         finally:
             with self.server.state_lock:
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
+        payload["daemon_state"] = daemon_request_metadata(
+            pid=os.getpid(),
+            generation=self.server.generation,
+            started_at=self.server.started_at,
+            uptime_seconds=time.monotonic() - self.server.started_monotonic,
+            code_fingerprint=self.server.code_fingerprint,
+            request_id=str(request.get("request_id") or ""),
+            request_sequence=request_sequence,
+            queue_depth=queue_depth,
+            request_seconds=time.monotonic() - request_started,
+        )
         self._send_json(payload)
 
     def _authorized(self) -> bool:
         return self.headers.get("X-RAGD-Token") == self.server.token
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+        if payload.get("schema") == "local-rag.search.v1":
+            payload = normalize_search_contract(payload)
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -179,6 +210,10 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
                     "pid": os.getpid(),
                     "generation": self.server.generation,
                     "started_at": self.server.started_at,
+                    "uptime_seconds": round(time.monotonic() - self.server.started_monotonic, 6),
+                    "active_requests": self.server.active_requests,
+                    "request_sequence": self.server.request_sequence,
+                    "code_fingerprint": self.server.code_fingerprint,
                     "idle_timeout_seconds": self.server.idle_timeout,
                 }
             )
@@ -192,7 +227,11 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             return
 
         payload = request.get("payload") or {}
+        request_started = time.monotonic()
         with self.server.state_lock:
+            self.server.request_sequence += 1
+            request_sequence = self.server.request_sequence
+            queue_depth = self.server.active_requests
             self.server.active_requests += 1
         try:
             result = run_search_payload(
@@ -205,22 +244,38 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
                 explain=bool(payload.get("explain")),
                 include_db_hint=bool(payload.get("include_db_hint")),
                 retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
+                identifier_diagnostics=bool(payload.get("identifier_diagnostics", True)),
             )
         except Exception as exc:
-            result = {
-                "schema": "local-rag.search.v1",
-                "status": "error",
-                "db": payload.get("db") if isinstance(payload, dict) else "",
-                "query": payload.get("question") if isinstance(payload, dict) else "",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+            result = normalize_search_contract(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "error",
+                    "db": payload.get("db") if isinstance(payload, dict) else "",
+                    "query": payload.get("question") if isinstance(payload, dict) else "",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
         finally:
             with self.server.state_lock:
                 self.server.active_requests -= 1
                 self.server.last_used_at = time.monotonic()
+        result["daemon_state"] = daemon_request_metadata(
+            pid=os.getpid(),
+            generation=self.server.generation,
+            started_at=self.server.started_at,
+            uptime_seconds=time.monotonic() - self.server.started_monotonic,
+            code_fingerprint=self.server.code_fingerprint,
+            request_id=str(payload.get("request_id") or ""),
+            request_sequence=request_sequence,
+            queue_depth=queue_depth,
+            request_seconds=time.monotonic() - request_started,
+        )
         self._send_json(result)
 
     def _send_json(self, payload: dict[str, Any]) -> None:
+        if payload.get("schema") == "local-rag.search.v1":
+            payload = normalize_search_contract(payload)
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
 
 
@@ -270,6 +325,8 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
     requests_dir.mkdir(exist_ok=True)
     responses_dir.mkdir(exist_ok=True)
     heartbeat_file = file_dir / "heartbeat.json"
+    code_fingerprint = runtime_code_fingerprint()
+    started_monotonic = time.monotonic()
     state = {
         "schema": "local-rag.ragd.v2",
         "transport": "file",
@@ -277,16 +334,24 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
         "generation": generation,
         "token": token,
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "code_fingerprint": code_fingerprint,
         "idle_timeout_seconds": idle_timeout,
         "file_dir": str(file_dir),
         "heartbeat_file": str(heartbeat_file),
     }
     _write_json_atomic(state_file, state)
     last_used_at = time.monotonic()
+    last_cleanup_at = 0.0
     active_requests = 0
+    request_sequence = 0
 
     try:
         while True:
+            if _state_is_superseded(state_file, generation=generation, pid=os.getpid()):
+                return
+            if time.monotonic() - last_cleanup_at >= 60:
+                _cleanup_stale_transport_files(responses_dir, max_age_seconds=600)
+                last_cleanup_at = time.monotonic()
             _write_json_atomic(
                 heartbeat_file,
                 {
@@ -295,6 +360,9 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                     "generation": generation,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "active_requests": active_requests,
+                    "request_sequence": request_sequence,
+                    "uptime_seconds": round(time.monotonic() - started_monotonic, 6),
+                    "code_fingerprint": code_fingerprint,
                 },
             )
             request_files = sorted(requests_dir.glob("*.request.json"))
@@ -311,6 +379,9 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
             except FileNotFoundError:
                 continue
             active_requests += 1
+            request_sequence += 1
+            request_started = time.monotonic()
+            response_file: Path | None = None
             try:
                 request = json.loads(processing_file.read_text(encoding="utf-8", errors="replace"))
                 response_name = str(request.get("response") or f"{uuid.uuid4().hex}.response.json")
@@ -326,11 +397,26 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         "pid": os.getpid(),
                         "generation": generation,
                         "started_at": state["started_at"],
+                        "uptime_seconds": round(time.monotonic() - started_monotonic, 6),
+                        "active_requests": active_requests,
+                        "request_sequence": request_sequence,
+                        "code_fingerprint": code_fingerprint,
                         "idle_timeout_seconds": idle_timeout,
                     }
                 elif request.get("op") == "search":
                     payload = request.get("payload") or {}
                     result = _run_search_request(payload)
+                    result["daemon_state"] = daemon_request_metadata(
+                        pid=os.getpid(),
+                        generation=generation,
+                        started_at=state["started_at"],
+                        uptime_seconds=time.monotonic() - started_monotonic,
+                        code_fingerprint=code_fingerprint,
+                        request_id=str(payload.get("request_id") or ""),
+                        request_sequence=request_sequence,
+                        queue_depth=max(0, len(request_files) - 1),
+                        request_seconds=time.monotonic() - request_started,
+                    )
                 elif request.get("op") == "shutdown":
                     result = {"schema": "local-rag.ragd.shutdown.v1", "status": "ok"}
                     _write_json_atomic(response_file, result)
@@ -339,7 +425,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                     result = {"status": "not_found"}
                 _write_json_atomic(response_file, result)
             except Exception as exc:
-                fallback = responses_dir / f"{uuid.uuid4().hex}.response.json"
+                fallback = response_file or (responses_dir / f"{uuid.uuid4().hex}.response.json")
                 _write_json_atomic(
                     fallback,
                     {"schema": "local-rag.ragd.v1", "status": "error", "error": f"{type(exc).__name__}: {exc}"},
@@ -355,6 +441,20 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
         _unlink_state(state_file)
 
 
+def _cleanup_stale_transport_files(directory: Path, *, max_age_seconds: float) -> None:
+    cutoff = time.time() - max_age_seconds
+    try:
+        paths = list(directory.glob("*.response.json"))
+    except OSError:
+        return
+    for path in paths:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+
 def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         return run_search_payload(
@@ -367,15 +467,65 @@ def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
             explain=bool(payload.get("explain")),
             include_db_hint=bool(payload.get("include_db_hint")),
             retrieval_mode=str(payload.get("retrieval_mode") or "hybrid"),
+            identifier_diagnostics=bool(payload.get("identifier_diagnostics", True)),
         )
     except Exception as exc:
-        return {
-            "schema": "local-rag.search.v1",
-            "status": "error",
-            "db": payload.get("db") if isinstance(payload, dict) else "",
-            "query": payload.get("question") if isinstance(payload, dict) else "",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        return normalize_search_contract(
+            {
+                "schema": "local-rag.search.v1",
+                "status": "error",
+                "db": payload.get("db") if isinstance(payload, dict) else "",
+                "query": payload.get("question") if isinstance(payload, dict) else "",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+
+def runtime_code_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for path in runtime_fingerprint_paths():
+        digest.update(str(path.relative_to(RAG_ROOT)).encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
+def runtime_fingerprint_paths() -> list[Path]:
+    package_root = TOOL_ROOT / "software_rag_tool"
+    paths = [
+        Path(__file__).resolve(),
+        TOOL_ROOT / "pyproject.toml",
+        TOOL_ROOT / "requirements.txt",
+        *package_root.rglob("*.py"),
+    ]
+    return sorted(set(paths), key=lambda path: str(path.relative_to(RAG_ROOT)))
+
+
+def daemon_request_metadata(
+    *,
+    pid: int,
+    generation: str,
+    started_at: str,
+    uptime_seconds: float,
+    code_fingerprint: str,
+    request_id: str,
+    request_sequence: int,
+    queue_depth: int,
+    request_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "pid": pid,
+        "generation": generation,
+        "started_at": started_at,
+        "uptime_seconds": round(uptime_seconds, 6),
+        "code_fingerprint": code_fingerprint,
+        "request_id": request_id,
+        "request_sequence": request_sequence,
+        "queue_depth": queue_depth,
+        "request_seconds": round(request_seconds, 6),
+    }
 
 
 def _write_state(server: RagDaemonServer) -> None:
@@ -385,6 +535,7 @@ def _write_state(server: RagDaemonServer) -> None:
         "generation": server.generation,
         "token": server.token,
         "started_at": server.started_at,
+        "code_fingerprint": server.code_fingerprint,
         "idle_timeout_seconds": server.idle_timeout,
     }
     if isinstance(server, RagUnixDaemonServer):
@@ -415,9 +566,33 @@ def _unlink_state(path: Path) -> None:
         pass
 
 
+def _state_is_superseded(path: Path, *, generation: str, pid: int) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except FileNotFoundError:
+        return True
+    except json.JSONDecodeError:
+        return False
+    try:
+        owner_pid = int(data.get("pid") or 0)
+    except (TypeError, ValueError):
+        return True
+    return (
+        str(data.get("generation") or "") != generation
+        or owner_pid != pid
+    )
+
+
 def _idle_monitor(server: RagDaemonServer) -> None:
     while True:
-        time.sleep(30)
+        time.sleep(1)
+        if _state_is_superseded(
+            server.state_file,
+            generation=server.generation,
+            pid=os.getpid(),
+        ):
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            return
         with server.state_lock:
             idle_for = time.monotonic() - server.last_used_at
             active = server.active_requests

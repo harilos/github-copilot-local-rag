@@ -1,0 +1,50 @@
+@startuml
+!pragma layout smetana
+
+title 手元の資料を、AIが根拠として使えるようにする
+
+left to right direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 14
+skinparam defaultFontName "Noto Sans JP"
+skinparam defaultFontSize 16
+skinparam titleFontSize 24
+skinparam titleFontStyle bold
+skinparam ArrowColor #52606D
+skinparam ArrowFontColor #364152
+skinparam ArrowFontSize 14
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam actorBorderColor #52606D
+skinparam actorFontColor #202938
+skinparam rectangleBorderColor #52606D
+skinparam rectangleFontColor #202938
+skinparam databaseBorderColor #9A6700
+skinparam databaseFontColor #202938
+skinparam noteBorderColor #8A94A6
+skinparam noteBackgroundColor #F7F8FA
+skinparam noteFontColor #202938
+
+actor "利用者" as User
+
+rectangle "<b>GitHub Copilot / Codex</b>\nAIエージェント" as Agent #E8F1FF
+
+frame "あなたのPC内" as Local {
+  rectangle "<b>ローカルRAG</b>\n質問に関係する資料を探す" as RAG #E7F6EF
+  database "<b>登録済みの文書DB</b>\n仕様書・議事録・障害記録\nPDF・Word・コードなど" as DB #FFF4DE
+}
+
+User --> Agent : 質問
+Agent --> RAG : 1コマンド
+RAG --> DB : 検索
+DB --> RAG : 本文 + 出典
+RAG --> Agent : 根拠context
+Agent --> User : 根拠付き回答
+
+note bottom of RAG
+  利用者は検索方式を選びません。
+  Python側が自動で検索します。
+end note
+
+@enduml

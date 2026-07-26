@@ -6,8 +6,11 @@ Gold data is span-based so that chunk length can vary without rewriting labels.
 
 ```json
 {
+  "schema_version": 1,
   "id": "AC_SEM_001",
+  "db": "ac-rag",
   "db_family": "ac",
+  "db_snapshot_hash": "sha256:...",
   "query": "冷房需要が増える背景を資料から説明して",
   "query_type": "semantic",
   "answerable": true,
@@ -19,6 +22,8 @@ Gold data is span-based so that chunk length can vary without rewriting labels.
       "start_char": 18240,
       "end_char": 18810,
       "required": true,
+      "span_text": "the exact short gold span contained by a current chunk",
+      "span_text_sha256": "sha256:...",
       "source_text_hash": "sha256:...",
       "context_before": "short quote before span",
       "context_after": "short quote after span"
@@ -51,6 +56,8 @@ For negative questions, success means no unsupported answer is produced. Retriev
 - `answerable`
 - `gold_spans`
 - `gold_claims`
+- `db`
+- `db_snapshot_hash`
 
 For each span:
 
@@ -59,5 +66,32 @@ For each span:
 - `start_char`
 - `end_char`
 - `required`
+- `span_text`
+- `span_text_sha256`
 - `source_text_hash` or stable context quote
 
+`context_before` and `context_after` are relocation aids only. They must not
+independently count as a retrieval hit. Evaluation matches `span_text` against
+the final packed context and rejects a dataset whose DB snapshot differs from
+`db_snapshot_hash`.
+
+## Retrieval Trace
+
+Semantic H/L/V comparison should persist the candidate lifecycle when the
+search response exposes it:
+
+```json
+{
+  "retrieval_trace": {
+    "dense": [{"chunk_uid": "...", "rank": 1}],
+    "lexical": [],
+    "exact": [],
+    "metadata": [],
+    "rrf": [],
+    "final": []
+  }
+}
+```
+
+This trace is required for Dense candidate → RRF → final gold survival. It is
+not required to run the initial 30-question Hit@5 and Context Recall pilot.

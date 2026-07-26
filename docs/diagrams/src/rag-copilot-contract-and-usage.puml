@@ -1,0 +1,70 @@
+@startuml
+!pragma layout smetana
+
+title GitHub CopilotからローカルRAGを使うために必要なもの
+
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 14
+skinparam defaultFontName "Noto Sans JP"
+skinparam defaultFontSize 15
+skinparam titleFontSize 23
+skinparam titleFontStyle bold
+skinparam ArrowColor #52606D
+skinparam ArrowFontColor #364152
+skinparam ArrowFontSize 13
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam actorBorderColor #52606D
+skinparam actorFontColor #202938
+skinparam rectangleBorderColor #52606D
+skinparam rectangleFontColor #202938
+skinparam databaseBorderColor #9A6700
+skinparam databaseFontColor #202938
+skinparam noteBorderColor #8A94A6
+skinparam noteBackgroundColor #F7F8FA
+skinparam noteFontColor #202938
+
+frame "1. Copilotの利用条件" as Access {
+  rectangle "<b>個人</b>\nGitHubアカウント\n+ Copilot利用権\nFreeを含む（利用量に差）" as Personal #E8F1FF
+  rectangle "<b>組織</b>\nBusiness / Enterpriseの割り当て\n+ 管理者がCLI / Agentを許可" as Organization #E8F1FF
+  Personal -[hidden]right- Organization
+}
+
+frame "2. PC側の準備" as LocalReady {
+  rectangle "<b>初回セットアップ</b>\nPython・検索モデル・RAG DB" as Setup #FFF4DE
+  rectangle "<b>ローカル実行を許可</b>\nCopilot CLI\nまたは IDEのAgent mode" as Permission #FFF4DE
+  Setup -[hidden]right- Permission
+}
+
+actor "利用者" as User
+rectangle "<b>ローカルで動くCopilot</b>\n質問を理解して\n検索コマンドを実行" as Agent #DDEBFF
+rectangle "<b>search.py</b>\n--db xxx-rag “質問”\n検索方式はPythonが自動選択" as Search #E7F6EF
+database "<b>選択したローカルDB</b>\n登録済みの資料" as DB #FFF4DE
+rectangle "<b>根拠付きの結果</b>\n本文・ファイル名・ページ等を取得\n調査・要約・設計・実装に利用" as Benefit #E7F6EF
+
+Personal --> Agent : どちらか
+Organization --> Agent : どちらか
+Setup --> Search : 実行環境
+Permission --> Agent : ツール実行
+
+User --> Agent : 普通の言葉で質問
+Agent --> Search : 1コマンド
+Search --> DB : 自動検索
+DB --> Benefit : 根拠context
+
+rectangle "<b>追加契約は不要</b>\nRAG用クラウド契約・APIキーなし\nCopilot側の利用量・機能はプランに従う" as NoExtra #F1F3F5
+rectangle "<b>クラウド実行は別構成</b>\nCopilot cloud agent等からは\n手元の ~/.copilot/rag を直接参照できない" as Cloud #F1F3F5
+
+Search ..> NoExtra
+DB ..> Cloud
+
+Access -[hidden]right- LocalReady
+
+note bottom of Access
+  提供プランや上限は変更されるため、
+  最新情報はGitHub公式のプラン一覧を参照します。
+end note
+
+@enduml

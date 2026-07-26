@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from collections import Counter
@@ -298,6 +299,49 @@ def bm25_search(question: str, *, top_k: int, source: str = "any", path: Path | 
                     rows[item["id"]] = item
     ranked = sorted(rows.values(), key=lambda item: float(item.get("score") or 0))
     return _ranked(ranked[:top_k])
+
+
+def anchor_lexical_search(
+    question: str,
+    *,
+    top_k: int = 1,
+    source: str = "any",
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Return a few low-chunk-frequency lexical candidates for one Hybrid call."""
+    path = path or catalog_path()
+    if not path.exists() or top_k <= 0:
+        return []
+    try:
+        with connect(path) as conn:
+            anchors = _informative_anchor_tokens(conn, question, limit=1)
+            if not anchors:
+                return []
+            token, chunk_df, information_score = anchors[0]
+            query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
+            if not query_text:
+                return []
+            candidates = _run_fts(conn, "fts_word", query_text, max(8, top_k * 4), source)
+            rows: list[dict[str, Any]] = []
+            for raw in candidates:
+                item = _row_to_result(raw, signal="lexical_anchor", score=raw["score"])
+                debug = dict(item.get("debug") or {})
+                debug["lexical_anchor"] = {
+                    "token": token,
+                    "chunk_df": chunk_df,
+                    "information_score": round(information_score, 6),
+                }
+                item["debug"] = debug
+                rows.append(item)
+            rows.sort(
+                key=lambda item: (
+                    _token_position(str(item.get("text") or ""), token),
+                    float(item.get("score") or 0),
+                )
+            )
+            return _ranked(rows[:top_k])
+    except (sqlite3.Error, ValueError):
+        return []
 
 
 def metadata_search(question: str, *, top_k: int, source: str = "any", path: Path | None = None) -> list[dict[str, Any]]:
@@ -748,6 +792,62 @@ def _query_variants(question: str, tokens: list[str]) -> list[str]:
         queries.append(or_query)
     queries.extend(phrase_queries(question))
     return _unique(queries)
+
+
+def _informative_anchor_tokens(
+    conn: sqlite3.Connection,
+    question: str,
+    *,
+    limit: int,
+) -> list[tuple[str, int, float]]:
+    tokens = _unique(canonicalize(token) for token in tokens_for_fts(question, max_tokens=32))
+    tokens = [
+        token
+        for token in tokens
+        if len(token) >= 2
+        and not token.isdigit()
+        and any(character.isalnum() for character in token)
+    ]
+    if not tokens or limit <= 0:
+        return []
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.fts_word_vocab "
+        "USING fts5vocab(main, fts_word, 'row')"
+    )
+    placeholders = ",".join("?" for _ in tokens)
+    rows = conn.execute(
+        f"SELECT term, doc FROM temp.fts_word_vocab WHERE term IN ({placeholders})",
+        tokens,
+    )
+    chunk_count_row = conn.execute(
+        "SELECT COUNT(*) AS count FROM chunk WHERE visible_until IS NULL"
+    ).fetchone()
+    chunk_count = int(chunk_count_row["count"] if chunk_count_row else 0)
+    if chunk_count <= 0:
+        return []
+    token_order = {token: index for index, token in enumerate(tokens)}
+    ranked: list[tuple[str, int, float]] = []
+    for row in rows:
+        token = str(row["term"])
+        chunk_df = int(row["doc"] or 0)
+        if chunk_df <= 0 or chunk_df / chunk_count > 0.05:
+            continue
+        idf = math.log((chunk_count + 1) / (chunk_df + 1))
+        length_bonus = 1.0 + min(len(token), 12) / 12.0
+        ranked.append((token, chunk_df, idf * length_bonus))
+    ranked.sort(
+        key=lambda item: (
+            -item[2],
+            item[1],
+            token_order.get(item[0], len(tokens)),
+        )
+    )
+    return ranked[:limit]
+
+
+def _token_position(text: str, token: str) -> int:
+    position = canonicalize(text).find(canonicalize(token))
+    return position if position >= 0 else 1_000_000_000
 
 
 def _run_fts(conn: sqlite3.Connection, table: str, query_text: str, top_k: int, source: str) -> list[sqlite3.Row]:

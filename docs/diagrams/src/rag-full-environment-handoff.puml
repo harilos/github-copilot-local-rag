@@ -1,0 +1,95 @@
+@startuml
+!pragma layout smetana
+
+title DB・モデル込みの環境を、別の人へ丸ごと渡す
+
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 12
+skinparam defaultFontName "Noto Sans JP"
+skinparam defaultFontSize 14
+skinparam titleFontSize 24
+skinparam titleFontStyle bold
+skinparam ArrowColor #52606D
+skinparam ArrowFontColor #364152
+skinparam ArrowFontSize 12
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam rectangleBorderColor #52606D
+skinparam rectangleFontColor #202938
+skinparam folderBorderColor #9A6700
+skinparam folderFontColor #202938
+skinparam artifactBorderColor #52606D
+skinparam artifactFontColor #202938
+skinparam noteBorderColor #8A94A6
+skinparam noteBackgroundColor #F7F8FA
+skinparam noteFontColor #202938
+
+folder "<b>配布元の rag/</b>\n構築済みDB・モデルを含む作業フォルダ" as Source #FFF4DE
+
+rectangle "<b>1. 安全に停止</b>\nDB構築・追加・再構築を終了\nragdを停止してDB接続を閉じる\nSQLite WALを確定して件数整合を確認" as Freeze #E8F1FF
+
+Source --> Freeze
+
+frame "2. 配布用アーカイブへ入れるもの" as Bundle {
+  folder "<b>必須の入口</b>\n.copilot/instructions/rag.instructions.md\ninstall.sh / install.ps1\nREADME.md / LICENSE" as Entry #DDEBFF
+
+  folder "<b>RAG本体</b>\n.copilot/rag/query/\n.copilot/rag/gen_db/\n.copilot/rag/docs/" as Runtime #E8F1FF
+
+  folder "<b>すぐ検索・再開できるデータ</b>\nmodels/ruri-v3-30m-onnx-int8/\ndbs/{db}/VERSION.json・db.json\ndbs/{db}/catalog.sqlite・data/・index/・logs/" as ReadyData #FFF4DE
+
+  artifact "<b>追加推奨</b>\nBUNDLE_MANIFEST.json\nツール・依存・モデル・DBのversion\nSHA256SUMS" as Manifest #E7F6EF
+
+  Entry -[hidden]right- Runtime
+  Entry -[hidden]down- ReadyData
+  Runtime -[hidden]down- Manifest
+  ReadyData -[hidden]right- Manifest
+}
+
+Freeze --> Entry
+Freeze --> Runtime
+Freeze --> ReadyData
+Freeze --> Manifest
+
+frame "アーカイブから除外" as Exclude {
+  rectangle "<b>OS依存・再生成可能</b>\n.venv/・__pycache__/" as PlatformFiles #FDECEC
+  rectangle "<b>実行時だけの状態</b>\nPID・socket・lock・temp\nWAL/SHMはcheckpoint後に解消" as RuntimeState #FDECEC
+  rectangle "<b>不要な履歴</b>\nquery/run/\n.git/\n（DBの再開状態logsは保持）" as History #FDECEC
+
+  PlatformFiles -[hidden]right- RuntimeState
+  RuntimeState -[hidden]right- History
+}
+
+Freeze ..> Exclude : 入れない
+
+artifact "<b>rag-full.zip / tar.gz</b>\n隠しフォルダ .copilot を含む\nDB・モデル・install script入り" as Archive #E7F6EF
+Bundle --> Archive : 作業フォルダから作成
+
+rectangle "<b>注意</b>\nGitHubのSource ZIP・git archiveには\nignore対象のDB本体が入りません。\n「丸ごと配布」には使わないでください。" as GitWarning #FDECEC
+GitWarning ..> Archive
+
+frame "3. 受け取った側" as Receiver {
+  rectangle "<b>展開してインストール</b>\ninstall.sh または install.ps1\n→ $HOME/.copilot/へマージ" as Install #E8F1FF
+
+  rectangle "<b>「RAGの初期設定をして」</b>\n受取側OS用のvenv・native依存を作成\n同梱モデルとDBのversion・hashを確認" as Setup #E7F6EF
+
+  rectangle "<b>動作確認</b>\nlist_dbs.pyで想定DBを確認\nno-daemon検索 → daemon検索\n件数・JSON・出典を確認" as Verify #DDEBFF
+
+  rectangle "<b>利用開始</b>\n「project-ragで〈質問〉を調べて」\n「docsからproject-ragを作って」" as Use #E7F6EF
+
+  Install --> Setup
+  Setup --> Verify
+  Verify --> Use
+}
+
+Archive --> Install : 渡す
+
+note bottom of Verify
+  SQLiteとONNXモデルは比較的移しやすい一方、
+  Chromaは同じversionでopen・件数を検証します。
+  互換性エラー時はdata内のclean recordsから
+  該当indexを再構築できる状態を残します。
+end note
+
+@enduml

@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--include-db-hint", action="store_true")
     parser.add_argument("--retrieval-mode", choices=["hybrid", "lexical", "dense"], default="hybrid")
     parser.add_argument("--lexical-only", action="store_true", help="Skip dense vector search")
+    parser.add_argument("--disable-identifier-diagnostics", action="store_true", help="Skip identifier diagnostics for pure retrieval benchmarking")
     args = parser.parse_args()
     question = sys.stdin.read().strip() if args.stdin else (args.question or "").strip()
     if not question:
@@ -42,6 +43,7 @@ def main() -> None:
         include_db_hint=args.include_db_hint,
         use_dense=not args.lexical_only,
         retrieval_mode="lexical" if args.lexical_only else args.retrieval_mode,
+        identifier_diagnostics=not args.disable_identifier_diagnostics,
     )
     print(payload_to_text(payload, args.format, explain=args.explain))
 

@@ -1,0 +1,134 @@
+@startuml
+!pragma layout smetana
+
+title ローカルRAG 内部アーキテクチャ
+
+top to bottom direction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundCorner 10
+skinparam defaultFontName "Noto Sans JP"
+skinparam defaultFontSize 13
+skinparam titleFontSize 24
+skinparam titleFontStyle bold
+skinparam ArrowColor #596579
+skinparam ArrowFontColor #364152
+skinparam ArrowFontSize 11
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam rectangleBorderColor #596579
+skinparam rectangleFontColor #202938
+skinparam databaseBorderColor #9A6700
+skinparam databaseFontColor #202938
+skinparam folderBorderColor #9A6700
+skinparam folderFontColor #202938
+skinparam artifactBorderColor #9A6700
+skinparam artifactFontColor #202938
+skinparam noteBorderColor #8A94A6
+skinparam noteBackgroundColor #F7F8FA
+skinparam noteFontColor #202938
+
+actor "GitHub Copilot\nCodexなど" as Agent
+
+frame "QUERY TIME" as QueryLane {
+  rectangle "<b>search.py</b>\n--db {name} “{question}”\n--stdin / --format json\n--explain / --no-daemon" as CLI #DDEBFF
+
+  rectangle "<b>ragd</b>\n自動起動・複数DB対応\nmodel session / DB cache\n3時間idleで終了" as Daemon #E8F1FF
+
+  rectangle "<b>Query preparation</b>\n最小正規化・識別子抽出\nSudachi A tokenize\nquery prefix: 検索クエリ:" as Prep #E8F1FF
+
+  package "Parallel Retrievers" as Retrievers {
+    rectangle "<b>Dense</b>\nquery embedding\nChroma ANN" as Dense #E9E4FF
+    rectangle "<b>Lexical</b>\nFTS5 BM25\nSudachi A" as Lexical #E7F6EF
+    rectangle "<b>Exact</b>\nfull-token strict match\nlossy aliasなし" as Exact #FFE8D6
+    rectangle "<b>Metadata</b>\nfile / path / title\nheading lookup" as Metadata #FFF4DE
+
+    Dense -[hidden]right- Lexical
+    Lexical -[hidden]right- Exact
+    Exact -[hidden]right- Metadata
+  }
+
+  rectangle "<b>Candidate Fusion</b>\n候補union + weighted RRF\nretriever rank / signal\nExact anchor・lexical fast path" as Fusion #E8F1FF
+
+  rectangle "<b>Postprocess</b>\n重複抑制・同一文書偏り抑制\n文書多様化・隣接chunk展開" as Post #E7F6EF
+
+  rectangle "<b>Budget Packing</b>\ntoken budget / max chars\n根拠位置を保持してcontext化" as Packing #E7F6EF
+
+  artifact "<b>JSON / prompt response</b>\nstatus: ok / partial\n本文・path・title・section\nsignals・unmatched identifiers\nwarnings・explain" as Response #DDEBFF
+
+  CLI --> Daemon : 通常
+  CLI ..> Prep : --no-daemon
+  Daemon --> Prep : request
+
+  Prep --> Dense
+  Prep --> Lexical
+  Prep --> Exact
+  Prep --> Metadata
+
+  Dense --> Fusion : dense rank
+  Lexical --> Fusion : lexical rank
+  Exact --> Fusion : exact rank + matched term
+  Metadata --> Fusion : metadata rank
+
+  Fusion --> Post
+  Post --> Packing
+  Packing --> Response
+}
+
+rectangle "<b>AIが利用</b>\n根拠に基づく回答\n調査・設計・実装" as Answer #DDEBFF
+
+Agent --> CLI : 1コマンド
+Response --> Answer : 根拠context
+
+frame "~/.copilot/rag/dbs/{db}/  —  1回の検索で1DBを選択" as StorageLane {
+  database "<b>Chroma</b>\nchunk embedding\nRuri-v3-30m\nONNX INT8" as Chroma #FFF4DE
+  database "<b>catalog.sqlite</b>\nchunk text / metadata\nfts_word / file_fts\nidentifier postings\ndatabase_meta" as Catalog #FFF4DE
+  folder "<b>data/clean</b>\n正規化済みrecords\n再構築元" as Clean #FFF4DE
+  artifact "<b>状態・互換性</b>\nVERSION.json\nprogress.json\nindex_state.json\nevents.jsonl" as State #FFF4DE
+
+  Chroma -[hidden]right- Catalog
+  Catalog -[hidden]right- Clean
+  Clean -[hidden]right- State
+}
+
+Dense ..> Chroma : vector query
+Lexical ..> Catalog : FTS MATCH
+Exact ..> Catalog : canonical identifier
+Metadata ..> Catalog : file lookup
+
+frame "INDEX / UPDATE TIME" as IndexLane {
+  folder "<b>入力</b>\nWord / PowerPoint / PDF\nMarkdown / txt\nsource / config" as Sources #FFF4DE
+  rectangle "<b>Extract & Normalize</b>\n本文・path・title・heading\nsource location・hash" as Extract #E8F1FF
+  rectangle "<b>Chunking</b>\ndoc_id / chunk_uid\nchunk_index / location" as Chunking #E8F1FF
+  rectangle "<b>Feature生成</b>\n文書prefix: 検索文書:\nSudachi A tokens\nstrict identifiers\nfile metadata" as Features #E8F1FF
+  rectangle "<b>Small-batch Builder</b>\ncreate / build --resume\nadd / rebuild component" as Builder #E7F6EF
+
+  Sources --> Extract : 抽出
+  Extract --> Chunking : 正規化record
+  Chunking --> Features : chunk
+  Features --> Builder : index投入単位
+}
+
+Builder --> Chroma : embeddings
+Builder --> Catalog : text / FTS / postings
+Builder --> Clean : clean records
+Builder --> State : checkpoint / version / events
+
+QueryLane -[hidden]down- StorageLane
+StorageLane -[hidden]down- IndexLane
+
+legend bottom
+  |= 色 |= 役割 |
+  |<#DDEBFF> | 外部I/F・応答 |
+  |<#E8F1FF> | 共通処理・runtime |
+  |<#E7F6EF> | lexical / postprocess |
+  |<#E9E4FF> | dense vector |
+  |<#FFE8D6> | exact identifier |
+  |<#FFF4DE> | metadata・永続データ |
+  | <b>注意</b> | RRF scoreは関連確率ではない |
+  | <b>注意</b> | neighborはhitではなくcontext拡張 |
+  | <b>注意</b> | 20kは文書数ではなくchunk規模 |
+endlegend
+
+@enduml

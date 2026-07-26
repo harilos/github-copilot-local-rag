@@ -19,6 +19,7 @@ class SearchBackend(Protocol):
     def vector_query(self, question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def fetch_rows_by_ids(self, ids: Any) -> dict[str, dict[str, Any]]: ...
     def get_neighbor_rows(self, chunk_uid: str, *, window: int = 1) -> list[dict[str, Any]]: ...
@@ -35,6 +36,9 @@ class _GlobalBackend:
 
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         return catalog.bm25_search(question, top_k=top_k, source=source)
+
+    def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        return catalog.anchor_lexical_search(question, top_k=top_k, source=source)
 
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         return catalog.metadata_search(question, top_k=top_k, source=source)
@@ -66,16 +70,26 @@ def hybrid_query(
 
     if use_dense:
         try:
-            family_rankings.append(("dense", 1.0, backend.vector_query(question, top_k=dense_k, source=source)))
+            dense_rows = _without_test_fixtures(
+                backend.vector_query(question, top_k=dense_k, source=source)
+            )
+            family_rankings.append(("dense", 1.0, dense_rows))
         except ConfigMismatchError:
             raise
         except Exception as exc:
             warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
 
     exact_rows: list[dict[str, Any]] = []
+    anchor_ids: list[str] = []
     if use_lexical:
         try:
             exact_rows, lexical_rows, metadata_rows = _lexical_candidates(question, source=source, backend=backend)
+            exact_rows = _without_test_fixtures(exact_rows)
+            lexical_rows = _without_test_fixtures(lexical_rows)
+            metadata_rows = _without_test_fixtures(metadata_rows)
+            if use_dense and not exact_rows:
+                anchor_rows = _anchor_candidates(question, source=source, backend=backend)
+                lexical_rows, anchor_ids = _merge_anchor_rows(lexical_rows, anchor_rows)
             family_rankings.append(("lexical", 1.1, lexical_rows))
             family_rankings.append(("metadata", 0.7, metadata_rows))
             if exact_rows:
@@ -86,11 +100,14 @@ def hybrid_query(
 
     fused = _weighted_rrf(family_rankings)
     rows = _materialize(fused, family_rankings, backend=backend)
-    rows = _anchor_rescue(rows, exact_rows, question)
+    rows = _without_test_fixtures(rows)
+    rows = _anchor_rescue(rows, exact_rows, question, anchor_ids=anchor_ids)
     rows = rows[: max(DEFAULT_RRF_K, top_k)]
     rows = _dedupe_and_diversify(rows, top_k=max(top_k * 3, top_k), max_per_doc=max_per_doc)
     rows = _expand_neighbors(rows, backend=backend)
+    rows = _without_test_fixtures(rows)
     rows = _pack_budget(rows, budget_tokens=budget_tokens)
+    rows = _without_test_fixtures(rows)
     rows = rows[:top_k]
 
     for rank, row in enumerate(rows, start=1):
@@ -205,15 +222,63 @@ def _materialize(
     return output
 
 
-def _anchor_rescue(rows: list[dict[str, Any]], exact_rows: list[dict[str, Any]], question: str) -> list[dict[str, Any]]:
-    if not extract_anchors(question, limit=5) or not exact_rows:
+def _anchor_candidates(
+    question: str,
+    *,
+    source: str,
+    backend: SearchBackend,
+) -> list[dict[str, Any]]:
+    search = getattr(backend, "anchor_lexical_search", None)
+    if not callable(search):
+        return []
+    try:
+        return _without_test_fixtures(search(question, top_k=1, source=source))
+    except Exception:
+        return []
+
+
+def _merge_anchor_rows(
+    lexical_rows: list[dict[str, Any]],
+    anchor_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not anchor_rows:
+        return lexical_rows, []
+    anchor = dict(anchor_rows[0])
+    anchor_id = str(anchor.get("id") or "")
+    if not anchor_id:
+        return lexical_rows, []
+    anchor["signals"] = sorted(set(anchor.get("signals") or []) | {"lexical", "lexical_anchor"})
+    merged = [anchor]
+    merged.extend(row for row in lexical_rows if str(row.get("id") or "") != anchor_id)
+    return merged, [anchor_id]
+
+
+def _anchor_rescue(
+    rows: list[dict[str, Any]],
+    exact_rows: list[dict[str, Any]],
+    question: str,
+    *,
+    anchor_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    rescue_id = ""
+    rescue_signal = ""
+    if extract_anchors(question, limit=5) and exact_rows:
+        rescue_id = str(exact_rows[0].get("id") or "")
+        rescue_signal = "exact"
+    elif anchor_ids:
+        rescue_id = str(anchor_ids[0] or "")
+        rescue_signal = "lexical_anchor"
+    if not rescue_id:
         return rows
-    rescued = dict(exact_rows[0])
-    rescued["signals"] = sorted(set(rescued.get("signals") or []) | {"exact"})
+    selected = next((row for row in rows if str(row.get("id") or "") == rescue_id), None)
+    if selected is None:
+        return rows
+    rescued = dict(selected)
+    rescued["signals"] = sorted(set(rescued.get("signals") or []) | {rescue_signal})
     rescued["score"] = 1_000_000_000.0
     rescued["debug"] = dict(rescued.get("debug") or {})
-    rescued["debug"]["anchor_rescue"] = True
-    return [rescued] + [row for row in rows if row.get("id") != rescued.get("id")]
+    rescued["debug"]["anchor_rescue"] = rescue_signal
+    return [rescued] + [row for row in rows if str(row.get("id") or "") != rescue_id]
 
 
 def _strong_lexical_hit(
@@ -282,7 +347,9 @@ def _dedupe_and_diversify(rows: list[dict[str, Any]], *, top_k: int, max_per_doc
 def _expand_neighbors(rows: list[dict[str, Any]], *, backend: SearchBackend) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for row in rows:
-        neighbors = backend.get_neighbor_rows(str(row.get("id") or ""), window=1)
+        neighbors = _without_test_fixtures(
+            backend.get_neighbor_rows(str(row.get("id") or ""), window=1)
+        )
         if len(neighbors) <= 1:
             output.append(row)
             continue
@@ -302,6 +369,20 @@ def _expand_neighbors(rows: list[dict[str, Any]], *, backend: SearchBackend) -> 
             copy["signals"] = sorted(signals)
         output.append(copy)
     return output
+
+
+def _without_test_fixtures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if not _is_test_fixture(row)]
+
+
+def _is_test_fixture(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") or {}
+    value = metadata.get("test_fixture", row.get("test_fixture"))
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value == 1
 
 
 def _pack_budget(rows: list[dict[str, Any]], *, budget_tokens: int | None) -> list[dict[str, Any]]:
