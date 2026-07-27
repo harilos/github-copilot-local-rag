@@ -10,6 +10,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+from urllib.parse import quote
 
 from .jsonl import read_jsonl
 from .paths import catalog_path, clean_dir
@@ -83,7 +84,16 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 @contextmanager
 def connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
     """Open an existing catalog without creating WAL or schema writes."""
-    uri = path.resolve().as_uri() + "?mode=ro"
+    resolved = path.resolve()
+    resolved_text = str(resolved)
+    if resolved_text.startswith("\\\\"):
+        # sqlite rejects a file URI with a non-empty authority, including
+        # ``file://server/share``.  Four leading slashes keep a Windows UNC
+        # path in the URI path component and preserve read-only mode.
+        unc_path = resolved_text.lstrip("\\").replace("\\", "/")
+        uri = "file:////" + quote(unc_path, safe="/:") + "?mode=ro"
+    else:
+        uri = resolved.as_uri() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
         conn.row_factory = sqlite3.Row

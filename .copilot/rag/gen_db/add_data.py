@@ -22,7 +22,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, help="Target DB name, e.g. project-rag")
     parser.add_argument("--root", required=True, help="Input document directory")
-    parser.add_argument("--source-id", default="local")
+    parser.add_argument(
+        "--source-id",
+        default="local",
+        help=(
+            "Stable ingestion Source ID. Keep each provider separate; "
+            "generic examples: sharepoint-docs, redmine-issues, "
+            "github-repository, filesystem-docs."
+        ),
+    )
     parser.add_argument(
         "--scan-subdir",
         help="Relative subdirectory to scan while keeping paths relative to --root",

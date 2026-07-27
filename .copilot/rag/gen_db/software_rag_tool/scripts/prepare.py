@@ -23,7 +23,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, help="Target DB name. Must match '<name>-rag'.")
     parser.add_argument("--root", required=True, help="Input document directory")
-    parser.add_argument("--source-id", default="local", help="Source id stored in metadata")
+    parser.add_argument(
+        "--source-id",
+        default="local",
+        help=(
+            "Source ID stored in metadata. Keep each provider separate; "
+            "generic examples: sharepoint-docs, redmine-issues, "
+            "github-repository, filesystem-docs."
+        ),
+    )
     parser.add_argument("--out", default="local.jsonl", help="Output JSONL filename under data/clean")
     args = parser.parse_args()
 

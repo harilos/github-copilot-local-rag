@@ -6,7 +6,6 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -66,14 +65,15 @@ class SourceInventoryContractTests(unittest.TestCase):
         self.assertEqual(
             [("資料ルート/", 2)],
             [
-                (item.prefix, item.document_count)
-                for item in alpha.top_level_prefixes
+                (item.root, item.document_count)
+                for item in alpha.observed_roots
             ],
         )
         self.assertEqual(
             ["資料ルート/plans/a.md", "資料ルート/specs/b.md"],
             [item.path for item in alpha.sample_documents],
         )
+        self.assertEqual("ready", alpha.observed_root_status)
         self.assertEqual(
             {
                 "alpha": [
@@ -88,6 +88,49 @@ class SourceInventoryContractTests(unittest.TestCase):
             "catalog_documents_missing_source_id",
             [item.code for item in inventory.diagnostics],
         )
+
+    def test_multiple_current_roots_are_reported_for_one_source(self) -> None:
+        self._create_catalog(
+            documents=[
+                (1, "doc-a", "alpha", "First Root/a.md", "A", None),
+                (2, "doc-b", "alpha", "Second Root/b.md", "B", None),
+                (3, "doc-old", "alpha", "Old Root/c.md", "C", 2),
+            ],
+            chunks=[
+                (1, "a-1", 1, None),
+                (2, "b-1", 2, None),
+                (3, "old-1", 3, None),
+            ],
+        )
+        inventory = build_source_inventory(self.db_root)
+        source = inventory.get_source("alpha")
+        assert source is not None
+        self.assertEqual(
+            ("First Root/", "Second Root/"),
+            source.observed_stored_roots,
+        )
+        self.assertEqual(
+            "multiple_observed_roots",
+            source.observed_root_status,
+        )
+
+    def test_windows_separator_is_presented_as_canonical_stored_path(
+        self,
+    ) -> None:
+        self._create_catalog(
+            documents=[
+                (1, "doc-a", "alpha", r"Root\docs\file.md", "A", None),
+            ],
+            chunks=[
+                (1, "a-1", 1, None),
+            ],
+        )
+        inventory = build_source_inventory(self.db_root)
+        source = inventory.get_source("alpha")
+        assert source is not None
+        self.assertEqual(("Root/",), source.observed_stored_roots)
+        self.assertEqual(("Root/docs/file.md",), source.document_paths)
+        self.assertEqual("ready", source.observed_root_status)
 
     def test_catalog_is_opened_read_only_without_changing_files(self) -> None:
         self._create_catalog(
@@ -123,45 +166,30 @@ class SourceInventoryContractTests(unittest.TestCase):
                 (1, "a-1", 1, None),
             ],
         )
-        mapping_id = str(uuid.uuid4())
-        unmatched_id = str(uuid.uuid4())
         (self.db_root / "source-links.json").write_text(
             json.dumps(
                 {
                     "schema_version": SCHEMA_VERSION,
-                    "database": "sample-rag",
                     "revision": 1,
                     "sources": [
                         {
                             "source_id": "alpha",
+                            "enabled": True,
+                            "provider": "other",
+                            "strategy": "home-only",
                             "display_name": "Alpha Source",
-                            "mappings": [
-                                {
-                                    "mapping_id": mapping_id,
-                                    "enabled": True,
-                                    "path_prefix": "Root/",
-                                    "provider": "other",
-                                    "strategy": "home-only",
-                                    "settings": {
-                                        "source_home_url": "https://example.invalid/alpha"
-                                    },
-                                }
-                            ],
+                            "settings": {
+                                "source_home_url": "https://example.invalid/alpha"
+                            },
                         },
                         {
                             "source_id": "not-indexed",
-                            "mappings": [
-                                {
-                                    "mapping_id": unmatched_id,
-                                    "enabled": False,
-                                    "path_prefix": "",
-                                    "provider": "other",
-                                    "strategy": "home-only",
-                                    "settings": {
-                                        "source_home_url": "https://example.invalid/unused"
-                                    },
-                                }
-                            ],
+                            "enabled": False,
+                            "provider": "other",
+                            "strategy": "home-only",
+                            "settings": {
+                                "source_home_url": "https://example.invalid/unused"
+                            },
                         },
                     ],
                 },
@@ -179,21 +207,18 @@ class SourceInventoryContractTests(unittest.TestCase):
         alpha = inventory.get_source("alpha")
         assert alpha is not None
         assert alpha.link_setting is not None
-        self.assertEqual("Alpha Source", alpha.link_setting.display_name)
-        self.assertEqual(1, alpha.link_setting.mapping_count)
-        self.assertEqual(1, alpha.link_setting.enabled_mapping_count)
-        self.assertEqual(
-            "Root/",
-            alpha.link_setting.mappings[0].path_prefix,
-        )
+        self.assertEqual("other", alpha.link_setting.provider)
+        self.assertEqual("Alpha Source", alpha.display_name)
+        self.assertTrue(alpha.link_setting.enabled)
+        self.assertEqual(1, alpha.link_mapping_count)
         self.assertEqual(
             ["not-indexed"],
             [item.source_id for item in inventory.unmatched_settings],
         )
         payload = inventory.to_dict()
         self.assertEqual(
-            "Alpha Source",
-            payload["sources"][0]["source_link_setting"]["display_name"],
+            "other",
+            payload["sources"][0]["source_link_setting"]["provider"],
         )
 
     def test_malformed_optional_sidecar_does_not_break_inventory(self) -> None:
@@ -209,26 +234,19 @@ class SourceInventoryContractTests(unittest.TestCase):
             json.dumps(
                 {
                     "schema_version": SCHEMA_VERSION,
-                    "database": "sample-rag",
                     "revision": 1,
                     "sources": [
                         {
                             "source_id": "alpha",
-                            "mappings": [
-                                {
-                                    "mapping_id": str(uuid.uuid4()),
-                                    "enabled": True,
-                                    "path_prefix": "Root/",
-                                    "provider": "redmine",
-                                    "strategy": "regex-template",
-                                    "settings": {
-                                        "path_pattern": r"(?P<id>[0-9]+)",
-                                        "url_template": (
-                                            "https://example.invalid/items/{id"
-                                        ),
-                                    },
-                                }
-                            ],
+                            "enabled": True,
+                            "provider": "redmine",
+                            "strategy": "regex-template",
+                            "settings": {
+                                "path_pattern": r"(?P<id>[0-9]+)",
+                                "url_template": (
+                                    "https://example.invalid/items/{id"
+                                ),
+                            },
                         }
                     ],
                 }
@@ -260,15 +278,12 @@ class SourceInventoryContractTests(unittest.TestCase):
         for _index in range(1_100):
             nested = '{"nested":' + nested + "}"
         raw = (
-            '{"schema_version":"rag-source-links-v1",'
-            '"database":"sample-rag","revision":1,'
-            '"sources":[{"source_id":"alpha","mappings":['
-            '{"mapping_id":"'
-            + str(uuid.uuid4())
-            + '","enabled":true,"path_prefix":"Root/",'
+            '{"schema_version":"rag-source-links-v2",'
+            '"revision":1,'
+            '"sources":[{"source_id":"alpha","enabled":true,'
             '"provider":"other","strategy":"home-only","settings":'
             + nested
-            + "}]}]}"
+            + "}]}"
         )
         (self.db_root / "source-links.json").write_text(
             raw,
@@ -408,7 +423,7 @@ class SourceInventoryContractTests(unittest.TestCase):
 
         alpha = inventory.get_source("alpha")
         assert alpha is not None
-        self.assertEqual((), alpha.top_level_prefixes)
+        self.assertEqual((), alpha.observed_roots)
         self.assertEqual(
             ["invalid_stored_path"],
             [item.code for item in alpha.diagnostics],

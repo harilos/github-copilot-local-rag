@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 from .catalog import connect_readonly
+from .source_paths import (
+    SourcePathError,
+    canonical_stored_path,
+    observed_root_from_paths,
+)
 from .source_links import SourceLinksLoad, load_source_links
 
 
@@ -17,8 +22,8 @@ class InventoryDiagnostic:
 
 
 @dataclass(frozen=True)
-class PathPrefixSummary:
-    prefix: str
+class ObservedRootSummary:
+    root: str
     document_count: int
 
 
@@ -30,20 +35,16 @@ class DocumentSample:
 
 
 @dataclass(frozen=True)
-class SourceLinkMappingSummary:
-    mapping_id: str
-    enabled: bool
-    path_prefix: str
-    provider: str
-    strategy: str
-
-
-@dataclass(frozen=True)
 class SourceLinkSetting:
     display_name: str
-    mapping_count: int
-    enabled_mapping_count: int
-    mappings: tuple[SourceLinkMappingSummary, ...]
+    provider: str
+    strategy: str
+    enabled: bool
+    status: str
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.provider)
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,7 @@ class SourceSummary:
     display_name: str
     document_count: int
     chunk_count: int
-    top_level_prefixes: tuple[PathPrefixSummary, ...]
+    observed_roots: tuple[ObservedRootSummary, ...]
     last_updated_at: str | None
     sample_documents: tuple[DocumentSample, ...]
     document_paths: tuple[str, ...]
@@ -73,8 +74,16 @@ class SourceSummary:
     diagnostics: tuple[InventoryDiagnostic, ...] = ()
 
     @property
-    def stored_path_prefixes(self) -> tuple[str, ...]:
-        return tuple(item.prefix for item in self.top_level_prefixes)
+    def observed_stored_roots(self) -> tuple[str, ...]:
+        return tuple(item.root for item in self.observed_roots)
+
+    @property
+    def observed_root_status(self) -> str:
+        if not self.observed_roots:
+            return "no_observed_root"
+        if len(self.observed_roots) > 1:
+            return "multiple_observed_roots"
+        return "ready"
 
     @property
     def indexed_file_count(self) -> int | None:
@@ -86,15 +95,26 @@ class SourceSummary:
 
     @property
     def link_mapping_count(self) -> int:
-        return self.link_setting.mapping_count if self.link_setting else 0
+        return (
+            1
+            if self.link_setting is not None
+            and self.link_setting.configured
+            else 0
+        )
 
     @property
     def link_status(self) -> str:
-        if self.link_setting is None or self.link_setting.mapping_count == 0:
-            return "not_configured"
+        if self.link_setting is None or not self.link_setting.configured:
+            return (
+                self.link_setting.status
+                if self.link_setting is not None
+                else "not_configured"
+            )
+        if self.link_setting.status not in {"", "configured"}:
+            return self.link_setting.status
         return (
             "configured"
-            if self.link_setting.enabled_mapping_count
+            if self.link_setting.enabled
             else "disabled"
         )
 
@@ -102,8 +122,10 @@ class SourceSummary:
     def link_providers(self) -> tuple[str, ...]:
         if self.link_setting is None:
             return ()
-        return tuple(
-            sorted({item.provider for item in self.link_setting.mappings})
+        return (
+            (self.link_setting.provider,)
+            if self.link_setting.provider
+            else ()
         )
 
     @property
@@ -116,9 +138,10 @@ class SourceSummary:
             "display_name": self.display_name,
             "document_count": self.document_count,
             "chunk_count": self.chunk_count,
-            "stored_path_prefixes": list(self.stored_path_prefixes),
-            "top_level_prefixes": [
-                asdict(value) for value in self.top_level_prefixes
+            "observed_stored_roots": list(self.observed_stored_roots),
+            "observed_root_status": self.observed_root_status,
+            "observed_roots": [
+                asdict(value) for value in self.observed_roots
             ],
             "last_updated_at": self.last_updated_at,
             "indexed_file_count": self.indexed_file_count,
@@ -133,14 +156,15 @@ class SourceSummary:
             "source_link_setting": (
                 {
                     "display_name": self.link_setting.display_name,
-                    "mapping_count": self.link_setting.mapping_count,
-                    "enabled_mapping_count": (
-                        self.link_setting.enabled_mapping_count
+                    "provider": self.link_setting.provider,
+                    "strategy": self.link_setting.strategy,
+                    "enabled": self.link_setting.enabled,
+                    "configuration": (
+                        "configured"
+                        if self.link_setting.configured
+                        else "not_configured"
                     ),
-                    "mappings": [
-                        asdict(value)
-                        for value in self.link_setting.mappings
-                    ],
+                    "status": self.link_status,
                 }
                 if self.link_setting
                 else None
@@ -154,12 +178,12 @@ class SourceSummary:
 @dataclass(frozen=True)
 class UnmatchedSourceLinkSetting:
     source_id: str
-    display_name: str
-    mapping_count: int
+    provider: str
+    enabled: bool
 
     @property
     def link_mapping_count(self) -> int:
-        return self.mapping_count
+        return 1 if self.provider else 0
 
 
 @dataclass(frozen=True)
@@ -246,22 +270,17 @@ def build_source_inventory(
     """Build catalog-authoritative Source inventory without DB writes."""
     root = Path(db_root).expanduser().resolve()
     name = db_name or root.name
-    sidecar = load_source_links(root, name)
     diagnostics: list[InventoryDiagnostic] = []
-    if sidecar.status == "invalid":
-        diagnostics.append(
-            InventoryDiagnostic(
-                "source_links_invalid",
-                "The optional Source-Link sidecar is invalid"
-                + (
-                    f" ({sidecar.error_kind})."
-                    if sidecar.error_kind
-                    else "."
-                ),
-            )
-        )
     catalog_path = root / "catalog.sqlite"
     if not catalog_path.is_file():
+        sidecar = load_source_links(root, name, observed_roots={})
+        if sidecar.status == "invalid":
+            diagnostics.append(
+                InventoryDiagnostic(
+                    "source_links_invalid",
+                    "The optional Source-Link sidecar is invalid.",
+                )
+            )
         diagnostics.append(
             InventoryDiagnostic(
                 "catalog_missing",
@@ -283,6 +302,34 @@ def build_source_inventory(
         )
 
     catalog = _read_catalog(catalog_path)
+    observed_roots: dict[str, tuple[str, ...]] = {}
+    for row in catalog["sources"]:
+        try:
+            roots = observed_root_from_paths(
+                canonical_stored_path(document["path"])
+                for document in row["documents"]
+                if _valid_stored_path(str(document["path"]))
+            )
+        except SourcePathError:
+            roots = ()
+        observed_roots[str(row["source_id"])] = roots
+    sidecar = load_source_links(
+        root,
+        name,
+        observed_roots=observed_roots,
+    )
+    if sidecar.status == "invalid":
+        diagnostics.append(
+            InventoryDiagnostic(
+                "source_links_invalid",
+                "The optional Source-Link sidecar is invalid"
+                + (
+                    f" ({sidecar.error_kind})."
+                    if sidecar.error_kind
+                    else "."
+                ),
+            )
+        )
     if catalog["missing_documents"]:
         diagnostics.append(
             InventoryDiagnostic(
@@ -291,6 +338,7 @@ def build_source_inventory(
             )
         )
     configured = _configured_sources(sidecar)
+    source_link_statuses = dict(sidecar.source_statuses)
     state = _supplemental_state(root)
     diagnostics.extend(state["diagnostics"])
     if state["missing_source_entries"]:
@@ -324,8 +372,9 @@ def build_source_inventory(
         source_diagnostics: list[InventoryDiagnostic] = []
         samples: list[DocumentSample] = []
         for document in row["documents"]:
-            path = str(document["path"])
-            if not _valid_stored_path(path):
+            try:
+                path = canonical_stored_path(document["path"])
+            except SourcePathError:
                 source_diagnostics.append(
                     InventoryDiagnostic(
                         "invalid_stored_path",
@@ -349,7 +398,10 @@ def build_source_inventory(
                     )
                 )
         overlay = configured.get(source_id)
-        link_setting = _link_setting(overlay)
+        link_setting = _link_setting(
+            overlay,
+            source_link_statuses.get(source_id, "not_configured"),
+        )
         supplemental = _source_state(
             state,
             source_id,
@@ -357,15 +409,13 @@ def build_source_inventory(
         summaries.append(
             SourceSummary(
                 source_id=source_id,
-                display_name=(
-                    link_setting.display_name
-                    if link_setting and link_setting.display_name
-                    else source_id
+                display_name=str(
+                    (overlay or {}).get("display_name") or source_id
                 ),
                 document_count=int(row["document_count"]),
                 chunk_count=int(row["chunk_count"]),
-                top_level_prefixes=tuple(
-                    PathPrefixSummary(prefix, count)
+                observed_roots=tuple(
+                    ObservedRootSummary(prefix, count)
                     for prefix, count in sorted(prefixes.items())
                 ),
                 last_updated_at=(
@@ -556,27 +606,17 @@ def _configured_sources(
 
 def _link_setting(
     source: dict[str, Any] | None,
+    status: str,
 ) -> SourceLinkSetting | None:
-    if source is None:
+    if source is None and status == "not_configured":
         return None
-    mappings = tuple(
-        SourceLinkMappingSummary(
-            mapping_id=str(value.get("mapping_id") or ""),
-            enabled=bool(value.get("enabled")),
-            path_prefix=str(value.get("path_prefix") or ""),
-            provider=str(value.get("provider") or ""),
-            strategy=str(value.get("strategy") or ""),
-        )
-        for value in source.get("mappings") or []
-        if isinstance(value, dict)
-    )
+    value = source or {}
     return SourceLinkSetting(
-        display_name=str(source.get("display_name") or ""),
-        mapping_count=len(mappings),
-        enabled_mapping_count=sum(
-            1 for value in mappings if value.enabled
-        ),
-        mappings=mappings,
+        display_name=str(value.get("display_name") or ""),
+        provider=str(value.get("provider") or ""),
+        strategy=str(value.get("strategy") or ""),
+        enabled=bool(value.get("enabled")),
+        status=status,
     )
 
 
@@ -588,14 +628,8 @@ def _unmatched_link_settings(
     return tuple(
         UnmatchedSourceLinkSetting(
             source_id=source_id,
-            display_name=str(source.get("display_name") or source_id),
-            mapping_count=len(
-                [
-                    value
-                    for value in source.get("mappings") or []
-                    if isinstance(value, dict)
-                ]
-            ),
+            provider=str(source.get("provider") or ""),
+            enabled=bool(source.get("enabled")),
         )
         for source_id, source in sorted(configured.items())
         if source_id not in catalog_source_ids
@@ -751,16 +785,11 @@ def _source_state(
 
 
 def _valid_stored_path(value: str) -> bool:
-    if not value or "\\" in value:
+    try:
+        canonical_stored_path(value)
+    except SourcePathError:
         return False
-    posix = PurePosixPath(value)
-    windows = PureWindowsPath(value)
-    return not (
-        posix.is_absolute()
-        or windows.is_absolute()
-        or bool(windows.drive)
-        or any(part in {"", ".", ".."} for part in posix.parts)
-    )
+    return True
 
 
 def _load_json(

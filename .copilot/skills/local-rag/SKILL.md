@@ -1,6 +1,6 @@
 ---
 name: local-rag
-description: Performs one read-only lookup against installed local RAG databases when the user explicitly asks to answer from RAG, local documents, internal or company information, or information installed in or provided to Copilot.
+description: Performs one read-only lookup against installed local RAG databases when the user explicitly asks to answer from RAG, local documents, internal or company information, or information installed in or provided to Copilot; it also provides the exact ordinary lookup command without executing it when explicitly requested.
 ---
 
 # Local RAG Lookup
@@ -15,6 +15,12 @@ local documents, internal or company information, or information installed in
 or provided to Copilot. Treat equivalent source-based wording in any language
 as explicit. Do not activate lookup merely because the question mentions a
 company or an internal-sounding term.
+
+Source-Link configuration is a human-only Manager boundary, not a lookup. If
+the user asks to create, edit, inspect, or explain Source-Link settings, do not
+list databases, search, inspect files, run an admin command, or open the
+Manager. State only that a human can manage those settings through the Local
+RAG Manager and stop.
 
 ## One-command decision
 
@@ -42,6 +48,28 @@ database already named by the user.
 - Do not issue a second search automatically.
 - Do not search another database after receiving a result.
 - Do not suggest that the user rewrite the question into search keywords.
+
+## Verbatim original-question gate for executed lookup
+
+When executing `search.py`, the final positional argument must be a
+character-for-character copy of the latest human-authored visible prompt.
+Keep its database name, RAG or local-document wording, instructions,
+punctuation, and every wrapper phrase. Do not extract only the text after a
+colon, only an embedded question, or only the apparent search keywords.
+This executed-lookup rule does not apply when the user asks only to display a
+static command without executing it; the static command-only contract below
+governs that case.
+
+Copilot may place runtime metadata around that prompt. Never include
+Copilot-generated runtime, session-limit, status, system-reminder, SQL-table,
+date/time, or other XML-like metadata blocks in the search question. These
+blocks were not authored by the human and are not part of the visible prompt.
+
+Immediately before invoking `search.py`, compare the final positional argument
+with the latest human-authored visible prompt after excluding only those
+Copilot-generated metadata blocks. If they differ, correct the argument before
+execution. Retrieval facets remain separate arguments and never replace or
+modify this verbatim positional argument.
 
 ## Broad one-shot retrieval planning
 
@@ -130,7 +158,8 @@ executable directly:
   --include-db-hint `
   --compact-json `
   --result-delivery file `
-  --answer-goal evidence `
+  --answer-goal "evidence" `
+  --literal-identifier "<literal identifier>" `
   --facet "<literal or semantic facet>" `
   "<complete-user-question>"
 ```
@@ -139,6 +168,27 @@ Do not use `cmd.exe /c`, `cmd /c`, `Start-Process`, a `.bat` or `.cmd`
 wrapper, a nested PowerShell process, PATH-based Python discovery, or a JSON
 stdin pipeline on Windows. Start the venv `python.exe` process directly, wait
 for that process, and read its stdout and stderr directly.
+
+The `search.py` tool call must contain only the direct Python invocation.
+Do not combine it with an assignment, semicolon, pipeline, `ConvertFrom-Json`,
+`Get-Content`, or any other command. After that process exits, read the
+returned `summary_file` in one separate, single-purpose file-read tool call.
+Pass the complete question as one directly quoted final argv token. Do not use
+a PowerShell here-string, shell variable, command substitution, environment
+variable, or another multiline text container for the question.
+
+In Git Bash on Windows, use the same Windows venv executable through a
+Git-Bash-compatible path. Do not switch to the POSIX `bin/python` layout:
+
+```bash
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
+  "$HOME/.copilot/rag/query/search.py" \
+  --db <selected-db> \
+  --include-db-hint \
+  --compact-json \
+  --result-delivery file \
+  "<complete-user-question>"
+```
 
 Normal lookup must use the persistent local daemon managed by `search.py`.
 Do not add `--no-daemon` to an ordinary lookup. A STARTING or BUSY daemon is
@@ -153,6 +203,24 @@ Use repeated planning arguments on Windows:
 - `--entity` (maximum five)
 - `--facet` (maximum four)
 - `--semantic-hypothesis` (maximum three, semantic-only)
+
+`--answer-goal` accepts only one of these exact values:
+
+- `definition`
+- `evidence`
+- `comparison`
+- `procedure`
+- `history`
+- `survey`
+
+Never invent a free-text answer goal.
+
+Pass every value for `--answer-goal`, `--literal-identifier`, `--entity`,
+`--facet`, and `--semantic-hypothesis` as one directly quoted argv token.
+Never emit an unquoted multiword planning value.
+Immediately before execution, verify that each planning option is followed by
+exactly one quoted value and that no words from that value became separate
+argv tokens.
 
 These arguments also work on macOS and Linux. The `--request-json --stdin`
 interface remains available for manual POSIX integration, but it is not the
@@ -187,13 +255,22 @@ After selecting a database:
    `search.py` exactly once.
 2. Use the default hybrid retrieval behavior.
 3. Do not specify `--retrieval-mode`.
-4. Do not retry after `ok`, `partial`, `no_hit`, or `error`.
+4. Do not retry after `ok`, `partial`, `no_hit`, or `error`. If the
+   `search.py` process exits nonzero or rejects an argument, report that error
+   and stop. Do not correct the command and try again.
 5. A new search is allowed only when the user explicitly requests additional
    investigation or provides a meaningful clarification.
 6. Use `--result-delivery file`. Read the returned `summary_file` exactly
    once. Do not read `manifest.json` or any detail item for the initial answer.
 7. Treat `summary.json` as the complete initial-answer result. Do not run
    `jq`, `grep`, `head`, `tail`, or another command to post-process it.
+
+When the user explicitly requests raw stdout JSON for diagnostics, use the
+narrow diagnostic exception `--result-delivery stdout --format json` and do
+not read a summary pointer or summary file. Parse only the valid stdout JSON.
+A warning on stderr does not authorize a retry. This exception applies only
+to an explicit raw-stdout request; normal Windows lookup continues to require
+file delivery.
 
 Dense, lexical, Exact, metadata, and fusion candidate retrieval performed
 inside that one Hybrid call are not additional searches.
@@ -300,3 +377,20 @@ sources in the answer and normally mention five or more when the user asks
 for related material. If direct evidence is empty but document results exist,
 say that direct evidence was not found, then present the broader results. Do
 not report that the entire RAG search found nothing.
+
+## Static command-only requests
+
+When the user asks only to show a lookup command without executing it, return
+exactly one code block containing the applicable platform template already
+printed in this Skill. Resolve the database placeholder and put the supplied
+lookup question in one directly quoted final argument. Do not add explanatory
+text, a second code block, or a second command. After this Skill has been
+loaded, do not call any other tool and do not read, glob, search, fetch, or
+inspect source code, help output, tests, fixtures, README files, or generated
+results. Do not execute the command.
+
+When a static command request labels a separate `Lookup question`, copy only
+the text after that label into the final argument, character for character.
+Do not copy the surrounding command request, Skill-loading instruction, shell
+restrictions, or other meta instructions into the lookup question.
+This static rule explicitly overrides the executed-lookup verbatim rule above.

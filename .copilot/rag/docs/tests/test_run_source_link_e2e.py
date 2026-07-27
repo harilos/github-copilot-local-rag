@@ -8,6 +8,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote, urlsplit
 
 
@@ -114,6 +115,22 @@ class SourceLinkE2ERunnerTests(unittest.TestCase):
         self.assertEqual(1, redirected.redirects)
         self.assertEqual(404, missing.status)
 
+    def test_explicit_ca_bundle_has_precedence(self) -> None:
+        previous = e2e._EXPLICIT_CA_BUNDLE
+        try:
+            e2e._EXPLICIT_CA_BUNDLE = Path("<synthetic-ca-bundle>")
+            with mock.patch.object(
+                e2e.ssl,
+                "create_default_context",
+                return_value=object(),
+            ) as create:
+                e2e._https_context()
+            create.assert_called_once_with(
+                cafile=str(Path("<synthetic-ca-bundle>"))
+            )
+        finally:
+            e2e._EXPLICIT_CA_BUNDLE = previous
+
     def test_github_suite_has_six_passing_cases(self) -> None:
         args = argparse.Namespace(
             repository_url=self.base_url + "/owner/repository",
@@ -138,6 +155,22 @@ class SourceLinkE2ERunnerTests(unittest.TestCase):
         self.assertEqual(5, len(records))
         self.assertTrue(all(record["passed"] for record in records))
         self.assertFalse(any("generated_url" in record for record in records))
+
+    def test_status_change_cannot_be_reported_as_pass(self) -> None:
+        record = e2e._record(
+            case_id="GH-E2E-STATUS",
+            provider="github",
+            generated_url=self.base_url + "/ok",
+            expected_status=200,
+            actual_status=200,
+            latency_seconds=0.01,
+            target_verified=True,
+            marker_verified=True,
+            search_status_unchanged=False,
+            passed=True,
+            url_reporting="redacted",
+        )
+        self.assertFalse(record["passed"])
 
 
 if __name__ == "__main__":

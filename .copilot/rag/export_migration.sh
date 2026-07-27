@@ -183,6 +183,9 @@ if [ "$INCLUDE_NETWORK_CONFIG" = true ] &&
     --path "$RAG_SOURCE/config/network.json" ||
     fail "network.json contains invalid or persisted proxy credentials"
 fi
+"$MIGRATION_PYTHON" "$MIGRATION_HELPER" validate-source-links-tree \
+  --root "$RAG_SOURCE/dbs" ||
+  fail "active Source-Link configuration is invalid or unsafe"
 
 for required in \
   "instructions/rag.instructions.md" \
@@ -320,7 +323,9 @@ set -- \
   --exclude='*.pfx' \
   --exclude='*-shm' \
   --exclude='*-wal' \
-  --exclude='*-journal'
+  --exclude='*-journal' \
+  --exclude='*/.source-links.lock' \
+  --exclude='*/source-links.json.bak'
 
 if [ "$INCLUDE_NETWORK_CONFIG" = false ]; then
   set -- "$@" --exclude='./rag/config/network.json'
@@ -342,6 +347,9 @@ SOURCE_TAR="$TEMP_ROOT/source-payload.tar"
   tar -xf "$SOURCE_TAR"
 ) || fail "could not stage the source snapshot"
 rm -f -- "$SOURCE_TAR"
+"$MIGRATION_PYTHON" "$MIGRATION_HELPER" validate-source-links-tree \
+  --root "$STAGE_COPILOT/rag/dbs" ||
+  fail "staged Source-Link configuration is invalid or unsafe"
 
 "$MIGRATION_PYTHON" "$MIGRATION_HELPER" fingerprint-tree \
   --root "$RAG_SOURCE/dbs" \
@@ -398,8 +406,8 @@ rag_policy=blacklist
 outside_rag_policy=exact_whitelist
 outside_rag_whitelist=instructions/rag.instructions.md,skills/local-rag/SKILL.md,skills/local-rag-admin/SKILL.md
 excluded_runtime=query/.venv,query/run
-excluded_private=.env,.env.*,credential*,secret*,.netrc,.pypirc,.npmrc,.git-credentials,id_*,*.key,*.pem,*.p12,*.pfx
-excluded_transient=__pycache__,*.pyc,*.pyo,*-shm,*-wal,*-journal
+excluded_private=.env,.env.*,credential*,secret*,.netrc,.pypirc,.npmrc,.git-credentials,id_*,*.key,*.pem,*.p12,*.pfx,source-links.json.bak
+excluded_transient=__pycache__,*.pyc,*.pyo,*-shm,*-wal,*-journal,.source-links.lock
 EOF
 
 cat >"$STAGE_ROOT/RESTORE.md" <<'EOF'

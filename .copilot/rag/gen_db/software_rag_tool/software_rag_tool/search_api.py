@@ -678,9 +678,7 @@ def _add_discovery_lane(
                 "ranks": {},
                 "candidates": [],
                 "_source_id": str(
-                    metadata.get("source_id")
-                    or metadata.get("source")
-                    or ""
+                    metadata.get("source_id") or ""
                 ),
             },
         )
@@ -697,9 +695,7 @@ def _add_discovery_lane(
             document["score"] = score
             document["best"] = item
             document["_source_id"] = str(
-                metadata.get("source_id")
-                or metadata.get("source")
-                or ""
+                metadata.get("source_id") or ""
             )
         document["signals"].update(item["signals"])
         document["facets"].update(item["facets"])
@@ -1045,7 +1041,6 @@ def _cached_document_detail(
         "path": str(document.get("path") or ""),
         "_source_id": str(
             metadata.get("source_id")
-            or metadata.get("source")
             or document.get("_source_id")
             or ""
         ),
@@ -1081,9 +1076,7 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
         item: dict[str, Any] = {
             "id": f"R{row['rank']}",
             "_source_id": str(
-                meta.get("source_id")
-                or meta.get("source")
-                or ""
+                meta.get("source_id") or ""
             ),
             "source": {
                 "path": meta.get("path") or "",

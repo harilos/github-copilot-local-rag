@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -39,13 +40,13 @@ class MigrationExportContractTests(unittest.TestCase):
             "dbs/example-rag/db.json": "{}\n",
             "dbs/example-rag/catalog.sqlite": "catalog\n",
             "dbs/example-rag/source-links.json": (
-                '{"schema_version":"rag-source-links-v1",'
-                '"database":"example-rag","revision":1,"sources":[]}\n'
+                '{"schema_version":"rag-source-links-v2",'
+                '"revision":1,"sources":[]}\n'
             ),
             "dbs/example-rag/source-links.json.bak": (
-                '{"schema_version":"rag-source-links-v1",'
-                '"database":"example-rag","revision":1,"sources":[]}\n'
+                "refresh_token=synthetic-backup-marker\n"
             ),
+            "dbs/example-rag/.source-links.lock": "opaque\n",
             "dbs/example-rag/catalog.sqlite-wal": "",
             "dbs/example-rag/catalog.sqlite-shm": "transient\n",
             "dbs/example-rag/logs/progress.json": '{"status":"completed"}\n',
@@ -94,8 +95,12 @@ class MigrationExportContractTests(unittest.TestCase):
         self,
         name: str = "migration.tar.gz",
         *extra: str,
+        environment: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         archive = self.root / name
+        process_environment = os.environ.copy()
+        if environment:
+            process_environment.update(environment)
         completed = subprocess.run(
             [
                 "/bin/sh",
@@ -108,6 +113,7 @@ class MigrationExportContractTests(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
+            env=process_environment,
             timeout=30,
             check=False,
         )
@@ -134,8 +140,12 @@ class MigrationExportContractTests(unittest.TestCase):
             prefix + "rag/dbs/example-rag/source-links.json",
             names,
         )
-        self.assertIn(
+        self.assertNotIn(
             prefix + "rag/dbs/example-rag/source-links.json.bak",
+            names,
+        )
+        self.assertNotIn(
+            prefix + "rag/dbs/example-rag/.source-links.lock",
             names,
         )
         self.assertIn(
@@ -167,6 +177,18 @@ class MigrationExportContractTests(unittest.TestCase):
         self.assertNotIn(prefix + "rag/config/credentials.json", names)
         self.assertNotIn(prefix + "rag/config/private.pem", names)
         self.assertFalse(any("/._" in name for name in names))
+        with tarfile.open(archive, "r:gz") as package:
+            combined_payload = b"".join(
+                handle.read()
+                for member in package.getmembers()
+                if member.isfile()
+                for handle in [package.extractfile(member)]
+                if handle is not None
+            )
+        self.assertNotIn(
+            b"synthetic-backup-marker",
+            combined_payload,
+        )
 
         self.assertIn(prefix + "instructions/rag.instructions.md", names)
         self.assertIn(prefix + "skills/local-rag/SKILL.md", names)
@@ -282,6 +304,234 @@ class MigrationExportContractTests(unittest.TestCase):
             "local-rag-migration-v1/.copilot/rag/config/network.json",
             names,
         )
+
+    def test_source_link_credentials_stop_export_and_backup_is_excluded(
+        self,
+    ) -> None:
+        active = self.rag / "dbs/example-rag/source-links.json"
+        marker = "synthetic-source-link-secret"
+        active.write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-links-v2",
+                    "revision": 1,
+                    "sources": [
+                        {
+                            "source_id": "fixture-source",
+                            "enabled": True,
+                            "provider": "sharepoint",
+                            "strategy": "append-relative-path",
+                            "settings": {
+                                "source_web_root": (
+                                    "https://fixture.example.invalid/"
+                                    f"refresh_token={marker}"
+                                )
+                            },
+                        }
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        completed, archive = self.run_export(
+            "unsafe-source-links.tar.gz"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(archive.exists())
+        combined = completed.stdout + completed.stderr
+        self.assertNotIn(marker, combined)
+        self.assertNotIn("fixture.example.invalid", combined)
+
+        active.write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-links-v2",
+                    "revision": 1,
+                    "sources": [
+                        {
+                            "source_id": "fixture-source",
+                            "enabled": True,
+                            "provider": "other",
+                            "strategy": "home-only",
+                            "settings": {
+                                "source_home_url": (
+                                    "https://fixture.example.invalid/"
+                                    "?next=refresh_token%253D"
+                                    f"{marker}"
+                                )
+                            },
+                        }
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        encoded, encoded_archive = self.run_export(
+            "encoded-unsafe-source-links.tar.gz"
+        )
+        self.assertNotEqual(encoded.returncode, 0)
+        self.assertFalse(encoded_archive.exists())
+        encoded_output = encoded.stdout + encoded.stderr
+        self.assertNotIn(marker, encoded_output)
+        self.assertNotIn("fixture.example.invalid", encoded_output)
+
+        active.write_text(
+            active.read_text(encoding="utf-8").replace(
+                "refresh_token%253D",
+                "signature%253D",
+            ),
+            encoding="utf-8",
+        )
+        signed, signed_archive = self.run_export(
+            "signed-unsafe-source-links.tar.gz"
+        )
+        self.assertNotEqual(signed.returncode, 0)
+        self.assertFalse(signed_archive.exists())
+        signed_output = signed.stdout + signed.stderr
+        self.assertNotIn(marker, signed_output)
+        self.assertNotIn("fixture.example.invalid", signed_output)
+
+        for query_key in ("pwd", "passphrase", "sas"):
+            active.write_text(
+                active.read_text(encoding="utf-8").replace(
+                    "?next=signature%253D",
+                    f"?{query_key}=",
+                ),
+                encoding="utf-8",
+            )
+            direct_result, direct_archive = self.run_export(
+                f"direct-{query_key}-unsafe.tar.gz"
+            )
+            self.assertNotEqual(direct_result.returncode, 0)
+            self.assertFalse(direct_archive.exists())
+            direct_output = direct_result.stdout + direct_result.stderr
+            self.assertNotIn(marker, direct_output)
+            self.assertNotIn("fixture.example.invalid", direct_output)
+            active.write_text(
+                active.read_text(encoding="utf-8").replace(
+                    f"?{query_key}=",
+                    "?next=signature%253D",
+                ),
+                encoding="utf-8",
+            )
+
+        for assignment in (
+            "APIKeys",
+            "passPhrase",
+            "APIKEYS",
+            "apikeys",
+            "ACCESSKEYS",
+            "accesskeys",
+            "SSHKEY",
+            "sshkey",
+            "SUBSCRIPTIONKEY",
+            "subscriptionkey",
+            "ACCESSKEYID",
+            "accesskeyid",
+            "AWSACCESSKEYID",
+            "awsaccesskeyid",
+            "PASSPHRASES",
+            "passphrases",
+            "XAMZSIGNATURE",
+            "xamzsignature",
+            "XGOOGSIGNATURE",
+            "xgoogsignature",
+            "PROXYAUTHORIZATION",
+            "proxyauthorization",
+            "PROXYAUTH",
+            "proxyauth",
+            "SECRETACCESSKEY",
+            "secretaccesskey",
+        ):
+            active.write_text(
+                active.read_text(encoding="utf-8").replace(
+                    "signature%253D",
+                    f"{assignment}%253D",
+                ),
+                encoding="utf-8",
+            )
+            alias_result, alias_archive = self.run_export(
+                f"alias-{assignment.casefold()}-unsafe.tar.gz"
+            )
+            self.assertNotEqual(alias_result.returncode, 0)
+            self.assertFalse(alias_archive.exists())
+            alias_output = alias_result.stdout + alias_result.stderr
+            self.assertNotIn(marker, alias_output)
+            self.assertNotIn("fixture.example.invalid", alias_output)
+            active.write_text(
+                active.read_text(encoding="utf-8").replace(
+                    f"{assignment}%253D",
+                    "signature%253D",
+                ),
+                encoding="utf-8",
+            )
+
+        active.write_text(
+            '{"schema_version":"rag-source-links-v1",'
+            '"database":"example-rag","revision":1,"sources":[]}\n',
+            encoding="utf-8",
+        )
+        legacy, legacy_archive = self.run_export(
+            "legacy-source-links.tar.gz"
+        )
+        self.assertNotEqual(legacy.returncode, 0)
+        self.assertFalse(legacy_archive.exists())
+        self.assertNotIn("example-rag", legacy.stderr)
+
+    def test_staged_source_link_is_revalidated_after_snapshot(self) -> None:
+        wrapper = self.root / "migration-python-wrapper"
+        swap_marker = self.root / "swap-complete"
+        secret = "synthetic-staged-secret"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "if 'fingerprint-tree' in args and '--root' in args:\n"
+            "    root = pathlib.Path(args[args.index('--root') + 1])\n"
+            "    marker = pathlib.Path(os.environ['RAG_SWAP_MARKER'])\n"
+            "    if root.name == 'dbs' and not marker.exists():\n"
+            "        target = pathlib.Path(os.environ['RAG_SWAP_SIDECAR'])\n"
+            "        payload = {\n"
+            "          'schema_version': 'rag-source-links-v2',\n"
+            "          'revision': 1,\n"
+            "          'sources': [{\n"
+            "            'source_id': 'fixture-source',\n"
+            "            'enabled': True,\n"
+            "            'provider': 'sharepoint',\n"
+            "            'strategy': 'append-relative-path',\n"
+            "            'settings': {'source_web_root':\n"
+            "              'https://fixture.example.invalid/' +\n"
+            "              'refresh_token=' +\n"
+            "              os.environ['RAG_SWAP_SECRET']},\n"
+            "          }],\n"
+            "        }\n"
+            "        target.write_text(json.dumps(payload), encoding='utf-8')\n"
+            "        marker.write_text('done', encoding='ascii')\n"
+            "os.execv(sys.executable, [sys.executable, *args])\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        completed, archive = self.run_export(
+            "snapshot-race.tar.gz",
+            environment={
+                "RAG_MIGRATION_PYTHON": str(wrapper),
+                "RAG_SWAP_MARKER": str(swap_marker),
+                "RAG_SWAP_SIDECAR": str(
+                    self.rag / "dbs/example-rag/source-links.json"
+                ),
+                "RAG_SWAP_SECRET": secret,
+            },
+        )
+        self.assertTrue(swap_marker.is_file())
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(archive.exists())
+        combined = completed.stdout + completed.stderr
+        self.assertNotIn(secret, combined)
+        self.assertNotIn("fixture.example.invalid", combined)
 
     def test_include_network_compatibility_option_keeps_default(self) -> None:
         completed, archive = self.run_export(

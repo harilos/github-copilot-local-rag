@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qsl, urlsplit
@@ -166,6 +167,18 @@ def verify_payload_topology(root: Path, manifest: dict[str, str]) -> None:
         raise MigrationArchiveError(
             "network_config_included does not match the payload"
         )
+    database_root = rag / "dbs"
+    if database_root.is_dir():
+        if any(database_root.rglob("source-links.json.bak")):
+            raise MigrationArchiveError(
+                "Source-Link rollback backups are forbidden in migration "
+                "archives"
+            )
+        if any(database_root.rglob(".source-links.lock")):
+            raise MigrationArchiveError(
+                "Source-Link edit locks are forbidden in migration archives"
+            )
+        validate_source_links_tree(database_root)
     try:
         expected_count = int(manifest["file_count"])
     except (KeyError, ValueError) as exc:
@@ -357,6 +370,73 @@ def validate_network_config(path: Path) -> None:
         )
 
 
+def validate_source_links_tree(root: Path) -> None:
+    """Validate only active portable v2 sidecars without disclosing values."""
+    root = root.resolve()
+    if not root.is_dir():
+        return
+    package_root = (
+        Path(__file__).resolve().parent
+        / "gen_db"
+        / "software_rag_tool"
+    )
+    try:
+        sys.path.insert(0, str(package_root))
+        from software_rag_tool import source_links
+    except (ImportError, OSError) as exc:
+        raise MigrationArchiveError(
+            "active Source-Link configuration validation is unavailable"
+        ) from exc
+
+    try:
+        candidates = sorted(root.rglob(source_links.SIDECAR_NAME))
+        for path in candidates:
+            try:
+                metadata = path.lstat()
+                if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                    raise MigrationArchiveError(
+                        "active Source-Link configuration is invalid or unsafe"
+                    )
+                raw = path.read_bytes()
+                if len(raw) > source_links.MAX_SIDECAR_BYTES:
+                    raise MigrationArchiveError(
+                        "active Source-Link configuration is invalid or unsafe"
+                    )
+                payload = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("schema_version")
+                    != source_links.SCHEMA_VERSION
+                ):
+                    raise MigrationArchiveError(
+                        "active Source-Link configuration must be migrated "
+                        "to v2 before export"
+                    )
+                source_links.validate_source_links(
+                    payload,
+                    allow_unmatched_sources=True,
+                )
+            except MigrationArchiveError:
+                raise
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                source_links.SourceLinkError,
+                ValueError,
+                OverflowError,
+                RecursionError,
+            ) as exc:
+                raise MigrationArchiveError(
+                    "active Source-Link configuration is invalid or unsafe"
+                ) from exc
+    finally:
+        try:
+            sys.path.remove(str(package_root))
+        except ValueError:
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -376,6 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     network = subparsers.add_parser("validate-network-config")
     network.add_argument("--path", type=Path, required=True)
+
+    source_links = subparsers.add_parser("validate-source-links-tree")
+    source_links.add_argument("--root", type=Path, required=True)
     return parser
 
 
@@ -394,6 +477,8 @@ def main() -> int:
             tree_fingerprint(args.root, args.output)
         elif args.command == "validate-network-config":
             validate_network_config(args.path)
+        elif args.command == "validate-source-links-tree":
+            validate_source_links_tree(args.root)
         else:
             raise MigrationArchiveError("unknown command")
     except (MigrationArchiveError, OSError, tarfile.TarError) as exc:

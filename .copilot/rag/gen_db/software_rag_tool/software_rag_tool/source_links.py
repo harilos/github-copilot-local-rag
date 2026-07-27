@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import string
 import threading
 import time
@@ -12,37 +14,59 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
-from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    quote,
+    unquote,
+    urlsplit,
+    urlunsplit,
+)
+
+from .source_paths import (
+    SourcePathError,
+    canonical_stored_path,
+    observed_root_from_paths,
+    read_visible_observed_roots,
+    source_relative_path,
+)
 
 
-SCHEMA_VERSION = "rag-source-links-v1"
+SCHEMA_VERSION = "rag-source-links-v2"
+LEGACY_SCHEMA_VERSION = "rag-source-links-v1"
 SIDECAR_NAME = "source-links.json"
 BACKUP_NAME = "source-links.json.bak"
 MAX_SIDECAR_BYTES = 1_048_576
 MAX_SOURCES = 500
-MAX_MAPPINGS = 2_000
 MAX_URL_LENGTH = 4_096
 MAX_PATH_LENGTH = 2_048
 MAX_PATTERN_LENGTH = 300
 LOCK_WAIT_SECONDS = 2.0
-LOCK_STALE_SECONDS = 30.0
+WINDOWS_REPLACE_RETRY_SECONDS = 2.0
 
 _ALLOWED_PROVIDERS = {"sharepoint", "github", "redmine", "other"}
 _SENSITIVE_KEY_PARTS = (
     "access_token",
+    "bearer",
     "cookie",
+    "credential",
+    "jwt",
     "password",
+    "passwd",
     "proxy",
     "oauth",
     "private_key",
     "secret",
+    "token",
 )
 _SENSITIVE_QUERY_PARTS = (
     "access_token",
     "auth",
+    "bearer",
     "code",
     "cookie",
     "credential",
+    "jwt",
     "key",
     "oauth",
     "password",
@@ -69,16 +93,28 @@ class SourceLinksLoad:
     status: str
     payload: dict[str, Any] | None
     error_kind: str | None = None
+    revision: int = 0
+    etag: str = "missing"
+    migration_required: bool = False
+    source_statuses: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass
+class _SourceLinksLock:
+    descriptor: int | None
 
 
 def load_source_links(
     db_root: Path,
     db_name: str | None = None,
+    *,
+    observed_roots: dict[str, Iterable[str]] | None = None,
 ) -> SourceLinksLoad:
     """Read and validate the optional DB-local sidecar without writing."""
     root = Path(db_root).expanduser().resolve()
     path = root / SIDECAR_NAME
-    cache_key = (path, str(db_name or ""))
+    effective_db_name = str(db_name or root.name)
+    cache_key = (path, effective_db_name)
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -88,11 +124,7 @@ def load_source_links(
             _CACHE[cache_key] = (fingerprint, loaded)
         return loaded
     except OSError as exc:
-        loaded = SourceLinksLoad(
-            "invalid",
-            None,
-            type(exc).__name__,
-        )
+        loaded = SourceLinksLoad("invalid", None, type(exc).__name__)
         with _CACHE_LOCK:
             _drop_cached_path(path)
         return loaded
@@ -106,18 +138,34 @@ def load_source_links(
     except OSError as exc:
         return SourceLinksLoad("invalid", None, type(exc).__name__)
     digest = hashlib.sha256(raw).hexdigest()
-    fingerprint = (stat.st_mtime_ns, len(raw), digest)
-    with _CACHE_LOCK:
-        cached = _CACHE.get(cache_key)
-        if cached and cached[0] == fingerprint:
-            return _clone_load(cached[1])
     try:
-        payload = json.loads(raw.decode("utf-8"))
-        payload = validate_source_links(
-            payload,
-            expected_database=db_name,
-            allow_ambiguous=True,
+        decoded = json.loads(raw.decode("utf-8"))
+        roots = (
+            {
+                str(key): tuple(str(value) for value in values)
+                for key, values in observed_roots.items()
+            }
+            if observed_roots is not None
+            else read_visible_observed_roots(root)
         )
+        payload, source_statuses, migration_required = _normalize_payload(
+            decoded,
+            observed_roots=roots,
+            expected_database=effective_db_name,
+        )
+        roots_digest = hashlib.sha256(
+            json.dumps(
+                roots,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        fingerprint = (stat.st_mtime_ns, len(raw), digest + roots_digest)
+        with _CACHE_LOCK:
+            cached = _CACHE.get(cache_key)
+            if cached and cached[0] == fingerprint:
+                return _clone_load(cached[1])
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
@@ -126,9 +174,22 @@ def load_source_links(
         OverflowError,
         RecursionError,
     ) as exc:
-        loaded = SourceLinksLoad("invalid", None, type(exc).__name__)
+        fingerprint = (stat.st_mtime_ns, len(raw), digest)
+        loaded = SourceLinksLoad(
+            "invalid",
+            None,
+            type(exc).__name__,
+            etag=digest,
+        )
     else:
-        loaded = SourceLinksLoad("configured", payload)
+        loaded = SourceLinksLoad(
+            "configured",
+            payload,
+            revision=int(payload["revision"]),
+            etag=digest,
+            migration_required=migration_required,
+            source_statuses=tuple(sorted(source_statuses.items())),
+        )
     with _CACHE_LOCK:
         # Invalid or removed settings replace any previously valid cache entry.
         _CACHE[cache_key] = (fingerprint, _clone_load(loaded))
@@ -144,13 +205,52 @@ def validate_source_links(
     allow_ambiguous: bool = False,
     allow_unmatched_sources: bool = False,
 ) -> dict[str, Any]:
+    normalized, _statuses, _migration = _normalize_payload(
+        payload,
+        observed_roots=observed_paths or {},
+        expected_database=expected_database,
+        existing_sources=existing_sources,
+        allow_unmatched_sources=allow_unmatched_sources,
+    )
+    return normalized
+
+
+def _normalize_payload(
+    payload: Any,
+    *,
+    observed_roots: dict[str, Iterable[str]],
+    expected_database: str | None = None,
+    existing_sources: Iterable[str] | None = None,
+    allow_unmatched_sources: bool = True,
+) -> tuple[dict[str, Any], dict[str, str], bool]:
     if not isinstance(payload, dict):
         raise SourceLinkError("source-links sidecar must be a JSON object")
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
         raise SourceLinkError("unsupported source-links schema")
-    database = _bounded_text(payload.get("database"), "database", 200)
-    if expected_database and database != expected_database:
-        raise SourceLinkError("source-links database does not match the DB")
+    if schema_version == LEGACY_SCHEMA_VERSION:
+        declared_database = _bounded_text(
+            payload.get("database"),
+            "legacy database",
+            200,
+        )
+        if (
+            not expected_database
+            or declared_database != str(expected_database)
+        ):
+            raise SourceLinkError(
+                "legacy source-links database does not match its directory"
+            )
+    if schema_version == SCHEMA_VERSION:
+        unexpected = set(payload) - {
+            "schema_version",
+            "revision",
+            "sources",
+        }
+        if unexpected:
+            raise SourceLinkError(
+                "v2 source-links contains unsupported top-level fields"
+            )
     revision = payload.get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
         raise SourceLinkError("source-links revision must be a positive integer")
@@ -163,108 +263,150 @@ def validate_source_links(
         else None
     )
     normalized_sources: list[dict[str, Any]] = []
+    source_statuses: dict[str, str] = {}
     seen_sources: set[str] = set()
-    mapping_count = 0
     for source in sources:
         if not isinstance(source, dict):
             raise SourceLinkError("each Source setting must be an object")
-        source_id = _bounded_text(source.get("source_id"), "source_id", 200)
+        source_id = _bounded_text(
+            source.get("source_id"),
+            "source_id",
+            200,
+        )
         if source_id in seen_sources:
             raise SourceLinkError("duplicate source_id in source-links")
         seen_sources.add(source_id)
+        if schema_version == LEGACY_SCHEMA_VERSION:
+            original_source_id = source_id
+            source, legacy_status = _upgrade_legacy_source(
+                source,
+                tuple(
+                    str(value)
+                    for value in observed_roots.get(original_source_id, ())
+                ),
+            )
+            if original_source_id:
+                source_statuses[original_source_id] = legacy_status
+            if source is None:
+                continue
+        elif set(source) - {
+            "source_id",
+            "display_name",
+            "enabled",
+            "provider",
+            "strategy",
+            "settings",
+        }:
+            raise SourceLinkError(
+                "v2 Source settings contain unsupported fields"
+            )
         if (
             known_sources is not None
             and source_id not in known_sources
             and not allow_unmatched_sources
         ):
             raise SourceLinkError("mapping Source does not exist in the catalog")
-        display_name = str(source.get("display_name") or "").strip()
-        if len(display_name) > 300:
-            raise SourceLinkError("display_name is too long")
-        mappings = source.get("mappings")
-        if not isinstance(mappings, list):
-            raise SourceLinkError("Source mappings must be an array")
-        normalized_mappings: list[dict[str, Any]] = []
-        seen_mapping_ids: set[str] = set()
-        seen_prefixes: set[str] = set()
-        paths = [
-            _normalize_stored_path(value)
-            for value in (observed_paths or {}).get(source_id, [])
-        ]
-        for mapping in mappings:
-            normalized = validate_mapping(mapping)
-            mapping_id = normalized["mapping_id"]
-            if mapping_id in seen_mapping_ids:
-                raise SourceLinkError("duplicate mapping_id")
-            seen_mapping_ids.add(mapping_id)
-            prefix = normalized["path_prefix"]
-            if prefix in seen_prefixes and not allow_ambiguous:
-                raise SourceLinkError(
-                    "duplicate path_prefix creates ambiguous priority"
-                )
-            seen_prefixes.add(prefix)
-            if (
-                observed_paths is not None
-                and source_id in observed_paths
-                and not any(
-                _prefix_matches(path, prefix) for path in paths
-                )
-            ):
-                raise SourceLinkError(
-                    "path_prefix does not match an indexed document"
-                )
-            normalized_mappings.append(normalized)
-            mapping_count += 1
-            if mapping_count > MAX_MAPPINGS:
-                raise SourceLinkError("too many Source-Link mappings")
         normalized_source: dict[str, Any] = {
             "source_id": source_id,
-            "mappings": normalized_mappings,
         }
+        display_name = str(source.get("display_name") or "").strip()
         if display_name:
-            normalized_source["display_name"] = display_name
+            normalized_source["display_name"] = _bounded_text(
+                display_name,
+                "display_name",
+                300,
+            )
+        link_fields = ("provider", "enabled", "strategy", "settings")
+        present = [field in source for field in link_fields]
+        if any(present) and not all(present):
+            raise SourceLinkError(
+                "Source Link requires provider, enabled, strategy, and settings"
+            )
+        if all(present):
+            normalized_source.update(validate_source_link(source))
+            source_statuses.setdefault(source_id, "configured")
+        else:
+            source_statuses.setdefault(source_id, "not_configured")
         normalized_sources.append(normalized_source)
-    return {
+    return ({
         "schema_version": SCHEMA_VERSION,
-        "database": database,
         "revision": revision,
         "sources": normalized_sources,
-    }
+    }, source_statuses, schema_version == LEGACY_SCHEMA_VERSION)
 
 
-def validate_mapping(mapping: Any) -> dict[str, Any]:
-    if not isinstance(mapping, dict):
-        raise SourceLinkError("mapping must be an object")
-    mapping_id = str(mapping.get("mapping_id") or uuid.uuid4())
-    try:
-        mapping_id = str(uuid.UUID(mapping_id))
-    except ValueError as exc:
-        raise SourceLinkError("mapping_id must be a UUID") from exc
-    enabled = mapping.get("enabled", True)
+def validate_source_link(link: Any) -> dict[str, Any]:
+    if not isinstance(link, dict):
+        raise SourceLinkError("Source Link must be an object")
+    enabled = link.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise SourceLinkError("mapping enabled must be boolean")
-    path_prefix = _normalize_path_prefix(mapping.get("path_prefix"))
-    provider = str(mapping.get("provider") or "").strip().lower()
+        raise SourceLinkError("Source Link enabled must be boolean")
+    provider = str(link.get("provider") or "").strip().lower()
     if provider not in _ALLOWED_PROVIDERS:
         raise SourceLinkError("unsupported Source-Link provider")
-    strategy = str(mapping.get("strategy") or "").strip().lower()
-    settings = mapping.get("settings")
+    settings = link.get("settings")
     if not isinstance(settings, dict):
-        raise SourceLinkError("mapping settings must be an object")
+        raise SourceLinkError("Source Link settings must be an object")
     _reject_sensitive_keys(settings)
+    strategy = str(link.get("strategy") or "").strip().lower()
+    if not strategy:
+        raise SourceLinkError("Source Link strategy is required")
     normalized_settings = _validate_provider_settings(
         provider,
         strategy,
         settings,
     )
     return {
-        "mapping_id": mapping_id,
         "enabled": enabled,
-        "path_prefix": path_prefix,
         "provider": provider,
         "strategy": strategy,
         "settings": normalized_settings,
     }
+
+
+def validate_mapping(mapping: Any) -> dict[str, Any]:
+    """Compatibility alias that normalizes an old mapping into a v2 link."""
+    return validate_source_link(mapping)
+
+
+def _upgrade_legacy_source(
+    source: dict[str, Any],
+    observed_roots: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, str]:
+    """Normalize one safe legacy mapping without writing the sidecar."""
+    upgraded: dict[str, Any] = {"source_id": source.get("source_id")}
+    display_name = str(source.get("display_name") or "").strip()
+    if display_name:
+        upgraded["display_name"] = display_name
+    mappings = source.get("mappings")
+    if mappings is None:
+        return (upgraded if display_name else None), "not_configured"
+    if not isinstance(mappings, list):
+        raise SourceLinkError("legacy Source mappings must be an array")
+    if not mappings:
+        return (upgraded if display_name else None), "not_configured"
+    if len(mappings) != 1:
+        return (upgraded if display_name else None), "legacy_multiple_mappings"
+    first = mappings[0]
+    if not isinstance(first, dict):
+        raise SourceLinkError("legacy Source mapping must be an object")
+    if len(observed_roots) == 0:
+        return (upgraded if display_name else None), "no_observed_root"
+    if len(observed_roots) > 1:
+        return (upgraded if display_name else None), "multiple_observed_roots"
+    try:
+        former_prefix = canonical_stored_path(
+            str(first.get("path_prefix") or "").rstrip("/")
+        )
+        observed = canonical_stored_path(observed_roots[0].rstrip("/"))
+    except SourcePathError:
+        return (upgraded if display_name else None), "legacy_root_mismatch"
+    if former_prefix != observed:
+        return (upgraded if display_name else None), "legacy_root_mismatch"
+    for key in ("provider", "enabled", "settings", "strategy"):
+        if key in first:
+            upgraded[key] = first[key]
+    return upgraded, "legacy_migration_available"
 
 
 def save_source_links(
@@ -276,10 +418,19 @@ def save_source_links(
     observed_paths: dict[str, Iterable[str]] | None = None,
     allow_unmatched_sources: bool = False,
     expected_revision: int | None = None,
+    expected_etag: str | None = None,
 ) -> dict[str, Any]:
     root = Path(db_root).expanduser().resolve()
     if not root.is_dir():
         raise SourceLinkError("database directory does not exist")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise SourceLinkError(
+            "legacy source-links require explicit in-memory migration"
+        )
+    if expected_revision is None or expected_etag is None:
+        raise SourceLinkError(
+            "source-links save requires revision and content hash"
+        )
     normalized = validate_source_links(
         payload,
         expected_database=db_name,
@@ -300,64 +451,145 @@ def save_source_links(
     current = root / SIDECAR_NAME
     backup = root / BACKUP_NAME
     lock = root / ".source-links.lock"
-    descriptor = _acquire_lock(lock)
+    lock_handle = _acquire_lock(lock)
     temporary = root / f".{SIDECAR_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     backup_temporary = root / (
         f".{BACKUP_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
     try:
-        if expected_revision is not None:
-            current_revision = _read_current_revision(
-                current,
-                db_name,
+        current_revision = _read_current_revision(
+            current,
+            db_name,
+        )
+        current_etag = _current_etag(current)
+        if (
+            current_revision != expected_revision
+            or current_etag != expected_etag
+        ):
+            raise SourceLinkError(
+                "source_link_configuration_changed"
             )
-            if current_revision != expected_revision:
-                raise SourceLinkError(
-                    "source-links changed since it was opened"
-                )
+        try:
+            authoritative_roots = read_visible_observed_roots(root)
+        except Exception as exc:
+            raise SourceLinkError(
+                "Source roots could not be verified from the catalog"
+            ) from exc
+        _validate_observed_root_contract(
+            normalized,
+            authoritative_roots,
+            existing_sources=existing_sources,
+        )
         _write_bytes(temporary, encoded)
         if current.exists():
             previous = current.read_bytes()
             _write_bytes(backup_temporary, previous)
-            os.replace(backup_temporary, backup)
-        os.replace(temporary, current)
+        if (
+            _read_current_revision(current, db_name) != expected_revision
+            or _current_etag(current) != expected_etag
+        ):
+            raise SourceLinkError("source_link_configuration_changed")
+        try:
+            roots_before_publish = read_visible_observed_roots(root)
+        except Exception as exc:
+            raise SourceLinkError(
+                "Source roots could not be reverified from the catalog"
+            ) from exc
+        if roots_before_publish != authoritative_roots:
+            raise SourceLinkError("source_link_catalog_roots_changed")
+        if backup_temporary.exists():
+            _atomic_replace(backup_temporary, backup)
+        _atomic_replace(temporary, current)
         _fsync_directory(root)
     finally:
         for candidate in (temporary, backup_temporary):
             try:
                 candidate.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
-        try:
-            os.close(descriptor)
-        finally:
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
+        _release_lock(lock_handle)
     with _CACHE_LOCK:
         _drop_cached_path(current)
     return normalized
+
+
+def _validate_observed_root_contract(
+    payload: dict[str, Any],
+    observed_roots: dict[str, Iterable[str]],
+    *,
+    existing_sources: Iterable[str] | None,
+) -> None:
+    known_sources = (
+        {str(value) for value in existing_sources}
+        if existing_sources is not None
+        else None
+    )
+    for source in payload.get("sources") or []:
+        source_id = str(source.get("source_id") or "")
+        if (
+            not isinstance(source, dict)
+            or not source.get("provider")
+            or source.get("strategy") == "home-only"
+            or (
+                known_sources is not None
+                and source_id not in known_sources
+            )
+        ):
+            continue
+        roots = tuple(
+            str(value)
+            for value in observed_roots.get(
+                source_id,
+                (),
+            )
+        )
+        if not roots:
+            raise SourceLinkError(
+                "per-file Source Link requires one observed root: "
+                "no_observed_root"
+            )
+        if len(roots) != 1:
+            raise SourceLinkError(
+                "per-file Source Link requires one observed root: "
+                "multiple_observed_roots"
+            )
 
 
 def resolve_mapping_preview(
     mapping: dict[str, Any],
     stored_paths: Iterable[str],
 ) -> list[dict[str, Any]]:
-    normalized = validate_mapping(mapping)
+    normalized = validate_source_link(mapping)
+    values = list(stored_paths)[:5]
+    try:
+        roots = observed_root_from_paths(values)
+    except SourcePathError:
+        roots = ()
     output: list[dict[str, Any]] = []
-    prefix = normalized["path_prefix"]
-    for stored_path in list(stored_paths)[:5]:
+    for stored_path in values:
         path = _normalize_stored_path(stored_path)
-        if not _prefix_matches(path, prefix):
-            output.append({"path": path, "status": "prefix_not_matched"})
-            continue
-        relative = _strip_prefix(path, prefix)
-        resolved = _generate_provider_urls(normalized, relative)
+        resolved: dict[str, str] = {}
+        status = (
+            "no_observed_root"
+            if not roots
+            else (
+                "multiple_observed_roots"
+                if len(roots) > 1
+                else "unconfigured"
+            )
+        )
+        if normalized["enabled"] and len(roots) == 1:
+            try:
+                relative = source_relative_path(path, roots[0])
+                resolved = _generate_provider_urls(normalized, relative)
+            except (SourcePathError, SourceLinkError):
+                status = "resolution_failed"
+            else:
+                status = "resolved" if resolved else "unconfigured"
         output.append(
             {
                 "path": path,
-                "status": "resolved" if resolved else "unconfigured",
+                "status": status,
                 **resolved,
             }
         )
@@ -373,7 +605,16 @@ def enrich_search_payload(
 ) -> dict[str, Any]:
     """Add optional links after retrieval without changing result semantics."""
     enriched = dict(payload)
-    loaded = load_source_links(db_root, db_name)
+    try:
+        observed_roots = read_visible_observed_roots(db_root)
+    except (OSError, ValueError):
+        observed_roots = {}
+    loaded = load_source_links(
+        db_root,
+        db_name,
+        observed_roots=observed_roots,
+    )
+    source_statuses = dict(loaded.source_statuses)
     for key in (
         "evidence",
         "contexts",
@@ -411,11 +652,14 @@ def enrich_search_payload(
                         loaded.payload,
                         source_id,
                         path,
+                        observed_roots,
                     )
                 except (SourceLinkError, ValueError, KeyError):
                     status = "resolution_failed"
             elif loaded.status == "invalid":
                 status = "resolution_failed"
+            if status == "unconfigured":
+                status = source_statuses.get(source_id, status)
             item.update(resolved)
             if explain:
                 item["source_link_status"] = status
@@ -438,6 +682,7 @@ def _resolve_from_payload(
     payload: dict[str, Any],
     source_id: str,
     stored_path: str,
+    observed_roots: dict[str, Iterable[str]],
 ) -> tuple[dict[str, str], str]:
     if not source_id or not stored_path:
         return {}, "unconfigured"
@@ -445,6 +690,11 @@ def _resolve_from_payload(
         path = _normalize_stored_path(stored_path)
     except SourceLinkError:
         return {}, "resolution_failed"
+    roots = tuple(str(value) for value in observed_roots.get(source_id, ()))
+    if not roots:
+        return {}, "no_observed_root"
+    if len(roots) > 1:
+        return {}, "multiple_observed_roots"
     source = next(
         (
             item
@@ -455,37 +705,16 @@ def _resolve_from_payload(
     )
     if not isinstance(source, dict):
         return {}, "unconfigured"
-    candidates = [
-        mapping
-        for mapping in source.get("mappings") or []
-        if mapping.get("enabled") is True
-        and _prefix_matches(path, str(mapping.get("path_prefix") or ""))
-    ]
-    if not candidates:
+    if (
+        source.get("enabled") is not True
+        or not source.get("provider")
+        or not isinstance(source.get("settings"), dict)
+    ):
         return {}, "unconfigured"
-    maximum = max(
-        len(PurePosixPath(str(item["path_prefix"]).rstrip("/")).parts)
-        if item.get("path_prefix")
-        else 0
-        for item in candidates
-    )
-    best = [
-        item
-        for item in candidates
-        if (
-            len(PurePosixPath(str(item["path_prefix"]).rstrip("/")).parts)
-            if item.get("path_prefix")
-            else 0
-        )
-        == maximum
-    ]
-    if len(best) != 1:
-        return {}, "ambiguous"
-    mapping = best[0]
     try:
-        relative = _strip_prefix(path, str(mapping.get("path_prefix") or ""))
-        resolved = _generate_provider_urls(mapping, relative)
-    except (SourceLinkError, ValueError, KeyError):
+        relative = source_relative_path(path, roots[0])
+        resolved = _generate_provider_urls(source, relative)
+    except (SourcePathError, SourceLinkError, ValueError, KeyError):
         return {}, "resolution_failed"
     if not resolved:
         return {}, "unconfigured"
@@ -524,19 +753,31 @@ def _validate_provider_settings(
         split = urlsplit(repository_url)
         if split.query or split.fragment:
             raise SourceLinkError("repository_url cannot contain query or fragment")
+        if any(
+            marker in split.path.casefold()
+            for marker in ("/blob/", "/tree/")
+        ):
+            raise SourceLinkError(
+                "repository_url must identify the repository root"
+            )
         path = split.path.rstrip("/")
         if path.endswith(".git"):
             path = path[:-4]
         repository_url = urlunsplit(
             (split.scheme, split.netloc, path, "", "")
         ).rstrip("/")
-        ref = _bounded_text(settings.get("ref"), "ref", 300)
+        ref = _validate_git_ref(
+            _bounded_text(settings.get("ref"), "ref", 300)
+        )
         prefix = _normalize_optional_relative_path(
             settings.get("repository_path_prefix")
         )
         commit = str(settings.get("commit") or "").strip()
-        if len(commit) > 300:
-            raise SourceLinkError("commit is too long")
+        if commit and not re.fullmatch(r"[0-9A-Fa-f]{40,64}", commit):
+            raise SourceLinkError(
+                "commit must be a full 40-64 character hexadecimal ID"
+            )
+        commit = commit.lower()
         permalink_enabled = settings.get("permalink_enabled", False)
         if not isinstance(permalink_enabled, bool):
             raise SourceLinkError("permalink_enabled must be boolean")
@@ -603,20 +844,20 @@ def _validate_provider_settings(
 
 
 def _generate_provider_urls(
-    mapping: dict[str, Any],
-    relative_path: str,
+    source_link: dict[str, Any],
+    stored_path: str,
 ) -> dict[str, str]:
-    relative = _normalize_relative_result_path(relative_path)
-    provider = str(mapping["provider"])
-    strategy = str(mapping["strategy"])
-    settings = dict(mapping.get("settings") or {})
+    path = _normalize_stored_path(stored_path)
+    provider = str(source_link["provider"])
+    settings = dict(source_link.get("settings") or {})
+    strategy = str(source_link.get("strategy") or "")
     if strategy == "home-only":
         return {}
     output: dict[str, str] = {"source_provider": provider}
     if provider == "sharepoint":
         output["source_url"] = _append_encoded_path(
             str(settings["source_web_root"]),
-            relative,
+            path,
         )
     elif provider == "github":
         repository = str(settings["repository_url"]).rstrip("/")
@@ -624,7 +865,7 @@ def _generate_provider_urls(
             settings.get("repository_path_prefix") or ""
         ).strip("/")
         file_path = "/".join(
-            value for value in (repo_prefix, relative) if value
+            value for value in (repo_prefix, path) if value
         )
         output["source_url"] = (
             f"{repository}/blob/{_encode_path(str(settings['ref']))}"
@@ -638,11 +879,11 @@ def _generate_provider_urls(
     elif strategy == "append-relative-path":
         output["source_url"] = _append_encoded_path(
             str(settings["source_web_root"]),
-            relative,
+            path,
         )
     else:
         pattern = re.compile(str(settings["path_pattern"]))
-        match = pattern.search(relative)
+        match = pattern.search(path)
         if not match:
             return {}
         values = {
@@ -700,16 +941,185 @@ def _required_url(value: Any) -> str:
         or any(char.isspace() for char in text)
     ):
         raise SourceLinkError("URL must be HTTP(S) without credentials")
-    for key in parse_qs(split.query, keep_blank_values=True):
-        normalized = key.casefold()
-        if any(part in normalized for part in _SENSITIVE_QUERY_PARTS):
+    _reject_sensitive_url_path(split.path)
+    for key, query_value in parse_qsl(
+        split.query,
+        keep_blank_values=True,
+    ):
+        decoded_key = _fully_unquote(key)
+        normalized = decoded_key.casefold()
+        if (
+            any(part in normalized for part in _SENSITIVE_QUERY_PARTS)
+            or _is_sensitive_assignment_name(decoded_key)
+        ):
             raise SourceLinkError(
                 "URL query parameters must not contain credentials"
             )
-    fragment = split.fragment.casefold()
-    if any(part in fragment for part in _SENSITIVE_QUERY_PARTS):
-        raise SourceLinkError("URL fragments must not contain credentials")
+        _reject_sensitive_credential_expressions(query_value)
+    _reject_sensitive_credential_expressions(split.fragment)
     return text
+
+
+def _reject_sensitive_url_path(path: str) -> None:
+    decoded = _fully_unquote(path)
+    if "\\" in decoded or any(
+        component in {".", ".."}
+        for component in decoded.split("/")
+    ):
+        raise SourceLinkError(
+            "URL paths must not contain traversal or backslashes"
+        )
+    _reject_sensitive_credential_expressions(decoded)
+
+
+def _reject_sensitive_credential_expressions(value: Any) -> None:
+    decoded = _fully_unquote(value)
+    if re.search(
+        r"(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s/?#@]+@",
+        decoded,
+    ):
+        raise SourceLinkError(
+            "URL components must not contain embedded credentials"
+        )
+    if re.search(
+        r"(?i)(?:^|[^a-z0-9])(?:bearer|basic)\s+\S",
+        decoded,
+    ):
+        raise SourceLinkError(
+            "URL components must not contain authentication values"
+        )
+    separators = "/?#&;,=:@"
+    for index, character in enumerate(decoded):
+        if character not in "=:":
+            continue
+        end = index
+        while end > 0 and decoded[end - 1].isspace():
+            end -= 1
+        start = end
+        while start > 0 and decoded[start - 1] not in separators:
+            start -= 1
+        candidate = decoded[start:end].strip()
+        if _is_sensitive_assignment_name(candidate):
+            raise SourceLinkError(
+                "URL components must not contain credential assignments"
+            )
+
+
+def _is_sensitive_assignment_name(value: str) -> bool:
+    camel_split = re.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])",
+        "_",
+        value,
+    )
+    camel_split = re.sub(
+        r"(?<=[A-Z])(?=[A-Z][a-z])",
+        "_",
+        camel_split,
+    )
+    components = [
+        component
+        for component in re.split(
+            r"[^a-z0-9]+",
+            camel_split.casefold(),
+        )
+        if component
+    ]
+    direct = {
+        "auth",
+        "authentication",
+        "authorization",
+        "bearer",
+        "basic",
+        "code",
+        "jwt",
+        "key",
+        "keys",
+        "oauth",
+        "passphrase",
+        "passphrases",
+        "proxy",
+        "pwd",
+        "sas",
+        "sig",
+        "signature",
+    }
+    suffixes = (
+        "token",
+        "tokens",
+        "secret",
+        "secrets",
+        "password",
+        "passwords",
+        "passwd",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+    )
+    key_names = {
+        "accesskey",
+        "accesskeyid",
+        "accesskeys",
+        "apikey",
+        "apikeys",
+        "authcode",
+        "authorizationcode",
+        "awsaccesskeyid",
+        "encryptionkey",
+        "encryptionkeys",
+        "oauthcode",
+        "privatekey",
+        "privatekeys",
+        "secretkey",
+        "secretkeys",
+        "signingkey",
+        "signingkeys",
+        "sshkey",
+        "sshkeys",
+        "subscriptionkey",
+        "subscriptionkeys",
+    }
+    key_suffixes = tuple(
+        name
+        for name in key_names
+        if name not in {"authcode", "authorizationcode", "oauthcode"}
+    )
+    collapsed_auth_suffixes = (
+        "auth",
+        "authentication",
+        "authorization",
+        "jwt",
+        "passphrase",
+        "passphrases",
+        "pwd",
+        "sas",
+        "sig",
+        "signature",
+        "signatures",
+    )
+    collapsed = re.sub(r"[^a-z0-9]+", "", value.casefold())
+    return any(
+        component in direct
+        or component in key_names
+        or component.endswith(suffixes)
+        for component in components
+    ) or (
+        collapsed in direct
+        or collapsed in key_names
+        or collapsed.endswith(suffixes)
+        or collapsed.endswith(key_suffixes)
+        or collapsed.endswith(collapsed_auth_suffixes)
+    )
+
+
+def _fully_unquote(value: Any) -> str:
+    decoded = str(value or "")
+    for _ in range(len(decoded) + 1):
+        value = unquote(decoded)
+        if value == decoded:
+            return decoded
+        decoded = value
+    raise SourceLinkError("URL encoding nesting is too deep")
 
 
 def _required_root_url(value: Any) -> str:
@@ -727,19 +1137,33 @@ def _optional_url(value: Any) -> str:
     return _required_url(text) if text else ""
 
 
-def _normalize_path_prefix(value: Any) -> str:
-    raw = str(value or "").strip().replace("\\", "/")
-    if not raw:
-        return ""
-    normalized = _normalize_relative_result_path(raw)
-    return normalized.rstrip("/") + "/"
-
-
 def _normalize_optional_relative_path(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
     return _normalize_relative_result_path(raw)
+
+
+def _validate_git_ref(value: str) -> str:
+    if (
+        value == "@"
+        or value.startswith("/")
+        or value.endswith(("/", "."))
+        or "//" in value
+        or ".." in value
+        or "@{" in value
+        or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", value)
+    ):
+        raise SourceLinkError("ref is not a safe Git ref")
+    components = value.split("/")
+    if any(
+        component in {"", ".", ".."}
+        or component.startswith(".")
+        or component.casefold().endswith(".lock")
+        for component in components
+    ):
+        raise SourceLinkError("ref is not a safe Git ref")
+    return value
 
 
 def _normalize_stored_path(value: Any) -> str:
@@ -776,25 +1200,6 @@ def _normalize_absolute_web_path(value: str) -> str:
     return PurePosixPath(*parts).as_posix()
 
 
-def _prefix_matches(path: str, prefix: str) -> bool:
-    if not prefix:
-        return True
-    base = prefix.rstrip("/")
-    return path == base or path.startswith(prefix)
-
-
-def _strip_prefix(path: str, prefix: str) -> str:
-    if not prefix:
-        return path
-    base = prefix.rstrip("/")
-    if path == base:
-        return ""
-    if not path.startswith(prefix):
-        raise SourceLinkError("stored path does not match path_prefix")
-    relative = path[len(prefix) :]
-    return _normalize_relative_result_path(relative)
-
-
 def _encode_path(value: str) -> str:
     return "/".join(quote(segment, safe="") for segment in value.split("/"))
 
@@ -809,7 +1214,7 @@ def _reject_sensitive_keys(value: Any, *, depth: int = 0) -> None:
         raise SourceLinkError("source-link settings are nested too deeply")
     if isinstance(value, dict):
         for key, child in value.items():
-            normalized = str(key).casefold()
+            normalized = _fully_unquote(key).casefold()
             if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
                 raise SourceLinkError(
                     "credentials and secrets are not allowed in source-links"
@@ -874,6 +1279,10 @@ def _clone_load(value: SourceLinksLoad) -> SourceLinksLoad:
         value.status,
         copy.deepcopy(value.payload),
         value.error_kind,
+        value.revision,
+        value.etag,
+        value.migration_required,
+        tuple(value.source_statuses),
     )
 
 
@@ -897,11 +1306,21 @@ def _read_current_revision(
     if len(raw) > MAX_SIDECAR_BYTES:
         raise SourceLinkError("existing source-links sidecar is invalid")
     try:
-        payload = validate_source_links(
-            json.loads(raw.decode("utf-8")),
-            expected_database=db_name,
-            allow_ambiguous=True,
-        )
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise SourceLinkError("sidecar must be an object")
+        if payload.get("schema_version") not in {
+            SCHEMA_VERSION,
+            LEGACY_SCHEMA_VERSION,
+        }:
+            raise SourceLinkError("unsupported source-links schema")
+        revision = payload.get("revision")
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise SourceLinkError("invalid source-links revision")
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
@@ -913,7 +1332,14 @@ def _read_current_revision(
         raise SourceLinkError(
             "existing source-links sidecar is invalid"
         ) from exc
-    return int(payload["revision"])
+    return int(revision)
+
+
+def _current_etag(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return "missing"
 
 
 def _bounded_text(value: Any, field: str, limit: int) -> str:
@@ -938,31 +1364,101 @@ def _write_bytes(path: Path, value: bytes) -> None:
         os.close(descriptor)
 
 
-def _acquire_lock(path: Path) -> int:
+def _acquire_lock(path: Path) -> _SourceLinksLock:
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     while True:
+        descriptor: int | None = None
         try:
+            if os.name == "nt" and path.is_symlink():
+                raise SourceLinkError(
+                    "source-links update lock must not be a symlink"
+                )
+            flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
             descriptor = os.open(
                 path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                flags,
                 0o600,
             )
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
-            return descriptor
-        except FileExistsError:
-            try:
-                stale = time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS
-            except OSError:
-                stale = False
-            if stale:
+            os.set_inheritable(descriptor, False)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise SourceLinkError(
+                    "source-links update lock must be a regular file"
+                )
+            if _try_kernel_lock(descriptor):
+                return _SourceLinksLock(descriptor)
+            os.close(descriptor)
+            descriptor = None
+        except SourceLinkError:
+            if descriptor is not None:
                 try:
-                    path.unlink()
+                    os.close(descriptor)
                 except OSError:
                     pass
-                continue
-            if time.monotonic() >= deadline:
-                raise SourceLinkError("source-links update is busy")
-            time.sleep(0.05)
+            raise
+        except OSError as exc:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise SourceLinkError(
+                "source-links update lock is unavailable"
+            ) from exc
+        if time.monotonic() >= deadline:
+            raise SourceLinkError("source-links update is busy")
+        time.sleep(0.05)
+
+
+def _try_kernel_lock(descriptor: int) -> bool:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {
+                errno.EACCES,
+                errno.EAGAIN,
+                errno.EDEADLK,
+            }:
+                return False
+            raise
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(
+            descriptor,
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except OSError as exc:
+        if exc.errno in {
+            errno.EACCES,
+            errno.EAGAIN,
+            errno.EDEADLK,
+        }:
+            return False
+        raise
+    return True
+
+
+def _release_lock(handle: _SourceLinksLock) -> None:
+    descriptor = handle.descriptor
+    if descriptor is None:
+        return
+    handle.descriptor = None
+    try:
+        os.close(descriptor)
+    except OSError:
+        # A close failure is diagnostic only. The save has already completed,
+        # and process termination remains the final OS-enforced release.
+        pass
 
 
 def _fsync_directory(path: Path) -> None:
@@ -976,3 +1472,29 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _atomic_replace(source: Path, target: Path) -> None:
+    deadline = (
+        time.monotonic() + WINDOWS_REPLACE_RETRY_SECONDS
+        if _is_windows()
+        else 0.0
+    )
+    delay = 0.01
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if (
+                not _is_windows()
+                or getattr(exc, "winerror", None) not in {5, 32}
+                or time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"

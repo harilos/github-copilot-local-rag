@@ -5,11 +5,11 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import ssl
 import sys
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -34,7 +34,7 @@ from software_rag_tool import source_links
 
 GITHUB_MARKER = "LOCAL_RAG_SOURCE_LINK_FIXTURE_V1"
 REDMINE_MARKER = "LOCAL_RAG_SOURCE_LINK_ISSUE_V1"
-FIXTURE_PREFIX = "Fixture Root/"
+FIXTURE_PREFIX = "source-link-fixtures/"
 FIXTURE_REPOSITORY_PATH = (
     ".copilot/rag/docs/tests/source-link-fixtures"
 )
@@ -43,6 +43,7 @@ MAX_REDIRECTS = 3
 CONNECT_TIMEOUT_SECONDS = 3.0
 TOTAL_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_EXPLICIT_CA_BUNDLE: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,8 @@ def fetch_url(
 
 
 def _https_context() -> ssl.SSLContext:
+    if _EXPLICIT_CA_BUNDLE is not None:
+        return ssl.create_default_context(cafile=str(_EXPLICIT_CA_BUNDLE))
     explicit = (
         os.getenv("SSL_CERT_FILE", "").strip()
         or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
@@ -184,17 +187,14 @@ def _https_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-def _mapping(
+def _source_link(
     *,
     provider: str,
     strategy: str,
-    path_prefix: str = FIXTURE_PREFIX,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "mapping_id": str(uuid.uuid4()),
         "enabled": True,
-        "path_prefix": path_prefix,
         "provider": provider,
         "strategy": strategy,
         "settings": settings,
@@ -202,8 +202,8 @@ def _mapping(
 
 
 def _github_mapping(args: argparse.Namespace) -> dict[str, Any]:
-    return source_links.validate_mapping(
-        _mapping(
+    return source_links.validate_source_link(
+        _source_link(
             provider="github",
             strategy="github-blob",
             settings={
@@ -224,8 +224,8 @@ def _redmine_mapping(
     template: str | None = None,
 ) -> dict[str, Any]:
     root = base_url.rstrip("/")
-    return source_links.validate_mapping(
-        _mapping(
+    return source_links.validate_source_link(
+        _source_link(
             provider="redmine",
             strategy="regex-template",
             settings={
@@ -283,16 +283,34 @@ def _search_contract_unchanged(
     ) as temporary:
         db_root = Path(temporary) / "fixture-rag"
         db_root.mkdir()
+        connection = sqlite3.connect(db_root / "catalog.sqlite")
+        try:
+            connection.execute(
+                """
+                CREATE TABLE document (
+                    doc_pk INTEGER PRIMARY KEY,
+                    source_id TEXT,
+                    path TEXT,
+                    visible_until INTEGER
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO document VALUES (1, ?, ?, NULL)",
+                ("fixture-source", FIXTURE_PREFIX + relative_path),
+            )
+            connection.commit()
+        finally:
+            connection.close()
         source_links.save_source_links(
             db_root,
             {
                 "schema_version": source_links.SCHEMA_VERSION,
-                "database": "fixture-rag",
                 "revision": 1,
                 "sources": [
                     {
                         "source_id": "fixture-source",
-                        "mappings": [mapping],
+                        **mapping,
                     }
                 ],
             },
@@ -303,6 +321,8 @@ def _search_contract_unchanged(
                     FIXTURE_PREFIX + relative_path,
                 ]
             },
+            expected_revision=0,
+            expected_etag="missing",
         )
         after = source_links.enrich_search_payload(
             before,
@@ -358,7 +378,7 @@ def _record(
         "marker_verified": marker_verified,
         "latency_seconds": round(latency_seconds, 6),
         "search_status_unchanged": search_status_unchanged,
-        "passed": bool(passed),
+        "passed": bool(passed and search_status_unchanged),
     }
     if generated_url:
         output["url_sha256"] = hashlib.sha256(
@@ -392,6 +412,11 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
         plain_http.status == 200
         and urlsplit(plain_http.final_url).hostname == expected_host
     )
+    plain_invariant = _search_contract_unchanged(
+        mapping,
+        "plain.txt",
+        expect_link=True,
+    )
     cases.append(
         _record(
             case_id="GH-E2E-001",
@@ -402,11 +427,7 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=plain_http.latency_seconds,
             target_verified=plain_target,
             marker_verified=plain_marker,
-            search_status_unchanged=_search_contract_unchanged(
-                mapping,
-                "plain.txt",
-                expect_link=True,
-            ),
+            search_status_unchanged=plain_invariant,
             passed=plain_target and plain_marker,
             url_reporting=args.url_reporting,
             error_kind=plain_http.error_kind,
@@ -425,6 +446,11 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
         and args.commit.lower() in permalink.lower()
         and urlsplit(permalink_http.final_url).hostname == expected_host
     )
+    nested_invariant = _search_contract_unchanged(
+        mapping,
+        "nested/document.md",
+        expect_link=True,
+    )
     cases.append(
         _record(
             case_id="GH-E2E-002",
@@ -435,7 +461,7 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=permalink_http.latency_seconds,
             target_verified=permalink_target,
             marker_verified=permalink_marker,
-            search_status_unchanged=True,
+            search_status_unchanged=nested_invariant,
             passed=permalink_target and permalink_marker,
             url_reporting=args.url_reporting,
             error_kind=permalink_http.error_kind,
@@ -466,6 +492,11 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
         and encoded
         and urlsplit(special_http.final_url).hostname == expected_host
     )
+    special_invariant = _search_contract_unchanged(
+        mapping,
+        "日本語 空白 #1 (final).txt",
+        expect_link=True,
+    )
     cases.append(
         _record(
             case_id="GH-E2E-003",
@@ -476,7 +507,7 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=special_http.latency_seconds,
             target_verified=special_target,
             marker_verified=special_marker,
-            search_status_unchanged=True,
+            search_status_unchanged=special_invariant,
             passed=special_target and special_marker,
             url_reporting=args.url_reporting,
             error_kind=special_http.error_kind,
@@ -498,7 +529,7 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=plain_http.latency_seconds,
             target_verified=slash_target,
             marker_verified=plain_marker,
-            search_status_unchanged=True,
+            search_status_unchanged=plain_invariant,
             passed=slash_target and plain_marker,
             url_reporting=args.url_reporting,
             error_kind=plain_http.error_kind,
@@ -521,7 +552,7 @@ def run_github(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=permalink_http.latency_seconds,
             target_verified=preferred_ok,
             marker_verified=permalink_marker,
-            search_status_unchanged=True,
+            search_status_unchanged=nested_invariant,
             passed=preferred_ok and permalink_marker,
             url_reporting=args.url_reporting,
             error_kind=permalink_http.error_kind,
@@ -683,7 +714,7 @@ def run_redmine(args: argparse.Namespace) -> list[dict[str, Any]]:
             latency_seconds=issue_http.latency_seconds,
             target_verified=slash_ok,
             marker_verified=page_marker,
-            search_status_unchanged=True,
+            search_status_unchanged=issue_invariant,
             passed=slash_ok and page_marker,
             url_reporting=args.url_reporting,
             error_kind=issue_http.error_kind,
@@ -784,6 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="redacted",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--ca-bundle", type=Path)
     parser.add_argument("--repository-url")
     parser.add_argument("--ref")
     parser.add_argument("--commit")
@@ -801,6 +833,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.ca_bundle is not None:
+        bundle = args.ca_bundle.expanduser().resolve()
+        if not bundle.is_file():
+            raise ValueError("--ca-bundle must be a readable regular file")
     if args.provider == "github":
         missing = [
             name
@@ -820,10 +856,16 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _EXPLICIT_CA_BUNDLE
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         _validate_args(args)
+        _EXPLICIT_CA_BUNDLE = (
+            args.ca_bundle.expanduser().resolve()
+            if args.ca_bundle is not None
+            else None
+        )
         records = (
             run_github(args)
             if args.provider == "github"
@@ -836,7 +878,11 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         parser.error(str(exc))
     write_jsonl(records, args.output)
-    return 0 if all(record["passed"] for record in records) else 1
+    return 0 if all(
+        record["passed"]
+        and record.get("search_status_unchanged") is True
+        for record in records
+    ) else 1
 
 
 if __name__ == "__main__":

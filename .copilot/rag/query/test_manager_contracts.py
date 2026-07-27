@@ -52,9 +52,11 @@ class FakeInventory:
             "sources": [
                 {
                     "source_id": "source-a",
-                    "display_name": "Synthetic Source",
                     "document_count": 2,
                     "chunk_count": 5,
+                    "display_name": "Synthetic Source",
+                    "observed_stored_roots": ["Example Root/"],
+                    "observed_root_status": "ready",
                     "sample_documents": [
                         "Example Root/docs/first.txt",
                         "Example Root/docs/second.txt",
@@ -79,7 +81,7 @@ class FakeInventory:
 
 
 class FakeSourceLinks:
-    SCHEMA_VERSION = "rag-source-links-v1"
+    SCHEMA_VERSION = "rag-source-links-v2"
 
     def __init__(self) -> None:
         self.saved: list[dict[str, Any]] = []
@@ -95,11 +97,13 @@ class FakeSourceLinks:
         )
 
     @staticmethod
-    def validate_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
-        value = dict(mapping)
-        value.setdefault("mapping_id", "00000000-0000-0000-0000-000000000001")
-        value["path_prefix"] = str(value.get("path_prefix") or "")
-        return value
+    def validate_source_link(link: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "provider": str(link["provider"]),
+            "enabled": bool(link["enabled"]),
+            "strategy": str(link["strategy"]),
+            "settings": dict(link["settings"]),
+        }
 
     @staticmethod
     def resolve_mapping_preview(
@@ -206,14 +210,13 @@ class ManagerContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [label for _, label in manage.MAPPING_MENU],
+            [label for _, label in manage.SOURCE_LINK_MENU],
             [
-                "List mappings",
-                "Add mapping",
-                "Edit mapping",
-                "Enable / disable mapping",
-                "Remove mapping",
-                "Preview mapping",
+                "Show configuration",
+                "Configure or replace",
+                "Enable / disable",
+                "Remove configuration",
+                "Preview generated URLs",
                 "Back",
             ],
         )
@@ -381,37 +384,156 @@ class ManagerContractTests(unittest.TestCase):
             ["", "4", "1", "https://docs.example.invalid", "y"]
         )
         manager._import_source_links = lambda: links
-        manager._add_mapping(
+        manager._configure_source_link(
             "example-rag", FakeInventory(), "source-a"
         )
         self.assertEqual(len(links.saved), 1)
         source = links.saved[0]["sources"][0]
         self.assertEqual(1, links.saved[0]["revision"])
         self.assertEqual(source["source_id"], "source-a")
-        self.assertEqual(source["mappings"][0]["provider"], "other")
+        self.assertEqual(source["provider"], "other")
+        self.assertEqual(source["strategy"], "home-only")
+        self.assertNotIn("mappings", source)
+        self.assertNotIn("path_prefix", source)
         self.assertIn(
             "Representative stored paths and generated URLs",
             "\n".join(self.output),
         )
 
-    def test_mapping_edit_preserves_enter_and_clears_optional_dash(self) -> None:
+    def test_per_file_link_requires_one_observed_root(self) -> None:
+        links = FakeSourceLinks()
+        inventory = FakeInventory()
+        inventory.payload["sources"][0]["observed_root_status"] = (
+            "multiple_observed_roots"
+        )
+        manager = self.manager()
+        manager._import_source_links = lambda: links
+        manager._prompt_source_link = lambda **_: {
+            "provider": "other",
+            "enabled": True,
+            "strategy": "append-relative-path",
+            "settings": {
+                "source_web_root": "https://docs.example.invalid/root"
+            },
+        }
+        manager._configure_source_link(
+            "example-rag",
+            inventory,
+            "source-a",
+        )
+        self.assertEqual([], links.saved)
+        self.assertIn(
+            "multiple_observed_roots",
+            "\n".join(self.output),
+        )
+
+    def test_home_only_link_is_allowed_without_observed_root(self) -> None:
+        links = FakeSourceLinks()
+        inventory = FakeInventory()
+        inventory.payload["sources"][0]["observed_root_status"] = (
+            "no_observed_root"
+        )
+        manager = self.manager(["y"])
+        manager._import_source_links = lambda: links
+        manager._prompt_source_link = lambda **_: {
+            "provider": "other",
+            "enabled": True,
+            "strategy": "home-only",
+            "settings": {
+                "source_home_url": "https://docs.example.invalid"
+            },
+        }
+        manager._configure_source_link(
+            "example-rag",
+            inventory,
+            "source-a",
+        )
+        self.assertEqual(1, len(links.saved))
+
+    def test_legacy_sidecar_requires_explicit_migration_confirmation(
+        self,
+    ) -> None:
+        links = FakeSourceLinks()
+        links.payload = {
+            "schema_version": links.SCHEMA_VERSION,
+            "revision": 1,
+            "sources": [
+                {
+                    "source_id": "source-a",
+                    "provider": "other",
+                    "enabled": True,
+                    "strategy": "home-only",
+                    "settings": {
+                        "source_home_url": "https://docs.example.invalid"
+                    },
+                }
+            ],
+        }
+
+        def legacy_load(*_: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                status="configured",
+                payload=links.payload,
+                error_kind=None,
+                revision=1,
+                etag="legacy-etag",
+                migration_required=True,
+                source_statuses=(
+                    ("source-a", "legacy_migration_available"),
+                ),
+            )
+
+        links.load_source_links = legacy_load
+        manager = self.manager(["y", "n"])
+        manager._import_source_links = lambda: links
+        manager._prompt_source_link = lambda **_: {
+            "provider": "other",
+            "enabled": True,
+            "strategy": "home-only",
+            "settings": {
+                "source_home_url": "https://docs.example.invalid"
+            },
+        }
+        manager._configure_source_link(
+            "example-rag",
+            FakeInventory(),
+            "source-a",
+        )
+        self.assertEqual([], links.saved)
+        text = "\n".join(self.output)
+        self.assertIn("explicitly migrate", text)
+        self.assertIn("migration cancelled", text)
+
+    def test_ingestion_prompt_shows_provider_oriented_source_examples(
+        self,
+    ) -> None:
+        manager = self.manager(
+            ["<source-root>", "sharepoint-docs", ""]
+        )
+        self.assertEqual(
+            ("<source-root>", "sharepoint-docs", ""),
+            manager._prompt_ingestion_values(),
+        )
+        text = "\n".join(self.output)
+        self.assertIn("sharepoint-docs", text)
+        self.assertIn("redmine-issues", text)
+        self.assertIn("github-repository", text)
+
+    def test_source_link_edit_preserves_enter_and_clears_optional_dash(
+        self,
+    ) -> None:
         existing = {
             "enabled": True,
-            "path_prefix": "Example Root/docs/",
             "provider": "sharepoint",
-            "strategy": "append-relative-path",
             "settings": {
                 "source_home_url": "https://home.example.invalid",
                 "source_web_root": "https://files.example.invalid",
             },
         }
         manager = self.manager(["", "", "", "-", ""])
-        value = manager._prompt_mapping(
-            "Example Root/docs/", existing=existing
-        )
+        value = manager._prompt_source_link(existing=existing)
         self.assertIsNotNone(value)
         assert value is not None
-        self.assertEqual(value["path_prefix"], existing["path_prefix"])
         self.assertNotIn("source_home_url", value["settings"])
         self.assertEqual(
             value["settings"]["source_web_root"],

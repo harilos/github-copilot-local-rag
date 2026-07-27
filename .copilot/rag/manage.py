@@ -39,18 +39,16 @@ SOURCE_MENU = (
 SOURCE_DETAIL_MENU = (
     ("1", "Sample documents"),
     ("2", "Ingestion scopes"),
-    ("3", "Edit display name"),
-    ("4", "Configure Source-Link mappings"),
-    ("5", "Preview generated URLs"),
+    ("3", "Configure Source Link"),
+    ("4", "Preview generated URLs"),
     ("0", "Back"),
 )
-MAPPING_MENU = (
-    ("1", "List mappings"),
-    ("2", "Add mapping"),
-    ("3", "Edit mapping"),
-    ("4", "Enable / disable mapping"),
-    ("5", "Remove mapping"),
-    ("6", "Preview mapping"),
+SOURCE_LINK_MENU = (
+    ("1", "Show configuration"),
+    ("2", "Configure or replace"),
+    ("3", "Enable / disable"),
+    ("4", "Remove configuration"),
+    ("5", "Preview generated URLs"),
     ("0", "Back"),
 )
 REPAIR_COMPONENTS = {
@@ -110,6 +108,9 @@ class LocalRagManager:
         self.input = input_fn
         self.output = output_fn
         self.runner = runner
+        self._sidecar_etags: dict[str, str] = {}
+        self._sidecar_migrations: dict[str, bool] = {}
+        self._sidecar_source_statuses: dict[str, dict[str, str]] = {}
 
     def run(self) -> int:
         while True:
@@ -302,7 +303,7 @@ class LocalRagManager:
                     for source in (loaded.payload or {}).get("sources") or []
                     if isinstance(source, dict)
                     and source.get("source_id") in indexed_source_ids
-                    and bool(source.get("mappings"))
+                    and bool(source.get("provider"))
                 }
             )
         except Exception:
@@ -536,6 +537,11 @@ class LocalRagManager:
             self.output("A logical root is required.")
             return None
         if source_id is None:
+            self.output(
+                "Use one Source ID per ingestion provider, for example "
+                "sharepoint-docs, redmine-issues, github-repository, or "
+                "filesystem-docs."
+            )
             source_id = self._ask("Source ID: ")
             if source_id is None or not source_id.strip():
                 self.output("A Source ID is required.")
@@ -559,7 +565,11 @@ class LocalRagManager:
         for index, source_id in enumerate(source_ids, start=1):
             self.output(f"{index}. Existing: {source_id}")
         new_index = len(source_ids) + 1
-        self.output(f"{new_index}. New Source ID")
+        self.output(
+            f"{new_index}. New Source ID "
+            "(examples: sharepoint-docs, redmine-issues, "
+            "github-repository, filesystem-docs)"
+        )
         choice = self._ask("Select, or 0 to cancel: ")
         if choice in (None, "0"):
             return None
@@ -571,7 +581,9 @@ class LocalRagManager:
             return source_ids[index - 1]
         if index != new_index:
             return None
-        value = self._ask("New Source ID: ")
+        value = self._ask(
+            "New Source ID (keep each provider in a separate Source): "
+        )
         if value is None or not value.strip():
             self.output("A Source ID is required.")
             return None
@@ -664,20 +676,15 @@ class LocalRagManager:
         for index, source in enumerate(sources, start=1):
             source_id = str(source["source_id"])
             label = str(source.get("display_name") or source_id)
-            roots = (
-                source.get("stored_path_prefixes")
-                or source.get("top_level_prefixes")
-                or []
-            )
             providers = ", ".join(source.get("link_providers") or []) or "none"
+            link_setting = source.get("source_link_setting") or {}
             self.output(
                 f"{index}. {label} ({source_id}) | "
                 f"documents={int(source.get('document_count') or 0)}, "
                 f"chunks={int(source.get('chunk_count') or 0)} | "
-                f"roots={self._compact_values(roots)} | "
-                f"last indexed={source.get('last_updated_at') or 'unknown'} | "
-                f"links={source.get('link_status') or 'not_configured'} "
-                f"({providers})"
+                f"provider={providers} | "
+                f"configuration={link_setting.get('configuration') or 'not_configured'} | "
+                f"status={source.get('link_status') or 'not_configured'}"
             )
         self.output(
             "Indexed Sources are read-only; this manager cannot create, "
@@ -704,19 +711,20 @@ class LocalRagManager:
                 f"\nSource: {source.get('display_name') or source_id} "
                 f"({source_id})"
             )
-            roots = (
-                source.get("stored_path_prefixes")
-                or source.get("top_level_prefixes")
-                or []
-            )
+            link_setting = source.get("source_link_setting") or {}
             self.output(
                 f"Documents: {int(source.get('document_count') or 0)} | "
                 f"Chunks: {int(source.get('chunk_count') or 0)}\n"
                 f"Source ID (read-only): {source_id}\n"
-                f"Stored roots: {self._compact_values(roots)}\n"
                 f"Last indexed: {source.get('last_updated_at') or 'unknown'}\n"
                 f"Extraction errors: {source.get('error_file_count') or 0}\n"
-                f"Link mappings: {source.get('link_mapping_count') or 0}"
+                f"Observed stored roots: "
+                f"{', '.join(source.get('observed_stored_roots') or []) or 'none'}\n"
+                f"Observed root status: "
+                f"{source.get('observed_root_status') or 'no_observed_root'}\n"
+                f"Provider: {link_setting.get('provider') or 'not configured'}\n"
+                f"Configuration: {link_setting.get('configuration') or 'not_configured'}\n"
+                f"Status: {source.get('link_status') or 'not_configured'}"
             )
             self._print_menu("Source detail", SOURCE_DETAIL_MENU)
             choice = self._ask("Select: ")
@@ -734,20 +742,18 @@ class LocalRagManager:
                 values = (
                     source.get("ingestion_scopes")
                     or source.get("scopes")
-                    or source.get("top_level_prefixes")
+                    or source.get("observed_roots")
                     or []
                 )
                 self._print_values("Ingestion scopes", values)
             elif choice == "3":
-                self._edit_source_display_name(db_name, inventory, source_id)
+                self._source_link_screen(db_name, inventory, source_id)
             elif choice == "4":
-                self._mapping_screen(db_name, inventory, source_id)
-            elif choice == "5":
-                self._preview_all_mappings(db_name, inventory, source_id)
+                self._preview_source_link(db_name, inventory, source_id)
             else:
                 self.output("Unknown selection.")
 
-    def _mapping_screen(
+    def _source_link_screen(
         self,
         db_name: str,
         inventory: Any,
@@ -755,24 +761,22 @@ class LocalRagManager:
     ) -> None:
         while True:
             self._print_menu(
-                f"Source-Link mappings: {source_id}",
-                MAPPING_MENU,
+                f"Source Link: {source_id}",
+                SOURCE_LINK_MENU,
             )
             choice = self._ask("Select: ")
             if choice in (None, "0"):
                 return
             if choice == "1":
-                self._list_source_mappings(db_name, source_id)
+                self._show_source_link(db_name, source_id)
             elif choice == "2":
-                self._add_mapping(db_name, inventory, source_id)
+                self._configure_source_link(db_name, inventory, source_id)
             elif choice == "3":
-                self._edit_mapping(db_name, inventory, source_id)
+                self._toggle_source_link(db_name, inventory, source_id)
             elif choice == "4":
-                self._toggle_mapping(db_name, inventory, source_id)
+                self._remove_source_link(db_name, inventory, source_id)
             elif choice == "5":
-                self._remove_mapping(db_name, inventory, source_id)
-            elif choice == "6":
-                self._preview_mapping(db_name, inventory, source_id)
+                self._preview_source_link(db_name, inventory, source_id)
             else:
                 self.output("Unknown selection.")
 
@@ -787,11 +791,30 @@ class LocalRagManager:
         if loaded.status == "invalid":
             self.output("The Source-Link sidecar is invalid and was not modified.")
             return None
+        self._sidecar_etags[db_name] = str(
+            getattr(loaded, "etag", "missing")
+        )
+        self._sidecar_migrations[db_name] = bool(
+            getattr(loaded, "migration_required", False)
+        )
+        self._sidecar_source_statuses[db_name] = dict(
+            getattr(loaded, "source_statuses", ())
+        )
+        if self._sidecar_migrations[db_name]:
+            statuses = self._sidecar_source_statuses[db_name]
+            summary = ", ".join(
+                f"{source_id}={status}"
+                for source_id, status in sorted(statuses.items())
+            )
+            self.output(
+                "Legacy Source-Link settings were loaded read-only. "
+                "They will not be rewritten without an explicit migration."
+                + (f" Status: {summary}" if summary else "")
+            )
         if loaded.status == "configured" and loaded.payload is not None:
             return source_links, copy.deepcopy(loaded.payload)
         return source_links, {
             "schema_version": source_links.SCHEMA_VERSION,
-            "database": db_name,
             "revision": 0,
             "sources": [],
         }
@@ -809,7 +832,7 @@ class LocalRagManager:
                 return source
         if not create:
             return None
-        source = {"source_id": source_id, "mappings": []}
+        source = {"source_id": source_id}
         sources.append(source)
         return source
 
@@ -849,7 +872,7 @@ class LocalRagManager:
         source_links: Any,
         payload: dict[str, Any],
     ) -> bool:
-        ids, observed = self._inventory_ids_paths(inventory)
+        ids, _observed = self._inventory_ids_paths(inventory)
         previous_revision = int(payload.get("revision") or 0)
         payload["revision"] = previous_revision + 1
         kwargs: dict[str, Any] = {
@@ -857,9 +880,29 @@ class LocalRagManager:
             "existing_sources": ids,
             "allow_unmatched_sources": True,
             "expected_revision": previous_revision,
+            "expected_etag": self._sidecar_etags.get(db_name, "missing"),
         }
-        if any(observed.values()):
-            kwargs["observed_paths"] = observed
+        if self._sidecar_migrations.get(db_name, False):
+            statuses = self._sidecar_source_statuses.get(db_name, {})
+            self.output(
+                "The next save will explicitly migrate the legacy sidecar "
+                "to rag-source-links-v2. The current primary will be retained "
+                "as source-links.json.bak."
+            )
+            if statuses:
+                self.output(
+                    "Migration status: "
+                    + ", ".join(
+                        f"{source_id}={status}"
+                        for source_id, status in sorted(statuses.items())
+                    )
+                )
+            if not self._confirm(
+                f"Migrate Source-Link settings for database {db_name}?"
+            ):
+                payload["revision"] = previous_revision
+                self.output("Legacy Source-Link migration cancelled.")
+                return False
         try:
             source_links.save_source_links(
                 self._database_root(db_name), payload, **kwargs
@@ -870,218 +913,212 @@ class LocalRagManager:
                 f"{type(exc).__name__}: {exc}"
             )
             return False
+        self._sidecar_migrations[db_name] = False
         return True
 
-    def _edit_source_display_name(
-        self,
-        db_name: str,
-        inventory: Any,
-        source_id: str,
-    ) -> None:
-        loaded = self._load_sidecar_payload(db_name)
-        if loaded is None:
-            return
-        source_links, payload = loaded
-        source = self._source_entry(payload, source_id, create=True)
-        assert source is not None
-        value = self._ask("Display name (blank removes it): ")
-        if value is None:
-            return
-        if value.strip():
-            source["display_name"] = value.strip()
-        else:
-            source.pop("display_name", None)
-        if not self._confirm(
-            f"Save display-name setting for Source {source_id} in selected "
-            f"database {db_name}?"
-        ):
-            return
-        if self._save_sidecar(db_name, inventory, source_links, payload):
-            self.output("Source display name saved; indexed Source identity is unchanged.")
-
-    def _source_mappings(
+    def _source_link(
         self,
         db_name: str,
         source_id: str,
-    ) -> tuple[Any, dict[str, Any], list[dict[str, Any]]] | None:
+    ) -> tuple[Any, dict[str, Any], dict[str, Any] | None] | None:
         loaded = self._load_sidecar_payload(db_name)
         if loaded is None:
             return None
         source_links, payload = loaded
         source = self._source_entry(payload, source_id, create=False)
-        mappings = (
-            [
-                dict(value)
-                for value in source.get("mappings") or []
-                if isinstance(value, dict)
-            ]
-            if source is not None
-            else []
-        )
-        return source_links, payload, mappings
+        return source_links, payload, source
 
-    def _list_source_mappings(self, db_name: str, source_id: str) -> None:
-        loaded = self._source_mappings(db_name, source_id)
+    def _show_source_link(self, db_name: str, source_id: str) -> None:
+        loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
-        mappings = loaded[2]
-        if not mappings:
-            self.output("No mappings are configured for this Source.")
+        source = loaded[2]
+        if source is None or not source.get("provider"):
+            self.output("No Source Link is configured for this Source.")
             return
-        for index, mapping in enumerate(mappings, start=1):
-            state = "enabled" if mapping.get("enabled", True) else "disabled"
-            self.output(
-                f"{index}. {state} | "
-                f"{mapping.get('path_prefix') or '<whole Source>'} | "
-                f"{mapping.get('provider')} / {mapping.get('strategy')}"
+        self.output(
+            json.dumps(
+                {
+                    "source_id": source_id,
+                    "display_name": source.get("display_name"),
+                    "provider": source.get("provider"),
+                    "strategy": source.get("strategy"),
+                    "enabled": bool(source.get("enabled")),
+                    "settings": source.get("settings") or {},
+                },
+                ensure_ascii=False,
+                indent=2,
             )
-
-    def _add_mapping(self, db_name: str, inventory: Any, source_id: str) -> None:
-        prefix = self._ask("Stored path prefix (blank for whole Source): ")
-        if prefix is None:
-            return
-        mapping = self._prompt_mapping(prefix)
-        if mapping is None:
-            return
-        loaded = self._source_mappings(db_name, source_id)
-        if loaded is None:
-            return
-        source_links, payload, mappings = loaded
-        try:
-            mapping = source_links.validate_mapping(mapping)
-        except Exception as exc:
-            self.output(f"Invalid Source-Link mapping: {type(exc).__name__}: {exc}")
-            return
-        _, observed = self._inventory_ids_paths(inventory)
-        self._show_representative_preview(
-            source_links, mapping, observed.get(source_id, [])
         )
-        if not self._confirm(
-            f"Add this mapping for Source {source_id} in database {db_name}?"
-        ):
-            return
-        source = self._source_entry(payload, source_id, create=True)
-        assert source is not None
-        source["mappings"] = [*mappings, mapping]
-        if self._save_sidecar(db_name, inventory, source_links, payload):
-            self.output("Source-Link mapping added.")
 
-    def _choose_mapping(
+    def _configure_source_link(
         self,
-        mappings: list[dict[str, Any]],
-    ) -> tuple[int, dict[str, Any]] | None:
-        if not mappings:
-            self.output("No mappings are configured for this Source.")
-            return None
-        for index, mapping in enumerate(mappings, start=1):
-            self.output(
-                f"{index}. {mapping.get('path_prefix') or '<whole Source>'} | "
-                f"{mapping.get('provider')} / {mapping.get('strategy')}"
-            )
-        choice = self._ask("Select a mapping, or 0 to cancel: ")
-        if choice in (None, "0"):
-            return None
-        try:
-            index = int(choice) - 1
-        except ValueError:
-            return None
-        return (index, mappings[index]) if 0 <= index < len(mappings) else None
-
-    def _edit_mapping(self, db_name: str, inventory: Any, source_id: str) -> None:
-        loaded = self._source_mappings(db_name, source_id)
+        db_name: str,
+        inventory: Any,
+        source_id: str,
+    ) -> None:
+        loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
-        source_links, payload, mappings = loaded
-        chosen = self._choose_mapping(mappings)
-        if chosen is None:
-            return
-        index, old = chosen
-        mapping = self._prompt_mapping(
-            str(old.get("path_prefix") or ""),
-            existing=old,
+        source_links, payload, source = loaded
+        current = (
+            {
+                key: copy.deepcopy(source[key])
+                for key in (
+                    "display_name",
+                    "provider",
+                    "enabled",
+                    "strategy",
+                    "settings",
+                )
+                if source is not None and key in source
+            }
+            if source is not None
+            else {}
         )
-        if mapping is None:
+        link = self._prompt_source_link(existing=current or None)
+        if link is None:
             return
-        mapping["mapping_id"] = old.get("mapping_id")
-        mapping["enabled"] = bool(old.get("enabled", True))
+        display_name = str(link.pop("display_name", "") or "").strip()
         try:
-            mapping = source_links.validate_mapping(mapping)
+            link = source_links.validate_source_link(link)
         except Exception as exc:
-            self.output(f"Invalid Source-Link mapping: {type(exc).__name__}: {exc}")
+            self.output(
+                f"Invalid Source Link: {type(exc).__name__}: {exc}"
+            )
+            return
+        source_payload = next(
+            (
+                value
+                for value in self._inventory_sources(inventory)
+                if value.get("source_id") == source_id
+            ),
+            {},
+        )
+        root_status = str(
+            source_payload.get("observed_root_status") or "no_observed_root"
+        )
+        if link.get("strategy") != "home-only" and root_status != "ready":
+            self.output(
+                "Per-file Source Links require exactly one observed stored "
+                f"root; current status is {root_status}. Split ingestion "
+                "providers into separate Source IDs and add them again."
+            )
             return
         _, observed = self._inventory_ids_paths(inventory)
         self._show_representative_preview(
-            source_links, mapping, observed.get(source_id, [])
+            source_links,
+            link,
+            observed.get(source_id, []),
         )
         if not self._confirm(
-            f"Save mapping changes for Source {source_id} in database {db_name}?"
+            f"Save this Source Link for Source {source_id} in "
+            f"database {db_name}?"
         ):
             return
-        mappings[index] = mapping
-        source = self._source_entry(payload, source_id, create=True)
-        assert source is not None
-        source["mappings"] = mappings
-        if self._save_sidecar(db_name, inventory, source_links, payload):
-            self.output("Source-Link mapping updated.")
+        target = self._source_entry(payload, source_id, create=True)
+        assert target is not None
+        if display_name:
+            target["display_name"] = display_name
+        else:
+            target.pop("display_name", None)
+        for key in ("provider", "enabled", "strategy", "settings"):
+            target[key] = copy.deepcopy(link[key])
+        if self._save_sidecar(
+            db_name,
+            inventory,
+            source_links,
+            payload,
+        ):
+            self.output("Source Link saved.")
 
-    def _toggle_mapping(self, db_name: str, inventory: Any, source_id: str) -> None:
-        loaded = self._source_mappings(db_name, source_id)
+    def _toggle_source_link(
+        self,
+        db_name: str,
+        inventory: Any,
+        source_id: str,
+    ) -> None:
+        loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
-        source_links, payload, mappings = loaded
-        chosen = self._choose_mapping(mappings)
-        if chosen is None:
+        source_links, payload, source = loaded
+        if source is None or not source.get("provider"):
+            self.output("No Source Link is configured for this Source.")
             return
-        index, mapping = chosen
-        mappings[index]["enabled"] = not bool(mapping.get("enabled", True))
-        state = "enable" if mappings[index]["enabled"] else "disable"
+        new_state = not bool(source.get("enabled"))
+        label = "Enable" if new_state else "Disable"
         if not self._confirm(
-            f"{state.capitalize()} this mapping for Source {source_id} "
-            f"in database {db_name}?"
+            f"{label} the Source Link for Source {source_id} in "
+            f"database {db_name}?"
         ):
             return
-        source = self._source_entry(payload, source_id, create=True)
-        assert source is not None
-        source["mappings"] = mappings
-        if self._save_sidecar(db_name, inventory, source_links, payload):
-            self.output("Source-Link mapping state changed.")
+        source["enabled"] = new_state
+        if self._save_sidecar(
+            db_name,
+            inventory,
+            source_links,
+            payload,
+        ):
+            self.output("Source Link state changed.")
 
-    def _remove_mapping(self, db_name: str, inventory: Any, source_id: str) -> None:
-        loaded = self._source_mappings(db_name, source_id)
+    def _remove_source_link(
+        self,
+        db_name: str,
+        inventory: Any,
+        source_id: str,
+    ) -> None:
+        loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
-        source_links, payload, mappings = loaded
-        chosen = self._choose_mapping(mappings)
-        if chosen is None or not self._confirm(
-            f"Remove this mapping for Source {source_id} from selected "
+        source_links, payload, source = loaded
+        if source is None or not source.get("provider"):
+            self.output("No Source Link is configured for this Source.")
+            return
+        if not self._confirm(
+            f"Remove the Source Link for Source {source_id} from "
             f"database {db_name}? Indexed Source records are unchanged."
         ):
             return
-        del mappings[chosen[0]]
-        source = self._source_entry(payload, source_id, create=True)
-        assert source is not None
-        source["mappings"] = mappings
-        if self._save_sidecar(db_name, inventory, source_links, payload):
-            self.output("Source-Link mapping removed.")
+        for key in ("provider", "enabled", "strategy", "settings"):
+            source.pop(key, None)
+        if not source.get("display_name"):
+            payload["sources"] = [
+                value
+                for value in payload.get("sources") or []
+                if value.get("source_id") != source_id
+            ]
+        if self._save_sidecar(
+            db_name,
+            inventory,
+            source_links,
+            payload,
+        ):
+            self.output("Source Link removed.")
 
-    def _preview_mapping(self, db_name: str, inventory: Any, source_id: str) -> None:
-        loaded = self._source_mappings(db_name, source_id)
+    def _preview_source_link(
+        self,
+        db_name: str,
+        inventory: Any,
+        source_id: str,
+    ) -> None:
+        loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
-        source_links, _, mappings = loaded
-        chosen = self._choose_mapping(mappings)
-        if chosen is None:
+        source_links, _payload, source = loaded
+        if source is None or not source.get("provider"):
+            self.output("No Source Link is configured for this Source.")
             return
         _, observed = self._inventory_ids_paths(inventory)
         preview = source_links.resolve_mapping_preview(
-            chosen[1], observed.get(source_id, [])
+            source,
+            observed.get(source_id, []),
         )
         self.output(json.dumps(preview, ensure_ascii=False, indent=2))
 
     def _show_representative_preview(
         self,
         source_links: Any,
-        mapping: dict[str, Any],
+        source_link: dict[str, Any],
         paths: list[str],
     ) -> None:
         representative = list(paths[:5])
@@ -1089,31 +1126,11 @@ class LocalRagManager:
         if not representative:
             self.output("(no representative paths are available)")
             return
-        preview = source_links.resolve_mapping_preview(mapping, representative)
+        preview = source_links.resolve_mapping_preview(
+            source_link,
+            representative,
+        )
         self.output(json.dumps(preview, ensure_ascii=False, indent=2))
-
-    def _preview_all_mappings(
-        self,
-        db_name: str,
-        inventory: Any,
-        source_id: str,
-    ) -> None:
-        loaded = self._source_mappings(db_name, source_id)
-        if loaded is None:
-            return
-        source_links, _, mappings = loaded
-        _, observed = self._inventory_ids_paths(inventory)
-        paths = observed.get(source_id, [])[:5]
-        if not mappings:
-            self.output("No mappings are configured for this Source.")
-            return
-        for mapping in mappings:
-            self.output(
-                f"\n{mapping.get('provider')} / {mapping.get('strategy')} | "
-                f"{'enabled' if mapping.get('enabled', True) else 'disabled'}"
-            )
-            preview = source_links.resolve_mapping_preview(mapping, paths)
-            self.output(json.dumps(preview, ensure_ascii=False, indent=2))
 
     def _unmatched_source_settings(self, db_name: str) -> None:
         inventory = self._load_source_inventory(db_name)
@@ -1135,8 +1152,8 @@ class LocalRagManager:
         for index, source in enumerate(unmatched, start=1):
             self.output(
                 f"{index}. {source.get('source_id')} | "
-                f"display={source.get('display_name') or '<none>'} | "
-                f"mappings={len(source.get('mappings') or [])}"
+                f"provider={source.get('provider') or 'not_configured'} | "
+                f"enabled={bool(source.get('enabled'))}"
             )
         choice = self._ask("Inspect a setting, or 0 to go back: ")
         if choice in (None, "0"):
@@ -1186,32 +1203,32 @@ class LocalRagManager:
                 output.append(str(text))
         return ", ".join(output[:4]) if output else "none"
 
-    def _prompt_mapping(
+    def _prompt_source_link(
         self,
-        path_prefix: str,
         *,
         existing: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         current = dict(existing or {})
         current_settings = dict(current.get("settings") or {})
+        display_name = self._prompt_preserving_value(
+            "Optional Source display name",
+            str(current.get("display_name") or ""),
+            required=False,
+        )
+        if display_name is None:
+            return None
         if existing is not None:
-            prefix = self._prompt_preserving_value(
-                "Stored path prefix",
-                str(current.get("path_prefix") or path_prefix),
-                required=False,
-            )
             provider = self._prompt_choice_preserving(
                 "Provider",
                 ["sharepoint", "github", "redmine", "other"],
                 str(current.get("provider") or ""),
             )
         else:
-            prefix = path_prefix
             provider = self._select_value(
                 "Provider",
                 ["sharepoint", "github", "redmine", "other"],
             )
-        if prefix is None or provider is None:
+        if provider is None:
             return None
         if provider == "sharepoint":
             choices = ["home-only", "append-relative-path"]
@@ -1220,10 +1237,14 @@ class LocalRagManager:
         else:
             choices = ["home-only", "append-relative-path", "regex-template"]
         if existing is not None:
+            current_strategy = self._infer_source_link_strategy(
+                str(current.get("provider") or ""),
+                current_settings,
+            )
             strategy = self._prompt_choice_preserving(
                 "Link strategy",
                 choices,
-                str(current.get("strategy") or ""),
+                current_strategy,
             )
         else:
             strategy = self._select_value("Link strategy", choices)
@@ -1232,7 +1253,11 @@ class LocalRagManager:
         settings: dict[str, Any] = {}
         same_shape = (
             provider == current.get("provider")
-            and strategy == current.get("strategy")
+            and strategy
+            == self._infer_source_link_strategy(
+                str(current.get("provider") or ""),
+                current_settings,
+            )
         )
         prior = current_settings if same_shape else {}
         if provider == "sharepoint":
@@ -1322,12 +1347,25 @@ class LocalRagManager:
                 return None
             settings = {"path_pattern": pattern, "url_template": template}
         return {
+            "display_name": display_name,
             "enabled": bool(current.get("enabled", True)),
-            "path_prefix": prefix,
             "provider": provider,
             "strategy": strategy,
             "settings": settings,
         }
+
+    @staticmethod
+    def _infer_source_link_strategy(
+        provider: str,
+        settings: dict[str, Any],
+    ) -> str:
+        if provider == "github":
+            return "github-blob"
+        if settings.get("path_pattern") or settings.get("url_template"):
+            return "regex-template"
+        if settings.get("source_web_root"):
+            return "append-relative-path"
+        return "home-only"
 
     def _prompt_preserving_value(
         self,
@@ -1695,20 +1733,6 @@ class LocalRagManager:
 
     def _database_root(self, db_name: str) -> Path:
         return self.dbs_root / db_name
-
-    @staticmethod
-    def _flatten_mappings(
-        payload: dict[str, Any],
-    ) -> list[tuple[str, dict[str, Any]]]:
-        output: list[tuple[str, dict[str, Any]]] = []
-        for source in payload.get("sources") or []:
-            if not isinstance(source, dict):
-                continue
-            source_id = str(source.get("source_id") or "")
-            for mapping in source.get("mappings") or []:
-                if isinstance(mapping, dict):
-                    output.append((source_id, dict(mapping)))
-        return output
 
     def _import_source_inventory(self) -> Any:
         tool_root = self.rag_root / "gen_db" / "software_rag_tool"

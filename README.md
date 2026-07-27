@@ -197,7 +197,7 @@ Source一覧は`catalog.sqlite`の索引済み文書から読み取り専用で�
 Source画面からSourceを作成・削除・改名することはできません。新しい
 `source_id`は、buildまたはaddが文書を正常に索引した後にだけ表示されます。
 
-既存Sourceには任意でSource Linkを設定できます。設定はDB直下の次のsidecarへ
+既存Sourceには任意でSource Linkを1つ設定できます。設定はDB直下の次のsidecarへ
 保存され、DBと一緒に持ち運べます。
 
 ```text
@@ -206,15 +206,24 @@ Source画面からSourceを作成・削除・改名することはできませ�
 ```
 
 SharePoint、GitHub、Redmine、一般WebのHTTP(S)リンクに対応します。
+1 Sourceは1 Provider・1設定です。現在有効なcatalog文書からSourceごとの
+先頭stored rootを自動導出し、そのroot componentを1回だけ除いた
+Source-relative pathからURLを生成します。Source Link用の人間入力prefix、
+最長prefix選択、Source内の複数Provider混在はありません。
+未公開のv1 sidecarはmappingが1件だけで、旧prefixが唯一のobserved rootと
+一致する場合だけread互換を提供します。0件は未設定、複数mapping・root不一致・
+rootなし・複数rootはpath-onlyへfail-openします。明示保存時だけv2へ移行し、
+以前のprimaryをbackupへ残します。
 GitHubのrepository/refやSharePointの文書library/folder URLは人が入力し、
 `.git`の検査、Gitコマンド、Microsoft Graphによる自動検出は行いません。
 sidecarがないDBは従来どおりpath-onlyで動作します。設定不備も検索失敗には
 せずpath-onlyへ戻り、検索順位・根拠性・`doc_id`・`chunk_uid`は変わりません。
 リンク設定だけでDBや索引を再構築する必要はありません。
 
-完全なDBをcopy/exportするとsidecarも含まれます。
-`source-links.json`には内部URLが含まれる可能性があるため、移行archiveは
-機密データとして扱ってください。実sidecarは公開sourceやfixtureへ含めません。
+完全なDB directoryを手動copyするとactive sidecarとローカルrollback用`.bak`
+が保持されます。migration exporterはactiveなv2 sidecarだけを検証して含め、
+以前の内部URLを含み得る`source-links.json.bak`は除外します。どちらの移送も
+機密データとして扱い、実sidecarは公開sourceやfixtureへ含めません。
 
 ## Copilotにこう頼みます
 
@@ -234,7 +243,7 @@ sidecarがないDBは従来どおりpath-onlyで動作します。設定不備�
 | 中断した構築を再開 | `project-ragの前回の構築を再開して。` |
 | SQLite検索を更新 | `project-ragのSQLite検索インデックスだけ再構築して。` |
 
-DB名は用途が分かる英数字名とし、原則として`-rag`で終わらせます。`source-id`は入力資料の出所を識別する安定した名前です。同じ資料群を更新するときは同じ値を使用します。
+DB名は用途が分かる英数字名とし、原則として`-rag`で終わらせます。`source-id`は入力資料の出所を識別する安定した名前です。同じ資料群を更新するときは同じ値を使用します。例として、SharePoint資料なら`sharepoint-docs`、Redmineなら`redmine-issues`、GitHubなら`github-repository`、一般のファイル群なら`filesystem-docs`のように指定できます。
 
 入力ツリーの一部だけを対象にする場合も、`--root`には安定した上位
 ディレクトリを指定し、対象範囲を`--scan-subdir`で指定します。

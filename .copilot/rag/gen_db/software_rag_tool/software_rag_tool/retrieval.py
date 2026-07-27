@@ -58,6 +58,10 @@ _GENERIC_IDENTIFIER_LOOKUP_TERMS = {
     "範囲",
     "資料",
 }
+_GENERIC_IDENTIFIER_LOOKUP_PHRASES = (
+    "について",
+    "教えて",
+)
 
 
 class SearchBackend(Protocol):
@@ -1824,6 +1828,8 @@ def _is_identifier_only_lookup(question: str) -> bool:
             remainder,
             flags=re.IGNORECASE,
         )
+    for phrase in _GENERIC_IDENTIFIER_LOOKUP_PHRASES:
+        remainder = remainder.replace(phrase, " ")
     terms = {
         canonicalize(token)
         for token in [

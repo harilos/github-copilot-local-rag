@@ -142,8 +142,7 @@ retriever or update detector.
 
 A Source appears only after indexed catalog documents contain its
 `source_id`. The Source screens cannot create, delete, or rename Sources.
-They may attach optional presentation metadata and Source-Link mappings to an
-existing Source.
+They may attach one optional Source Link to an existing Source.
 
 Source-Link configuration is stored with its database:
 
@@ -152,13 +151,30 @@ Source-Link configuration is stored with its database:
 <db-root>/source-links.json.bak
 ```
 
-Mappings associate an existing `source_id` and stored path prefix with a
-manually configured SharePoint, GitHub, Redmine, or other HTTP(S) location.
+Each existing `source_id` has at most one enabled or disabled Provider
+configuration. The manager derives one observed top-level stored root from the
+Source's current visible catalog documents. URL generation removes that root
+component exactly once, then passes the remaining Source-relative path to the
+Provider. There is no user-entered Source-Link path prefix, longest-prefix
+selection, or mixed Provider configuration inside one Source.
 Search resolves links only after retrieval, ranking, packing, and evidence
 classification. It adds `source_url` or `source_permalink` without changing
 document IDs, chunk IDs, scores, ordering, authority, answerability, or search
-status. Missing or invalid mappings fail open to the stored path. No database
+status. Missing or invalid settings fail open to the stored path. No database
 or index rebuild is required.
+
+An unreleased `rag-source-links-v1` file with exactly one mapping is read only
+when its legacy path prefix matches the one observed stored root. A Source
+with no mapping remains unconfigured. Multiple mappings, a root mismatch, no
+observed root, or multiple observed roots fail open to path-only results. The
+manager performs an explicit save to publish the single-configuration
+`rag-source-links-v2` schema while retaining the prior primary as a backup.
+
+Per-file Source Links require exactly one observed stored root. If one Source
+contains documents from several top-level roots, add those provider roots
+again under separate stable Source IDs; the manager does not split or reindex
+the database automatically. A home-only setting may still be used without a
+single observed root.
 
 GitHub repository URLs and refs are entered manually; the manager does not
 inspect `.git` or run Git. SharePoint file links require a manually supplied
@@ -166,10 +182,12 @@ document-library or folder root; Microsoft Graph is not required. Site-only
 and home-only settings remain visible only in the human manager and do not
 become per-document search links.
 
-Copying or exporting the complete database preserves the sidecar. A copied or
-exported database may therefore contain internal source URLs in
-`source-links.json`. Treat the archive as sensitive. Real sidecars are not
-part of public source archives or tracked fixtures.
+Copying the complete database directory preserves the active sidecar and its
+local rollback backup. The migration exporter validates and includes only the
+active v2 sidecar; it excludes `source-links.json.bak` because that rollback
+file may contain an older internal URL. Treat either form of transfer as
+sensitive. Real sidecars are not part of public source archives or tracked
+fixtures.
 
 ## Search
 
@@ -273,6 +291,10 @@ report only the file and line; the configured literal is never printed. The
 migration exporter also excludes the local denylist.
 
 ## Create Or Update A DB
+
+Choose a stable Source ID that describes the ingestion origin. Examples are
+`sharepoint-docs`, `redmine-issues`, `github-repository`, and
+`filesystem-docs`. Reuse the same Source ID when updating the same source.
 
 ```bash
 python ~/.copilot/rag/gen_db/create_db.py --db project-rag --title "Project Knowledge"

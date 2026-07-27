@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 QUERY_ROOT = Path(__file__).resolve().parent
@@ -16,6 +17,7 @@ from software_rag_tool.retrieval import (
     _decorate_anchored_neighbor,
     _dedupe_and_diversify,
     _expand_and_pack,
+    _is_identifier_only_lookup,
     _packed_rows_token_count,
     _postprocess_candidate_pool,
     adaptive_hybrid_query,
@@ -121,6 +123,26 @@ class FakeBackend:
             return list(self.neighbor_rows[chunk_uid])
         row = self.fetch_rows_by_ids([chunk_uid]).get(chunk_uid)
         return [row] if row else []
+
+
+class SourceIdentityContractTests(unittest.TestCase):
+    def test_legacy_source_metadata_is_not_a_source_link_identity(
+        self,
+    ) -> None:
+        row = result_row(
+            "legacy-source",
+            "Synthetic evidence.",
+            path="Root/document.txt",
+        )
+        row["rank"] = 1
+        row["metadata"]["source"] = "source-a"
+        payload = json_payload(
+            [row],
+            "Synthetic question",
+            "fixture-rag",
+            6_000,
+        )
+        self.assertEqual("", payload["evidence"][0]["_source_id"])
 
 
 class HybridAnchorContractTests(unittest.TestCase):
@@ -915,6 +937,32 @@ class HybridAnchorContractTests(unittest.TestCase):
         self.assertTrue(
             all(row["exact_evidence_eligible"] for row in exact_rows)
         )
+
+    def test_identifier_only_lookup_is_stable_with_fallback_cjk_tokens(
+        self,
+    ) -> None:
+        fallback_tokens = [
+            "につ",
+            "つい",
+            "いて",
+            "て教",
+            "教え",
+            "えて",
+            "につい",
+            "ついて",
+            "いて教",
+            "て教え",
+            "教えて",
+        ]
+        with patch(
+            "software_rag_tool.retrieval.tokens_for_fts",
+            side_effect=lambda text: (
+                [] if not str(text).strip() else fallback_tokens
+            ),
+        ):
+            self.assertTrue(
+                _is_identifier_only_lookup("A2Lについて教えて")
+            )
 
     def test_different_section_neighbor_requires_an_independent_signal(self) -> None:
         primary = result_row(

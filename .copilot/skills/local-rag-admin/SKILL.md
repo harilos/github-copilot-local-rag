@@ -12,6 +12,14 @@ may write files and indexes or run for a long time.
 Do not require or set a GitHub Copilot model name. Do not create a custom
 agent.
 
+Source-Link configuration is a human-only Manager boundary. If the user asks
+only for an explanation of that boundary, or explicitly prohibits opening the
+Manager, inspecting configuration, editing, or running commands, use no tools:
+do not list databases, search, read configuration, invoke the Manager, or run
+an admin command. State only that the human-operated Local RAG Manager owns
+the configuration and that ordinary Copilot lookup may consume already
+resolved links. Do not provide configuration steps or inspect stored settings.
+
 ## Python selection
 
 Setup is the only workflow that may use a system Python because the RAG
@@ -167,7 +175,10 @@ The exporter uses a blacklist under `~/.copilot/rag`, so new RAG files are
 included by default. Outside `rag`, it includes only the RAG instruction and
 the `local-rag` and `local-rag-admin` skills. It intentionally excludes the
 platform-specific virtual environment, daemon state, caches, SQLite
-transients, and private credential files.
+transients, private credential files, persistent Source-Link edit locks, and
+`source-links.json.bak`. It validates and includes only active v2
+`source-links.json` files; migrate an unreleased v1 sidecar explicitly before
+export.
 
 Do not start or terminate the daemon or a database maintenance operation
 implicitly for export. If the exporter reports an active daemon, active DB
@@ -230,6 +241,18 @@ Before creating a database, require:
 - a stable source ID;
 - a title.
 
+Use one stable Source ID per ingestion provider. When asking the user for a
+Source ID, show generic examples such as:
+
+- `sharepoint-docs`
+- `redmine-issues`
+- `github-repository`
+- `filesystem-docs`
+
+Do not combine different SharePoint, Redmine, GitHub, or other provider roots
+under one Source ID. These are examples only; never infer the actual provider
+without the user's input.
+
 Ask only for missing values. List existing databases once and do not recreate
 an existing database.
 
@@ -291,6 +314,11 @@ Check status first. Preserve existing contents and run:
   --root "<input-folder>" \
   --source-id <source-name>
 ```
+
+When the user is adding a genuinely new provider, ask for a new stable Source
+ID and show the same generic provider-oriented examples. Existing content from
+the same provider and logical root should continue using its existing Source
+ID.
 
 Use `--retry-errors` only when the user explicitly requests retrying prior
 extraction failures or approves the explained retry.
