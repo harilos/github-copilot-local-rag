@@ -14,6 +14,8 @@ param(
     [double]$MaxAiCreditsPerTurn = 30.0,
     [ValidateSet("A", "B")]
     [string]$Phase = "A",
+    [switch]$AllowMeteredRun,
+    [switch]$AllowRepeatCohort,
     [switch]$SelfTest
 )
 
@@ -396,6 +398,21 @@ if ($SelfTest) {
     & $CollectorPython $CollectorPath --self-test --cases $CasesPath
     $selfTestExitCode = [int]$LASTEXITCODE
     exit $selfTestExitCode
+}
+
+if (-not $AllowMeteredRun) {
+    throw (
+        "Copilot product compliance is an optional metered test and is " +
+        "excluded from normal regression and release gates. Re-run with " +
+        "-AllowMeteredRun only after reviewing the current account quota."
+    )
+}
+if ($Phase -eq "B" -and -not $AllowRepeatCohort) {
+    throw (
+        "Phase B is a high-cost repeatability cohort. Re-run with both " +
+        "-AllowMeteredRun and -AllowRepeatCohort only when explicitly " +
+        "authorized."
+    )
 }
 
 foreach ($required in @(

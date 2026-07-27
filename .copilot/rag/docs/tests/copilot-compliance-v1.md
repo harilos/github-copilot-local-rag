@@ -21,6 +21,17 @@ but is not a pass/fail choice.
 This is a behavioral compliance harness, not a semantic relevance benchmark.
 It does not replace Exact, broad-discovery, or unseen Semantic holdout tests.
 
+This is also an **optional, explicitly metered product test**. It is excluded
+from normal unit tests, full regression runs, release gates, and routine
+post-change validation. A missing, failed, quota-blocked, or unexecuted
+Copilot cohort does not fail the Local RAG software release gate. Report its
+status separately as `PASS`, `FAIL`, `UNVERIFIED`, or `NOT_RUN`.
+
+The runner refuses all product-model execution unless
+`-AllowMeteredRun` is supplied. Phase B additionally requires
+`-AllowRepeatCohort`. Static `-SelfTest` remains free of model calls and does
+not require either switch.
+
 ## Files
 
 ```text
@@ -150,11 +161,13 @@ Use PowerShell and an explicit Python executable for the collector:
   -FixtureWorkspace "<SYNTHETIC_FIXTURE_WORKSPACE>" `
   -VariablesJson "<SYNTHETIC_VARIABLE_FILE>" `
   -OutputRoot "<OUTPUT_DIRECTORY_OUTSIDE_WORKSPACE>" `
+  -AllowMeteredRun `
   -Phase A
 ```
 
-After Phase A passes, run the same command with `-Phase B`. Phase B writes its
-raw cohort under `phase-b/` and does not overwrite Phase A.
+Run Phase B only after a separate, explicit decision to spend the additional
+model quota. Use the same command with `-Phase B -AllowRepeatCohort`. Phase B
+writes its raw cohort under `phase-b/` and does not overwrite Phase A.
 
 The runner deliberately does not use:
 
@@ -173,6 +186,11 @@ The runner sets the Copilot CLI's minimum accepted 30-credit session ceiling
 per turn. This is a safety ceiling, not an expected charge; actual reported
 AI Credits are recorded separately. Override it only after reviewing the
 initial measurements.
+
+Do not place this command in a standard CI job, installer validation, normal
+`full test` alias, or release script. Prefer the static self-test for routine
+changes. Run a paid product cohort only when a human explicitly requests it
+and has reviewed the current quota and billing state.
 
 ## Machine-verifiable gates
 

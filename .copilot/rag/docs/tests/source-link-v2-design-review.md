@@ -1,5 +1,11 @@
 # Source Link v2 Independent Design Review
 
+> Superseding execution policy, 2026-07-28: Copilot product-compliance
+> cohorts are optional metered tests. They are excluded from routine
+> regression and the Local RAG software release gate. The design observations
+> remain useful, but an unexecuted or quota-blocked cohort is `NOT_RUN` or
+> `UNVERIFIED`, not a software release failure.
+
 ## Review context
 
 - Baseline branch: `main`

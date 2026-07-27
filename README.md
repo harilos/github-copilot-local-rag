@@ -679,6 +679,10 @@ DB・モデル込みで別の人へ渡す場合は、作業フォルダから隠
 - [評価runbook](.copilot/rag/docs/tests/rag-evaluation-runbook.md)
 - [リリース候補試験](.copilot/rag/docs/tests/release-candidate-test-plan.md)
 
+Copilot CLIのモデル適合試験は、通常の回帰試験・リリース判定には含めません。
+モデルquotaを消費する任意試験であり、専用runnerも明示的な許可スイッチなしでは
+実行されません。
+
 ## 注意事項
 
 - 「ローカルRAG」は文書処理と検索がローカルであることを意味します。回答に利用する検索結果はCopilotへ渡されます。

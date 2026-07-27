@@ -19,6 +19,22 @@ COMPLIANCE_CASES = (
     / "data"
     / "copilot-compliance-cases-v1.jsonl"
 )
+COMPLIANCE_RUNNER = (
+    REPO_ROOT
+    / ".copilot"
+    / "rag"
+    / "docs"
+    / "tests"
+    / "run_copilot_compliance.ps1"
+)
+COMPLIANCE_SPEC = (
+    REPO_ROOT
+    / ".copilot"
+    / "rag"
+    / "docs"
+    / "tests"
+    / "copilot-compliance-v1.md"
+)
 
 
 class LightweightRoutingContractTests(unittest.TestCase):
@@ -171,6 +187,23 @@ class LightweightRoutingContractTests(unittest.TestCase):
             required,
         )
         self.assertIn(".venv/bin/python", forbidden)
+
+    def test_copilot_product_cohorts_are_optional_and_explicit(self) -> None:
+        runner = COMPLIANCE_RUNNER.read_text(encoding="utf-8")
+        spec = COMPLIANCE_SPEC.read_text(encoding="utf-8")
+        self.assertIn("[switch]$AllowMeteredRun", runner)
+        self.assertIn("[switch]$AllowRepeatCohort", runner)
+        self.assertIn("if (-not $AllowMeteredRun)", runner)
+        self.assertRegex(
+            runner,
+            r'\$Phase -eq "B".*-not \$AllowRepeatCohort',
+        )
+        self.assertIn("excluded", spec)
+        self.assertIn(
+            "from normal unit tests, full regression runs, release gates",
+            spec,
+        )
+        self.assertIn("Do not place this command in a standard CI job", spec)
 
     def test_admin_preserves_required_management_operations(self) -> None:
         text = ADMIN.read_text(encoding="utf-8").lower()

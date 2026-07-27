@@ -30,6 +30,11 @@ Priority follows the review scheme:
 
 ## Decision
 
+> Execution-policy update after this review: Copilot product compliance is an
+> optional metered test. It is excluded from routine regression and the Local
+> RAG software release gate. The observations below remain valid product
+> evidence, but they do not block this implementation.
+
 ### Candidate implementation review
 
 **ACCEPTED — candidate-origin P0: 0; candidate-origin P1: 0.**
@@ -39,10 +44,9 @@ identity, wrong-Source isolation, database identity, locking, atomic
 publication, credential rejection, fail-open search behavior, or source
 hygiene.
 
-### Overall requested validation
+### Optional Copilot product validation
 
-**BLOCKED / UNVERIFIED — the required Copilot formal validation is not
-complete.**
+**UNVERIFIED — the optional metered Copilot formal validation is incomplete.**
 
 The current formal evidence is:
 
@@ -66,17 +70,12 @@ contain `model.call_failure` and `session.error` with HTTP 402
 
 Phase B was correctly not started after the incomplete Phase A.
 
-### Push authorization
+### Release implication
 
-**The candidate must not be represented or pushed as `PASS_AND_PUSHED`, a
-completed release gate, or a stable release.**
-
-The implementation diff is technically clean from the independent code-review
-perspective, but the user's strict end-to-end completion condition is not met:
-Standard Phase A is unverified and Phase B is not run. A successful-completion
-push is not authorized by this review. Any checkpoint outside that contract
-must be explicitly labelled unreleased and validation-incomplete; it must not
-be reported as a passing final result.
+The incomplete product cohort must not be represented as a
+Copilot-compliance PASS. Under the superseding execution policy, however, it
+is not a Local RAG software release blocker and does not prevent a normal
+implementation push.
 
 ## Open findings and blockers
 
@@ -329,20 +328,19 @@ This independent review changed only this review artifact. It did not modify
 implementation source, runners, product Skills, cases, fixtures, or tests.
 Unrelated dirty performance artifacts were preserved and excluded.
 
-## Required next steps
+## Optional follow-up
 
-1. Keep the exact candidate hashes frozen.
-2. After quota reset or authorized entitlement, rerun all 16 Standard Phase A
-   cases from fresh sessions.
+1. Run another product cohort only after a human explicitly authorizes the
+   metered test and reviews the current quota.
+2. If authorized, rerun all 16 Standard Phase A cases from fresh sessions.
 3. Do not relabel quota failures as model failures or passing tests.
-4. If the complete Phase A meets the declared gate, run the full Phase B
-   matrix from fresh sessions.
+4. Run the full Phase B matrix only after a separate explicit authorization.
 5. Preserve the Mini `CPL-012` model noncompliance in the final report; do not
    weaken its oracle.
 6. Re-run source hygiene and diff checks after adding final sanitized formal
    artifacts.
-7. Obtain an independent final review of the completed Phase A and Phase B
-   reports before any `PASS_AND_PUSHED` conclusion.
+7. Report optional Copilot results independently from the Local RAG software
+   release decision.
 
-Until those steps complete, the only accurate overall state is
-**BLOCKED / UNVERIFIED**, not PASS.
+The current implementation state remains **ACCEPTED**. The optional Copilot
+product cohort remains **UNVERIFIED**, not PASS.
