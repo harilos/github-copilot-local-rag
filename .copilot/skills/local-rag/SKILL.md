@@ -109,6 +109,7 @@ On macOS or Linux:
   --db <selected-db> \
   --include-db-hint \
   --compact-json \
+  --result-delivery file \
   --format json \
   "<complete-user-question>"
 ```
@@ -128,6 +129,7 @@ executable directly:
   --db <selected-db> `
   --include-db-hint `
   --compact-json `
+  --result-delivery file `
   --answer-goal evidence `
   --facet "<literal or semantic facet>" `
   "<complete-user-question>"
@@ -188,14 +190,69 @@ After selecting a database:
 4. Do not retry after `ok`, `partial`, `no_hit`, or `error`.
 5. A new search is allowed only when the user explicitly requests additional
    investigation or provides a meaningful clarification.
-6. Treat the `search.py` output as the complete retrieval result. Do not run
-   `jq`, `grep`, `head`, `tail`, or another tool to inspect or re-extract it.
-7. If the shell tool still reports that compact output was truncated or
-   offloaded to a file, do not open that file. Briefly report the error and
-   stop.
+6. Use `--result-delivery file`. Read the returned `summary_file` exactly
+   once. Do not read `manifest.json` or any detail item for the initial answer.
+7. Treat `summary.json` as the complete initial-answer result. Do not run
+   `jq`, `grep`, `head`, `tail`, or another command to post-process it.
 
 Dense, lexical, Exact, metadata, and fusion candidate retrieval performed
 inside that one Hybrid call are not additional searches.
+
+## Initial answer
+
+The initial RAG result contains a self-contained `initial_response`.
+
+Answer the user's first question using only:
+
+- `initial_response.answer_draft_markdown`;
+- `initial_response.key_points`;
+- `initial_response.limitations`;
+- the source IDs and short evidence entries in `summary.json`.
+
+Do not read `manifest.json` or detailed item files for the initial answer.
+Do not add claims that are absent from the initial response.
+
+A lightweight model should normally be able to use
+`answer_draft_markdown` with only minor stylistic editing. Preserve every
+limitation and warning.
+
+## Follow-up detail retrieval
+
+A successful lookup may return a `result_set_id` and item IDs such as `E1`,
+`E2`, `D1`, and `D2`.
+
+When the user asks to tell them more, explain in more detail, show more
+context from a source, or makes an equivalent follow-up request, do not run
+`list_dbs.py` or `search.py` again. Run `result_detail.py` exactly once.
+
+Use:
+
+- the evidence IDs used in the previous answer when the user refers to that
+  evidence;
+- `follow_up.default_item_ids` when the user only asks for more detail;
+- explicitly named item IDs when the user identifies a source.
+
+Normally expand one to three items. Invoke the installed venv interpreter
+directly:
+
+```text
+<venv-python> <rag-root>/query/result_detail.py
+  --result-set-id <result-set-uuid>
+  --item-id <item-id>
+  --detail-level expanded
+  --result-delivery file
+```
+
+Read the returned `detail_file` exactly once and use its
+`answer_draft_markdown` as the basis of the expanded answer. This reads the
+previous result bundle and is not a new search.
+
+Run a new search only when the user explicitly requests another search, a
+different database, refreshed information, a new subject, or a viewpoint not
+represented in the previous result set.
+
+If the temporary result has expired, report that cached detail is no longer
+available. Do not automatically repeat the search.
 
 ## Result handling
 
@@ -211,6 +268,11 @@ Follow the returned status:
 Use only `evidence` for factual claims.
 Identify the supporting evidence ID, source path, and available location in
 the answer.
+When a result contains `source_permalink`, prefer it as the document link.
+Otherwise, when a result contains `source_url`, use that link. When neither
+field exists, cite the stored document path. Do not run another command to
+resolve a missing source URL. A missing source URL does not reduce the
+authority or relevance of the evidence.
 Treat `background_context` as background information only.
 Never use `related_context` as proof.
 Treat `document_results` as broad discovery results. Weak or

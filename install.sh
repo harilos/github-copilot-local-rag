@@ -27,6 +27,7 @@ fi
   cd "$PAYLOAD_DIR"
   tar \
     --exclude='./rag/config/network.json' \
+    --exclude='./rag/config/sensitive-terms.local' \
     --exclude='./rag/query/run' \
     --exclude='./rag/query/run/*' \
     --exclude='*/.venv' \

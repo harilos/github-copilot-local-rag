@@ -108,11 +108,68 @@ RAG setup to recreate the virtual environment.
         VERSION.json
         db.json
         DB_PROFILE.md
+        source-links.json        # optional, human-managed
         catalog.sqlite
         data/
         index/
         logs/
 ```
+
+## Human Manager
+
+Run the interactive manager when a person wants to inspect or maintain Local
+RAG without assembling command-line arguments:
+
+macOS/Linux:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python ~/.copilot/rag/manage.py
+```
+
+Windows PowerShell:
+
+```powershell
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\manage.py"
+```
+
+The top-level menu contains setup/verification, database selection, database
+creation, and exit. After a database is selected, the manager exposes search,
+the read-only Source inventory, build/resume, add/update, detailed status,
+search-index repair, and guarded database deletion. The manager delegates to
+the existing scripts with argument arrays; it does not implement a second
+retriever or update detector.
+
+A Source appears only after indexed catalog documents contain its
+`source_id`. The Source screens cannot create, delete, or rename Sources.
+They may attach optional presentation metadata and Source-Link mappings to an
+existing Source.
+
+Source-Link configuration is stored with its database:
+
+```text
+<db-root>/source-links.json
+<db-root>/source-links.json.bak
+```
+
+Mappings associate an existing `source_id` and stored path prefix with a
+manually configured SharePoint, GitHub, Redmine, or other HTTP(S) location.
+Search resolves links only after retrieval, ranking, packing, and evidence
+classification. It adds `source_url` or `source_permalink` without changing
+document IDs, chunk IDs, scores, ordering, authority, answerability, or search
+status. Missing or invalid mappings fail open to the stored path. No database
+or index rebuild is required.
+
+GitHub repository URLs and refs are entered manually; the manager does not
+inspect `.git` or run Git. SharePoint file links require a manually supplied
+document-library or folder root; Microsoft Graph is not required. Site-only
+and home-only settings remain visible only in the human manager and do not
+become per-document search links.
+
+Copying or exporting the complete database preserves the sidecar. A copied or
+exported database may therefore contain internal source URLs in
+`source-links.json`. Treat the archive as sensitive. Real sidecars are not
+part of public source archives or tracked fixtures.
 
 ## Search
 
@@ -164,6 +221,56 @@ python ~/.copilot/rag/query/search.py --db project-rag --retrieval-mode hybrid "
 ```
 
 Omitting `--retrieval-mode` keeps the normal hybrid behavior.
+
+### Two-stage result delivery
+
+Copilot-facing lookup uses a small temporary result pointer so the initial
+answer does not have to pass a large multilingual payload through a shell:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/query/search.py \
+  --db "<project-rag>" \
+  --compact-json \
+  --result-delivery file \
+  "<complete-user-question>"
+```
+
+The command writes a self-contained `summary.json` and cached detail items
+under the operating system temporary directory. The pointer printed to stdout
+contains only a result-set UUID, the summary path, expiry, and byte count. The
+summary contains a deterministic extractive answer draft, concise evidence,
+limitations, broad document cards, and default follow-up item IDs. Initial
+answers read only this summary.
+
+A follow-up that asks for more detail reads the same cached result without
+running retrieval again:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/query/result_detail.py \
+  --result-set-id "<result-set-uuid>" \
+  --item-id "<item-id>" \
+  --detail-level expanded \
+  --result-delivery file
+```
+
+Temporary result sets expire after 60 minutes by default, extend on access up
+to a four-hour hard lifetime, and are isolated by UUID. They are not stored in
+the repository, `.copilot`, a database, an export, or a release archive.
+`--result-delivery stdout` preserves the existing direct JSON interface.
+
+Before distributing changes, tracked text can be checked for user-profile
+paths and optional local sensitive terms:
+
+```bash
+RAG_SENSITIVE_TERMS_FILE="<path-to-untracked-denylist>" \
+  python ~/.copilot/rag/query/source_hygiene.py
+```
+
+The denylist remains untracked and is excluded by both installers. Findings
+report only the file and line; the configured literal is never printed. The
+migration exporter also excludes the local denylist.
 
 ## Create Or Update A DB
 

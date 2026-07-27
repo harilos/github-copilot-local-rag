@@ -310,6 +310,7 @@ set -- \
   --exclude='*/.pypirc' \
   --exclude='*/.npmrc' \
   --exclude='*/.git-credentials' \
+  --exclude='./rag/config/sensitive-terms.local' \
   --exclude='*/id_rsa' \
   --exclude='*/id_ed25519' \
   --exclude='*/id_ecdsa' \

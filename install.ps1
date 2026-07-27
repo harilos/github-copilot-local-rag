@@ -33,6 +33,9 @@ function Test-InstallPayloadExcluded {
     if ($Normalized -ieq "rag\config\network.json") {
         return $true
     }
+    if ($Normalized -ieq "rag\config\sensitive-terms.local") {
+        return $true
+    }
     if (
         ($Normalized -ieq "rag\query\run") -or
         $Normalized.StartsWith(

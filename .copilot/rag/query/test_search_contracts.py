@@ -45,6 +45,65 @@ class FakeStore:
         return []
 
 
+class ResultDeliveryContractTests(unittest.TestCase):
+    def test_file_delivery_publishes_payload_and_prints_ascii_pointer(
+        self,
+    ) -> None:
+        args = argparse.Namespace(
+            result_delivery="file",
+            format="json",
+            compact_json=True,
+            explain=False,
+        )
+        payload = {"status": "ok", "query": "日本語"}
+        pointer = {
+            "status": "written",
+            "schema_version": "rag-result-pointer-v1",
+            "result_set_id": "00000000-0000-4000-8000-000000000001",
+            "summary_file": "/tmp/一時/summary.json",
+            "expires_at": "2030-01-01T01:00:00Z",
+            "bytes": 100,
+        }
+        stream = io.StringIO()
+        with mock.patch.object(
+            SEARCH,
+            "publish_result_bundle",
+            return_value=pointer,
+        ) as publish:
+            with contextlib.redirect_stdout(stream):
+                SEARCH._print_search_payload(payload, args=args)
+        publish.assert_called_once_with(payload)
+        rendered = stream.getvalue().strip()
+        rendered.encode("ascii")
+        self.assertEqual(pointer, json.loads(rendered))
+        self.assertNotIn("日本語", rendered)
+
+    def test_stdout_delivery_preserves_direct_json_contract(self) -> None:
+        args = argparse.Namespace(
+            result_delivery="stdout",
+            format="json",
+            compact_json=False,
+            explain=False,
+        )
+        payload = {
+            "status": "ok",
+            "query": "question",
+            "_result_detail_items": [{"matched_excerpt": "private detail"}],
+        }
+        stream = io.StringIO()
+        with mock.patch.object(
+            SEARCH,
+            "publish_result_bundle",
+        ) as publish:
+            with contextlib.redirect_stdout(stream):
+                SEARCH._print_search_payload(payload, args=args)
+        publish.assert_not_called()
+        rendered = json.loads(stream.getvalue())
+        self.assertEqual("ok", rendered["status"])
+        self.assertEqual("question", rendered["query"])
+        self.assertNotIn("_result_detail_items", rendered)
+
+
 class BrokenStore:
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict]:
         del question, top_k, source
@@ -401,6 +460,25 @@ class NoHitContractTests(unittest.TestCase):
         )
         self.assertEqual({"rank": 1}, explained["evidence"][0]["debug"])
 
+    def test_compact_contract_never_truncates_a_source_url(self) -> None:
+        source_url = "https://example.invalid/" + ("a" * 2_500)
+        compact = compact_search_contract(
+            {
+                "status": "ok",
+                "answerability": "full",
+                "evidence": [
+                    {
+                        "id": "R1",
+                        "text": "Evidence.",
+                        "source": {"path": "Root/document.txt"},
+                        "source_url": source_url,
+                    }
+                ],
+            },
+            explain=False,
+        )
+        self.assertEqual(source_url, compact["evidence"][0]["source_url"])
+
     def test_no_hit_prompt_marks_related_context_as_non_evidence(self) -> None:
         prompt = payload_to_prompt(
             {
@@ -495,7 +573,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit) as raised:
                 SEARCH._run_sync_script(
-                    python=r"C:\Users\tester\.copilot\rag\query\.venv\Scripts\python.exe",
+                    python=r"C:\path\to\.copilot\rag\query\.venv\Scripts\python.exe",
                     env={},
                     args=args,
                     db_name="ac-rag",
@@ -509,7 +587,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         self.assertEqual(0, raised.exception.code)
         command = child.call_args.args[0]
         self.assertEqual(
-            r"C:\Users\tester\.copilot\rag\query\.venv\Scripts\python.exe",
+            r"C:\path\to\.copilot\rag\query\.venv\Scripts\python.exe",
             command[0],
         )
         self.assertIn("--adaptive-hybrid", command)

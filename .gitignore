@@ -26,3 +26,6 @@ windows_ac_rag_job/
 
 # Machine-local network configuration (the example remains tracked)
 .copilot/rag/config/network.json
+
+# Optional machine-local source hygiene denylist
+.copilot/rag/config/sensitive-terms.local

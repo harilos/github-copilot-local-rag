@@ -38,6 +38,14 @@ class MigrationExportContractTests(unittest.TestCase):
             "future/new-feature.dat": "future compatible\n",
             "dbs/example-rag/db.json": "{}\n",
             "dbs/example-rag/catalog.sqlite": "catalog\n",
+            "dbs/example-rag/source-links.json": (
+                '{"schema_version":"rag-source-links-v1",'
+                '"database":"example-rag","revision":1,"sources":[]}\n'
+            ),
+            "dbs/example-rag/source-links.json.bak": (
+                '{"schema_version":"rag-source-links-v1",'
+                '"database":"example-rag","revision":1,"sources":[]}\n'
+            ),
             "dbs/example-rag/catalog.sqlite-wal": "",
             "dbs/example-rag/catalog.sqlite-shm": "transient\n",
             "dbs/example-rag/logs/progress.json": '{"status":"completed"}\n',
@@ -51,6 +59,7 @@ class MigrationExportContractTests(unittest.TestCase):
             "config/network.json": (
                 '{"proxy_url":"http://proxy.example:8080"}\n'
             ),
+            "config/sensitive-terms.local": "private local term\n",
             "gen_db/software_rag_tool/.env.example": "SAFE=example\n",
             "gen_db/software_rag_tool/.env": "SECRET=value\n",
             "gen_db/software_rag_tool/.env.production": "SECRET=prod\n",
@@ -116,7 +125,19 @@ class MigrationExportContractTests(unittest.TestCase):
         prefix = "local-rag-migration-v1/.copilot/"
 
         self.assertIn(prefix + "rag/future/new-feature.dat", names)
+        self.assertNotIn(
+            prefix + "rag/config/sensitive-terms.local",
+            names,
+        )
         self.assertIn(prefix + "rag/dbs/example-rag/catalog.sqlite", names)
+        self.assertIn(
+            prefix + "rag/dbs/example-rag/source-links.json",
+            names,
+        )
+        self.assertIn(
+            prefix + "rag/dbs/example-rag/source-links.json.bak",
+            names,
+        )
         self.assertIn(
             prefix + "rag/dbs/example-rag/logs/index_state.json",
             names,

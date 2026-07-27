@@ -59,6 +59,14 @@ def payload_to_prompt(
             f"[{item.get('id')}] {source.get('path') or ''}"
             + (f" - {section}" if section else "")
         )
+        source_link = _preferred_source_link(item)
+        if source_link:
+            lines.append(f"Source link: {source_link}")
+        if explain and item.get("source_link_status"):
+            lines.append(
+                "Source link status: "
+                + str(item["source_link_status"])
+            )
         if item.get("context_before"):
             lines.append(
                 "Context before: " + str(item["context_before"])
@@ -85,13 +93,18 @@ def payload_to_prompt(
         lines.extend([f"## {heading}", ""])
         for item in items:
             source = item.get("source") or {}
-            lines.extend(
-                [
-                    f"[{item.get('id')}] {source.get('path') or ''}",
-                    str(item.get("text") or ""),
-                    "",
-                ]
+            lines.append(
+                f"[{item.get('id')}] {source.get('path') or ''}"
             )
+            source_link = _preferred_source_link(item)
+            if source_link:
+                lines.append(f"Source link: {source_link}")
+            if explain and item.get("source_link_status"):
+                lines.append(
+                    "Source link status: "
+                    + str(item["source_link_status"])
+                )
+            lines.extend([str(item.get("text") or ""), ""])
     if documents:
         lines.extend(["## Related documents (discovery results)", ""])
         for item in documents:
@@ -100,6 +113,14 @@ def payload_to_prompt(
             lines.append(
                 f"- [{item.get('support_level') or 'weak'}] {title} ({path})"
             )
+            source_link = _preferred_source_link(item)
+            if source_link:
+                lines.append(f"  Source link: {source_link}")
+            if explain and item.get("source_link_status"):
+                lines.append(
+                    "  Source link status: "
+                    + str(item["source_link_status"])
+                )
             if item.get("relationship"):
                 lines.append(f"  {item['relationship']}")
             if item.get("preview"):
@@ -121,3 +142,11 @@ def payload_to_prompt(
         ]
     )
     return "\n".join(lines)
+
+
+def _preferred_source_link(item: dict[str, Any]) -> str:
+    return str(
+        item.get("source_permalink")
+        or item.get("source_url")
+        or ""
+    )

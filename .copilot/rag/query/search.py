@@ -29,6 +29,7 @@ from software_rag_tool.search_request import (
     request_from_cli,
     request_to_cli_arguments,
 )
+from result_bundle import cleanup_result_spool, publish_result_bundle
 from setup_contract import completion_contract_valid
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
@@ -56,6 +57,7 @@ _LOCAL_HTTP_OPENER = urllib.request.build_opener(
 
 def main() -> None:
     _configure_standard_streams()
+    cleanup_result_spool()
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="*")
     parser.add_argument("--db", help="Target DB name, e.g. project-rag")
@@ -76,6 +78,15 @@ def main() -> None:
         "--compact-json",
         action="store_true",
         help="For JSON output, omit duplicate legacy result arrays and return the evidence-first contract.",
+    )
+    parser.add_argument(
+        "--result-delivery",
+        choices=["stdout", "file"],
+        default="stdout",
+        help=(
+            "Write a managed temporary summary/detail bundle and return an "
+            "ASCII-safe pointer, or preserve the existing stdout response."
+        ),
     )
     parser.add_argument("--include-db-hint", action="store_true")
     parser.add_argument(
@@ -119,6 +130,8 @@ def main() -> None:
         parser.error("--daemon-fallback must be on or off")
 
     if args.compact_json:
+        args.format = "json"
+    if args.result_delivery == "file":
         args.format = "json"
     stdin_text = sys.stdin.read() if args.stdin else ""
     try:
@@ -197,7 +210,9 @@ def main() -> None:
         "adaptive_hybrid": args.retrieval_mode == "hybrid",
         "identifier_diagnostics": not args.disable_identifier_diagnostics,
         "search_request": search_request,
-        "compact_json": bool(args.compact_json),
+        "compact_json": bool(
+            args.compact_json and args.result_delivery == "stdout"
+        ),
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
@@ -494,7 +509,10 @@ def _run_sync_script(
         cmd.append("--explain")
     if args.include_db_hint:
         cmd.append("--include-db-hint")
-    if getattr(args, "compact_json", False):
+    if (
+        getattr(args, "compact_json", False)
+        and getattr(args, "result_delivery", "stdout") == "stdout"
+    ):
         cmd.append("--compact-json")
     if args.disable_identifier_diagnostics:
         cmd.append("--disable-identifier-diagnostics")
@@ -986,6 +1004,18 @@ def _print_deadline_failure(
 
 
 def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
+    if getattr(args, "result_delivery", "stdout") == "file":
+        pointer = publish_result_bundle(payload)
+        print(
+            json.dumps(
+                pointer,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
+        return
+    payload = dict(payload)
+    payload.pop("_result_detail_items", None)
     if args.format == "json":
         if (
             getattr(args, "compact_json", False)
@@ -1065,7 +1095,10 @@ def _effective_budget_tokens(args: argparse.Namespace) -> int | None:
         return configured
     if (
         getattr(args, "format", "prompt") == "json"
-        and getattr(args, "compact_json", False)
+        and (
+            getattr(args, "compact_json", False)
+            or getattr(args, "result_delivery", "stdout") == "file"
+        )
     ):
         return COMPACT_JSON_DEFAULT_BUDGET_TOKENS
     return None

@@ -29,6 +29,8 @@ Copilotへ「RAGの初期設定をして」「RAGを使ってローカル資料�
 - 大きな入力ツリーの一部だけを選択して構築・追加
 - 一致箇所を優先しつつ、見出しや表ヘッダーなどの周辺文脈を返却
 - ベクトルを再計算せず、SQLite検索インデックスだけを再構築
+- 人間向け管理画面からDB・Source一覧・索引修復・安全なDB削除を操作
+- 既存Sourceへ任意のWebリンクを設定し、検索結果の参照先として表示
 
 通常利用では、検索モードや内部オプションを指定する必要はありません。
 
@@ -168,6 +170,52 @@ DBがまだない場合:
 タイトルは「Project Knowledge」、source-idはprojectにして。
 ```
 
+## 人間向け管理画面
+
+Copilotを介さず、人がDBを選択して検索・構築・追加・状態確認・索引修復・
+削除を行う場合は、対話型managerを起動します。
+
+macOS/Linux:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python ~/.copilot/rag/manage.py
+```
+
+Windows PowerShell:
+
+```powershell
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\manage.py"
+```
+
+トップ画面は初期設定・DB一覧選択・DB作成・終了だけです。DBを選ぶと、検索、
+Source一覧、構築・再開、文書追加・更新、詳細状態、検索索引修復、DB削除を
+操作できます。既存のPythonコマンドへ委譲するため、manager独自の検索処理や
+更新判定はありません。
+
+Source一覧は`catalog.sqlite`の索引済み文書から読み取り専用で生成されます。
+Source画面からSourceを作成・削除・改名することはできません。新しい
+`source_id`は、buildまたはaddが文書を正常に索引した後にだけ表示されます。
+
+既存Sourceには任意でSource Linkを設定できます。設定はDB直下の次のsidecarへ
+保存され、DBと一緒に持ち運べます。
+
+```text
+<db-root>/source-links.json
+<db-root>/source-links.json.bak
+```
+
+SharePoint、GitHub、Redmine、一般WebのHTTP(S)リンクに対応します。
+GitHubのrepository/refやSharePointの文書library/folder URLは人が入力し、
+`.git`の検査、Gitコマンド、Microsoft Graphによる自動検出は行いません。
+sidecarがないDBは従来どおりpath-onlyで動作します。設定不備も検索失敗には
+せずpath-onlyへ戻り、検索順位・根拠性・`doc_id`・`chunk_uid`は変わりません。
+リンク設定だけでDBや索引を再構築する必要はありません。
+
+完全なDBをcopy/exportするとsidecarも含まれます。
+`source-links.json`には内部URLが含まれる可能性があるため、移行archiveは
+機密データとして扱ってください。実sidecarは公開sourceやfixtureへ含めません。
+
 ## Copilotにこう頼みます
 
 以下はターミナルへ入力するコマンドではなく、GitHub Copilotへの依頼例です。
@@ -215,7 +263,7 @@ Windowsでも永続pathの区切りは`/`になります。`add_data.py`の削�
 <summary>Windowsのフォルダを指定してDBを作る例</summary>
 
 ```text
-C:\Users\name\Documents\project-docs の文書からproject-ragを作って。
+C:\path\to\source-root の文書からproject-ragを作って。
 タイトルは「Project Knowledge」、source-idはprojectにして。
 ```
 
@@ -231,6 +279,14 @@ Copilotは次の順で検索対象DBを決めます。
 4. 複数候補が妥当なら利用者へ確認
 
 質問全文は一度だけ`search.py`へ渡します。Copilot側でキーワード分割したり、dense・BM25・exactを個別に実行したりしません。
+
+Copilot向けの通常検索は`--result-delivery file`を使い、OSの一時領域へ
+自己完結した`summary.json`と詳細アイテムをUTF-8で原子的に保存します。
+初回回答はsummaryだけを1回読み、決定論的に生成された回答ドラフト、短い根拠、
+制約、関連文書カードを利用します。「詳しく」などの追質問では、
+`result_detail.py`が同じresult-set UUIDのキャッシュを読み、検索やDB一覧取得を
+再実行しません。既存の直接JSON出力は`--result-delivery stdout`で維持されます。
+一時結果はGit、`.copilot`、DB、export、release archiveへ格納されません。
 
 検索では複数文書のprimary一致箇所を先に確保し、残りの出力予算だけで
 同じsection、表ヘッダー、前後段落、関数・設定ブロックなどの周辺文脈を

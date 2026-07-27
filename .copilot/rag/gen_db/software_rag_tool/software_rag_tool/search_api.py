@@ -133,7 +133,12 @@ def run_search_payload(
         deadline_monotonic=deadline_monotonic,
         dense_runtime_ready=dense_runtime_ready,
     )
-    return normalize_search_contract(payload)
+    return _finalize_search_payload(
+        payload,
+        store=store,
+        db_name=name,
+        explain=explain,
+    )
 
 
 def run_adaptive_search_payload(
@@ -227,7 +232,12 @@ def run_adaptive_search_payload(
             "dense_ran": bool(route.get("dense_used")),
         },
     )
-    return normalize_search_contract(payload)
+    return _finalize_search_payload(
+        payload,
+        store=store,
+        db_name=name,
+        explain=explain,
+    )
 
 
 def try_cold_lexical_fast_path(
@@ -276,7 +286,12 @@ def try_cold_lexical_fast_path(
         payload["retrieval_route"] = "cold_identifier_no_hit"
         payload["dense_used"] = False
         payload["dense_skipped_reason"] = "cold_lexical_fast_path"
-        return normalize_search_contract(payload)
+        return _finalize_search_payload(
+            payload,
+            store=store,
+            db_name=name,
+            explain=explain,
+        )
     db_hint = store.context.profile_hint if include_db_hint else ""
     payload = json_payload(rows, question, name, max_chars, db_hint=db_hint)
     if identifier_diagnostics:
@@ -295,7 +310,55 @@ def try_cold_lexical_fast_path(
     payload["retrieval_route"] = "cold_lexical_fast_path"
     payload["dense_used"] = False
     payload["dense_skipped_reason"] = "cold_lexical_fast_path"
+    return _finalize_search_payload(
+        payload,
+        store=store,
+        db_name=name,
+        explain=explain,
+    )
+
+
+def _finalize_search_payload(
+    payload: dict[str, Any],
+    *,
+    store: Any,
+    db_name: str,
+    explain: bool,
+) -> dict[str, Any]:
+    """Attach optional source links without changing retrieval semantics."""
+    try:
+        from .source_links import enrich_search_payload
+
+        enriched = enrich_search_payload(
+            payload,
+            store.context.root,
+            db_name,
+            explain=explain,
+        )
+        payload.clear()
+        payload.update(enriched)
+    except Exception:
+        # Source links are optional presentation metadata. A missing, stale,
+        # or malformed sidecar must never turn a successful local lookup into
+        # an error or alter its status/warnings.
+        pass
+    finally:
+        _strip_private_source_ids(payload)
     return normalize_search_contract(payload)
+
+
+def _strip_private_source_ids(payload: dict[str, Any]) -> None:
+    for key in (
+        "evidence",
+        "contexts",
+        "background_context",
+        "related_context",
+        "document_results",
+        "_result_detail_items",
+    ):
+        for item in payload.get(key) or []:
+            if isinstance(item, dict):
+                item.pop("_source_id", None)
 
 
 def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
@@ -613,12 +676,31 @@ def _add_discovery_lane(
                 "facets": set(),
                 "literal_identifiers": set(),
                 "ranks": {},
+                "candidates": [],
+                "_source_id": str(
+                    metadata.get("source_id")
+                    or metadata.get("source")
+                    or ""
+                ),
             },
         )
+        if all(
+            str(
+                (candidate.get("row") or {}).get("id") or ""
+            )
+            != chunk_id
+            for candidate in document["candidates"]
+        ):
+            document["candidates"].append(item)
         score = float(item["score"])
         if score > float(document["score"]):
             document["score"] = score
             document["best"] = item
+            document["_source_id"] = str(
+                metadata.get("source_id")
+                or metadata.get("source")
+                or ""
+            )
         document["signals"].update(item["signals"])
         document["facets"].update(item["facets"])
         document["literal_identifiers"].update(
@@ -715,6 +797,7 @@ def _add_discovery_lane(
     for document in ranked_documents:
         select_document(document)
     cards: list[dict[str, Any]] = []
+    cached_details: list[dict[str, Any]] = []
     for index, document in enumerate(selected, start=1):
         best = document["best"]
         row = best["row"]
@@ -749,8 +832,10 @@ def _add_discovery_lane(
                     contains_literal=contains_literal,
                 ),
                 "rank": index,
+                "_source_id": str(document.get("_source_id") or ""),
             }
         )
+        cached_details.append(_cached_document_detail(document))
 
     counts = {
         level: sum(
@@ -765,6 +850,7 @@ def _add_discovery_lane(
         if facet in requested_facets
     }
     payload["document_results"] = cards
+    payload["_result_detail_items"] = cached_details
     payload["coverage"] = {
         "policy": coverage_request.get("policy") or "wide",
         "exact_identifier_found": any(
@@ -907,6 +993,79 @@ def _document_relationship(
     )
 
 
+def _cached_document_detail(
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    best = document["best"]
+    row = best["row"]
+    metadata = row.get("metadata") or {}
+    section = str(
+        metadata.get("section_path")
+        or metadata.get("chunk_title")
+        or ""
+    )
+    ranked_candidates = sorted(
+        list(document.get("candidates") or []),
+        key=lambda item: float(item.get("score") or 0.0),
+        reverse=True,
+    )
+    additional_sections: list[dict[str, Any]] = []
+    seen_ids = {str(row.get("id") or "")}
+    for candidate in ranked_candidates:
+        candidate_row = candidate.get("row") or {}
+        candidate_id = str(candidate_row.get("id") or "")
+        if not candidate_id or candidate_id in seen_ids:
+            continue
+        seen_ids.add(candidate_id)
+        candidate_metadata = candidate_row.get("metadata") or {}
+        additional_sections.append(
+            {
+                "chunk_uid": candidate_id,
+                "heading": str(
+                    candidate_metadata.get("section_path")
+                    or candidate_metadata.get("chunk_title")
+                    or ""
+                )[:160],
+                "text": str(candidate_row.get("text") or "")[:1_600],
+            }
+        )
+        if len(additional_sections) >= 1:
+            break
+    source_range: dict[str, Any] = {
+        "kind": "matched",
+        "chunk_uid": str(row.get("id") or ""),
+        "section": section,
+    }
+    if metadata.get("chunk_index") not in (None, ""):
+        source_range["chunk_index"] = metadata["chunk_index"]
+    for key in ("page", "slide", "lines"):
+        if metadata.get(key) not in (None, ""):
+            source_range[key] = metadata[key]
+    return {
+        "path": str(document.get("path") or ""),
+        "_source_id": str(
+            metadata.get("source_id")
+            or metadata.get("source")
+            or document.get("_source_id")
+            or ""
+        ),
+        "document_id": str(metadata.get("doc_id") or ""),
+        "chunk_uid": str(row.get("id") or ""),
+        "heading_path": [section] if section else [],
+        "matched_excerpt": str(row.get("text") or "")[:2_400],
+        "context_before": str(row.get("context_before") or "")[:1_000],
+        "context_after": str(row.get("context_after") or "")[:1_000],
+        "additional_sections": additional_sections,
+        "table_context": row.get("table_context"),
+        "source_ranges": [source_range],
+        "context_reason": str(row.get("context_reason") or ""),
+        "warnings": [
+            str(value)[:160]
+            for value in row.get("context_warnings") or []
+        ],
+    }
+
+
 def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_chars: int, *, db_hint: str = "") -> dict[str, Any]:
     converted: list[tuple[dict[str, Any], dict[str, Any], set[str]]] = []
     warnings: list[str] = []
@@ -921,6 +1080,11 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
             truncated = True
         item: dict[str, Any] = {
             "id": f"R{row['rank']}",
+            "_source_id": str(
+                meta.get("source_id")
+                or meta.get("source")
+                or ""
+            ),
             "source": {
                 "path": meta.get("path") or "",
                 "title": meta.get("title") or meta.get("chunk_title") or "",
@@ -1457,6 +1621,14 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
         section = location.get("section") or ""
         suffix = f" - {section}" if section else ""
         lines.append(f"[{item.get('id')}] {source.get('path') or ''}{suffix}")
+        source_link = _preferred_source_link(item)
+        if source_link:
+            lines.append(f"Source link: {source_link}")
+        if explain and item.get("source_link_status"):
+            lines.append(
+                "Source link status: "
+                + str(item["source_link_status"])
+            )
         if item.get("context_before"):
             lines.append(
                 "Context before: " + str(item["context_before"])
@@ -1476,6 +1648,14 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
         for item in background:
             source = item.get("source") or {}
             lines.append(f"[{item.get('id')}] {source.get('path') or ''}")
+            source_link = _preferred_source_link(item)
+            if source_link:
+                lines.append(f"Source link: {source_link}")
+            if explain and item.get("source_link_status"):
+                lines.append(
+                    "Source link status: "
+                    + str(item["source_link_status"])
+                )
             lines.append(str(item.get("text") or ""))
             lines.append("")
         lines.append("Do not use background context as direct proof.")
@@ -1497,6 +1677,14 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
             title = str(item.get("title") or "")
             heading = title if title and title != path else path
             lines.append(f"- [{support}] {heading} ({path})")
+            source_link = _preferred_source_link(item)
+            if source_link:
+                lines.append(f"  Source link: {source_link}")
+            if explain and item.get("source_link_status"):
+                lines.append(
+                    "  Source link status: "
+                    + str(item["source_link_status"])
+                )
             if item.get("relationship"):
                 lines.append(f"  {item['relationship']}")
             if item.get("preview"):
@@ -1519,6 +1707,14 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
     lines.append("\n# Question\n")
     lines.append(question)
     return "\n".join(lines)
+
+
+def _preferred_source_link(item: dict[str, Any]) -> str:
+    return str(
+        item.get("source_permalink")
+        or item.get("source_url")
+        or ""
+    )
 
 
 def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1598,6 +1794,7 @@ def compact_search_contract(
     ) = _project_document_results(
         list(normalized.get("document_results") or []),
         limit=COMPACT_DOCUMENT_RESULT_LIMIT,
+        explain=explain,
     )
     projection_truncated = (
         evidence_truncated
@@ -1657,6 +1854,7 @@ def _project_document_results(
     results: list[dict[str, Any]],
     *,
     limit: int,
+    explain: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     projected: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -1691,6 +1889,11 @@ def _project_document_results(
                 result.get("relationship") or ""
             )[:220],
         }
+        _copy_projected_source_links(
+            result,
+            item,
+            explain=explain,
+        )
         projected.append(item)
         if len(projected) >= limit:
             truncated = truncated or len(results) > len(projected)
@@ -1839,9 +2042,35 @@ def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any
     ):
         if context.get(key) not in (None, "", []):
             projected[key] = context[key]
+    _copy_projected_source_links(
+        context,
+        projected,
+        explain=explain,
+    )
     if explain and context.get("debug"):
         projected["debug"] = context["debug"]
     return projected
+
+
+def _copy_projected_source_links(
+    source: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    explain: bool,
+) -> None:
+    limits = {
+        "source_provider": 64,
+        "source_url": 4_096,
+        "source_permalink": 4_096,
+    }
+    for key, limit in limits.items():
+        value = str(source.get(key) or "")
+        if value and len(value) <= limit:
+            target[key] = value
+    if explain and source.get("source_link_status"):
+        target["source_link_status"] = str(
+            source["source_link_status"]
+        )[:120]
 
 
 def _conservative_token_count(text: str) -> int:
@@ -1872,6 +2101,12 @@ def _fit_compact_utf8_limit(
     compact["warnings"] = sorted(
         set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
     )
+    # Source links are optional navigation metadata. Preserve the retrieved
+    # evidence and document breadth before retaining links when the compact
+    # stdout envelope is under pressure.
+    _drop_optional_source_link_fields(compact)
+    if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+        return compact
     # Optional surrounding context is reduced before primary excerpts or
     # distinct discovery documents.
     for context_limit in (200, 120, 0):
@@ -1981,6 +2216,25 @@ def _fit_compact_utf8_limit(
             item.pop("retrieval_signals", None)
             item.pop("relationship", None)
     return compact
+
+
+def _drop_optional_source_link_fields(payload: dict[str, Any]) -> None:
+    for key in (
+        "evidence",
+        "background_context",
+        "related_context",
+        "document_results",
+    ):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            for field in (
+                "source_link_status",
+                "source_provider",
+                "source_url",
+                "source_permalink",
+            ):
+                item.pop(field, None)
 
 
 def _dedupe_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
