@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name(
@@ -158,18 +161,23 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name) / "rag"
         query = root / "query"
-        python = query / ".venv" / "bin" / "python"
+        python = query / ".venv" / (
+            Path("Scripts/python.exe")
+            if sys.platform.startswith("win")
+            else Path("bin/python")
+        )
         python.parent.mkdir(parents=True)
-        python.symlink_to(Path(sys.executable))
+        shutil.copy2(sys.executable, python)
         (query / "search.py").write_text("", encoding="utf-8")
         output = Path(temporary.name) / "artifacts"
-        return MODULE.PersistentDaemonWindowsRunner(
-            installed_rag=root,
-            output_dir=output,
-            run_id="unit",
-            databases=("ac-rag",),
-            deadline_seconds=15,
-        )
+        with mock.patch.object(MODULE.sys, "executable", str(python)):
+            return MODULE.PersistentDaemonWindowsRunner(
+                installed_rag=root,
+                output_dir=output,
+                run_id="unit",
+                databases=("ac-rag",),
+                deadline_seconds=15,
+            )
 
     def test_client_command_uses_direct_venv_and_no_shell_wrapper(self) -> None:
         runner = self._runner()
@@ -206,9 +214,13 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name) / "rag"
         query = root / "query"
-        python = query / ".venv" / "bin" / "python"
+        python = query / ".venv" / (
+            Path("Scripts/python.exe")
+            if sys.platform.startswith("win")
+            else Path("bin/python")
+        )
         python.parent.mkdir(parents=True)
-        python.symlink_to(Path(sys.executable))
+        shutil.copy2(sys.executable, python)
         (query / "search.py").write_text("", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "outside"):
             MODULE.PersistentDaemonWindowsRunner(
@@ -268,6 +280,105 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(
             "PASS",
             runner.gates["resource_worker_handles"]["result"],
+        )
+
+    def test_quiescence_requires_three_consecutive_empty_polls(self) -> None:
+        runner = self._runner()
+        runner.health = mock.Mock(
+            side_effect=[
+                {"active_requests": 1, "queue_depth": 0},
+                {"active_requests": 0, "queue_depth": 0},
+                {"active_requests": 0, "queue_depth": 1},
+                {"active_requests": 0, "queue_depth": 0},
+                {"active_requests": 0, "queue_depth": 0},
+                {
+                    "active_requests": 0,
+                    "queue_depth": 0,
+                    "manager_generation": "manager",
+                },
+            ]
+        )
+        with mock.patch.object(MODULE.time, "sleep"):
+            health = runner.wait_for_daemon_quiescence(
+                timeout_seconds=5,
+                poll_seconds=0,
+            )
+        self.assertEqual("manager", health["manager_generation"])
+        self.assertEqual(6, runner.health.call_count)
+
+    def test_resource_warmup_runs_twenty_unrecorded_at_c4(self) -> None:
+        runner = self._runner()
+        runner.databases = (
+            "ac-rag",
+            "incident-rag",
+            "rfc-full-20k-rag",
+        )
+        batches: list[tuple[int, bool]] = []
+        identity = {
+            "result": "PASS",
+            "manager_pid": 10,
+            "worker_pid": 11,
+            "manager_generation": "manager",
+            "worker_generation": "worker",
+            "model_load_count": 1,
+        }
+
+        def run_concurrent(
+            cases: list[MODULE.ClientCase],
+            *,
+            phase: str,
+            record: bool,
+        ) -> list[dict[str, object]]:
+            self.assertEqual("soak-resource-warm", phase)
+            batches.append((len(cases), record))
+            return [dict(identity) for _ in cases]
+
+        runner.run_concurrent = run_concurrent
+        runner.wait_for_daemon_quiescence = mock.Mock(
+            return_value={
+                **identity,
+                "active_requests": 0,
+                "queue_depth": 0,
+            }
+        )
+        result = runner.warm_soak_resource_paths()
+        self.assertEqual("PASS", result["result"])
+        self.assertEqual([(4, False)] * 5, batches)
+        self.assertEqual(20, len(result["rows"]))
+        self.assertFalse(result["event"]["recorded_as_soak_cases"])
+
+    def test_rss_monotonic_gate_is_not_relaxed_by_warmup_change(self) -> None:
+        runner = self._runner()
+        mib = 1024 * 1024
+        baseline = [
+            {
+                "manager_handle_count": 100,
+                "worker_handle_count": 100,
+                "manager_thread_count": 10,
+                "worker_thread_count": 10,
+                "manager_rss_bytes": 31 * mib,
+                "worker_rss_bytes": 100 * mib,
+            }
+        ] * 3
+        cohort = [
+            {
+                "manager_handle_count": 100,
+                "worker_handle_count": 100,
+                "manager_thread_count": 10,
+                "worker_thread_count": 10,
+                "manager_rss_bytes": value * mib,
+                "worker_rss_bytes": 100 * mib,
+            }
+            for value in (32, 33, 34, 35, 36)
+        ]
+        runner.evaluate_resource_gates(baseline, cohort)
+        self.assertEqual(
+            "FAIL",
+            runner.gates["resource_manager_rss"]["result"],
+        )
+        self.assertIn(
+            "monotonic=True",
+            runner.gates["resource_manager_rss"]["detail"],
         )
 
     def test_phase_gate_map_uses_canonical_gate_names(self) -> None:

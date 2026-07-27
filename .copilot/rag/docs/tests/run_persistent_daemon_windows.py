@@ -83,6 +83,22 @@ PROFILE_MODE = {
     "L": "lexical",
     "V": "dense",
 }
+RESOURCE_WARMUP_REQUESTS = 20
+RESOURCE_WARMUP_CONCURRENCY = 4
+RESOURCE_QUIESCENCE_STABLE_POLLS = 3
+RESOURCE_QUIESCENCE_POLL_SECONDS = 0.1
+RESOURCE_QUIESCENCE_TIMEOUT_SECONDS = 10.0
+RESOURCE_BASELINE_IDLE_SECONDS = 2.0
+RESOURCE_BASELINE_SAMPLE_COUNT = 3
+RESOURCE_BASELINE_SAMPLE_INTERVAL_SECONDS = 0.25
+RESOURCE_GATE_NAMES = (
+    "resource_manager_handles",
+    "resource_worker_handles",
+    "resource_manager_threads",
+    "resource_worker_threads",
+    "resource_manager_rss",
+    "resource_worker_rss",
+)
 _LOCAL_HTTP_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({})
 )
@@ -306,6 +322,17 @@ class PersistentDaemonWindowsRunner:
                 "at": utc_now(),
             },
         )
+
+    def fail_soak_resource_prerequisite(
+        self,
+        *,
+        soak_detail: str,
+        resource_reason: str,
+    ) -> None:
+        self.gate("soak_200_c4", "FAIL", soak_detail)
+        for gate_name in RESOURCE_GATE_NAMES:
+            self.gate(gate_name, "NOT_RUN", resource_reason)
+        self.safety_stop = True
 
     def read_state(self) -> dict[str, Any] | None:
         try:
@@ -637,6 +664,7 @@ class PersistentDaemonWindowsRunner:
         cases: list[ClientCase],
         *,
         phase: str,
+        record: bool = True,
     ) -> list[dict[str, Any]]:
         barrier = threading.Barrier(len(cases))
         with concurrent.futures.ThreadPoolExecutor(
@@ -648,10 +676,108 @@ class PersistentDaemonWindowsRunner:
                     case,
                     phase=phase,
                     barrier=barrier,
+                    record=record,
                 )
                 for case in cases
             ]
             return [future.result() for future in futures]
+
+    def wait_for_daemon_quiescence(
+        self,
+        *,
+        timeout_seconds: float = RESOURCE_QUIESCENCE_TIMEOUT_SECONDS,
+        stable_polls: int = RESOURCE_QUIESCENCE_STABLE_POLLS,
+        poll_seconds: float = RESOURCE_QUIESCENCE_POLL_SECONDS,
+    ) -> dict[str, Any] | None:
+        deadline = time.monotonic() + timeout_seconds
+        consecutive = 0
+        last_health: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            last_health = self.health()
+            if (
+                last_health
+                and int(last_health.get("active_requests") or 0) == 0
+                and int(last_health.get("queue_depth") or 0) == 0
+            ):
+                consecutive += 1
+                if consecutive >= stable_polls:
+                    return last_health
+            else:
+                consecutive = 0
+            time.sleep(poll_seconds)
+        return None
+
+    def warm_soak_resource_paths(
+        self,
+        *,
+        total: int = RESOURCE_WARMUP_REQUESTS,
+        concurrency: int = RESOURCE_WARMUP_CONCURRENCY,
+    ) -> dict[str, Any]:
+        if total <= 0 or concurrency <= 0 or total % concurrency:
+            raise ValueError(
+                "resource warmup must contain complete concurrency waves"
+            )
+        rows: list[dict[str, Any]] = []
+        for offset in range(0, total, concurrency):
+            cases = [
+                make_case(
+                    "soak-resource-warm",
+                    self.databases[(offset + client) % len(self.databases)],
+                    ("H", "L", "V")[(offset + client) % 3],
+                    offset + client,
+                )
+                for client in range(concurrency)
+            ]
+            rows.extend(
+                self.run_concurrent(
+                    cases,
+                    phase="soak-resource-warm",
+                    record=False,
+                )
+            )
+        quiescent_health = self.wait_for_daemon_quiescence()
+        stable = stable_identity(rows)
+        passed = bool(
+            len(rows) == total
+            and all(row["result"] == "PASS" for row in rows)
+            and stable
+            and quiescent_health
+            and int(quiescent_health.get("active_requests") or 0) == 0
+            and int(quiescent_health.get("queue_depth") or 0) == 0
+            and int(quiescent_health.get("model_load_count") or 0) == 1
+        )
+        event = {
+            "phase": "soak-resource-warm",
+            "event": "excluded_resource_warmup",
+            "at": utc_now(),
+            "requests": len(rows),
+            "concurrency": concurrency,
+            "waves": total // concurrency,
+            "all_success": all(row["result"] == "PASS" for row in rows),
+            "stable_identity": stable,
+            "active_requests": (
+                quiescent_health or {}
+            ).get("active_requests"),
+            "queue_depth": (quiescent_health or {}).get("queue_depth"),
+            "manager_generation": (
+                quiescent_health or {}
+            ).get("manager_generation"),
+            "worker_generation": (
+                quiescent_health or {}
+            ).get("worker_generation"),
+            "model_load_count": (
+                quiescent_health or {}
+            ).get("model_load_count"),
+            "recorded_as_soak_cases": False,
+            "result": "PASS" if passed else "FAIL",
+        }
+        self.artifacts.append("event", event)
+        return {
+            "rows": rows,
+            "health": quiescent_health,
+            "event": event,
+            "result": event["result"],
+        }
 
     def shutdown_and_verify(self, phase: str) -> dict[str, Any]:
         state = self.read_state()
@@ -727,6 +853,8 @@ class PersistentDaemonWindowsRunner:
             "model_load_count": (health or {}).get("model_load_count"),
             "open_database_count": (health or {}).get("open_database_count"),
             "handled_request_count": (health or {}).get("handled_request_count"),
+            "active_requests": (health or {}).get("active_requests"),
+            "queue_depth": (health or {}).get("queue_depth"),
             "manager_rss_bytes": manager_external.get("rss_bytes"),
             "worker_rss_bytes": worker_external.get("rss_bytes"),
             "manager_handle_count": manager_external.get("handle_count"),
@@ -1422,18 +1550,91 @@ class PersistentDaemonWindowsRunner:
             )
             for index, db_name in enumerate(self.databases)
         ]
-        baseline_samples = [
-            self.sample_resources(
-                phase="soak-200-c4",
-                sample_index=index,
-                requests_completed=0,
+        resource_warm = self.warm_soak_resource_paths()
+        warmup_ok = bool(
+            warm["row"]["result"] == "PASS"
+            and all(row["result"] == "PASS" for row in cache_warm_rows)
+            and resource_warm["result"] == "PASS"
+        )
+        if not warmup_ok:
+            self.fail_soak_resource_prerequisite(
+                soak_detail=(
+                    "resource warmup failed before the measured soak"
+                ),
+                resource_reason="resource_warmup_failed",
             )
-            for index in range(3)
-        ]
-        baseline_health = warm["health"] or self.health() or {}
+            return
+        time.sleep(RESOURCE_BASELINE_IDLE_SECONDS)
+        baseline_health = self.wait_for_daemon_quiescence()
+        if not baseline_health:
+            self.fail_soak_resource_prerequisite(
+                soak_detail=(
+                    "daemon was not quiescent before resource baseline"
+                ),
+                resource_reason="resource_baseline_not_quiescent",
+            )
+            return
+        baseline_samples: list[dict[str, Any]] = []
+        for index in range(RESOURCE_BASELINE_SAMPLE_COUNT):
+            baseline_samples.append(
+                self.sample_resources(
+                    phase="soak-200-c4",
+                    sample_index=index,
+                    requests_completed=0,
+                )
+            )
+            if index + 1 < RESOURCE_BASELINE_SAMPLE_COUNT:
+                time.sleep(RESOURCE_BASELINE_SAMPLE_INTERVAL_SECONDS)
+        baseline_identity_ok = all(
+            sample.get("manager_generation")
+            == baseline_health.get("manager_generation")
+            and sample.get("worker_generation")
+            == baseline_health.get("worker_generation")
+            and int(sample.get("model_load_count") or 0) == 1
+            for sample in baseline_samples
+        )
+        if (
+            not baseline_identity_ok
+            or any(
+                int(sample.get("active_requests") or 0) != 0
+                or int(sample.get("queue_depth") or 0) != 0
+                for sample in baseline_samples
+            )
+        ):
+            self.fail_soak_resource_prerequisite(
+                soak_detail=(
+                    "resource baseline was active or changed generation"
+                ),
+                resource_reason="resource_baseline_not_quiescent",
+            )
+            return
+        self.artifacts.append(
+            "event",
+            {
+                "phase": "soak-200-c4",
+                "event": "resource_baseline_ready",
+                "at": utc_now(),
+                "definition": (
+                    "dense_ready; all DB caches opened; 20 excluded requests "
+                    "in five concurrency-4 waves; active_requests=0 and "
+                    "queue_depth=0 for three polls; two-second idle"
+                ),
+                "sample_count": len(baseline_samples),
+                "sample_interval_seconds": (
+                    RESOURCE_BASELINE_SAMPLE_INTERVAL_SECONDS
+                ),
+                "manager_generation": baseline_health.get(
+                    "manager_generation"
+                ),
+                "worker_generation": baseline_health.get(
+                    "worker_generation"
+                ),
+            },
+        )
         manager_generation = baseline_health.get("manager_generation")
         worker_generation = baseline_health.get("worker_generation")
         rows: list[dict[str, Any]] = []
+        cohort_samples: list[dict[str, Any]] = []
         bucket_size = 20
         bucket_count = total // bucket_size
         for bucket in range(bucket_count):
@@ -1457,10 +1658,13 @@ class PersistentDaemonWindowsRunner:
                 if any(row["result"] != "PASS" for row in cohort):
                     self.safety_stop = True
                     break
-            self.sample_resources(
-                phase="soak-200-c4",
-                sample_index=bucket + 3,
-                requests_completed=len(rows),
+            cohort_samples.append(
+                self.sample_resources(
+                    phase="soak-200-c4",
+                    sample_index=bucket
+                    + RESOURCE_BASELINE_SAMPLE_COUNT,
+                    requests_completed=len(rows),
+                )
             )
             if self.safety_stop:
                 break
@@ -1469,6 +1673,7 @@ class PersistentDaemonWindowsRunner:
             sample_index=99,
             requests_completed=len(rows),
         )
+        cohort_samples.append(final)
         stable = bool(
             rows
             and all(
@@ -1489,7 +1694,7 @@ class PersistentDaemonWindowsRunner:
             "PASS" if passed else "FAIL",
             f"completed={len(rows)}/{total}, stable_generation={stable}",
         )
-        self.evaluate_resource_gates(baseline_samples, self.resources[-11:])
+        self.evaluate_resource_gates(baseline_samples, cohort_samples)
 
     def evaluate_resource_gates(
         self,
@@ -1556,7 +1761,8 @@ class PersistentDaemonWindowsRunner:
                 f"resource_{owner}_rss",
                 "PASS" if passed else "FAIL",
                 f"baseline={int(base)}, final={int(series[-1])}, "
-                f"monotonic={is_monotonic_increase(series)}",
+                f"monotonic={is_monotonic_increase(series)}, "
+                f"material={material}",
             )
 
     def phase_overload(self) -> None:

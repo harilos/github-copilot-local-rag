@@ -1019,9 +1019,34 @@ Run 200 total requests with four independent client sessions. Mix:
 - broad document searches;
 - Exact positive and negative cases.
 
+Before taking the resource baseline, establish the measured concurrency-four
+steady state in this exact order:
+
+1. start one clean manager/worker generation and wait for Dense warmup;
+2. run one Hybrid request against each test DB so all three DB runtimes are
+   present in the worker cache;
+3. run 20 additional requests as five concurrency-four waves, using the same
+   mixed DB and H/L/V pattern as the measured soak;
+4. require all 20 requests to succeed on the same manager and worker
+   generations with `model_load_count=1`;
+5. require `active_requests=0` and `queue_depth=0` for three consecutive
+   health polls 100 ms apart;
+6. idle for two seconds, then repeat the quiescence check;
+7. take three baseline samples 250 ms apart.
+
+The 20 concurrency warmup requests are recorded as one
+`excluded_resource_warmup` event. They are not case rows, do not count toward
+the 200-request cohort, and do not contribute resource-trend samples.
+
+This sequence is the normative meaning of **after warmup** for the soak
+resource gate. Serial DB-cache warmup alone is insufficient because it does
+not initialize the manager's concurrent request-handler and queue paths. A
+warmup failure makes `soak_200_c4` fail and leaves the dependent resource
+gates `NOT_RUN`; it must not be hidden by moving the baseline.
+
 Use 10 ordered time buckets of 20 completed requests. Sample resources:
 
-- after warmup;
+- at the three-point steady-state baseline defined above;
 - at every bucket boundary;
 - after the final request;
 - after a two-minute idle period.
@@ -1046,8 +1071,16 @@ separate crash phase.
 
 ## 21. Resource and degradation gates
 
-Let the warm baseline be the median of at least three samples taken after
-Dense warmup and before the soak.
+Let the warm baseline be the median of the three samples taken after the
+normative steady-state sequence in Phase S: Dense ready, all three DB caches
+open, 20 excluded requests in five concurrency-four waves, daemon quiescent,
+and a two-second idle. All baseline samples must report
+`active_requests=0`, `queue_depth=0`, and the same manager and worker
+generations used by the measured cohort.
+
+Changing the warmup definition does not change any handle, thread, RSS, or
+latency threshold below. It only prevents one-time allocation of the
+advertised concurrency-four path from being classified as post-warmup growth.
 
 ### Handles
 
