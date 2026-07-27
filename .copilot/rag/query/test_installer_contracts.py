@@ -51,6 +51,10 @@ class InstallerExclusionContractTests(unittest.TestCase):
             ),
         )
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX installer execution is not applicable on Windows",
+    )
     def test_posix_install_preserves_runtime_and_skips_transients(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
