@@ -12,13 +12,44 @@ if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
 
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
+function Test-InstallPayloadExcluded {
+    param([Parameter(Mandatory = $true)][string]$RelativePath)
+
+    $Normalized = $RelativePath.Replace("/", "\").TrimStart("\")
+    if ($Normalized -ieq "rag\config\network.json") {
+        return $true
+    }
+    if (
+        ($Normalized -ieq "rag\query\run") -or
+        $Normalized.StartsWith(
+            "rag\query\run\",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
+    $Parts = @($Normalized -split "\\")
+    if (
+        ($Parts -icontains ".venv") -or
+        ($Parts -icontains "__pycache__")
+    ) {
+        return $true
+    }
+    $Leaf = $Parts[-1]
+    if ($Leaf -ieq ".DS_Store") {
+        return $true
+    }
+    $Extension = [System.IO.Path]::GetExtension($Leaf)
+    return ($Extension -ieq ".pyc") -or ($Extension -ieq ".pyo")
+}
+
 $PayloadRoot = [System.IO.Path]::GetFullPath($Payload)
 Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
     $Relative = $_.FullName.Substring($PayloadRoot.Length).TrimStart(
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    if ($Relative -ine "rag\config\network.json") {
+    if (-not (Test-InstallPayloadExcluded -RelativePath $Relative)) {
         $Destination = Join-Path $Target $Relative
         if ($_.PSIsContainer) {
             New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -39,9 +70,13 @@ if (
     (Test-Path -LiteralPath $LegacyMarker -PathType Leaf) -and
     ((Get-Content -LiteralPath $LegacyMarker -Raw).Trim() -ceq "ok")
 ) {
-    & $LegacyPython (Join-Path $Target "rag\query\setup.py") `
-        --migrate-legacy-marker --format json | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        & $LegacyPython (Join-Path $Target "rag\query\setup.py") `
+            --migrate-legacy-marker --format json | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Existing RAG runtime needs setup verification before lookup."
+        }
+    } catch {
         Write-Warning "Existing RAG runtime needs setup verification before lookup."
     }
 }

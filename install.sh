@@ -13,7 +13,19 @@ fi
 mkdir -p "$TARGET_DIR"
 (
   cd "$PAYLOAD_DIR"
-  tar --exclude='./rag/config/network.json' -cf - .
+  tar \
+    --exclude='./rag/config/network.json' \
+    --exclude='./rag/query/run' \
+    --exclude='./rag/query/run/*' \
+    --exclude='*/.venv' \
+    --exclude='*/.venv/*' \
+    --exclude='*/__pycache__' \
+    --exclude='*/__pycache__/*' \
+    --exclude='*.pyc' \
+    --exclude='*.pyo' \
+    --exclude='./.DS_Store' \
+    --exclude='*/.DS_Store' \
+    -cf - .
 ) | (
   cd "$TARGET_DIR"
   tar -xf -
