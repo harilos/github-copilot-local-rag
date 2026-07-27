@@ -514,6 +514,8 @@ def daemon_fingerprint_paths() -> list[Path]:
     package_root = tool_root / "software_rag_tool"
     paths = [
         QUERY_ROOT / "ragd.py",
+        QUERY_ROOT / "rag_manager.py",
+        QUERY_ROOT / "rag_worker.py",
         tool_root / "pyproject.toml",
         tool_root / "requirements.txt",
         *package_root.rglob("*.py"),
@@ -837,6 +839,7 @@ def run_list_dbs(python: str, env: dict[str, str], *, repeats: int, timeout: int
                 "parse_error": parse_error,
                 "db_count": len((payload or {}).get("dbs") or []) if isinstance(payload, dict) else None,
                 "dbs": [item.get("db") for item in (payload or {}).get("dbs") or []] if isinstance(payload, dict) else [],
+                "stdout_bytes": len(completed.stdout.encode("utf-8")),
                 "stdout_prefix": completed.stdout[:80],
                 "stderr_tail": completed.stderr[-500:],
             }
@@ -867,6 +870,7 @@ def run_search_case(
         mode,
         "--format",
         "json",
+        "--compact-json",
         "--budget-tokens",
         str(args.budget_tokens),
         "--max-chars",
@@ -945,6 +949,7 @@ def run_search_case(
             "stdout_json_pure": False,
             "outer_timeout_seconds": args.timeout or None,
             "outer_deadline_exceeded": elapsed > args.timeout if args.timeout > 0 else False,
+            "stdout_bytes": _output_byte_count(exc.stdout),
         }
         row.update(row_run_metadata(args, db_name=str(case["db"]), explain=explain_enabled))
         row["identifier_diagnostics_enabled"] = "unknown"
@@ -970,6 +975,8 @@ def summarize_search(
 ) -> dict[str, Any]:
     authoritative_evidence = payload.get("evidence") or []
     related_context = payload.get("related_context") or []
+    daemon = payload.get("daemon") or payload.get("daemon_state") or {}
+    daemon_attempt = _daemon_attempt_from_payload(payload)
     evidence = authoritative_evidence
     results = _dedupe_payload_results(
         [
@@ -1032,7 +1039,27 @@ def summarize_search(
         "stage_timing_enabled": args.stage_timing,
         "timings": payload.get("timings") or payload.get("latency_breakdown") or {},
         "retrieval_funnel": payload.get("retrieval_funnel") or {},
-        "daemon": payload.get("daemon") or payload.get("daemon_state") or {},
+        "daemon": daemon,
+        "manager_pid": daemon.get("manager_pid") or daemon.get("pid"),
+        "worker_pid": daemon.get("worker_pid"),
+        "manager_generation": (
+            daemon.get("manager_generation")
+            or daemon.get("generation")
+            or daemon_attempt.get("daemon_generation")
+        ),
+        "worker_generation": daemon.get("worker_generation"),
+        "daemon_code_fingerprint": (
+            daemon.get("code_fingerprint")
+            or daemon_attempt.get("daemon_code_fingerprint")
+        ),
+        "model_load_count": daemon.get("model_load_count"),
+        "open_database_count": daemon.get("open_database_count"),
+        "manager_rss_bytes": daemon.get("manager_rss_bytes"),
+        "worker_rss_bytes": daemon.get("worker_rss_bytes"),
+        "manager_handle_count": daemon.get("manager_handle_count"),
+        "worker_handle_count": daemon.get("worker_handle_count"),
+        "manager_thread_count": daemon.get("manager_thread_count"),
+        "worker_thread_count": daemon.get("worker_thread_count"),
         "execution_metadata": payload.get("execution_metadata") or {},
         "actual_execution": (payload.get("execution_metadata") or {}).get("actual_execution"),
         "first_attempt_success": (payload.get("execution_metadata") or {}).get("first_attempt_success"),
@@ -1092,6 +1119,7 @@ def summarize_search(
         ],
         "top1_path": ((top.get("source") or {}).get("path") if isinstance(top, dict) else None),
         "top1_section": ((top.get("location") or {}).get("section") if isinstance(top, dict) else None),
+        "stdout_bytes": len(completed.stdout.encode("utf-8")),
         "stdout_prefix": completed.stdout[:80],
         "stderr_tail": completed.stderr[-500:],
     }
@@ -2160,14 +2188,18 @@ def fallback_rate_state(rows: list[dict[str, Any]]) -> str:
 
 def daemon_build_matches(row: dict[str, Any]) -> bool:
     expected = row.get("daemon_code_fingerprint_expected")
-    actual = (row.get("daemon") or {}).get("code_fingerprint")
+    actual = daemon_code_fingerprint_for_row(row)
     return bool(expected and actual and expected == actual)
 
 
 def daemon_build_state(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "NOT_RUN"
-    if any(not row.get("daemon_code_fingerprint_expected") or not (row.get("daemon") or {}).get("code_fingerprint") for row in rows):
+    if any(
+        not row.get("daemon_code_fingerprint_expected")
+        or not daemon_code_fingerprint_for_row(row)
+        for row in rows
+    ):
         return "UNVERIFIED"
     return gate(all(daemon_build_matches(row) for row in rows))
 
@@ -2240,14 +2272,88 @@ def daemon_generation_state(rows: list[dict[str, Any]]) -> str:
     clean = [row for row in rows if row.get("sequence_plan") == "clean-mixed"]
     if not clean:
         return "NOT_APPLICABLE"
-    generations = {
-        str((row.get("daemon") or {}).get("generation"))
-        for row in clean
-        if (row.get("daemon") or {}).get("generation")
-    }
-    if any(not (row.get("daemon") or {}).get("generation") for row in clean):
+    identities = [daemon_generation_identity(row) for row in clean]
+    if any(identity is None for identity in identities):
         return "UNVERIFIED"
-    return gate(len(generations) == 1)
+    return gate(len(set(identities)) == 1)
+
+
+def daemon_attempt_for_row(row: dict[str, Any]) -> dict[str, Any]:
+    attempts = (row.get("execution_metadata") or {}).get("attempts") or []
+    return next(
+        (
+            attempt
+            for attempt in attempts
+            if isinstance(attempt, dict) and attempt.get("route") == "daemon"
+        ),
+        {},
+    )
+
+
+def manager_generation_for_row(row: dict[str, Any]) -> str | None:
+    daemon = row.get("daemon") or {}
+    value = (
+        row.get("manager_generation")
+        or daemon.get("manager_generation")
+        or daemon.get("generation")
+        or daemon_attempt_for_row(row).get("daemon_generation")
+    )
+    return str(value) if value else None
+
+
+def worker_generation_for_row(row: dict[str, Any]) -> str | None:
+    daemon = row.get("daemon") or {}
+    value = row.get("worker_generation") or daemon.get("worker_generation")
+    return str(value) if value else None
+
+
+def daemon_code_fingerprint_for_row(row: dict[str, Any]) -> str | None:
+    daemon = row.get("daemon") or {}
+    value = (
+        row.get("daemon_code_fingerprint")
+        or daemon.get("code_fingerprint")
+        or daemon_attempt_for_row(row).get("daemon_code_fingerprint")
+    )
+    return str(value) if value else None
+
+
+def daemon_generation_identity(
+    row: dict[str, Any],
+) -> tuple[str, ...] | None:
+    daemon = row.get("daemon") or {}
+    manager = manager_generation_for_row(row)
+    if not manager:
+        return None
+    persistent_schema = bool(
+        row.get("worker_generation")
+        or daemon.get("manager_generation")
+        or daemon.get("worker_generation")
+    )
+    if not persistent_schema:
+        # Backward compatibility for pre-manager/worker daemon artifacts.
+        return ("legacy", manager)
+    worker = worker_generation_for_row(row)
+    if not worker:
+        return None
+    return ("persistent", manager, worker)
+
+
+def _daemon_attempt_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    attempts = (payload.get("execution_metadata") or {}).get("attempts") or []
+    return next(
+        (
+            attempt
+            for attempt in attempts
+            if isinstance(attempt, dict) and attempt.get("route") == "daemon"
+        ),
+        {},
+    )
+
+
+def _output_byte_count(value: str | bytes | None) -> int:
+    if isinstance(value, bytes):
+        return len(value)
+    return len((value or "").encode("utf-8"))
 
 
 def state_for_rows(count: int, passed: bool) -> str:

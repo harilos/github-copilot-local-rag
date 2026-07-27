@@ -231,10 +231,57 @@ def main() -> None:
             if health_timeout is None or health_timeout > 0
             else ("DEADLINE_EXHAUSTED", None, None)
         )
+        if daemon_lifecycle == "DRAINING" and observed_state:
+            retirement_wait = _bounded_timeout(work_deadline, 8.0)
+            _wait_for_daemon_retirement(
+                observed_state,
+                timeout=(
+                    8.0
+                    if retirement_wait is None
+                    else retirement_wait
+                ),
+            )
+            retry_health_timeout = _bounded_timeout(work_deadline, 0.5)
+            daemon_lifecycle, observed_state, observed_health = (
+                _inspect_daemon_state(
+                    timeout=retry_health_timeout,
+                    desired_transport=(
+                        None
+                        if configured_transport == "auto"
+                        else desired_transport
+                    ),
+                )
+                if retry_health_timeout is None or retry_health_timeout > 0
+                else ("DEADLINE_EXHAUSTED", None, None)
+            )
         daemon_route = _select_daemon_route(
             daemon_lifecycle,
             require_daemon=args.require_daemon,
         )
+        if daemon_route == "daemon_draining":
+            _print_daemon_failure(
+                args=args,
+                db_name=resolution.db_name,
+                question=question,
+                request_id=str(request["request_id"]),
+                first_attempt={
+                    "route": "daemon",
+                    "success": False,
+                    "failure_kind": "daemon_draining",
+                    "latency_seconds": round(
+                        time.monotonic() - request_started,
+                        6,
+                    ),
+                    **(
+                        daemon_state_snapshot(observed_state)
+                        if observed_state
+                        else {}
+                    ),
+                },
+                restart=None,
+                request_started=request_started,
+            )
+            raise SystemExit(1)
         state = observed_state if daemon_route == "daemon_ready" else None
         if daemon_route == "daemon_required" and state is None:
             state = (
@@ -1231,6 +1278,8 @@ def _inspect_daemon_state(
     if not _daemon_identity_matches(state, health):
         return "DEAD", state, health
     lifecycle = str((health or {}).get("lifecycle_state") or "").upper()
+    if lifecycle == "DRAINING":
+        return lifecycle, state, health
     if lifecycle not in {"STARTING", "READY", "BUSY"}:
         if int((health or {}).get("active_requests") or 0) > 0:
             lifecycle = "BUSY"
@@ -1244,9 +1293,35 @@ def _inspect_daemon_state(
 def _select_daemon_route(lifecycle: str, *, require_daemon: bool) -> str:
     if lifecycle in {"READY", "STARTING", "BUSY"}:
         return "daemon_ready"
+    if lifecycle == "DRAINING":
+        return "daemon_draining"
     if require_daemon:
         return "daemon_required"
     return "daemon_start"
+
+
+def _wait_for_daemon_retirement(
+    state: dict,
+    *,
+    timeout: float,
+) -> bool:
+    """Wait for one authenticated draining generation to fully disappear."""
+    if timeout <= 0:
+        return False
+    generation = str(state.get("generation") or "")
+    manager_pid = int(state.get("pid") or 0)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        published = _read_state()
+        if not published:
+            return True
+        if (
+            str(published.get("generation") or "") != generation
+            or int(published.get("pid") or 0) != manager_pid
+        ):
+            return True
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return False
 
 
 def _daemon_health_payload(state: dict, *, timeout: int | float) -> dict | None:

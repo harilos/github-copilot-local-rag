@@ -356,15 +356,43 @@ class PersistentWorkerManager:
         }
 
     def health(self) -> dict[str, Any]:
-        with self._worker_lifecycle_lock:
+        # Worker retirement can spend several seconds in bounded
+        # join/terminate/kill calls while holding the lifecycle lock. Health
+        # is a manager control operation and must stay responsive during that
+        # transition; otherwise a client can misclassify the live manager as
+        # dead and start a competing generation. Use a short non-blocking
+        # snapshot and report STARTING until the transition completes.
+        lifecycle_snapshot_acquired = self._worker_lifecycle_lock.acquire(
+            timeout=0.01
+        )
+        try:
             process = self._process
-            worker_alive = bool(
-                process is not None and process.is_alive()
-            )
+            connection = self._connection
             state = dict(self._worker_state)
             worker_pid = self._worker_pid
             worker_generation = self._worker_generation
             worker_job_object_active = self._job is not None
+            if lifecycle_snapshot_acquired:
+                try:
+                    worker_alive = bool(
+                        process is not None and process.is_alive()
+                    )
+                except (AssertionError, ValueError):
+                    worker_alive = False
+            else:
+                worker_alive = False
+        finally:
+            if lifecycle_snapshot_acquired:
+                self._worker_lifecycle_lock.release()
+        connection_usable = bool(
+            connection is not None
+            and not bool(getattr(connection, "closed", False))
+        )
+        worker_usable = bool(
+            worker_alive
+            and connection_usable
+            and (os.name != "nt" or worker_job_object_active)
+        )
         with self._condition:
             active = self._active is not None
             queue_depth = self._pending_total
@@ -375,7 +403,7 @@ class PersistentWorkerManager:
             else "BUSY"
             if active or queue_depth
             else "READY"
-            if worker_alive
+            if worker_usable
             else "STARTING"
         )
         manager_metrics = _current_process_metrics()
@@ -385,8 +413,10 @@ class PersistentWorkerManager:
             "worker_pid": worker_pid or None,
             "worker_generation": worker_generation or None,
             "worker_alive": worker_alive,
+            "worker_usable": worker_usable,
             "worker_job_object_active": worker_job_object_active,
             "last_worker_start_error": self._last_worker_start_error,
+            "worker_transitioning": not lifecycle_snapshot_acquired,
             "active_requests": 1 if active else 0,
             "queue_depth": queue_depth,
             "lifecycle_state": lifecycle,
@@ -407,7 +437,7 @@ class PersistentWorkerManager:
             "worker_thread_count": state.get("thread_count"),
         }
 
-    def shutdown(self, *, timeout_seconds: float = 5.0) -> None:
+    def shutdown(self, *, timeout_seconds: float = 5.0) -> bool:
         deadline = time.monotonic() + max(0.1, timeout_seconds)
         cancelled: list[_PendingRequest] = []
         with self._condition:
@@ -425,10 +455,11 @@ class PersistentWorkerManager:
         for item in cancelled:
             item.result = self._manager_error(item, "daemon_draining")
             item.event.set()
-        self._stop_worker(graceful=self._active is None)
+        worker_reaped = self._stop_worker(graceful=self._active is None)
         self._dispatcher.join(
             timeout=max(0.0, deadline - time.monotonic())
         )
+        return bool(worker_reaped and not self._dispatcher.is_alive())
 
     def _dispatch_loop(self) -> None:
         while True:
@@ -554,9 +585,20 @@ class PersistentWorkerManager:
             return self._ensure_worker_locked(timeout_seconds=timeout_seconds)
 
     def _ensure_worker_locked(self, *, timeout_seconds: float) -> bool:
-        if self._process is not None and self._process.is_alive():
+        process = self._process
+        connection = self._connection
+        worker_usable = bool(
+            process is not None
+            and process.is_alive()
+            and connection is not None
+            and not bool(getattr(connection, "closed", False))
+            and (os.name != "nt" or self._job is not None)
+        )
+        if worker_usable:
             return True
-        self._stop_worker_locked(graceful=False)
+        if not self._stop_worker_locked(graceful=False):
+            self._last_worker_start_error = "previous_worker_not_reaped"
+            return False
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         generation = uuid.uuid4().hex

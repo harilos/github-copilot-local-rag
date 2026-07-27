@@ -5,8 +5,11 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUERY_ROOT = Path(__file__).resolve().parent
@@ -19,6 +22,8 @@ from software_rag_tool.daemon_control import (  # noqa: E402
     release_db_before_mutation,
 )
 from rag_worker import _execute_search_payload  # noqa: E402
+from rag_manager import PersistentWorkerManager  # noqa: E402
+from ragd import _drain_worker_then_stop_listener  # noqa: E402
 
 
 class PersistentDaemonContracts(unittest.TestCase):
@@ -115,6 +120,140 @@ for name in ('search', 'ragd'):
         ):
             text = (RAG_ROOT / relative).read_text(encoding="utf-8")
             self.assertIn("database_mutation_guard", text)
+
+    def test_health_stays_responsive_while_worker_is_reaped(self) -> None:
+        manager = object.__new__(PersistentWorkerManager)
+        manager._worker_lifecycle_lock = threading.RLock()
+        manager._process = None
+        manager._connection = None
+        manager._worker_state = {}
+        manager._worker_pid = 123
+        manager._worker_generation = "worker-generation"
+        manager._job = object()
+        manager._last_worker_start_error = None
+        manager._condition = threading.Condition()
+        manager._active = None
+        manager._pending_total = 0
+        manager._closed = False
+        manager._maintenance_restart_pending = False
+        manager._handled_request_count = 0
+        manager.manager_generation = "manager-generation"
+        manager.started_monotonic = time.monotonic()
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_lifecycle_lock() -> None:
+            with manager._worker_lifecycle_lock:
+                acquired.set()
+                release.wait(timeout=2)
+
+        thread = threading.Thread(target=hold_lifecycle_lock)
+        thread.start()
+        self.assertTrue(acquired.wait(timeout=1))
+        started = time.monotonic()
+        try:
+            health = manager.health()
+        finally:
+            release.set()
+            thread.join(timeout=1)
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertTrue(health["worker_transitioning"])
+        self.assertEqual("STARTING", health["lifecycle_state"])
+
+    def test_closed_worker_pipe_is_never_ready(self) -> None:
+        class AliveProcess:
+            def is_alive(self) -> bool:
+                return True
+
+        class ClosedConnection:
+            closed = True
+
+        manager = object.__new__(PersistentWorkerManager)
+        manager._worker_lifecycle_lock = threading.RLock()
+        manager._process = AliveProcess()
+        manager._connection = ClosedConnection()
+        manager._worker_state = {}
+        manager._worker_pid = 123
+        manager._worker_generation = "worker-generation"
+        manager._job = object()
+        manager._last_worker_start_error = None
+        manager._condition = threading.Condition()
+        manager._active = None
+        manager._pending_total = 0
+        manager._closed = False
+        manager._maintenance_restart_pending = False
+        manager._handled_request_count = 0
+        manager.manager_generation = "manager-generation"
+        manager.started_monotonic = time.monotonic()
+
+        health = manager.health()
+
+        self.assertTrue(health["worker_alive"])
+        self.assertFalse(health["worker_usable"])
+        self.assertEqual("STARTING", health["lifecycle_state"])
+
+    def test_shutdown_reaps_worker_before_stopping_listener(self) -> None:
+        calls: list[str] = []
+
+        class WorkerManager:
+            def shutdown(self) -> bool:
+                calls.append("worker")
+                return True
+
+        class Server:
+            worker_manager = WorkerManager()
+
+            def shutdown(self) -> None:
+                calls.append("listener")
+
+        _drain_worker_then_stop_listener(Server())
+        self.assertEqual(["worker", "listener"], calls)
+
+    def test_shutdown_keeps_listener_until_worker_is_reaped(self) -> None:
+        calls: list[str] = []
+
+        class WorkerManager:
+            outcomes = iter((False, False, True))
+
+            def shutdown(self) -> bool:
+                calls.append("worker")
+                return next(self.outcomes)
+
+        class Server:
+            worker_manager = WorkerManager()
+
+            def shutdown(self) -> None:
+                calls.append("listener")
+
+        with mock.patch("ragd.time.sleep"):
+            _drain_worker_then_stop_listener(Server())
+        self.assertEqual(
+            ["worker", "worker", "worker", "listener"],
+            calls,
+        )
+
+    def test_unreaped_worker_never_spawns_a_second_worker(self) -> None:
+        class AliveProcess:
+            def is_alive(self) -> bool:
+                return True
+
+        class ClosedConnection:
+            closed = True
+
+        manager = object.__new__(PersistentWorkerManager)
+        manager._process = AliveProcess()
+        manager._connection = ClosedConnection()
+        manager._job = None
+        manager._last_worker_start_error = None
+        manager._stop_worker_locked = mock.Mock(return_value=False)
+        with mock.patch("rag_manager.multiprocessing.get_context") as context:
+            ready = manager._ensure_worker_locked(timeout_seconds=1.0)
+        self.assertFalse(ready)
+        self.assertEqual(
+            "previous_worker_not_reaped",
+            manager._last_worker_start_error,
+        )
+        context.assert_not_called()
 
 
 if __name__ == "__main__":

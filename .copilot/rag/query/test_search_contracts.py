@@ -1042,6 +1042,13 @@ class DaemonLifecycleTests(unittest.TestCase):
                     require_daemon=True,
                 ),
             )
+        self.assertEqual(
+            "daemon_draining",
+            SEARCH._select_daemon_route(
+                "DRAINING",
+                require_daemon=True,
+            ),
+        )
 
     def test_retirement_failure_is_recorded_for_fallback_gate(self) -> None:
         attempt = SEARCH._record_retirement_outcome(
@@ -1083,6 +1090,61 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual("BUSY", lifecycle)
         self.assertEqual(state, observed)
         self.assertEqual(state, active)
+
+    def test_daemon_state_machine_preserves_draining(self) -> None:
+        state = {
+            "schema": "local-rag.ragd.v2",
+            "pid": 43210,
+            "generation": "generation",
+            "transport": "tcp",
+            "host": "127.0.0.1",
+            "port": 12345,
+            "token": "token",
+            "code_fingerprint": "current",
+        }
+        with (
+            mock.patch.object(SEARCH, "_read_state", return_value=state),
+            mock.patch.object(
+                SEARCH,
+                "_runtime_code_fingerprint",
+                return_value="current",
+            ),
+            mock.patch.object(
+                SEARCH,
+                "_daemon_health_payload",
+                return_value={
+                    "status": "ok",
+                    "pid": 43210,
+                    "generation": "generation",
+                    "code_fingerprint": "current",
+                    "lifecycle_state": "DRAINING",
+                },
+            ),
+        ):
+            lifecycle, observed, _health = SEARCH._inspect_daemon_state(
+                timeout=0.5
+            )
+        self.assertEqual("DRAINING", lifecycle)
+        self.assertEqual(state, observed)
+
+    def test_wait_for_draining_generation_requires_state_retirement(self) -> None:
+        state = {
+            "pid": 43210,
+            "generation": "generation",
+        }
+        with (
+            mock.patch.object(
+                SEARCH,
+                "_read_state",
+                side_effect=[state, state, None],
+            ),
+            mock.patch.object(SEARCH.time, "sleep"),
+        ):
+            retired = SEARCH._wait_for_daemon_retirement(
+                state,
+                timeout=1.0,
+            )
+        self.assertTrue(retired)
 
     def test_active_daemon_rejects_stale_runtime_fingerprint_before_healthcheck(self) -> None:
         state = {

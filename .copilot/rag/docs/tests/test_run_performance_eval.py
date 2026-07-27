@@ -7,6 +7,7 @@ import inspect
 import json
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -763,6 +764,193 @@ class SemanticMetricTests(unittest.TestCase):
         flags = MODULE.quality_flags(case, row)
         self.assertTrue(flags["semantic_hit_at_5"])
         self.assertEqual(0.5, flags["context_recall"])
+
+
+class PersistentDaemonHarnessTests(unittest.TestCase):
+    def test_expected_fingerprint_matches_current_daemon_runtime(self) -> None:
+        relative_paths = {
+            path.relative_to(MODULE.RAG_ROOT).as_posix()
+            for path in MODULE.daemon_fingerprint_paths()
+        }
+        self.assertIn("query/rag_manager.py", relative_paths)
+        self.assertIn("query/rag_worker.py", relative_paths)
+
+        script = f"""
+import importlib.util
+import sys
+from pathlib import Path
+query_root = Path({str(MODULE.QUERY_ROOT)!r})
+tool_root = Path({str(MODULE.RAG_ROOT / 'gen_db' / 'software_rag_tool')!r})
+sys.path.insert(0, str(query_root))
+sys.path.insert(0, str(tool_root))
+spec = importlib.util.spec_from_file_location('ragd_fingerprint_probe', query_root / 'ragd.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.runtime_code_fingerprint())
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(
+            MODULE.expected_daemon_code_fingerprint(),
+            completed.stdout.strip(),
+        )
+
+    def test_current_manager_worker_schema_drives_build_and_generation_gates(
+        self,
+    ) -> None:
+        row = success_row(
+            sequence_plan="clean-mixed",
+            daemon_code_fingerprint_expected="fingerprint",
+            daemon={
+                "manager_pid": 101,
+                "worker_pid": 202,
+                "manager_generation": "manager-a",
+                "worker_generation": "worker-a",
+            },
+            execution_metadata={
+                "attempts": [
+                    {
+                        "route": "daemon",
+                        "daemon_generation": "manager-a",
+                        "daemon_code_fingerprint": "fingerprint",
+                    }
+                ]
+            },
+        )
+        self.assertEqual(
+            "manager-a",
+            MODULE.manager_generation_for_row(row),
+        )
+        self.assertEqual(
+            "worker-a",
+            MODULE.worker_generation_for_row(row),
+        )
+        self.assertEqual(
+            "fingerprint",
+            MODULE.daemon_code_fingerprint_for_row(row),
+        )
+        self.assertTrue(MODULE.daemon_build_matches(row))
+        self.assertEqual("PASS", MODULE.daemon_build_state([row]))
+        self.assertEqual("PASS", MODULE.daemon_generation_state([row]))
+
+        changed_worker = {
+            **row,
+            "daemon": {
+                **row["daemon"],
+                "worker_generation": "worker-b",
+            },
+        }
+        self.assertEqual(
+            "FAIL",
+            MODULE.daemon_generation_state([row, changed_worker]),
+        )
+
+    def test_legacy_daemon_schema_remains_supported(self) -> None:
+        row = success_row(
+            sequence_plan="clean-mixed",
+            daemon_code_fingerprint_expected="legacy-fingerprint",
+            manager_generation="legacy-generation",
+            daemon={
+                "generation": "legacy-generation",
+                "code_fingerprint": "legacy-fingerprint",
+            },
+        )
+        self.assertTrue(MODULE.daemon_build_matches(row))
+        self.assertEqual(
+            ("legacy", "legacy-generation"),
+            MODULE.daemon_generation_identity(row),
+        )
+        self.assertEqual("PASS", MODULE.daemon_generation_state([row]))
+
+    def test_search_runner_uses_compact_json_and_records_stdout_bytes(
+        self,
+    ) -> None:
+        payload = {
+            "schema": "local-rag.search.v1",
+            "status": "ok",
+            "selected_db": "ac-rag",
+            "evidence": [],
+            "background_context": [],
+            "related_context": [],
+            "document_results": [],
+            "warnings": [],
+            "identifier_diagnostics_enabled": False,
+            "daemon_state": {
+                "manager_pid": 101,
+                "worker_pid": 202,
+                "manager_generation": "manager-a",
+                "worker_generation": "worker-a",
+                "model_load_count": 1,
+                "open_database_count": 1,
+            },
+            "execution_metadata": {
+                "actual_execution": "daemon",
+                "first_attempt_success": True,
+                "final_user_visible_success": True,
+                "fallback_used": False,
+                "attempts": [
+                    {
+                        "route": "daemon",
+                        "daemon_generation": "manager-a",
+                        "daemon_code_fingerprint": "fingerprint",
+                    }
+                ],
+            },
+        }
+        stdout = json.dumps(payload, ensure_ascii=False)
+        completed = subprocess.CompletedProcess(
+            args=["search"],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+        args = argparse.Namespace(
+            budget_tokens=1200,
+            max_chars=1200,
+            top_k=8,
+            timeout=15.0,
+            daemon_attempt_timeout=5.0,
+            stage_timing=False,
+            disable_identifier_diagnostics=True,
+            pure_profile=True,
+            diagnostics_level="off",
+            run_metadata={},
+        )
+        case = {
+            "id": "AC_SMOKE",
+            "db": "ac-rag",
+            "class": "semantic",
+            "question": "質問",
+            "expect_exact_positive": False,
+            "expect_exact_negative": False,
+            "expected_unmatched_identifiers": None,
+        }
+        with mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            row = MODULE.run_search_case(
+                "venv-python",
+                {},
+                case,
+                profile="H",
+                execution="daemon",
+                repeat=0,
+                args=args,
+                explain_enabled=False,
+            )
+        command = run.call_args.args[0]
+        self.assertIn("--compact-json", command)
+        self.assertEqual(len(stdout.encode("utf-8")), row["stdout_bytes"])
+        self.assertEqual("manager-a", row["manager_generation"])
+        self.assertEqual("worker-a", row["worker_generation"])
+        self.assertEqual("fingerprint", row["daemon_code_fingerprint"])
 
 
 if __name__ == "__main__":

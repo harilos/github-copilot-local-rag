@@ -44,6 +44,7 @@ class RagDaemonServer(ThreadingHTTPServer):
         self.runtime_ready = False
         self.dense_ready = False
         self.state_lock = threading.Lock()
+        self.shutdown_started = False
         self.worker_manager = PersistentWorkerManager(
             rag_root=RAG_ROOT,
             dbs_root=DBS_ROOT,
@@ -75,6 +76,7 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
         self.runtime_ready = False
         self.dense_ready = False
         self.state_lock = threading.Lock()
+        self.shutdown_started = False
         self.worker_manager = PersistentWorkerManager(
             rag_root=RAG_ROOT,
             dbs_root=DBS_ROOT,
@@ -114,6 +116,8 @@ def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dic
         "worker_job_object_active": worker[
             "worker_job_object_active"
         ],
+        "worker_usable": worker.get("worker_usable"),
+        "worker_transitioning": worker.get("worker_transitioning"),
         "last_worker_start_error": worker.get(
             "last_worker_start_error"
         ),
@@ -151,7 +155,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "forbidden"}, status=403)
                 return
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            _request_graceful_shutdown(self.server)
             return
         if self.path == "/release-db":
             if not self._authorized():
@@ -201,10 +205,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             )
             self._send_json(result)
             if result.get("manager_restart_required"):
-                threading.Thread(
-                    target=self.server.shutdown,
-                    daemon=True,
-                ).start()
+                _request_graceful_shutdown(self.server)
             return
         if self.path == "/cancel":
             if not self._authorized():
@@ -280,7 +281,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             return
         if op == "shutdown":
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            _request_graceful_shutdown(self.server)
             return
         if op == "release_db":
             result = self.server.worker_manager.release_db(
@@ -296,10 +297,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             )
             self._send_json(result)
             if result.get("manager_restart_required"):
-                threading.Thread(
-                    target=self.server.shutdown,
-                    daemon=True,
-                ).start()
+                _request_graceful_shutdown(self.server)
             return
         if op == "cancel":
             result = self.server.worker_manager.cancel_request(
@@ -661,7 +659,39 @@ def _state_is_superseded(path: Path, *, generation: str, pid: int) -> bool:
     )
 
 
-def _idle_monitor(server: RagDaemonServer) -> None:
+def _request_graceful_shutdown(
+    server: RagDaemonServer | RagUnixDaemonServer,
+) -> None:
+    with server.state_lock:
+        if server.shutdown_started:
+            return
+        server.shutdown_started = True
+    threading.Thread(
+        target=_drain_worker_then_stop_listener,
+        args=(server,),
+        name="ragd-graceful-shutdown",
+        daemon=True,
+    ).start()
+
+
+def _drain_worker_then_stop_listener(
+    server: RagDaemonServer | RagUnixDaemonServer,
+) -> None:
+    # Keep the listener available while the manager marks itself DRAINING and
+    # fully reaps the native-heavy worker. Health/control requests therefore
+    # keep identifying this generation, and clients cannot mistake a live
+    # shutdown transition for a dead daemon and start a competing manager.
+    while not server.worker_manager.shutdown():
+        # A Windows worker can remain observable briefly after terminate,
+        # kill, or Job Object close. Keep this authenticated generation's
+        # listener and state alive in DRAINING until both the worker and its
+        # dispatcher are fully reaped. Closing the listener earlier would let
+        # a client start a competing manager/worker generation.
+        time.sleep(0.1)
+    server.shutdown()
+
+
+def _idle_monitor(server: RagDaemonServer | RagUnixDaemonServer) -> None:
     while True:
         time.sleep(1)
         if _state_is_superseded(
@@ -669,7 +699,7 @@ def _idle_monitor(server: RagDaemonServer) -> None:
             generation=server.generation,
             pid=os.getpid(),
         ):
-            threading.Thread(target=server.shutdown, daemon=True).start()
+            _request_graceful_shutdown(server)
             return
         worker = server.worker_manager.health()
         idle_for = time.monotonic() - server.last_used_at
@@ -678,7 +708,7 @@ def _idle_monitor(server: RagDaemonServer) -> None:
             and worker["queue_depth"] == 0
             and idle_for >= server.idle_timeout
         ):
-            threading.Thread(target=server.shutdown, daemon=True).start()
+            _request_graceful_shutdown(server)
             return
 
 
