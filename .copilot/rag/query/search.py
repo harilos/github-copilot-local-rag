@@ -23,11 +23,6 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
 from software_rag_tool.dbs import resolve_db_name
-from software_rag_tool.search_api import (
-    compact_search_contract,
-    normalize_search_contract,
-    payload_to_text,
-)
 from software_rag_tool.search_request import (
     SearchRequestError,
     add_search_request_arguments,
@@ -105,18 +100,18 @@ def main() -> None:
         "--daemon-attempt-timeout",
         type=float,
         default=DEFAULT_DAEMON_ATTEMPT_TIMEOUT_SECONDS,
-        help="Maximum seconds for the first daemon attempt before one synchronous fallback.",
+        help="Legacy transport probe setting; accepted for compatibility.",
     )
     parser.add_argument(
         "--daemon-fallback",
         choices=["on", "off"],
-        default=os.getenv("RAGD_FALLBACK", "on").lower(),
-        help="Allow one read-only synchronous retry after a daemon transport failure.",
+        default=os.getenv("RAGD_FALLBACK", "off").lower(),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--require-daemon",
         action="store_true",
-        help="Require an actual daemon response; disables cold fast path and synchronous fallback.",
+        help="Require an actual persistent-daemon response.",
     )
     add_search_request_arguments(parser)
     args = parser.parse_args()
@@ -189,6 +184,7 @@ def main() -> None:
 
     request = {
         "request_id": uuid.uuid4().hex,
+        "client_id": uuid.uuid4().hex,
         "db": resolution.db_name,
         "question": question,
         "top_k": args.top_k,
@@ -201,6 +197,7 @@ def main() -> None:
         "adaptive_hybrid": args.retrieval_mode == "hybrid",
         "identifier_diagnostics": not args.disable_identifier_diagnostics,
         "search_request": search_request,
+        "compact_json": bool(args.compact_json),
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
@@ -239,26 +236,6 @@ def main() -> None:
             require_daemon=args.require_daemon,
         )
         state = observed_state if daemon_route == "daemon_ready" else None
-        if daemon_route == "cold_local":
-            _run_sync_script(
-                python=python,
-                env=env,
-                args=args,
-                db_name=resolution.db_name,
-                question=question,
-                timeout_override=_remaining_seconds(work_deadline),
-                execution_metadata={
-                    "request_id": request["request_id"],
-                    "requested_execution": "daemon",
-                    "actual_execution": "no-daemon",
-                    "fallback_used": False,
-                    "daemon_lifecycle_state": daemon_lifecycle,
-                    "route_selection": "cold_local_adaptive",
-                    "outer_timeout_seconds": args.timeout or None,
-                    "attempts": [],
-                },
-                request_started=request_started,
-            )
         if daemon_route == "daemon_required" and state is None:
             state = (
                 observed_state
@@ -280,6 +257,7 @@ def main() -> None:
                 not state
                 and desired_transport == "tcp"
                 and os.getenv("RAGD_TRANSPORT", "auto").lower() == "auto"
+                and not sys.platform.startswith("win")
             ):
                 retry_timeout = _bounded_timeout(work_deadline, 10.0)
                 if retry_timeout is None or retry_timeout > 0:
@@ -315,6 +293,18 @@ def main() -> None:
                 )
                 raise SystemExit(124)
             attempt_started = time.monotonic()
+            remaining_before_submit = _remaining_seconds(work_deadline)
+            request["remaining_deadline_ms"] = max(
+                1,
+                int(
+                    1000
+                    * (
+                        remaining_before_submit
+                        if remaining_before_submit is not None
+                        else 300.0
+                    )
+                ),
+            )
             payload = _query_daemon(state, request, timeout=daemon_timeout)
             attempt_elapsed = time.monotonic() - attempt_started
             if payload:
@@ -353,89 +343,6 @@ def main() -> None:
                 "dense_runtime_cold_start": dense_runtime_cold,
                 **daemon_state_snapshot(state),
             }
-            retire_timeout = _bounded_timeout(work_deadline, 1.0)
-            restart = _retire_daemon(
-                state,
-                request_id=str(request["request_id"]),
-                failure_kind=failure_kind,
-                shutdown_timeout=retire_timeout or 0.0,
-            )
-            first_attempt = _record_retirement_outcome(first_attempt, restart)
-            if args.require_daemon or args.daemon_fallback == "off":
-                _print_daemon_failure(
-                    args=args,
-                    db_name=resolution.db_name,
-                    question=question,
-                    request_id=str(request["request_id"]),
-                    first_attempt=first_attempt,
-                    restart=restart,
-                    request_started=request_started,
-                )
-                raise SystemExit(124 if failure_kind == "timeout" else 1)
-            if not restart.get("process_exited"):
-                _print_daemon_failure(
-                    args=args,
-                    db_name=resolution.db_name,
-                    question=question,
-                    request_id=str(request["request_id"]),
-                    first_attempt=first_attempt,
-                    restart=restart,
-                    request_started=request_started,
-                )
-                raise SystemExit(124 if failure_kind == "timeout" else 1)
-            remaining_timeout = _remaining_seconds(work_deadline)
-            if remaining_timeout is not None and remaining_timeout <= 0:
-                _print_deadline_failure(
-                    args=args,
-                    db_name=resolution.db_name,
-                    question=question,
-                    request_id=str(request["request_id"]),
-                    request_started=request_started,
-                    attempts=[first_attempt],
-                    restart=restart,
-                )
-                raise SystemExit(124)
-            execution_metadata = {
-                "request_id": request["request_id"],
-                "requested_execution": "daemon",
-                "actual_execution": "no-daemon",
-                "first_attempt_success": False,
-                "final_user_visible_success": False,
-                "fallback_used": True,
-                "attempts": [first_attempt],
-                "daemon_restart": restart,
-                "outer_timeout_seconds": args.timeout or None,
-            }
-            fallback_retrieval_mode = _fallback_retrieval_mode(
-                args.retrieval_mode,
-                remaining_seconds=remaining_timeout,
-            )
-            if fallback_retrieval_mode != args.retrieval_mode:
-                execution_metadata["fallback_retrieval_mode"] = (
-                    fallback_retrieval_mode
-                )
-                execution_metadata["fallback_dense_skipped"] = True
-                execution_metadata["fallback_dense_skipped_reason"] = (
-                    "deadline_bounded_windows_fallback"
-                )
-            _run_sync_script(
-                python=python,
-                env=env,
-                args=args,
-                question=question,
-                db_name=resolution.db_name,
-                timeout_override=remaining_timeout,
-                execution_metadata=execution_metadata,
-                retrieval_mode_override=fallback_retrieval_mode,
-                request_started=request_started,
-            )
-        first_attempt = {
-            "route": "daemon",
-            "success": False,
-            "failure_kind": "startup_failed",
-            "latency_seconds": round(time.monotonic() - request_started, 6),
-        }
-        if args.require_daemon or args.daemon_fallback == "off":
             _print_daemon_failure(
                 args=args,
                 db_name=resolution.db_name,
@@ -445,38 +352,23 @@ def main() -> None:
                 restart=None,
                 request_started=request_started,
             )
-            raise SystemExit(1)
-        remaining_timeout = _remaining_seconds(work_deadline)
-        if remaining_timeout is not None and remaining_timeout <= 0:
-            _print_deadline_failure(
-                args=args,
-                db_name=resolution.db_name,
-                question=question,
-                request_id=str(request["request_id"]),
-                request_started=request_started,
-                attempts=[first_attempt],
-                restart=None,
-            )
-            raise SystemExit(124)
-        _run_sync_script(
-            python=python,
-            env=env,
+            raise SystemExit(124 if failure_kind == "timeout" else 1)
+        first_attempt = {
+            "route": "daemon",
+            "success": False,
+            "failure_kind": "startup_failed",
+            "latency_seconds": round(time.monotonic() - request_started, 6),
+        }
+        _print_daemon_failure(
             args=args,
-            question=question,
             db_name=resolution.db_name,
-            timeout_override=remaining_timeout,
-            execution_metadata={
-                "request_id": request["request_id"],
-                "requested_execution": "daemon",
-                "actual_execution": "no-daemon",
-                "first_attempt_success": False,
-                "final_user_visible_success": False,
-                "fallback_used": True,
-                "attempts": [first_attempt],
-                "outer_timeout_seconds": args.timeout or None,
-            },
+            question=question,
+            request_id=str(request["request_id"]),
+            first_attempt=first_attempt,
+            restart=None,
             request_started=request_started,
         )
+        raise SystemExit(1)
 
     remaining_timeout = _remaining_seconds(work_deadline)
     if remaining_timeout is not None and remaining_timeout <= 0:
@@ -555,6 +447,8 @@ def _run_sync_script(
         cmd.append("--explain")
     if args.include_db_hint:
         cmd.append("--include-db-hint")
+    if getattr(args, "compact_json", False):
+        cmd.append("--compact-json")
     if args.disable_identifier_diagnostics:
         cmd.append("--disable-identifier-diagnostics")
     timeout = timeout_override if timeout_override is not None else (args.timeout or None)
@@ -628,7 +522,7 @@ def _run_sync_script(
                 )
                 raise SystemExit(completed.returncode or 1)
             else:
-                payload = normalize_search_contract(payload)
+                payload = _normalize_client_payload(payload)
                 metadata = dict(execution_metadata or {})
                 attempt = {
                     "route": "no-daemon",
@@ -842,7 +736,7 @@ def _terminate_process_tree(
 
 
 def _print_setup_required(output_format: str, db_name: str, question: str) -> None:
-    payload = normalize_search_contract(
+    payload = _normalize_client_payload(
         {
             "schema": "local-rag.search.v1",
             "status": "setup_required",
@@ -1045,16 +939,64 @@ def _print_deadline_failure(
 
 
 def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
-    if args.format == "json" and getattr(args, "compact_json", False):
-        print(
-            json.dumps(
-                compact_search_contract(payload, explain=args.explain),
-                ensure_ascii=False,
-                indent=2,
+    if args.format == "json":
+        if (
+            getattr(args, "compact_json", False)
+            and any(
+                key in payload
+                for key in (
+                    "contexts",
+                    "results",
+                    "background_results",
+                    "related_results",
+                )
             )
-        )
+        ):
+            # Explicit no-daemon/manual compatibility payload. Normal daemon
+            # responses are already compacted inside the search worker.
+            from software_rag_tool.search_api import compact_search_contract
+
+            payload = compact_search_contract(
+                payload,
+                explain=args.explain,
+            )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
+    from search_output import payload_to_text
+
     print(payload_to_text(payload, args.format, explain=args.explain))
+
+
+def _normalize_client_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    status = str(normalized.get("status") or "error")
+    if status == "no_evidence":
+        normalized["legacy_status"] = "no_evidence"
+        status = "no_hit"
+    normalized["status"] = status
+    db_name = str(
+        normalized.get("selected_db") or normalized.get("db") or ""
+    )
+    normalized.setdefault("db", db_name)
+    normalized["selected_db"] = db_name
+    for key in (
+        "evidence",
+        "background_context",
+        "related_context",
+        "document_results",
+        "warnings",
+    ):
+        if not isinstance(normalized.get(key), list):
+            normalized[key] = []
+    normalized.setdefault(
+        "answerability",
+        "full"
+        if status == "ok" and normalized["evidence"]
+        else "partial"
+        if status == "partial" and normalized["evidence"]
+        else "none",
+    )
+    return normalized
 
 
 def _deadline_from_timeout(timeout: float | int | None, *, started: float | None = None) -> float | None:
@@ -1106,9 +1048,10 @@ def _daemon_query_timeout(
     remaining = _remaining_seconds(deadline)
     if remaining is None:
         return soft_timeout
-    if cold_start and require_daemon:
-        return remaining
-    return min(soft_timeout, remaining)
+    # Once a request is submitted to the persistent daemon, queue wait and
+    # worker execution share the outer user-visible deadline. A shorter soft
+    # timeout would defeat bounded queueing and can trigger duplicate work.
+    return remaining
 
 
 def _request_may_use_dense(request: dict) -> bool:
@@ -1231,6 +1174,8 @@ def datetime_now() -> str:
 
 
 def _desired_transport() -> str:
+    if sys.platform.startswith("win"):
+        return "tcp"
     transport = os.getenv("RAGD_TRANSPORT", "auto").lower()
     if transport in {"tcp", "file"}:
         return transport
@@ -1242,6 +1187,8 @@ def _runtime_code_fingerprint() -> str:
     package_root = TOOL_ROOT / "software_rag_tool"
     paths = [
         Path(__file__).resolve().parent / "ragd.py",
+        Path(__file__).resolve().parent / "rag_manager.py",
+        Path(__file__).resolve().parent / "rag_worker.py",
         TOOL_ROOT / "pyproject.toml",
         TOOL_ROOT / "requirements.txt",
         *package_root.rglob("*.py"),
@@ -1265,7 +1212,7 @@ def _active_daemon_state(*, timeout: int | float, desired_transport: str | None 
         timeout=timeout,
         desired_transport=desired_transport,
     )
-    return state if lifecycle == "READY" else None
+    return state if lifecycle in {"STARTING", "READY", "BUSY"} else None
 
 
 def _inspect_daemon_state(
@@ -1295,11 +1242,11 @@ def _inspect_daemon_state(
 
 
 def _select_daemon_route(lifecycle: str, *, require_daemon: bool) -> str:
-    if lifecycle == "READY":
+    if lifecycle in {"READY", "STARTING", "BUSY"}:
         return "daemon_ready"
     if require_daemon:
         return "daemon_required"
-    return "cold_local"
+    return "daemon_start"
 
 
 def _daemon_health_payload(state: dict, *, timeout: int | float) -> dict | None:
@@ -1414,26 +1361,51 @@ def _start_daemon(
             str(idle_timeout),
         ]
         if transport == "tcp":
-            port = _free_port()
-            cmd.extend(["--host", "127.0.0.1", "--port", str(port)])
+            cmd.extend(["--host", "127.0.0.1", "--port", "0"])
         else:
             cmd.extend(["--file-dir", str(FILE_TRANSPORT_DIR / token)])
         popen_kwargs: dict = {}
         if sys.platform.startswith("win"):
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            )
         else:
             popen_kwargs["start_new_session"] = True
         with LOG_FILE.open("ab") as log:
             if os.name != "nt":
                 os.chmod(LOG_FILE, 0o600)
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                **popen_kwargs,
-            )
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    close_fds=True,
+                    shell=False,
+                    **popen_kwargs,
+                )
+            except OSError:
+                if not sys.platform.startswith("win"):
+                    raise
+                # Some command hosts disallow BREAKAWAY_FROM_JOB. Nested Job
+                # Objects are supported on current Windows, so retry once
+                # without breakaway while keeping direct-handle isolation.
+                process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    close_fds=True,
+                    shell=False,
+                    creationflags=getattr(
+                        subprocess,
+                        "CREATE_NEW_PROCESS_GROUP",
+                        0,
+                    ),
+                )
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break
@@ -1542,7 +1514,18 @@ def _lock_is_stale(max_age_seconds: int = 30) -> bool:
         age = time.time() - LOCK_FILE.stat().st_mtime
     except FileNotFoundError:
         return True
-    return age > max_age_seconds
+    if age <= max_age_seconds:
+        return False
+    try:
+        owner_pid = int(
+            LOCK_FILE.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).split()[0]
+        )
+    except (OSError, ValueError, IndexError):
+        return True
+    return not _process_is_alive(owner_pid)
 
 
 def _free_port() -> int:
@@ -1553,21 +1536,105 @@ def _free_port() -> int:
 
 def _query_daemon(state: dict, payload: dict, *, timeout: int | None) -> dict | None:
     if state.get("transport") == "file":
-        return _file_request(state, {"op": "search", "payload": payload}, timeout=timeout)
-    if state.get("transport") == "unix":
-        return _unix_request(state, {"op": "search", "payload": payload}, timeout=timeout)
-    try:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            f"http://{state['host']}:{state['port']}/search",
-            data=data,
-            headers={"Content-Type": "application/json; charset=utf-8", "X-RAGD-Token": str(state["token"])},
-            method="POST",
+        result = _file_request(
+            state,
+            {"op": "search", "payload": payload},
+            timeout=timeout,
         )
-        with _open_local_url(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8", errors="replace"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    elif state.get("transport") == "unix":
+        result = _unix_request(
+            state,
+            {"op": "search", "payload": payload},
+            timeout=timeout,
+        )
+    else:
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://{state['host']}:{state['port']}/search",
+                data=data,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "X-RAGD-Token": str(state["token"]),
+                },
+                method="POST",
+            )
+            with _open_local_url(request, timeout=timeout) as response:
+                result = json.loads(
+                    response.read().decode("utf-8", errors="replace")
+                )
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ):
+            _cancel_daemon_request(state, payload)
+            return None
+    if not result:
+        _cancel_daemon_request(state, payload)
         return None
+    if not _daemon_response_matches(state, payload, result):
+        return {
+            "schema": "local-rag.search.v1",
+            "status": "error",
+            "error": "daemon_response_mismatch",
+            "error_kind": "daemon_response_mismatch",
+            "db": str(payload.get("db") or ""),
+            "selected_db": str(payload.get("db") or ""),
+            "query": str(payload.get("question") or ""),
+            "evidence": [],
+            "document_results": [],
+            "warnings": [],
+        }
+    return result
+
+
+def _cancel_daemon_request(state: dict, payload: dict) -> None:
+    control = {
+        "op": "cancel",
+        "request_id": str(payload.get("request_id") or ""),
+        "client_id": str(payload.get("client_id") or ""),
+    }
+    if not control["request_id"]:
+        return
+    try:
+        if state.get("transport") == "file":
+            _file_request(state, control, timeout=0.05)
+        elif state.get("transport") == "unix":
+            _unix_request(state, control, timeout=0.05)
+        else:
+            request = urllib.request.Request(
+                f"http://{state['host']}:{state['port']}/cancel",
+                data=json.dumps(control).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-RAGD-Token": str(state["token"]),
+                },
+                method="POST",
+            )
+            with _open_local_url(request, timeout=0.05):
+                pass
+    except Exception:
+        # Cancellation is best effort after the user-visible deadline.
+        return
+
+
+def _daemon_response_matches(
+    state: dict,
+    request_payload: dict,
+    response_payload: dict,
+) -> bool:
+    metadata = response_payload.get("daemon_state") or {}
+    return bool(
+        str(metadata.get("request_id") or "")
+        == str(request_payload.get("request_id") or "")
+        and str(metadata.get("client_id") or "")
+        == str(request_payload.get("client_id") or "")
+        and str(metadata.get("db") or "")
+        == str(request_payload.get("db") or "")
+        and str(metadata.get("manager_generation") or "")
+        == str(state.get("generation") or "")
+    )
 
 
 def _open_local_url(

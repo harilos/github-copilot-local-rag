@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -16,10 +18,29 @@ RAGD_SPEC = importlib.util.spec_from_file_location("rag_daemon", QUERY_ROOT / "r
 assert RAGD_SPEC and RAGD_SPEC.loader
 RAGD = importlib.util.module_from_spec(RAGD_SPEC)
 RAGD_SPEC.loader.exec_module(RAGD)
+import rag_manager as RAG_MANAGER
+from rag_manager import PersistentWorkerManager
 
 
 class DaemonOwnershipTests(unittest.TestCase):
     def test_health_lifecycle_distinguishes_starting_ready_and_busy(self) -> None:
+        health = {
+            "lifecycle_state": "STARTING",
+            "active_requests": 0,
+            "queue_depth": 0,
+            "handled_request_count": 0,
+            "model_load_count": 0,
+            "open_database_count": 0,
+            "worker_pid": None,
+            "worker_generation": None,
+            "worker_job_object_active": False,
+            "manager_rss_bytes": None,
+            "worker_rss_bytes": None,
+            "manager_handle_count": None,
+            "worker_handle_count": None,
+            "manager_thread_count": 1,
+            "worker_thread_count": None,
+        }
         server = SimpleNamespace(
             state_lock=threading.Lock(),
             active_requests=0,
@@ -31,14 +52,18 @@ class DaemonOwnershipTests(unittest.TestCase):
             started_monotonic=time.monotonic(),
             code_fingerprint="fingerprint",
             idle_timeout=600,
+            worker_manager=SimpleNamespace(
+                health=lambda: dict(health),
+            ),
         )
         self.assertEqual("STARTING", RAGD._server_health_payload(server)["lifecycle_state"])
         self.assertFalse(RAGD._server_health_payload(server)["dense_ready"])
-        server.runtime_ready = True
+        health["lifecycle_state"] = "READY"
         self.assertEqual("READY", RAGD._server_health_payload(server)["lifecycle_state"])
-        server.dense_ready = True
+        health["model_load_count"] = 1
         self.assertTrue(RAGD._server_health_payload(server)["dense_ready"])
-        server.active_requests = 1
+        health["lifecycle_state"] = "BUSY"
+        health["active_requests"] = 1
         self.assertEqual("BUSY", RAGD._server_health_payload(server)["lifecycle_state"])
 
     def test_current_generation_owns_state(self) -> None:
@@ -71,44 +96,148 @@ class DaemonOwnershipTests(unittest.TestCase):
             )
 
 
-class DaemonRetrievalRouteTests(unittest.TestCase):
-    def test_default_hybrid_request_uses_adaptive_route(self) -> None:
-        request = {
-            "db": "ac-rag",
-            "question": "semantic question",
-            "retrieval_mode": "hybrid",
-            "adaptive_hybrid": True,
-        }
-        with (
-            patch.object(
-                RAGD,
-                "run_adaptive_search_payload",
-                return_value={"status": "ok"},
-            ) as adaptive,
-            patch.object(RAGD, "run_search_payload") as standard,
-        ):
-            self.assertEqual({"status": "ok"}, RAGD._execute_search_payload(request))
-        adaptive.assert_called_once()
-        standard.assert_not_called()
+class PersistentManagerTests(unittest.TestCase):
+    def test_release_lease_blocks_search_until_matching_resume(self) -> None:
+        manager = PersistentWorkerManager(
+            rag_root=QUERY_ROOT.parent,
+            dbs_root=QUERY_ROOT.parent / "dbs",
+            manager_generation="manager-lease-test",
+        )
+        release = manager.release_db("ac-rag", lease_id="lease-a")
+        self.assertEqual("db_released", release["status"])
+        blocked = manager.submit_search(
+            {
+                "request_id": "blocked",
+                "client_id": "client",
+                "db": "ac-rag",
+                "question": "q",
+                "remaining_deadline_ms": 500,
+            }
+        )
+        self.assertEqual("db_release_in_progress", blocked["error_kind"])
+        mismatch = manager.resume_db("ac-rag", lease_id="lease-b")
+        self.assertEqual("release_lease_mismatch", mismatch["status"])
+        resumed = manager.resume_db("ac-rag", lease_id="lease-a")
+        self.assertEqual("db_resumed", resumed["status"])
+        manager.shutdown()
 
-    def test_explicit_lexical_request_keeps_evaluation_route(self) -> None:
-        request = {
-            "db": "ac-rag",
-            "question": "lexical question",
-            "retrieval_mode": "lexical",
-            "adaptive_hybrid": True,
-        }
-        with (
-            patch.object(RAGD, "run_adaptive_search_payload") as adaptive,
-            patch.object(
-                RAGD,
-                "run_search_payload",
-                return_value={"status": "ok"},
-            ) as standard,
-        ):
-            self.assertEqual({"status": "ok"}, RAGD._execute_search_payload(request))
-        adaptive.assert_not_called()
-        self.assertEqual("lexical", standard.call_args.kwargs["retrieval_mode"])
+    def test_windows_release_blocks_all_dbs_until_manager_restart(self) -> None:
+        manager = PersistentWorkerManager(
+            rag_root=QUERY_ROOT.parent,
+            dbs_root=QUERY_ROOT.parent / "dbs",
+            manager_generation="manager-windows-release-test",
+        )
+        with patch.object(RAG_MANAGER.os, "name", "nt"):
+            release = manager.release_db("ac-rag", lease_id="lease-a")
+            self.assertEqual("db_released", release["status"])
+            other_db = manager.submit_search(
+                {
+                    "request_id": "other-db",
+                    "client_id": "client",
+                    "db": "incident-rag",
+                    "question": "q",
+                    "remaining_deadline_ms": 500,
+                }
+            )
+            self.assertEqual(
+                "daemon_restarting_for_maintenance",
+                other_db["error_kind"],
+            )
+            resumed = manager.resume_db("ac-rag", lease_id="lease-a")
+            self.assertTrue(resumed["manager_restart_required"])
+            same_db = manager.submit_search(
+                {
+                    "request_id": "same-db",
+                    "client_id": "client",
+                    "db": "ac-rag",
+                    "question": "q",
+                    "remaining_deadline_ms": 500,
+                }
+            )
+            self.assertEqual("daemon_draining", same_db["error_kind"])
+        manager.shutdown()
+
+    def test_manager_serializes_concurrent_clients(self) -> None:
+        manager = PersistentWorkerManager(
+            rag_root=QUERY_ROOT.parent,
+            dbs_root=QUERY_ROOT.parent / "dbs",
+            manager_generation="manager-test",
+        )
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def execute(item):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return {
+                "status": "ok",
+                "db": item.db_name,
+                "request_id": item.request_id,
+            }
+
+        manager._execute_item = execute  # type: ignore[method-assign]
+        results: list[dict] = []
+
+        def submit(index: int) -> None:
+            results.append(
+                manager.submit_search(
+                    {
+                        "request_id": f"request-{index}",
+                        "client_id": f"client-{index}",
+                        "db": "ac-rag",
+                        "question": "q",
+                        "remaining_deadline_ms": 2_000,
+                    }
+                )
+            )
+
+        threads = [
+            threading.Thread(target=submit, args=(index,))
+            for index in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        manager.shutdown()
+        self.assertEqual(1, maximum_active)
+        self.assertEqual(4, len(results))
+        self.assertEqual(
+            {f"request-{index}" for index in range(4)},
+            {result["request_id"] for result in results},
+        )
+
+    def test_manager_import_does_not_load_retrieval_runtime(self) -> None:
+        script = f"""
+import importlib.util, json, sys
+from pathlib import Path
+root = Path({str(QUERY_ROOT)!r})
+sys.path.insert(0, str(root))
+before = set(sys.modules)
+spec = importlib.util.spec_from_file_location('rag_manager_probe', root / 'rag_manager.py')
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+loaded = set(sys.modules) - before
+forbidden = [name for name in loaded if name.split('.')[0] in {{
+    'chromadb', 'onnxruntime', 'transformers', 'sudachipy'
+}}]
+if forbidden or 'software_rag_tool.search_api' in loaded:
+    raise SystemExit(json.dumps({{'forbidden': forbidden}}))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
 
 
 if __name__ == "__main__":

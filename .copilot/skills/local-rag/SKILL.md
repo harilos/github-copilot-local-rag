@@ -138,6 +138,12 @@ wrapper, a nested PowerShell process, PATH-based Python discovery, or a JSON
 stdin pipeline on Windows. Start the venv `python.exe` process directly, wait
 for that process, and read its stdout and stderr directly.
 
+Normal lookup must use the persistent local daemon managed by `search.py`.
+Do not add `--no-daemon` to an ordinary lookup. A STARTING or BUSY daemon is
+not a reason to launch a synchronous search; wait for the bounded daemon queue
+through the same direct `search.py` client process. `--no-daemon` is reserved
+for explicit diagnostics requested by the user.
+
 Use repeated planning arguments on Windows:
 
 - `--answer-goal`

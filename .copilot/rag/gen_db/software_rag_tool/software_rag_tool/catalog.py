@@ -6,7 +6,7 @@ import math
 import re
 import sqlite3
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -78,6 +78,29 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
+
+
+@contextmanager
+def connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open an existing catalog without creating WAL or schema writes."""
+    uri = path.resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
+    finally:
+        conn.close()
+
+
+def _reader(
+    connection: sqlite3.Connection | None,
+    path: Path,
+) -> Any:
+    if connection is not None:
+        return nullcontext(connection)
+    return connect_readonly(path)
 
 
 def init_catalog(conn: sqlite3.Connection | None = None) -> None:
@@ -288,7 +311,14 @@ def counts(path: Path | None = None) -> dict[str, Any]:
         }
 
 
-def bm25_search(question: str, *, top_k: int, source: str = "any", path: Path | None = None) -> list[dict[str, Any]]:
+def bm25_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
     path = path or catalog_path()
     if not path.exists():
         return []
@@ -297,9 +327,9 @@ def bm25_search(question: str, *, top_k: int, source: str = "any", path: Path | 
     if not queries:
         return []
     rows: dict[str, dict[str, Any]] = {}
-    with connect(path) as conn:
+    with _reader(conn, path) as reader:
         for query_text in queries:
-            for row in _run_fts(conn, "fts_word", query_text, top_k * 2, source):
+            for row in _run_fts(reader, "fts_word", query_text, top_k * 2, source):
                 item = _row_to_result(row, signal="lexical", score=row["score"])
                 current = rows.get(item["id"])
                 if current is None or float(item.get("score") or 0) < float(current.get("score") or 0):
@@ -314,21 +344,22 @@ def anchor_lexical_search(
     top_k: int = 1,
     source: str = "any",
     path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Return a few low-document-frequency lexical candidates for one Hybrid call."""
     path = path or catalog_path()
     if not path.exists() or top_k <= 0:
         return []
     try:
-        with connect(path) as conn:
-            anchors = _informative_anchor_tokens(conn, question, limit=1)
+        with _reader(conn, path) as reader:
+            anchors = _informative_anchor_tokens(reader, question, limit=1)
             if not anchors:
                 return []
             token, document_df, information_score = anchors[0]
             query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
             if not query_text:
                 return []
-            candidates = _run_fts(conn, "fts_word", query_text, max(8, top_k * 4), source)
+            candidates = _run_fts(reader, "fts_word", query_text, max(8, top_k * 4), source)
             rows: list[dict[str, Any]] = []
             for raw in candidates:
                 item = _row_to_result(raw, signal="lexical_anchor", score=raw["score"])
@@ -351,7 +382,14 @@ def anchor_lexical_search(
         return []
 
 
-def metadata_search(question: str, *, top_k: int, source: str = "any", path: Path | None = None) -> list[dict[str, Any]]:
+def metadata_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
     path = path or catalog_path()
     if not path.exists():
         return []
@@ -384,15 +422,22 @@ def metadata_search(question: str, *, top_k: int, source: str = "any", path: Pat
         ORDER BY docs.score ASC
     """
     params: list[Any] = [query_text, *source_params, top_k]
-    with connect(path) as conn:
+    with _reader(conn, path) as reader:
         try:
-            rows = [_row_to_result(row, signal="metadata", score=row["score"]) for row in conn.execute(sql, params)]
+            rows = [_row_to_result(row, signal="metadata", score=row["score"]) for row in reader.execute(sql, params)]
         except sqlite3.OperationalError:
             rows = []
     return _ranked(rows[:top_k])
 
 
-def exact_search(question: str, *, top_k: int, source: str = "any", path: Path | None = None) -> list[dict[str, Any]]:
+def exact_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
     path = path or catalog_path()
     if not path.exists():
         return []
@@ -401,12 +446,12 @@ def exact_search(question: str, *, top_k: int, source: str = "any", path: Path |
         return []
     lookup_values = _lookup_values_for_anchors(anchors)
     rows: dict[str, dict[str, Any]] = {}
-    with connect(path) as conn:
-        for row in _document_lookup_search(conn, lookup_values, top_k=top_k, source=source):
+    with _reader(conn, path) as reader:
+        for row in _document_lookup_search(reader, lookup_values, top_k=top_k, source=source):
             item = _row_to_result(row, signal="exact", score=-0.1)
             _set_exact_debug(item, row, match_kind="document_lookup")
             rows[item["id"]] = item
-        for row in _identifier_search(conn, lookup_values, top_k=top_k, source=source):
+        for row in _identifier_search(reader, lookup_values, top_k=top_k, source=source):
             item = _row_to_result(row, signal="exact", score=-float(row["match_count"]))
             _set_exact_debug(item, row, match_kind="casefold_exact")
             current = rows.get(item["id"])
@@ -416,15 +461,21 @@ def exact_search(question: str, *, top_k: int, source: str = "any", path: Path |
     return _ranked(ranked[:top_k])
 
 
-def get_neighbor_rows(chunk_uid: str, *, window: int = 1, path: Path | None = None) -> list[dict[str, Any]]:
+def get_neighbor_rows(
+    chunk_uid: str,
+    *,
+    window: int = 1,
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
     path = path or catalog_path()
     if not path.exists():
         return []
-    with connect(path) as conn:
-        row = conn.execute("SELECT doc_pk, chunk_index FROM chunk WHERE chunk_uid = ?", (chunk_uid,)).fetchone()
+    with _reader(conn, path) as reader:
+        row = reader.execute("SELECT doc_pk, chunk_index FROM chunk WHERE chunk_uid = ?", (chunk_uid,)).fetchone()
         if not row or row["chunk_index"] is None:
             return []
-        rows = conn.execute(
+        rows = reader.execute(
             f"""
             SELECT {_RESULT_COLUMNS}, 0.0 AS score
             FROM chunk c
@@ -440,14 +491,19 @@ def get_neighbor_rows(chunk_uid: str, *, window: int = 1, path: Path | None = No
     return [_row_to_result(item, signal="neighbor", score=0) for item in rows]
 
 
-def fetch_rows_by_ids(ids: Iterable[str], *, path: Path | None = None) -> dict[str, dict[str, Any]]:
+def fetch_rows_by_ids(
+    ids: Iterable[str],
+    *,
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, dict[str, Any]]:
     chunk_ids = [str(value) for value in ids if value]
     path = path or catalog_path()
     if not chunk_ids or not path.exists():
         return {}
-    with connect(path) as conn:
+    with _reader(conn, path) as reader:
         placeholders = ",".join("?" for _ in chunk_ids)
-        rows = conn.execute(
+        rows = reader.execute(
             f"""
             SELECT {_RESULT_COLUMNS}, 0.0 AS score
             FROM chunk c
@@ -817,10 +873,19 @@ def _informative_anchor_tokens(
     ]
     if not tokens or limit <= 0:
         return []
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.fts_word_vocab "
-        "USING fts5vocab(main, fts_word, 'row')"
-    )
+    query_only = bool(conn.execute("PRAGMA query_only").fetchone()[0])
+    if query_only:
+        # The catalog file remains protected by mode=ro. Temporarily allow a
+        # connection-local TEMP fts5vocab view used only for DF calculation.
+        conn.execute("PRAGMA query_only=OFF")
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.fts_word_vocab "
+            "USING fts5vocab(main, fts_word, 'row')"
+        )
+    finally:
+        if query_only:
+            conn.execute("PRAGMA query_only=ON")
     placeholders = ",".join("?" for _ in tokens)
     rows = conn.execute(
         f"SELECT term, doc FROM temp.fts_word_vocab WHERE term IN ({placeholders})",

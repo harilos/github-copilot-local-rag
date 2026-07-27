@@ -846,7 +846,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             ),
         )
 
-    def test_only_required_cold_daemon_receives_the_remaining_deadline(self) -> None:
+    def test_every_cold_daemon_receives_the_remaining_deadline(self) -> None:
         with mock.patch.object(SEARCH.time, "monotonic", return_value=100.0):
             self.assertEqual(
                 12.0,
@@ -858,7 +858,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(
-                5.0,
+                12.0,
                 SEARCH._daemon_query_timeout(
                     attempt_timeout=5.0,
                     deadline=112.0,
@@ -867,7 +867,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(
-                5.0,
+                12.0,
                 SEARCH._daemon_query_timeout(
                     attempt_timeout=5.0,
                     deadline=112.0,
@@ -1018,21 +1018,30 @@ class SyncFallbackMetadataTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
-    def test_non_ready_states_select_local_route_unless_daemon_is_required(self) -> None:
-        for lifecycle in ("MISSING", "STARTING", "BUSY", "DEAD"):
-            with self.subTest(lifecycle=lifecycle):
-                self.assertEqual(
-                    "cold_local",
-                    SEARCH._select_daemon_route(lifecycle, require_daemon=False),
-                )
-                self.assertEqual(
-                    "daemon_required",
-                    SEARCH._select_daemon_route(lifecycle, require_daemon=True),
-                )
-        self.assertEqual(
-            "daemon_ready",
-            SEARCH._select_daemon_route("READY", require_daemon=False),
-        )
+    def test_starting_and_busy_requests_stay_on_daemon_route(self) -> None:
+        for lifecycle in ("STARTING", "BUSY", "READY"):
+            self.assertEqual(
+                "daemon_ready",
+                SEARCH._select_daemon_route(
+                    lifecycle,
+                    require_daemon=False,
+                ),
+            )
+        for lifecycle in ("MISSING", "DEAD"):
+            self.assertEqual(
+                "daemon_start",
+                SEARCH._select_daemon_route(
+                    lifecycle,
+                    require_daemon=False,
+                ),
+            )
+            self.assertEqual(
+                "daemon_required",
+                SEARCH._select_daemon_route(
+                    lifecycle,
+                    require_daemon=True,
+                ),
+            )
 
     def test_retirement_failure_is_recorded_for_fallback_gate(self) -> None:
         attempt = SEARCH._record_retirement_outcome(
@@ -1073,7 +1082,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             active = SEARCH._active_daemon_state(timeout=0.5)
         self.assertEqual("BUSY", lifecycle)
         self.assertEqual(state, observed)
-        self.assertIsNone(active)
+        self.assertEqual(state, active)
 
     def test_active_daemon_rejects_stale_runtime_fingerprint_before_healthcheck(self) -> None:
         state = {

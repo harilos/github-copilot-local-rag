@@ -13,6 +13,7 @@ sys.path.insert(0, str(TOOL_ROOT))
 from software_rag_tool.catalog import counts as catalog_counts
 from software_rag_tool.catalog import rebuild_from_clean
 from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
+from software_rag_tool.daemon_control import database_mutation_guard
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
 from software_rag_tool.jsonl import read_jsonl
@@ -30,6 +31,11 @@ def main() -> None:
     args = parser.parse_args()
 
     db_name = require_db_name(args.db)
+    with database_mutation_guard(db_name, rag_root=RAG_ROOT):
+        _rebuild(args, db_name)
+
+
+def _rebuild(args: argparse.Namespace, db_name: str) -> None:
     db_root = ensure_db_layout(dbs_dir(), db_name)
     os.environ["RAG_DB_NAME"] = db_name
     os.environ["RAG_OUTPUT_ROOT"] = str(db_root)

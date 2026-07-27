@@ -16,8 +16,10 @@ from software_rag_tool.search_api import (  # noqa: E402
     compact_search_contract,
 )
 from software_rag_tool.search_request import (  # noqa: E402
+    add_search_request_arguments,
     normalize_search_request,
     request_from_cli,
+    request_to_cli_arguments,
 )
 
 
@@ -119,6 +121,32 @@ class StructuredRequestTests(unittest.TestCase):
         )
         self.assertEqual(from_json, from_repeated)
         self.assertEqual(question, from_repeated["original_question"])
+
+    def test_normalized_request_survives_internal_argv_roundtrip(self) -> None:
+        request = normalize_search_request(
+            {
+                "original_question": "A2Wについて一資料だけ",
+                "literal_identifiers": ["A2W"],
+                "facets": [
+                    {
+                        "kind": "semantic",
+                        "query": "A2W",
+                    }
+                ],
+                "coverage": {
+                    "policy": "narrow",
+                },
+            }
+        )
+        parser = argparse.ArgumentParser()
+        add_search_request_arguments(parser)
+        args = parser.parse_args(request_to_cli_arguments(request))
+        args.stdin = False
+        roundtripped = request_from_cli(
+            args,
+            positional_question=request["original_question"],
+        )
+        self.assertEqual(request, roundtripped)
 
     def test_discovery_lane_returns_distinct_documents_after_exact_no_hit(self) -> None:
         store = DiscoveryStore()

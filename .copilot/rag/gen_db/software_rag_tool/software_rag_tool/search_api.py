@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +78,8 @@ def run_search_payload(
     retrieval_mode: str = "hybrid",
     identifier_diagnostics: bool = True,
     search_request: dict[str, Any] | None = None,
+    deadline_monotonic: float | None = None,
+    dense_runtime_ready: bool = False,
 ) -> dict[str, Any]:
     load_env()
     name = require_db_name(db_name)
@@ -124,6 +128,8 @@ def run_search_payload(
         request,
         source=source,
         use_dense=mode in {"hybrid", "dense"},
+        deadline_monotonic=deadline_monotonic,
+        dense_runtime_ready=dense_runtime_ready,
     )
     return normalize_search_contract(payload)
 
@@ -140,6 +146,8 @@ def run_adaptive_search_payload(
     include_db_hint: bool = False,
     identifier_diagnostics: bool = True,
     search_request: dict[str, Any] | None = None,
+    deadline_monotonic: float | None = None,
+    dense_runtime_ready: bool = False,
 ) -> dict[str, Any]:
     """Run the default one-operation hybrid route without repeating lexical work."""
     load_env()
@@ -204,6 +212,10 @@ def run_adaptive_search_payload(
         request,
         source=source,
         use_dense=True,
+        deadline_monotonic=deadline_monotonic,
+        dense_runtime_ready=(
+            dense_runtime_ready or bool(route.get("dense_used"))
+        ),
         precomputed={
             "dense": list(route.get("dense_rows") or []),
             "lexical": list(route.get("lexical_rows") or []),
@@ -300,6 +312,8 @@ def _add_discovery_lane(
     source: str,
     use_dense: bool,
     precomputed: dict[str, Any] | None = None,
+    deadline_monotonic: float | None = None,
+    dense_runtime_ready: bool = False,
 ) -> None:
     """Build a recall-first document lane independently from evidence packing."""
     question = str(request["original_question"])
@@ -392,6 +406,14 @@ def _add_discovery_lane(
         if entity and entity != question:
             lexical_queries.append((entity, str(entity)[:100], 0.65))
     for query, label, factor in lexical_queries:
+        if (
+            deadline_monotonic is not None
+            and deadline_monotonic - time.monotonic() < 0.5
+        ):
+            discovery_warnings.append(
+                "discovery_incomplete_insufficient_remaining_deadline"
+            )
+            break
         try:
             add_rows(
                 store.bm25_search(
@@ -466,7 +488,29 @@ def _add_discovery_lane(
             continue
         seen_dense.add(item[0])
         unique_dense.append(item)
-    if unique_dense:
+    dense_minimum_seconds = (
+        13.0
+        if os.name == "nt" and not dense_runtime_ready
+        else 3.0
+    )
+    dense_remaining = (
+        deadline_monotonic - time.monotonic()
+        if deadline_monotonic is not None
+        else None
+    )
+    dense_deadline_skipped = bool(
+        unique_dense
+        and dense_remaining is not None
+        and dense_remaining < dense_minimum_seconds
+    )
+    if dense_deadline_skipped:
+        discovery_warnings.append(
+            "dense_discovery_unavailable_within_deadline"
+        )
+        payload["dense_skipped_reason"] = (
+            "insufficient_remaining_deadline"
+        )
+    elif unique_dense:
         try:
             queries = [item[0] for item in unique_dense]
             if hasattr(store, "vector_query_many"):
@@ -491,9 +535,9 @@ def _add_discovery_lane(
                     weight=1.0 * factor,
                 )
             dense_used = True
-        except Exception:
+        except Exception as exc:
             discovery_warnings.append(
-                "dense_discovery_unavailable_within_deadline"
+                f"dense_discovery_error:{type(exc).__name__}"
             )
 
     evidence_paths = {
@@ -531,6 +575,7 @@ def _add_discovery_lane(
                 "signals": set(),
                 "facets": set(),
                 "literal_identifiers": set(),
+                "ranks": {},
             },
         )
         score = float(item["score"])
@@ -542,6 +587,13 @@ def _add_discovery_lane(
         document["literal_identifiers"].update(
             item["literal_identifiers"]
         )
+        for signal, rank in item["ranks"].items():
+            previous = document["ranks"].get(signal)
+            document["ranks"][signal] = (
+                int(rank)
+                if previous is None
+                else min(int(previous), int(rank))
+            )
 
     ranked_documents: list[dict[str, Any]] = []
     for document in documents.values():
@@ -555,7 +607,14 @@ def _add_discovery_lane(
         is_direct = document["path"] in evidence_paths
         if is_direct:
             support_level = "direct"
-        elif document["literal_identifiers"] or len(signals) >= 2:
+        elif document["literal_identifiers"] or (
+            {"dense", "lexical"}.issubset(signals)
+            and max(
+                int(document["ranks"].get("dense") or 10_000),
+                int(document["ranks"].get("lexical") or 10_000),
+            )
+            <= 10
+        ):
             support_level = "strong"
         elif len(facets) >= 2 or float(document["score"]) >= 0.017:
             support_level = "moderate"
@@ -577,7 +636,47 @@ def _add_discovery_lane(
         maximum,
         int(coverage_request.get("target_distinct_documents") or 8),
     )
-    selected = ranked_documents[:target]
+    if not bool(coverage_request.get("allow_weak_related", True)):
+        ranked_documents = [
+            document
+            for document in ranked_documents
+            if document["support_level"] != "weak"
+        ]
+    selected: list[dict[str, Any]] = []
+    selected_paths: set[str] = set()
+
+    def select_document(document: dict[str, Any]) -> None:
+        path = str(document["path"])
+        if path in selected_paths or len(selected) >= target:
+            return
+        selected.append(document)
+        selected_paths.add(path)
+
+    for document in ranked_documents:
+        if document["support_level"] == "direct":
+            select_document(document)
+    # Round-robin across requested facets before score-only fill so one
+    # perspective cannot occupy the complete discovery list.
+    made_progress = True
+    while len(selected) < target and made_progress:
+        made_progress = False
+        for facet in requested_facets:
+            candidate = next(
+                (
+                    document
+                    for document in ranked_documents
+                    if document["path"] not in selected_paths
+                    and facet[:100] in document["facets"]
+                ),
+                None,
+            )
+            if candidate is not None:
+                select_document(candidate)
+                made_progress = True
+            if len(selected) >= target:
+                break
+    for document in ranked_documents:
+        select_document(document)
     cards: list[dict[str, Any]] = []
     for index, document in enumerate(selected, start=1):
         best = document["best"]

@@ -20,11 +20,7 @@ DBS_ROOT = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().r
 sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
-from software_rag_tool.search_api import (
-    normalize_search_contract,
-    run_adaptive_search_payload,
-    run_search_payload,
-)
+from rag_manager import PersistentWorkerManager
 
 _UnixStreamServerBase = getattr(socketserver, "ThreadingUnixStreamServer", socketserver.ThreadingTCPServer)
 
@@ -48,6 +44,11 @@ class RagDaemonServer(ThreadingHTTPServer):
         self.runtime_ready = False
         self.dense_ready = False
         self.state_lock = threading.Lock()
+        self.worker_manager = PersistentWorkerManager(
+            rag_root=RAG_ROOT,
+            dbs_root=DBS_ROOT,
+            manager_generation=generation,
+        )
 
 
 class RagUnixDaemonServer(_UnixStreamServerBase):
@@ -74,6 +75,11 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
         self.runtime_ready = False
         self.dense_ready = False
         self.state_lock = threading.Lock()
+        self.worker_manager = PersistentWorkerManager(
+            rag_root=RAG_ROOT,
+            dbs_root=DBS_ROOT,
+            manager_generation=generation,
+        )
 
     def server_close(self) -> None:
         super().server_close()
@@ -84,16 +90,8 @@ class RagUnixDaemonServer(_UnixStreamServerBase):
 
 
 def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dict[str, Any]:
-    with server.state_lock:
-        active_requests = server.active_requests
-        request_sequence = server.request_sequence
-        runtime_ready = server.runtime_ready
-        dense_ready = server.dense_ready
-    lifecycle_state = (
-        "BUSY"
-        if active_requests > 0
-        else ("READY" if runtime_ready else "STARTING")
-    )
+    worker = server.worker_manager.health()
+    lifecycle_state = str(worker["lifecycle_state"])
     return {
         "schema": "local-rag.ragd.health.v1",
         "status": "ok",
@@ -101,10 +99,30 @@ def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dic
         "generation": server.generation,
         "started_at": server.started_at,
         "uptime_seconds": round(time.monotonic() - server.started_monotonic, 6),
-        "active_requests": active_requests,
-        "request_sequence": request_sequence,
+        "manager_pid": os.getpid(),
+        "manager_generation": server.generation,
+        "worker_pid": worker.get("worker_pid"),
+        "worker_generation": worker.get("worker_generation"),
+        "active_requests": worker["active_requests"],
+        "queue_depth": worker["queue_depth"],
+        "request_sequence": worker["handled_request_count"],
         "ready": lifecycle_state == "READY",
-        "dense_ready": dense_ready,
+        "dense_ready": worker["model_load_count"] > 0,
+        "model_load_count": worker["model_load_count"],
+        "open_database_count": worker["open_database_count"],
+        "worker_job_object_active": worker[
+            "worker_job_object_active"
+        ],
+        "last_worker_start_error": worker.get(
+            "last_worker_start_error"
+        ),
+        "manager_rss_bytes": worker["manager_rss_bytes"],
+        "worker_rss_bytes": worker["worker_rss_bytes"],
+        "manager_handle_count": worker["manager_handle_count"],
+        "worker_handle_count": worker["worker_handle_count"],
+        "manager_thread_count": worker["manager_thread_count"],
+        "worker_thread_count": worker["worker_thread_count"],
+        "handled_request_count": worker["handled_request_count"],
         "lifecycle_state": lifecycle_state,
         "code_fingerprint": server.code_fingerprint,
         "idle_timeout_seconds": server.idle_timeout,
@@ -134,6 +152,81 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
+        if self.path == "/release-db":
+            if not self._authorized():
+                self._send_json({"status": "forbidden"}, status=403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                body = json.loads(
+                    self.rfile.read(length).decode("utf-8")
+                )
+                db_name = str(body["db"])
+                lease_id = str(body.get("lease_id") or "")
+            except Exception as exc:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "error": f"invalid release request: {exc}",
+                    },
+                    status=400,
+                )
+                return
+            self._send_json(
+                self.server.worker_manager.release_db(
+                    db_name,
+                    lease_id=lease_id or None,
+                )
+            )
+            return
+        if self.path == "/resume-db":
+            if not self._authorized():
+                self._send_json({"status": "forbidden"}, status=403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                db_name = str(body["db"])
+                lease_id = str(body["lease_id"])
+            except Exception as exc:
+                self._send_json(
+                    {"status": "error", "error": f"invalid resume request: {exc}"},
+                    status=400,
+                )
+                return
+            result = self.server.worker_manager.resume_db(
+                db_name,
+                lease_id=lease_id,
+            )
+            self._send_json(result)
+            if result.get("manager_restart_required"):
+                threading.Thread(
+                    target=self.server.shutdown,
+                    daemon=True,
+                ).start()
+            return
+        if self.path == "/cancel":
+            if not self._authorized():
+                self._send_json({"status": "forbidden"}, status=403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                request_id = str(body["request_id"])
+                client_id = str(body.get("client_id") or "")
+            except Exception as exc:
+                self._send_json(
+                    {"status": "error", "error": f"invalid cancel request: {exc}"},
+                    status=400,
+                )
+                return
+            self._send_json(
+                self.server.worker_manager.cancel_request(
+                    request_id,
+                    client_id=client_id,
+                )
+            )
+            return
         if self.path != "/search":
             self._send_json({"status": "not_found"}, status=404)
             return
@@ -148,52 +241,14 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             self._send_json({"schema": "local-rag.search.v1", "status": "error", "error": f"invalid request: {exc}"})
             return
 
-        request_started = time.monotonic()
-        with self.server.state_lock:
-            self.server.request_sequence += 1
-            request_sequence = self.server.request_sequence
-            queue_depth = self.server.active_requests
-            self.server.active_requests += 1
-        try:
-            payload = _execute_search_payload(request)
-        except Exception as exc:
-            payload = normalize_search_contract(
-                {
-                    "schema": "local-rag.search.v1",
-                    "status": "error",
-                    "db": request.get("db") if isinstance(request, dict) else "",
-                    "query": request.get("question") if isinstance(request, dict) else "",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        finally:
-            with self.server.state_lock:
-                if payload.get("status") != "error":
-                    self.server.runtime_ready = True
-                    if payload.get("dense_used") is True:
-                        self.server.dense_ready = True
-                self.server.active_requests -= 1
-                self.server.last_used_at = time.monotonic()
-        payload["daemon_state"] = daemon_request_metadata(
-            pid=os.getpid(),
-            generation=self.server.generation,
-            started_at=self.server.started_at,
-            uptime_seconds=time.monotonic() - self.server.started_monotonic,
-            code_fingerprint=self.server.code_fingerprint,
-            request_id=str(request.get("request_id") or ""),
-            request_sequence=request_sequence,
-            queue_depth=queue_depth,
-            request_seconds=time.monotonic() - request_started,
-            dense_ready=self.server.dense_ready,
-        )
+        payload = self.server.worker_manager.submit_search(request)
+        self.server.last_used_at = time.monotonic()
         self._send_json(payload)
 
     def _authorized(self) -> bool:
         return self.headers.get("X-RAGD-Token") == self.server.token
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
-        if payload.get("schema") == "local-rag.search.v1":
-            payload = normalize_search_contract(payload)
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -226,54 +281,42 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
+        if op == "release_db":
+            result = self.server.worker_manager.release_db(
+                str(request.get("db") or ""),
+                lease_id=str(request.get("lease_id") or "") or None,
+            )
+            self._send_json(result)
+            return
+        if op == "resume_db":
+            result = self.server.worker_manager.resume_db(
+                str(request.get("db") or ""),
+                lease_id=str(request.get("lease_id") or ""),
+            )
+            self._send_json(result)
+            if result.get("manager_restart_required"):
+                threading.Thread(
+                    target=self.server.shutdown,
+                    daemon=True,
+                ).start()
+            return
+        if op == "cancel":
+            result = self.server.worker_manager.cancel_request(
+                str(request.get("request_id") or ""),
+                client_id=str(request.get("client_id") or ""),
+            )
+            self._send_json(result)
+            return
         if op != "search":
             self._send_json({"status": "not_found"})
             return
 
         payload = request.get("payload") or {}
-        request_started = time.monotonic()
-        with self.server.state_lock:
-            self.server.request_sequence += 1
-            request_sequence = self.server.request_sequence
-            queue_depth = self.server.active_requests
-            self.server.active_requests += 1
-        try:
-            result = _execute_search_payload(payload)
-        except Exception as exc:
-            result = normalize_search_contract(
-                {
-                    "schema": "local-rag.search.v1",
-                    "status": "error",
-                    "db": payload.get("db") if isinstance(payload, dict) else "",
-                    "query": payload.get("question") if isinstance(payload, dict) else "",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-        finally:
-            with self.server.state_lock:
-                if result.get("status") != "error":
-                    self.server.runtime_ready = True
-                    if result.get("dense_used") is True:
-                        self.server.dense_ready = True
-                self.server.active_requests -= 1
-                self.server.last_used_at = time.monotonic()
-        result["daemon_state"] = daemon_request_metadata(
-            pid=os.getpid(),
-            generation=self.server.generation,
-            started_at=self.server.started_at,
-            uptime_seconds=time.monotonic() - self.server.started_monotonic,
-            code_fingerprint=self.server.code_fingerprint,
-            request_id=str(payload.get("request_id") or ""),
-            request_sequence=request_sequence,
-            queue_depth=queue_depth,
-            request_seconds=time.monotonic() - request_started,
-            dense_ready=self.server.dense_ready,
-        )
+        result = self.server.worker_manager.submit_search(payload)
+        self.server.last_used_at = time.monotonic()
         self._send_json(result)
 
     def _send_json(self, payload: dict[str, Any]) -> None:
-        if payload.get("schema") == "local-rag.search.v1":
-            payload = normalize_search_contract(payload)
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
 
 
@@ -287,7 +330,11 @@ def main() -> None:
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--idle-timeout", type=int, default=DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS)
     args = parser.parse_args()
-    if not args.socket_file and not args.file_dir and not args.port:
+    if (
+        not args.socket_file
+        and not args.file_dir
+        and args.port is None
+    ):
         parser.error("--port, --socket-file, or --file-dir is required")
 
     os.environ.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
@@ -312,6 +359,7 @@ def main() -> None:
     try:
         server.serve_forever(poll_interval=1.0)
     finally:
+        server.worker_manager.shutdown()
         server.server_close()
         _unlink_state(state_file)
 
@@ -339,6 +387,11 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
         "heartbeat_file": str(heartbeat_file),
     }
     _write_json_atomic(state_file, state)
+    worker_manager = PersistentWorkerManager(
+        rag_root=RAG_ROOT,
+        dbs_root=DBS_ROOT,
+        manager_generation=generation,
+    )
     last_used_at = time.monotonic()
     last_cleanup_at = 0.0
     active_requests = 0
@@ -393,11 +446,8 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                 elif request.get("generation") != generation:
                     result = {"status": "forbidden"}
                 elif request.get("op") == "health":
-                    lifecycle_state = (
-                        "BUSY"
-                        if active_requests > 1
-                        else ("READY" if runtime_ready else "STARTING")
-                    )
+                    worker_health = worker_manager.health()
+                    lifecycle_state = worker_health["lifecycle_state"]
                     result = {
                         "schema": "local-rag.ragd.health.v1",
                         "status": "ok",
@@ -405,32 +455,54 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         "generation": generation,
                         "started_at": state["started_at"],
                         "uptime_seconds": round(time.monotonic() - started_monotonic, 6),
-                        "active_requests": active_requests,
-                        "request_sequence": request_sequence,
+                        "manager_pid": os.getpid(),
+                        "manager_generation": generation,
+                        "worker_pid": worker_health.get("worker_pid"),
+                        "worker_generation": worker_health.get(
+                            "worker_generation"
+                        ),
+                        "active_requests": worker_health["active_requests"],
+                        "queue_depth": worker_health["queue_depth"],
+                        "request_sequence": worker_health[
+                            "handled_request_count"
+                        ],
                         "ready": lifecycle_state == "READY",
-                        "dense_ready": dense_ready,
+                        "dense_ready": (
+                            worker_health["model_load_count"] > 0
+                        ),
+                        "model_load_count": worker_health[
+                            "model_load_count"
+                        ],
+                        "open_database_count": worker_health[
+                            "open_database_count"
+                        ],
                         "lifecycle_state": lifecycle_state,
                         "code_fingerprint": code_fingerprint,
                         "idle_timeout_seconds": idle_timeout,
                     }
                 elif request.get("op") == "search":
                     payload = request.get("payload") or {}
-                    result = _run_search_request(payload)
-                    if result.get("status") != "error":
-                        runtime_ready = True
-                        if result.get("dense_used") is True:
-                            dense_ready = True
-                    result["daemon_state"] = daemon_request_metadata(
-                        pid=os.getpid(),
-                        generation=generation,
-                        started_at=state["started_at"],
-                        uptime_seconds=time.monotonic() - started_monotonic,
-                        code_fingerprint=code_fingerprint,
-                        request_id=str(payload.get("request_id") or ""),
-                        request_sequence=request_sequence,
-                        queue_depth=max(0, len(request_files) - 1),
-                        request_seconds=time.monotonic() - request_started,
-                        dense_ready=dense_ready,
+                    result = worker_manager.submit_search(payload)
+                    runtime_ready = result.get("status") != "error"
+                    dense_ready = (
+                        worker_manager.health()["model_load_count"] > 0
+                    )
+                elif request.get("op") == "release_db":
+                    result = worker_manager.release_db(
+                        str(request.get("db") or ""),
+                        lease_id=(
+                            str(request.get("lease_id") or "") or None
+                        ),
+                    )
+                elif request.get("op") == "resume_db":
+                    result = worker_manager.resume_db(
+                        str(request.get("db") or ""),
+                        lease_id=str(request.get("lease_id") or ""),
+                    )
+                elif request.get("op") == "cancel":
+                    result = worker_manager.cancel_request(
+                        str(request.get("request_id") or ""),
+                        client_id=str(request.get("client_id") or ""),
                     )
                 elif request.get("op") == "shutdown":
                     result = {"schema": "local-rag.ragd.shutdown.v1", "status": "ok"}
@@ -439,6 +511,8 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                 else:
                     result = {"status": "not_found"}
                 _write_json_atomic(response_file, result)
+                if result.get("manager_restart_required"):
+                    return
             except Exception as exc:
                 fallback = response_file or (responses_dir / f"{uuid.uuid4().hex}.response.json")
                 _write_json_atomic(
@@ -453,6 +527,7 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                 except FileNotFoundError:
                     pass
     finally:
+        worker_manager.shutdown()
         _unlink_state(state_file)
 
 
@@ -470,47 +545,6 @@ def _cleanup_stale_transport_files(directory: Path, *, max_age_seconds: float) -
             pass
 
 
-def _run_search_request(payload: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return _execute_search_payload(payload)
-    except Exception as exc:
-        return normalize_search_contract(
-            {
-                "schema": "local-rag.search.v1",
-                "status": "error",
-                "db": payload.get("db") if isinstance(payload, dict) else "",
-                "query": payload.get("question") if isinstance(payload, dict) else "",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
-
-
-def _execute_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    retrieval_mode = str(payload.get("retrieval_mode") or "hybrid")
-    common = {
-        "db_name": str(payload["db"]),
-        "question": str(payload["question"]),
-        "top_k": int(payload.get("top_k") or 8),
-        "source": str(payload.get("source") or "any"),
-        "max_chars": int(payload.get("max_chars") or 900),
-        "budget_tokens": (
-            int(payload["budget_tokens"])
-            if payload.get("budget_tokens")
-            else None
-        ),
-        "explain": bool(payload.get("explain")),
-        "include_db_hint": bool(payload.get("include_db_hint")),
-        "identifier_diagnostics": bool(payload.get("identifier_diagnostics", True)),
-        "search_request": payload.get("search_request"),
-    }
-    if bool(payload.get("adaptive_hybrid")) and retrieval_mode == "hybrid":
-        return run_adaptive_search_payload(**common)
-    return run_search_payload(
-        **common,
-        retrieval_mode=retrieval_mode,
-    )
-
-
 def runtime_code_fingerprint() -> str:
     digest = hashlib.sha256()
     for path in runtime_fingerprint_paths():
@@ -526,6 +560,8 @@ def runtime_fingerprint_paths() -> list[Path]:
     package_root = TOOL_ROOT / "software_rag_tool"
     paths = [
         Path(__file__).resolve(),
+        Path(__file__).resolve().parent / "rag_manager.py",
+        Path(__file__).resolve().parent / "rag_worker.py",
         TOOL_ROOT / "pyproject.toml",
         TOOL_ROOT / "requirements.txt",
         *package_root.rglob("*.py"),
@@ -634,10 +670,13 @@ def _idle_monitor(server: RagDaemonServer) -> None:
         ):
             threading.Thread(target=server.shutdown, daemon=True).start()
             return
-        with server.state_lock:
-            idle_for = time.monotonic() - server.last_used_at
-            active = server.active_requests
-        if active == 0 and idle_for >= server.idle_timeout:
+        worker = server.worker_manager.health()
+        idle_for = time.monotonic() - server.last_used_at
+        if (
+            worker["active_requests"] == 0
+            and worker["queue_depth"] == 0
+            and idle_for >= server.idle_timeout
+        ):
             threading.Thread(target=server.shutdown, daemon=True).start()
             return
 

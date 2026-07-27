@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from software_rag_tool.search_api import (
+    compact_search_contract,
     payload_to_text,
     run_adaptive_search_payload,
     run_search_payload,
@@ -33,6 +35,7 @@ def main() -> None:
     parser.add_argument("--explain", action="store_true", help="Include retriever ranks and RRF debug information")
     parser.add_argument("--format", choices=["json", "prompt"], default="json")
     parser.add_argument("--include-db-hint", action="store_true")
+    parser.add_argument("--compact-json", action="store_true")
     parser.add_argument("--retrieval-mode", choices=["hybrid", "lexical", "dense"], default="hybrid")
     parser.add_argument("--lexical-only", action="store_true", help="Skip dense vector search")
     parser.add_argument("--disable-identifier-diagnostics", action="store_true", help="Skip identifier diagnostics for pure retrieval benchmarking")
@@ -89,7 +92,16 @@ def main() -> None:
                 identifier_diagnostics=not args.disable_identifier_diagnostics,
                 search_request=search_request,
             )
-    print(payload_to_text(payload, args.format, explain=args.explain))
+    if args.format == "json" and args.compact_json:
+        print(
+            json.dumps(
+                compact_search_contract(payload, explain=args.explain),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(payload_to_text(payload, args.format, explain=args.explain))
 
 
 def _configure_standard_streams() -> None:

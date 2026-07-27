@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -41,6 +42,8 @@ class DbStore:
         self._client: Any | None = None
         self._collection: Any | None = None
         self._collection_lock = threading.Lock()
+        self._catalog_connection: sqlite3.Connection | None = None
+        self._catalog_lock = threading.Lock()
         self._embed_lock = threading.Lock()
         self._last_used_at = time.monotonic()
         self._validate()
@@ -106,11 +109,23 @@ class DbStore:
 
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        return catalog.exact_search(question, top_k=top_k, source=source, path=self.context.catalog_path)
+        return catalog.exact_search(
+            question,
+            top_k=top_k,
+            source=source,
+            path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
+        )
 
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        return catalog.bm25_search(question, top_k=top_k, source=source, path=self.context.catalog_path)
+        return catalog.bm25_search(
+            question,
+            top_k=top_k,
+            source=source,
+            path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
+        )
 
     def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
@@ -119,19 +134,59 @@ class DbStore:
             top_k=top_k,
             source=source,
             path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
         )
 
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        return catalog.metadata_search(question, top_k=top_k, source=source, path=self.context.catalog_path)
+        return catalog.metadata_search(
+            question,
+            top_k=top_k,
+            source=source,
+            path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
+        )
 
     def fetch_rows_by_ids(self, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        return catalog.fetch_rows_by_ids(ids, path=self.context.catalog_path)
+        return catalog.fetch_rows_by_ids(
+            ids,
+            path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
+        )
 
     def get_neighbor_rows(self, chunk_uid: str, *, window: int = 1) -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        return catalog.get_neighbor_rows(chunk_uid, window=window, path=self.context.catalog_path)
+        return catalog.get_neighbor_rows(
+            chunk_uid,
+            window=window,
+            path=self.context.catalog_path,
+            conn=self._get_catalog_connection(),
+        )
+
+    def _get_catalog_connection(self) -> sqlite3.Connection:
+        with self._catalog_lock:
+            if self._catalog_connection is None:
+                uri = self.context.catalog_path.resolve().as_uri() + "?mode=ro"
+                connection = sqlite3.connect(uri, uri=True)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA foreign_keys=ON")
+                self._catalog_connection = connection
+            return self._catalog_connection
+
+    def close(self) -> None:
+        with self._catalog_lock:
+            connection = self._catalog_connection
+            self._catalog_connection = None
+        if connection is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            connection.close()
+        self._collection = None
+        self._client = None
 
     def _get_collection(self) -> Any:
         with self._collection_lock:
@@ -166,7 +221,7 @@ class DbStore:
 
 
 class DbRegistry:
-    def __init__(self, dbs_root: Path, *, max_dbs: int = 8) -> None:
+    def __init__(self, dbs_root: Path, *, max_dbs: int = 3) -> None:
         self.dbs_root = dbs_root.expanduser().resolve()
         self.max_dbs = max_dbs
         self._stores: OrderedDict[str, tuple[tuple[Any, ...], DbStore]] = OrderedDict()
@@ -181,16 +236,35 @@ class DbRegistry:
             if cached and cached[0] == fingerprint:
                 self._stores.move_to_end(name)
                 return cached[1]
+            if cached:
+                cached[1].close()
             store = DbStore(_context_from_root(root, name))
             self._stores[name] = (fingerprint, store)
             self._stores.move_to_end(name)
             while len(self._stores) > self.max_dbs:
-                self._stores.popitem(last=False)
+                _old_name, (_old_fingerprint, old_store) = (
+                    self._stores.popitem(last=False)
+                )
+                old_store.close()
             return store
 
     def invalidate(self, db_name: str) -> None:
         with self._lock:
-            self._stores.pop(db_name, None)
+            cached = self._stores.pop(db_name, None)
+        if cached:
+            cached[1].close()
+
+    def close(self) -> None:
+        with self._lock:
+            stores = [store for _fingerprint, store in self._stores.values()]
+            self._stores.clear()
+        for store in stores:
+            store.close()
+
+    @property
+    def cached_count(self) -> int:
+        with self._lock:
+            return len(self._stores)
 
     def _fingerprint(self, root: Path, name: str) -> tuple[Any, ...]:
         catalog_path = root / "catalog.sqlite"

@@ -52,6 +52,48 @@ def add_search_request_arguments(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="Repeatable semantic-only hypothesis; maximum three",
     )
+    parser.add_argument(
+        "--literal-facet",
+        action="append",
+        default=[],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--semantic-facet",
+        action="append",
+        default=[],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-policy",
+        choices=["wide", "narrow"],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-target",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-minimum",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-maximum",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-max-chunks",
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--coverage-allow-weak",
+        choices=["true", "false"],
+        help=argparse.SUPPRESS,
+    )
 
 
 def request_from_cli(
@@ -74,6 +116,9 @@ def request_from_cli(
                 getattr(args, "entity", None),
                 getattr(args, "facet", None),
                 getattr(args, "semantic_hypothesis", None),
+                getattr(args, "literal_facet", None),
+                getattr(args, "semantic_facet", None),
+                getattr(args, "coverage_policy", None),
             ]
         ):
             raise SearchRequestError(
@@ -91,6 +136,30 @@ def request_from_cli(
         return normalize_search_request(payload)
 
     question = stdin_text.strip() if bool(getattr(args, "stdin", False)) else positional_question
+    facets: list[Any] = list(getattr(args, "facet", []) or [])
+    facets.extend(
+        {"kind": "literal", "query": value}
+        for value in (getattr(args, "literal_facet", []) or [])
+    )
+    facets.extend(
+        {"kind": "semantic", "query": value}
+        for value in (getattr(args, "semantic_facet", []) or [])
+    )
+    coverage: dict[str, Any] = {}
+    if getattr(args, "coverage_policy", None):
+        coverage["policy"] = args.coverage_policy
+    if getattr(args, "coverage_target", None) is not None:
+        coverage["target_distinct_documents"] = args.coverage_target
+    if getattr(args, "coverage_minimum", None) is not None:
+        coverage["minimum_desired_documents"] = args.coverage_minimum
+    if getattr(args, "coverage_maximum", None) is not None:
+        coverage["maximum_distinct_documents"] = args.coverage_maximum
+    if getattr(args, "coverage_max_chunks", None) is not None:
+        coverage["max_chunks_per_document"] = args.coverage_max_chunks
+    if getattr(args, "coverage_allow_weak", None) is not None:
+        coverage["allow_weak_related"] = (
+            args.coverage_allow_weak == "true"
+        )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "original_question": question,
@@ -99,10 +168,11 @@ def request_from_cli(
             getattr(args, "literal_identifier", []) or []
         ),
         "entities": list(getattr(args, "entity", []) or []),
-        "facets": list(getattr(args, "facet", []) or []),
+        "facets": facets,
         "inferred_concepts": list(
             getattr(args, "semantic_hypothesis", []) or []
         ),
+        "coverage": coverage,
     }
     return normalize_search_request(payload)
 
@@ -157,9 +227,30 @@ def request_to_cli_arguments(request: dict[str, Any]) -> list[str]:
     for value in normalized["entities"]:
         arguments.extend(["--entity", value])
     for facet in normalized["facets"]:
-        arguments.extend(["--facet", facet["query"]])
+        option = (
+            "--literal-facet"
+            if facet["kind"] == "literal"
+            else "--semantic-facet"
+        )
+        arguments.extend([option, facet["query"]])
     for concept in normalized["inferred_concepts"]:
         arguments.extend(["--semantic-hypothesis", concept["term"]])
+    coverage = normalized["coverage"]
+    arguments.extend(["--coverage-policy", coverage["policy"]])
+    arguments.extend(
+        [
+            "--coverage-target",
+            str(coverage["target_distinct_documents"]),
+            "--coverage-minimum",
+            str(coverage["minimum_desired_documents"]),
+            "--coverage-maximum",
+            str(coverage["maximum_distinct_documents"]),
+            "--coverage-max-chunks",
+            str(coverage["max_chunks_per_document"]),
+            "--coverage-allow-weak",
+            "true" if coverage["allow_weak_related"] else "false",
+        ]
+    )
     return arguments
 
 
