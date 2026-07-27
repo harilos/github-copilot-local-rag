@@ -1289,7 +1289,11 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "token_hex",
                 return_value="expected-generation",
             ),
-            mock.patch.object(SEARCH.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                SEARCH.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen,
             mock.patch.object(SEARCH, "_read_state", return_value=child_state),
             mock.patch.object(SEARCH, "_healthcheck", return_value=True),
             mock.patch.object(SEARCH, "_terminate_process_tree") as terminate,
@@ -1304,6 +1308,15 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(child_state, state)
         terminate.assert_not_called()
+        creationflags = popen.call_args.kwargs["creationflags"]
+        self.assertTrue(
+            creationflags
+            & getattr(
+                SEARCH.subprocess,
+                "CREATE_NO_WINDOW",
+                0x08000000,
+            )
+        )
 
     def test_non_windows_start_rejects_different_launcher_and_daemon_pids(self) -> None:
         state = {

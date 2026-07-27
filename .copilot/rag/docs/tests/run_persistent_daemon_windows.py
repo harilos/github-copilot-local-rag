@@ -596,6 +596,11 @@ class PersistentDaemonWindowsRunner:
                 "exact" in set(item.get("signals") or [])
                 for item in background
             ),
+            "background_neighbor_exact_signal_count": sum(
+                item.get("support_kind") == "anchored_neighbor"
+                and "exact" in set(item.get("signals") or [])
+                for item in background
+            ),
             "evidence_paths": sorted(
                 {
                     str((item.get("source") or {}).get("path") or "")
@@ -1644,7 +1649,10 @@ class PersistentDaemonWindowsRunner:
                     row.get("evidence_neighbor_exact_signal_count") or 0
                 )
                 == 0
-                and int(row.get("background_exact_signal_count") or 0) == 0
+                and int(
+                    row.get("background_neighbor_exact_signal_count") or 0
+                )
+                == 0
                 and not row.get("unmatched_identifiers")
                 and set(item.get("expected_matched_identifiers") or [])
                 <= set(row.get("raw_verified_identifiers") or [])
@@ -1772,7 +1780,9 @@ class PersistentDaemonWindowsRunner:
                         row.get("evidence_neighbor_exact_signal_count") or 0
                     )
                     == 0
-                    and int(row.get("background_exact_signal_count") or 0)
+                    and int(
+                        row.get("background_neighbor_exact_signal_count") or 0
+                    )
                     == 0
                     and not row.get("unmatched_identifiers")
                     and set(expectation.get("identifiers") or [])

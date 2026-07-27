@@ -1444,6 +1444,7 @@ def _start_daemon(
             popen_kwargs["creationflags"] = (
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             )
         else:
             popen_kwargs["start_new_session"] = True
@@ -1479,6 +1480,11 @@ def _start_daemon(
                         subprocess,
                         "CREATE_NEW_PROCESS_GROUP",
                         0,
+                    )
+                    | getattr(
+                        subprocess,
+                        "CREATE_NO_WINDOW",
+                        0x08000000,
                     ),
                 )
         while time.monotonic() < deadline:
