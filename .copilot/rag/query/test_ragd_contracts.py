@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -114,11 +115,20 @@ class PersistentManagerTests(unittest.TestCase):
                 "remaining_deadline_ms": 500,
             }
         )
-        self.assertEqual("db_release_in_progress", blocked["error_kind"])
+        expected_block = (
+            "daemon_restarting_for_maintenance"
+            if os.name == "nt"
+            else "db_release_in_progress"
+        )
+        self.assertEqual(expected_block, blocked["error_kind"])
         mismatch = manager.resume_db("ac-rag", lease_id="lease-b")
         self.assertEqual("release_lease_mismatch", mismatch["status"])
         resumed = manager.resume_db("ac-rag", lease_id="lease-a")
         self.assertEqual("db_resumed", resumed["status"])
+        self.assertEqual(
+            os.name == "nt",
+            resumed["manager_restart_required"],
+        )
         manager.shutdown()
 
     def test_windows_release_blocks_all_dbs_until_manager_restart(self) -> None:

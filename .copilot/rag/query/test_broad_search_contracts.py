@@ -214,6 +214,10 @@ class StructuredRequestTests(unittest.TestCase):
         self.assertEqual(["A2W"], store.exact_queries)
         self.assertNotIn("air-to-water", store.exact_queries)
 
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "macOS-specific cold ONNX deadline policy",
+    )
     def test_macos_cold_dense_is_deferred_but_warm_dense_runs(self) -> None:
         request = normalize_search_request(
             {"original_question": "broad topic"}
