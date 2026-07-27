@@ -11,6 +11,18 @@ if [ ! -d "$PAYLOAD_DIR" ]; then
 fi
 
 mkdir -p "$TARGET_DIR"
+
+RUNTIME_PYTHON="$TARGET_DIR/rag/query/.venv/bin/python"
+COMPLETION_MARKER="$TARGET_DIR/rag/query/.venv/.rag-deps-installed"
+PRE_UPDATE_MARKER=""
+if [ -f "$COMPLETION_MARKER" ]; then
+  PRE_UPDATE_MARKER="${COMPLETION_MARKER}.pre-update.$$"
+  if ! mv "$COMPLETION_MARKER" "$PRE_UPDATE_MARKER"; then
+    echo "setup_required: could not close the Local RAG lookup gate before update." >&2
+    exit 1
+  fi
+fi
+
 (
   cd "$PAYLOAD_DIR"
   tar \
@@ -31,14 +43,19 @@ mkdir -p "$TARGET_DIR"
   tar -xf -
 )
 
-LEGACY_PYTHON="$TARGET_DIR/rag/query/.venv/bin/python"
-LEGACY_MARKER="$TARGET_DIR/rag/query/.venv/.rag-deps-installed"
-if [ -x "$LEGACY_PYTHON" ] && [ -f "$LEGACY_MARKER" ] &&
-   [ "$(tr -d '\r\n ' < "$LEGACY_MARKER")" = "ok" ]; then
-  if ! "$LEGACY_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
-      --migrate-legacy-marker --format json >/dev/null; then
-    echo "Warning: existing RAG runtime needs setup verification before lookup." >&2
+if [ -x "$RUNTIME_PYTHON" ]; then
+  if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
+      --refresh-completion-marker --format json >/dev/null; then
+    echo "setup_required: existing RAG runtime verification failed; run Local RAG setup before lookup." >&2
+    exit 1
   fi
+elif [ -n "$PRE_UPDATE_MARKER" ]; then
+  echo "setup_required: the existing Local RAG runtime Python is missing after update." >&2
+  exit 1
+fi
+
+if [ -n "$PRE_UPDATE_MARKER" ]; then
+  rm -f "$PRE_UPDATE_MARKER"
 fi
 
 echo "Installed Copilot Local RAG files to: $TARGET_DIR"

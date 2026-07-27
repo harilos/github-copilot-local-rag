@@ -46,10 +46,48 @@ from software_rag_tool.network import NetworkResolution
 from setup_contract import (
     completion_contract_payload,
     completion_contract_valid,
+    requirements_fingerprint,
 )
 
 
 class SetupNetworkContractTests(unittest.TestCase):
+    @staticmethod
+    def _complete_verification() -> dict[str, object]:
+        return {
+            "status": "ready",
+            "setup_complete": True,
+            "lookup_ready": True,
+            "runtime": {
+                "venv": "pass",
+                "dependencies": "pass",
+                "requirements": "pass",
+                "pip_check": "pass",
+                "model_files": "pass",
+                "model_manifest": "pass",
+                "model_load": "pass",
+                "embedding_dimension": 256,
+                "list_dbs": "pass",
+            },
+            "databases": {"healthy": ["ac-rag"], "unhealthy": []},
+            "warnings": [],
+            "next_action": None,
+        }
+
+    @classmethod
+    def _write_current_valid_marker(cls, marker: Path) -> None:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                completion_contract_payload(
+                    runtime=cls._complete_verification()["runtime"],
+                    rag_root=SETUP.RAG_ROOT,
+                    verified_at="2026-07-27T00:00:00+00:00",
+                )
+            ),
+            encoding="utf-8",
+        )
+        assert completion_contract_valid(marker, SETUP.RAG_ROOT)[0]
+
     def test_completion_contract_rejects_corruption_and_stale_requirements(
         self,
     ) -> None:
@@ -73,6 +111,7 @@ class SetupNetworkContractTests(unittest.TestCase):
             runtime = {
                 "venv": "pass",
                 "dependencies": "pass",
+                "requirements": "pass",
                 "pip_check": "pass",
                 "model_files": "pass",
                 "model_manifest": "pass",
@@ -95,6 +134,15 @@ class SetupNetworkContractTests(unittest.TestCase):
                 (True, None),
                 completion_contract_valid(marker, rag_root),
             )
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            payload["runtime"].pop("requirements")
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(
+                (False, "completion_marker_requirements"),
+                completion_contract_valid(marker, rag_root),
+            )
+            payload["runtime"]["requirements"] = "pass"
+            marker.write_text(json.dumps(payload), encoding="utf-8")
             nested.write_text("chromadb>=2\n", encoding="utf-8")
             valid, reason = completion_contract_valid(marker, rag_root)
             self.assertFalse(valid)
@@ -103,6 +151,78 @@ class SetupNetworkContractTests(unittest.TestCase):
             self.assertFalse(
                 completion_contract_valid(marker, rag_root)[0]
             )
+
+    def test_recursive_pep508_requirements_are_checked_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "nested.txt"
+            nested.write_text(
+                (
+                    'Demo-Pkg[feature]>=1.5; python_version >= "3.0"\n'
+                    'Skipped-Pkg>=999; python_version < "1.0"\n'
+                ),
+                encoding="utf-8",
+            )
+            main = root / "requirements.txt"
+            main.write_text(
+                "-r nested.txt\n--requirement=nested.txt\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                SETUP_VERIFICATION.importlib.metadata,
+                "version",
+                return_value="1.7",
+            ) as version:
+                checked = (
+                    SETUP_VERIFICATION._verify_declared_requirements(
+                        (main,),
+                    )
+                )
+            self.assertEqual(1, checked)
+            version.assert_called_once_with("Demo-Pkg")
+
+    def test_requirements_check_rejects_unsatisfied_specifier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            requirements = Path(temporary) / "requirements.txt"
+            requirements.write_text(
+                "Demo-Pkg>=2.0\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    SETUP_VERIFICATION.importlib.metadata,
+                    "version",
+                    return_value="1.9",
+                ),
+                self.assertRaisesRegex(RuntimeError, "does not satisfy"),
+            ):
+                SETUP_VERIFICATION._verify_declared_requirements(
+                    (requirements,),
+                )
+
+    def test_verification_reports_requirements_failure_before_pip_check(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(
+                SETUP_VERIFICATION.importlib,
+                "import_module",
+            ),
+            mock.patch.object(
+                SETUP_VERIFICATION,
+                "_verify_declared_requirements",
+                side_effect=RuntimeError("version mismatch"),
+            ),
+            mock.patch.object(
+                SETUP_VERIFICATION.subprocess,
+                "run",
+                side_effect=AssertionError("pip check must not run"),
+            ),
+        ):
+            payload = SETUP_VERIFICATION.verify_installation()
+        self.assertFalse(payload["setup_complete"])
+        self.assertEqual("requirements", payload["failed_check"])
+        self.assertEqual("fail", payload["runtime"]["requirements"])
 
     def test_verify_only_is_json_pure_and_does_not_mutate_or_run_installers(
         self,
@@ -154,6 +274,377 @@ class SetupNetworkContractTests(unittest.TestCase):
         self.assertFalse(
             resolve.call_args.kwargs["external_operation"]
         )
+
+    def test_refresh_completion_marker_is_offline_atomic_and_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            marker.write_text('{"stale":true}\n', encoding="utf-8")
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ) as resolve,
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=self._complete_verification(),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_child",
+                    side_effect=AssertionError("installer must not run"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = SETUP.main()
+            self.assertEqual(0, code)
+            payload = json.loads(stdout.getvalue())
+            marker_result = payload["completion_marker"]
+            self.assertEqual("refreshed", marker_result["action"])
+            self.assertTrue(marker_result["refreshed"])
+            self.assertTrue(marker_result["valid"])
+            self.assertEqual(
+                requirements_fingerprint(SETUP.RAG_ROOT),
+                marker_result["requirements_sha256"],
+            )
+            self.assertTrue(
+                completion_contract_valid(marker, SETUP.RAG_ROOT)[0]
+            )
+            self.assertFalse(
+                resolve.call_args.kwargs["external_operation"]
+            )
+
+    def test_refresh_failure_invalidates_existing_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self._write_current_valid_marker(marker)
+            verification = {
+                "status": "error",
+                "setup_complete": False,
+                "lookup_ready": False,
+                "runtime": {"venv": "pass", "model_load": "fail"},
+                "databases": {"healthy": [], "unhealthy": []},
+                "warnings": [],
+                "failed_check": "model_load",
+                "error_kind": "RuntimeError",
+                "next_action": "Run setup again.",
+            }
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=verification,
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_write_completion_marker",
+                    side_effect=AssertionError("marker must not be written"),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = SETUP.main()
+            self.assertEqual(1, code)
+            self.assertFalse(marker.exists())
+
+    def test_refresh_rejects_requirements_change_during_verification(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self._write_current_valid_marker(marker)
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "requirements_fingerprint",
+                    side_effect=["before", "after"],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=self._complete_verification(),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_write_completion_marker",
+                    side_effect=AssertionError("marker must not be written"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = SETUP.main()
+            self.assertEqual(1, code)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                "requirements_changed_during_verification",
+                payload["error_kind"],
+            )
+            self.assertFalse(marker.exists())
+
+    def test_refresh_removes_marker_when_postvalidation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self._write_current_valid_marker(marker)
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=self._complete_verification(),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "completion_contract_valid",
+                    return_value=(False, "completion_marker_model_load"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = SETUP.main()
+            self.assertEqual(1, code)
+            self.assertFalse(marker.exists())
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["setup_complete"])
+            self.assertEqual(
+                "completion_marker_postvalidation_failed",
+                payload["error_kind"],
+            )
+
+    def test_refresh_write_failure_leaves_lookup_gate_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self._write_current_valid_marker(marker)
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=self._complete_verification(),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_write_completion_marker",
+                    side_effect=PermissionError("write denied"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = SETUP.main()
+            self.assertEqual(1, code)
+            self.assertFalse(marker.exists())
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["setup_complete"])
+            self.assertEqual(
+                "completion_marker_write_failed",
+                payload["error_kind"],
+            )
+
+    def test_refresh_rejects_final_fingerprint_change_after_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            venv = root / ".venv"
+            python = venv / "bin" / "python"
+            marker = venv / ".rag-deps-installed"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self._write_current_valid_marker(marker)
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "setup.py",
+                        "--refresh-completion-marker",
+                        "--format",
+                        "json",
+                    ],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_setup_paths",
+                    return_value=(root, venv, python, marker),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "resolve_network_configuration",
+                    return_value=self._network(
+                        selected_route="not_required"
+                    ),
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "requirements_fingerprint",
+                    side_effect=["same", "same", "changed"],
+                ),
+                mock.patch.object(
+                    SETUP,
+                    "_run_verification",
+                    return_value=self._complete_verification(),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = SETUP.main()
+            self.assertEqual(1, code)
+            self.assertFalse(marker.exists())
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["setup_complete"])
+            self.assertEqual(
+                "requirements_changed_during_verification",
+                payload["error_kind"],
+            )
+
+    def test_atomic_marker_replace_failure_preserves_old_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / ".rag-deps-installed"
+            self._write_current_valid_marker(marker)
+            original = marker.read_bytes()
+            with (
+                mock.patch.object(
+                    SETUP.os,
+                    "replace",
+                    side_effect=PermissionError("replace denied"),
+                ),
+                self.assertRaises(PermissionError),
+            ):
+                SETUP._write_completion_marker(
+                    marker,
+                    self._complete_verification(),
+                )
+            self.assertEqual(original, marker.read_bytes())
+            self.assertEqual(
+                [],
+                list(marker.parent.glob(f".{marker.name}.*")),
+            )
 
     def test_legacy_marker_migration_is_offline_and_runs_no_installer(
         self,

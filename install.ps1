@@ -12,6 +12,20 @@ if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
 
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
+$RuntimePython = Join-Path $Target "rag\query\.venv\Scripts\python.exe"
+$CompletionMarker = Join-Path $Target "rag\query\.venv\.rag-deps-installed"
+$PreUpdateMarker = $null
+if (Test-Path -LiteralPath $CompletionMarker -PathType Leaf) {
+    $PreUpdateMarker = (
+        $CompletionMarker +
+        ".pre-update." +
+        $PID +
+        "." +
+        [Guid]::NewGuid().ToString("N")
+    )
+    [System.IO.File]::Move($CompletionMarker, $PreUpdateMarker)
+}
+
 function Test-InstallPayloadExcluded {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
@@ -63,22 +77,24 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
     }
 }
 
-$LegacyPython = Join-Path $Target "rag\query\.venv\Scripts\python.exe"
-$LegacyMarker = Join-Path $Target "rag\query\.venv\.rag-deps-installed"
-if (
-    (Test-Path -LiteralPath $LegacyPython -PathType Leaf) -and
-    (Test-Path -LiteralPath $LegacyMarker -PathType Leaf) -and
-    ((Get-Content -LiteralPath $LegacyMarker -Raw).Trim() -ceq "ok")
-) {
-    try {
-        & $LegacyPython (Join-Path $Target "rag\query\setup.py") `
-            --migrate-legacy-marker --format json | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Existing RAG runtime needs setup verification before lookup."
-        }
-    } catch {
-        Write-Warning "Existing RAG runtime needs setup verification before lookup."
+if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
+    & $RuntimePython (Join-Path $Target "rag\query\setup.py") `
+        --refresh-completion-marker --format json | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw (
+            "setup_required: existing RAG runtime verification failed; " +
+            "run Local RAG setup before lookup."
+        )
     }
+} elseif ($null -ne $PreUpdateMarker) {
+    throw (
+        "setup_required: the existing Local RAG runtime Python is missing " +
+        "after update."
+    )
+}
+
+if ($null -ne $PreUpdateMarker) {
+    [System.IO.File]::Delete($PreUpdateMarker)
 }
 
 Write-Host "Installed Copilot Local RAG files to: $Target"

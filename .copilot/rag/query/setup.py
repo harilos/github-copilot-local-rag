@@ -26,7 +26,11 @@ from software_rag_tool.network import (
     redact_text,
     resolve_network_configuration,
 )
-from setup_contract import completion_contract_payload
+from setup_contract import (
+    completion_contract_payload,
+    completion_contract_valid,
+    requirements_fingerprint,
+)
 
 
 def main() -> int:
@@ -50,6 +54,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--refresh-completion-marker",
+        action="store_true",
+        help=(
+            "Verify the existing runtime offline and atomically refresh its "
+            "machine-verifiable completion marker"
+        ),
+    )
+    parser.add_argument(
         "--prepare-model",
         action="store_true",
         help="Deprecated: model preparation is now the default",
@@ -70,15 +82,27 @@ def main() -> int:
         parser.error("--prepare-model and --no-prepare-model cannot be used together")
     if args.verify_only and (args.force_model or args.prepare_model):
         parser.error("--verify-only cannot prepare or force a model")
-    if args.verify_only and args.migrate_legacy_marker:
-        parser.error(
-            "--verify-only and --migrate-legacy-marker cannot be combined"
+    offline_modes = sum(
+        bool(value)
+        for value in (
+            args.verify_only,
+            args.migrate_legacy_marker,
+            args.refresh_completion_marker,
         )
-    if args.migrate_legacy_marker and (
+    )
+    if offline_modes > 1:
+        parser.error(
+            "--verify-only, --migrate-legacy-marker, and "
+            "--refresh-completion-marker are mutually exclusive"
+        )
+    if (
+        args.migrate_legacy_marker or args.refresh_completion_marker
+    ) and (
         args.force_model or args.prepare_model or args.no_prepare_model
     ):
         parser.error(
-            "--migrate-legacy-marker cannot install or prepare components"
+            "completion-marker maintenance cannot install or prepare "
+            "components"
         )
 
     try:
@@ -89,7 +113,9 @@ def main() -> int:
             network_config=args.network_config,
             ignore_network_config=args.ignore_network_config,
             external_operation=not (
-                args.verify_only or args.migrate_legacy_marker
+                args.verify_only
+                or args.migrate_legacy_marker
+                or args.refresh_completion_marker
             ),
         )
     except NetworkConfigError as exc:
@@ -101,12 +127,7 @@ def main() -> int:
         _emit(payload, args.format)
         return 2
 
-    here = Path(__file__).resolve().parent
-    venv = here / ".venv"
-    python = venv / (
-        "Scripts/python.exe" if sys.platform.startswith("win") else "bin/python"
-    )
-    marker = venv / ".rag-deps-installed"
+    here, venv, python, marker = _setup_paths()
     if args.migrate_legacy_marker and not _is_legacy_completion_marker(
         marker
     ):
@@ -121,13 +142,29 @@ def main() -> int:
         )
         _emit(payload, args.format)
         return 1
+    if args.refresh_completion_marker:
+        try:
+            _invalidate_completion_marker(marker)
+        except SetupStepError as exc:
+            payload = _error_payload(
+                failed_check=exc.phase,
+                error_kind=exc.error_kind,
+                message=str(exc),
+                network=network,
+            )
+            _emit(payload, args.format)
+            return 1
     network_child_environment = dict(network.environment)
     route_token = secrets.token_urlsafe(24)
     network_child_environment[ROUTE_TOKEN] = route_token
     network_child_environment["PIP_CONFIG_FILE"] = os.devnull
     network_child_environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
 
-    if not (args.verify_only or args.migrate_legacy_marker):
+    if not (
+        args.verify_only
+        or args.migrate_legacy_marker
+        or args.refresh_completion_marker
+    ):
         try:
             _invalidate_completion_marker(marker)
             if not python.exists():
@@ -177,15 +214,61 @@ def main() -> int:
             _emit(payload, args.format)
             return 1
 
+    requirements_before: str | None = None
+    if args.refresh_completion_marker:
+        try:
+            requirements_before = requirements_fingerprint(RAG_ROOT)
+        except OSError as exc:
+            payload = _error_payload(
+                failed_check="completion_marker",
+                error_kind="requirements_fingerprint_failed",
+                message=str(exc),
+                network=network,
+            )
+            _emit(payload, args.format)
+            return 1
+
     verification = _run_verification(python)
     verification["network"] = network.details
     verification["warnings"] = [
         *network.warnings,
         *(verification.get("warnings") or []),
     ]
+    requirements_after: str | None = None
+    if args.refresh_completion_marker:
+        try:
+            requirements_after = requirements_fingerprint(RAG_ROOT)
+        except OSError as exc:
+            verification = _error_payload(
+                failed_check="completion_marker",
+                error_kind="requirements_fingerprint_failed",
+                message=str(exc),
+                network=network,
+            )
+        if (
+            verification.get("setup_complete")
+            and requirements_after != requirements_before
+        ):
+            verification = _error_payload(
+                failed_check="completion_marker",
+                error_kind="requirements_changed_during_verification",
+                message=(
+                    "The requirements fingerprint changed while runtime "
+                    "verification was running."
+                ),
+                network=network,
+            )
     if verification.get("setup_complete") and not args.verify_only:
         try:
-            _write_completion_marker(marker, verification)
+            _write_completion_marker(
+                marker,
+                verification,
+                requirements_sha256=(
+                    requirements_before
+                    if args.refresh_completion_marker
+                    else None
+                ),
+            )
         except OSError as exc:
             verification = _error_payload(
                 failed_check="completion_marker",
@@ -193,8 +276,93 @@ def main() -> int:
                 message=str(exc),
                 network=network,
             )
+        else:
+            if args.refresh_completion_marker:
+                try:
+                    requirements_final = requirements_fingerprint(RAG_ROOT)
+                except OSError as exc:
+                    discard_error = _discard_completion_marker(marker)
+                    message = (
+                        "The requirements fingerprint could not be read after "
+                        f"the completion marker was refreshed: {exc}"
+                    )
+                    if discard_error:
+                        message += (
+                            "; the invalid marker could not be removed: "
+                            f"{discard_error}"
+                        )
+                    verification = _error_payload(
+                        failed_check="completion_marker",
+                        error_kind="requirements_fingerprint_failed",
+                        message=message,
+                        network=network,
+                    )
+                else:
+                    if not (
+                        requirements_before
+                        == requirements_after
+                        == requirements_final
+                    ):
+                        discard_error = _discard_completion_marker(marker)
+                        message = (
+                            "The requirements fingerprint changed while the "
+                            "completion marker was being refreshed."
+                        )
+                        if discard_error:
+                            message += (
+                                "; the invalid marker could not be removed: "
+                                f"{discard_error}"
+                            )
+                        verification = _error_payload(
+                            failed_check="completion_marker",
+                            error_kind=(
+                                "requirements_changed_during_verification"
+                            ),
+                            message=message,
+                            network=network,
+                        )
+                    else:
+                        valid, reason = completion_contract_valid(
+                            marker,
+                            RAG_ROOT,
+                        )
+                        if not valid:
+                            discard_error = _discard_completion_marker(marker)
+                            message = (
+                                "The refreshed completion marker failed "
+                                f"post-write validation: {reason}"
+                            )
+                            if discard_error:
+                                message += (
+                                    "; the invalid marker could not be "
+                                    f"removed: {discard_error}"
+                                )
+                            verification = _error_payload(
+                                failed_check="completion_marker",
+                                error_kind=(
+                                    "completion_marker_postvalidation_failed"
+                                ),
+                                message=message,
+                                network=network,
+                            )
+                        else:
+                            verification["completion_marker"] = {
+                                "action": "refreshed",
+                                "refreshed": True,
+                                "valid": True,
+                                "requirements_sha256": requirements_final,
+                            }
     _emit(verification, args.format)
     return 0 if verification.get("setup_complete") else 1
+
+
+def _setup_paths() -> tuple[Path, Path, Path, Path]:
+    here = Path(__file__).resolve().parent
+    venv = here / ".venv"
+    python = venv / (
+        "Scripts/python.exe" if sys.platform.startswith("win") else "bin/python"
+    )
+    return here, venv, python, venv / ".rag-deps-installed"
 
 
 class SetupStepError(RuntimeError):
@@ -299,12 +467,19 @@ def _run_verification(python: Path) -> dict[str, Any]:
 def _write_completion_marker(
     marker: Path,
     verification: dict[str, Any],
+    *,
+    requirements_sha256: str | None = None,
 ) -> None:
     payload = completion_contract_payload(
         runtime=verification.get("runtime") or {},
         rag_root=RAG_ROOT,
         verified_at=datetime.now(timezone.utc).isoformat(),
     )
+    if requirements_sha256 is not None:
+        # Bind refresh output to the exact requirements that were verified.
+        # If requirements change before or after os.replace and cleanup then
+        # fails, normal lookup still rejects this marker by fingerprint.
+        payload["requirements_sha256"] = requirements_sha256
     marker.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{marker.name}.",
@@ -334,6 +509,14 @@ def _invalidate_completion_marker(marker: Path) -> None:
             -1,
             str(exc),
         ) from None
+
+
+def _discard_completion_marker(marker: Path) -> str | None:
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as exc:
+        return redact_text(str(exc))
+    return None
 
 
 def _is_legacy_completion_marker(marker: Path) -> bool:

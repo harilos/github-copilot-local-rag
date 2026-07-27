@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -19,6 +21,7 @@ DBS_ROOT = Path(
 sys.path.insert(0, str(TOOL_ROOT))
 
 REQUIRED_IMPORTS = (
+    "packaging",
     "chromadb",
     "numpy",
     "onnxruntime",
@@ -50,6 +53,7 @@ def verify_installation() -> dict[str, Any]:
     runtime: dict[str, Any] = {
         "venv": "pass",
         "dependencies": "pending",
+        "requirements": "pending",
         "pip_check": "pending",
         "model_files": "pending",
         "model_manifest": "pending",
@@ -68,6 +72,24 @@ def verify_installation() -> dict[str, Any]:
     except Exception as exc:
         runtime["dependencies"] = "fail"
         failed_check = "dependencies"
+        error_kind = type(exc).__name__
+        return _result(runtime, [], [], warnings, failed_check, error_kind)
+
+    try:
+        checked_requirements = _verify_declared_requirements(
+            (
+                RAG_ROOT / "query" / "requirements.txt",
+                RAG_ROOT
+                / "gen_db"
+                / "software_rag_tool"
+                / "requirements.txt",
+            )
+        )
+        runtime["requirements"] = "pass"
+        runtime["requirements_checked"] = checked_requirements
+    except Exception as exc:
+        runtime["requirements"] = "fail"
+        failed_check = "requirements"
         error_kind = type(exc).__name__
         return _result(runtime, [], [], warnings, failed_check, error_kind)
 
@@ -228,6 +250,96 @@ def verify_installation() -> dict[str, Any]:
         failed_check,
         error_kind,
     )
+
+
+def _verify_declared_requirements(paths: tuple[Path, ...]) -> int:
+    requirements: list[Any] = []
+    visited: set[Path] = set()
+    for path in paths:
+        requirements.extend(_read_requirements(path, visited))
+
+    checked = 0
+    for requirement in requirements:
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        try:
+            installed_version = importlib.metadata.version(requirement.name)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise RuntimeError(
+                f"required distribution is not installed: {requirement.name}"
+            ) from exc
+        if requirement.specifier and not requirement.specifier.contains(
+            installed_version,
+            prereleases=True,
+        ):
+            raise RuntimeError(
+                f"installed {requirement.name} {installed_version} does not "
+                f"satisfy {requirement.specifier}"
+            )
+        checked += 1
+    return checked
+
+
+def _read_requirements(
+    path: Path,
+    visited: set[Path],
+) -> list[Any]:
+    try:
+        from packaging.requirements import InvalidRequirement, Requirement
+    except ModuleNotFoundError:
+        # Unit/bootstrap environments may expose packaging only through pip.
+        # The installed RAG venv still verifies standalone ``packaging`` in
+        # REQUIRED_IMPORTS before this parser is reached.
+        from pip._vendor.packaging.requirements import (  # type: ignore
+            InvalidRequirement,
+            Requirement,
+        )
+
+    resolved = path.expanduser().resolve()
+    if resolved in visited:
+        return []
+    visited.add(resolved)
+    try:
+        lines = resolved.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"requirements file is unreadable: {resolved}"
+        ) from exc
+
+    parsed: list[Any] = []
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = re.split(r"\s+#", raw_line, maxsplit=1)[0].strip()
+        if not line or line.startswith("#"):
+            continue
+        include = _requirement_include_path(line)
+        if include is not None:
+            parsed.extend(
+                _read_requirements(resolved.parent / include, visited)
+            )
+            continue
+        if line.startswith("-"):
+            raise RuntimeError(
+                f"unsupported requirements option at "
+                f"{resolved}:{line_number}"
+            )
+        try:
+            parsed.append(Requirement(line))
+        except InvalidRequirement as exc:
+            raise RuntimeError(
+                f"invalid requirement at {resolved}:{line_number}"
+            ) from exc
+    return parsed
+
+
+def _requirement_include_path(line: str) -> str | None:
+    if line.startswith("-r") and line != "-r":
+        return line[2:].strip()
+    if line.startswith("--requirement="):
+        return line.split("=", 1)[1].strip()
+    parts = line.split(maxsplit=1)
+    if len(parts) == 2 and parts[0] in {"-r", "--requirement"}:
+        return parts[1].strip()
+    return None
 
 
 def _verify_database(name: str) -> None:
@@ -395,7 +507,7 @@ def _next_action(failed_check: str | None) -> str:
             "Run normal setup again. If TLS fails, confirm the company CA "
             "certificate and proxy configuration."
         )
-    if failed_check == "dependencies":
+    if failed_check in {"dependencies", "requirements"}:
         return "Run normal setup again to install the required dependencies."
     return "Run normal setup again and inspect the sanitized stderr diagnostics."
 

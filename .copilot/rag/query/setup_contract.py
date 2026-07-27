@@ -10,6 +10,7 @@ COMPLETION_SCHEMA = "local-rag.setup-completion.v1"
 REQUIRED_RUNTIME_PASSES = (
     "venv",
     "dependencies",
+    "requirements",
     "pip_check",
     "model_files",
     "model_manifest",
