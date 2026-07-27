@@ -28,6 +28,12 @@ from software_rag_tool.search_api import (
     normalize_search_contract,
     payload_to_text,
 )
+from software_rag_tool.search_request import (
+    SearchRequestError,
+    add_search_request_arguments,
+    request_from_cli,
+    request_to_cli_arguments,
+)
 from setup_contract import completion_contract_valid
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
@@ -112,13 +118,24 @@ def main() -> None:
         action="store_true",
         help="Require an actual daemon response; disables cold fast path and synchronous fallback.",
     )
+    add_search_request_arguments(parser)
     args = parser.parse_args()
     if args.daemon_fallback not in {"on", "off"}:
         parser.error("--daemon-fallback must be on or off")
 
-    question = sys.stdin.read().strip() if args.stdin else " ".join(args.question).strip()
-    if not question:
-        parser.error("question is required unless --stdin provides input")
+    if args.compact_json:
+        args.format = "json"
+    stdin_text = sys.stdin.read() if args.stdin else ""
+    try:
+        search_request = request_from_cli(
+            args,
+            positional_question=" ".join(args.question).strip(),
+            stdin_text=stdin_text,
+        )
+    except SearchRequestError as exc:
+        parser.error(str(exc))
+    question = str(search_request["original_question"])
+    args.search_request = search_request
     request_started = time.monotonic()
     outer_deadline = _deadline_from_timeout(args.timeout, started=request_started)
     output_reserve = _output_reserve_seconds(
@@ -183,6 +200,7 @@ def main() -> None:
         "retrieval_mode": args.retrieval_mode,
         "adaptive_hybrid": args.retrieval_mode == "hybrid",
         "identifier_diagnostics": not args.disable_identifier_diagnostics,
+        "search_request": search_request,
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
@@ -505,9 +523,8 @@ def _run_sync_script(
     cmd = [
         python,
         str(script),
+        question,
     ]
-    if not args.stdin:
-        cmd.append(question)
     cmd.extend(
         [
             "--db",
@@ -528,8 +545,12 @@ def _run_sync_script(
         cmd.extend(["--retrieval-mode", retrieval_mode])
     else:
         cmd.append("--adaptive-hybrid")
-    if args.stdin:
-        cmd.append("--stdin")
+    cmd.extend(
+        request_to_cli_arguments(
+            getattr(args, "search_request", None)
+            or {"original_question": question}
+        )
+    )
     if args.explain:
         cmd.append("--explain")
     if args.include_db_hint:
@@ -567,7 +588,7 @@ def _run_sync_script(
         completed = _run_sync_child(
             cmd,
             env=env,
-            input_text=question if args.stdin else None,
+            input_text=None,
             timeout=timeout,
         )
         if completed.stderr:
@@ -630,6 +651,13 @@ def _run_sync_script(
                     warnings = list(payload.get("warnings") or [])
                     if DEADLINE_FALLBACK_WARNING not in warnings:
                         warnings.append(DEADLINE_FALLBACK_WARNING)
+                    if (
+                        "dense_discovery_unavailable_within_deadline"
+                        not in warnings
+                    ):
+                        warnings.append(
+                            "dense_discovery_unavailable_within_deadline"
+                        )
                     payload["warnings"] = warnings
                     payload["dense_used"] = False
                     payload["dense_skipped_reason"] = metadata.get(

@@ -119,37 +119,57 @@ def collection_count() -> int:
 
 
 def vector_query(question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+    return vector_query_many([question], top_k=top_k, source=source)[0]
+
+
+def vector_query_many(
+    questions: list[str],
+    top_k: int,
+    source: str = "any",
+) -> list[list[dict[str, Any]]]:
     _require_chromadb()
     validate_embedding_manifest()
+    if not questions:
+        return []
     client = _persistent_client(chroma_dir())
     collection = client.get_collection(name=collection_name())
     embedder = get_embedder()
-    q_embedding = embedder.encode([question], mode="query")[0]
+    query_embeddings = embedder.encode(questions, mode="query")
     where = None if source == "any" else {"source": source}
     result = collection.query(
-        query_embeddings=[q_embedding],
+        query_embeddings=query_embeddings,
         n_results=top_k,
         where=where,
         include=["documents", "metadatas", "distances"],
     )
-
-    rows: list[dict[str, Any]] = []
-    ids = result.get("ids", [[]])[0]
-    docs = result.get("documents", [[]])[0]
-    metas = result.get("metadatas", [[]])[0]
-    distances = result.get("distances", [[]])[0]
-    for rank, (rid, doc, meta, distance) in enumerate(zip(ids, docs, metas, distances), start=1):
-        rows.append(
-            {
-                "rank": rank,
-                "id": rid,
-                "distance": distance,
-                "text": doc,
-                "metadata": meta,
-                "signals": ["dense"],
-            }
-        )
-    return rows
+    output: list[list[dict[str, Any]]] = []
+    all_ids = result.get("ids") or [[] for _ in questions]
+    all_docs = result.get("documents") or [[] for _ in questions]
+    all_metas = result.get("metadatas") or [[] for _ in questions]
+    all_distances = result.get("distances") or [[] for _ in questions]
+    for ids, docs, metas, distances in zip(
+        all_ids,
+        all_docs,
+        all_metas,
+        all_distances,
+    ):
+        rows: list[dict[str, Any]] = []
+        for rank, (rid, doc, meta, distance) in enumerate(
+            zip(ids, docs, metas, distances),
+            start=1,
+        ):
+            rows.append(
+                {
+                    "rank": rank,
+                    "id": rid,
+                    "distance": distance,
+                    "text": doc,
+                    "metadata": meta,
+                    "signals": ["dense"],
+                }
+            )
+        output.append(rows)
+    return output
 
 
 def query(

@@ -32,7 +32,8 @@ database already named by the user.
 ## Rules
 
 - Perform only read-only RAG lookup.
-- Do not create a plan.
+- Do not create a multi-step execution plan. Create only the bounded
+  structured retrieval request described below.
 - Do not inspect RAG source code or implementation files.
 - Do not edit files, databases, indexes, or configuration.
 - Do not invoke Codex, another coding agent, or a subagent.
@@ -42,10 +43,57 @@ database already named by the user.
 - Do not search another database after receiving a result.
 - Do not suggest that the user rewrite the question into search keywords.
 
+## Broad one-shot retrieval planning
+
+Local RAG acts as both an evidence retriever and a broad local-document search
+engine.
+
+Before an ordinary lookup, create exactly one bounded structured retrieval
+request using the current agent's own reasoning. Do not call another model,
+coding agent, Codex subagent, or planner. Planning happens in the current turn
+and does not add another lookup.
+
+Preserve the complete user question verbatim as the final positional
+argument. Extract identifiers and names exactly as written, including case,
+digits, punctuation, hyphens, underscores, dots, slashes, and version
+notation.
+
+Create at most four retrieval facets:
+
+1. One literal facet for important identifiers or names.
+2. Up to three semantic facets covering distinct, relevant perspectives.
+
+For a short definition question, semantic facets may cover uses,
+specifications, decisions, history, or other reasonably connected
+perspectives. Do not add unrelated generic topics to increase the result
+count.
+
+A plausible acronym expansion may be supplied only through
+`--semantic-hypothesis`. It is a semantic-only search hypothesis, never an
+Exact match or verified fact.
+
+Wide coverage is the default: target eight distinct documents, accept six
+when fewer useful candidates exist, allow labelled weak research leads, and
+return at most one document card per distinct path. Only use narrow coverage
+when the user explicitly asks for one source, only the best source, or no
+related material.
+
+Call `search.py` exactly once. Do not retry with rewritten keywords, inspect
+the result with another command, search a second database, invoke another
+agent, or discard `document_results` merely because Exact evidence was not
+found.
+
 ## Runtime
 
 Use the RAG virtual-environment Python directly. Do not try `python`,
 `python3`, or `py` for ordinary lookup.
+
+The required interpreter paths are:
+
+```text
+Windows:      %USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe
+macOS/Linux:  ~/.copilot/rag/query/.venv/bin/python
+```
 
 On macOS or Linux:
 
@@ -65,23 +113,42 @@ On macOS or Linux:
   "<complete-user-question>"
 ```
 
-On Windows PowerShell:
+On Windows PowerShell, use the call operator only to start the installed
+executable directly:
 
 ```powershell
-& "$HOME\.copilot\rag\query\.venv\Scripts\python.exe" `
-  "$HOME\.copilot\rag\query\list_dbs.py" `
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\query\list_dbs.py" `
   --format json
 ```
 
 ```powershell
-& "$HOME\.copilot\rag\query\.venv\Scripts\python.exe" `
-  "$HOME\.copilot\rag\query\search.py" `
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\query\search.py" `
   --db <selected-db> `
   --include-db-hint `
   --compact-json `
-  --format json `
+  --answer-goal evidence `
+  --facet "<literal or semantic facet>" `
   "<complete-user-question>"
 ```
+
+Do not use `cmd.exe /c`, `cmd /c`, `Start-Process`, a `.bat` or `.cmd`
+wrapper, a nested PowerShell process, PATH-based Python discovery, or a JSON
+stdin pipeline on Windows. Start the venv `python.exe` process directly, wait
+for that process, and read its stdout and stderr directly.
+
+Use repeated planning arguments on Windows:
+
+- `--answer-goal`
+- `--literal-identifier` (maximum three)
+- `--entity` (maximum five)
+- `--facet` (maximum four)
+- `--semantic-hypothesis` (maximum three, semantic-only)
+
+These arguments also work on macOS and Linux. The `--request-json --stdin`
+interface remains available for manual POSIX integration, but it is not the
+normal Windows path.
 
 If the platform-specific virtual-environment Python does not exist, do not
 try another interpreter. State that RAG setup is required and stop.
@@ -108,7 +175,8 @@ decision.
 
 After selecting a database:
 
-1. Pass the user's complete original question to `search.py` exactly once.
+1. Pass the user's complete original question as the final argument to
+   `search.py` exactly once.
 2. Use the default hybrid retrieval behavior.
 3. Do not specify `--retrieval-mode`.
 4. Do not retry after `ok`, `partial`, `no_hit`, or `error`.
@@ -129,7 +197,8 @@ Follow the returned status:
 
 - `ok`: Answer using only `evidence`.
 - `partial`: Answer only the supported portion and clearly state the limits.
-- `no_hit`: State that supporting evidence was not found and stop.
+- `no_hit`: State that direct supporting evidence was not found. If
+  `document_results` is nonempty, present them as related research leads.
 - `setup_required`: Tell the user that RAG setup is required.
 - `error`: Briefly report the error and stop. Do not retry automatically.
 
@@ -138,6 +207,8 @@ Identify the supporting evidence ID, source path, and available location in
 the answer.
 Treat `background_context` as background information only.
 Never use `related_context` as proof.
+Treat `document_results` as broad discovery results. Weak or
+non-authoritative cards are not proof.
 Obey every item in `warnings`.
 Preserve source severity and uncertainty when translating. Do not strengthen
 labels: for example, render `Substantial` damage as "substantial damage"
@@ -147,3 +218,17 @@ explicitly uses the stronger term.
 Do not infer missing table headers, column meanings, comparisons, rankings,
 maximums, minimums, or qualitative labels such as "large", "small", or
 "medium-sized" unless the evidence directly supports them.
+
+When answering:
+
+1. Give the direct answer supported by `evidence`, if available.
+2. Summarize broader viewpoints across distinct `document_results`.
+3. Clearly label weak or indirect sources.
+4. Explain when an identifier was not found literally.
+5. Never present an inferred acronym expansion as verified.
+
+If six or more document results are available, use at least three distinct
+sources in the answer and normally mention five or more when the user asks
+for related material. If direct evidence is empty but document results exist,
+say that direct evidence was not found, then present the broader results. Do
+not report that the entire RAG search found nothing.

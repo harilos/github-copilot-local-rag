@@ -13,6 +13,11 @@ from software_rag_tool.search_api import (
     run_adaptive_search_payload,
     run_search_payload,
 )
+from software_rag_tool.search_request import (
+    SearchRequestError,
+    add_search_request_arguments,
+    request_from_cli,
+)
 
 
 def main() -> None:
@@ -36,10 +41,18 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    add_search_request_arguments(parser)
     args = parser.parse_args()
-    question = sys.stdin.read().strip() if args.stdin else (args.question or "").strip()
-    if not question:
-        parser.error("question is required unless --stdin provides input")
+    stdin_text = sys.stdin.read() if args.stdin else ""
+    try:
+        search_request = request_from_cli(
+            args,
+            positional_question=(args.question or "").strip(),
+            stdin_text=stdin_text,
+        )
+    except SearchRequestError as exc:
+        parser.error(str(exc))
+    question = str(search_request["original_question"])
 
     # Keep stdout reserved for the requested JSON/prompt contract. Native
     # runtime initialization messages are diagnostic stderr.
@@ -59,6 +72,7 @@ def main() -> None:
                 explain=args.explain,
                 include_db_hint=args.include_db_hint,
                 identifier_diagnostics=not args.disable_identifier_diagnostics,
+                search_request=search_request,
             )
         else:
             payload = run_search_payload(
@@ -73,6 +87,7 @@ def main() -> None:
                 use_dense=not args.lexical_only,
                 retrieval_mode="lexical" if args.lexical_only else args.retrieval_mode,
                 identifier_diagnostics=not args.disable_identifier_diagnostics,
+                search_request=search_request,
             )
     print(payload_to_text(payload, args.format, explain=args.explain))
 

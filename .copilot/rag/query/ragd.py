@@ -501,6 +501,7 @@ def _execute_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "explain": bool(payload.get("explain")),
         "include_db_hint": bool(payload.get("include_db_hint")),
         "identifier_diagnostics": bool(payload.get("identifier_diagnostics", True)),
+        "search_request": payload.get("search_request"),
     }
     if bool(payload.get("adaptive_hybrid")) and retrieval_mode == "hybrid":
         return run_adaptive_search_payload(**common)

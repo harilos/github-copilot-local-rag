@@ -10,6 +10,7 @@ from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
 from .retrieval import adaptive_hybrid_query, cold_lexical_fast_path, hybrid_query
+from .search_request import normalize_search_request
 from .token_budget import conservative_token_count, truncate_to_token_limit
 from .tokenize import canonicalize, extract_anchors, identifier_match_keys
 
@@ -18,6 +19,9 @@ _REGISTRY: DbRegistry | None = None
 RETRIEVAL_MODES = {"hybrid", "lexical", "dense"}
 COMPACT_BACKGROUND_LIMIT = 2
 COMPACT_RELATED_LIMIT = 2
+COMPACT_DOCUMENT_RESULT_LIMIT = 10
+# Keep the established 10 KiB envelope. It is stricter than the 16 KiB hard
+# product contract and leaves room for command-provider framing.
 COMPACT_MAX_UTF8_BYTES = 10_240
 COMPACT_EVIDENCE_TOKEN_LIMIT = 1_200
 COMPACT_AUXILIARY_TOKEN_LIMIT = 160
@@ -30,9 +34,12 @@ COMPACT_SEARCH_FIELDS = (
     "status",
     "legacy_status",
     "answerability",
+    "answer_goal",
     "evidence",
     "background_context",
     "related_context",
+    "document_results",
+    "coverage",
     "warnings",
     "unmatched_identifiers",
     "exact_candidate_count",
@@ -68,11 +75,20 @@ def run_search_payload(
     use_dense: bool = True,
     retrieval_mode: str = "hybrid",
     identifier_diagnostics: bool = True,
+    search_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     load_env()
     name = require_db_name(db_name)
     store = registry().get(name)
     mode = _normalize_retrieval_mode(retrieval_mode, use_dense=use_dense)
+    request = normalize_search_request(
+        search_request
+        or {
+            "original_question": question,
+            "answer_goal": "evidence",
+        }
+    )
+    question = str(request["original_question"])
     rows = hybrid_query(
         question,
         top_k=top_k,
@@ -92,6 +108,9 @@ def run_search_payload(
             question,
             source=source,
             excluded_identifiers={name},
+            additional_identifiers=list(
+                request.get("literal_identifiers") or []
+            ),
         )
         payload.setdefault("identifier_diagnostics_enabled", True)
     else:
@@ -99,6 +118,13 @@ def run_search_payload(
     payload["retrieval_mode"] = mode
     payload["retrieval_route"] = mode
     payload["dense_used"] = mode in {"hybrid", "dense"}
+    _add_discovery_lane(
+        payload,
+        store,
+        request,
+        source=source,
+        use_dense=mode in {"hybrid", "dense"},
+    )
     return normalize_search_contract(payload)
 
 
@@ -113,11 +139,20 @@ def run_adaptive_search_payload(
     explain: bool = False,
     include_db_hint: bool = False,
     identifier_diagnostics: bool = True,
+    search_request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the default one-operation hybrid route without repeating lexical work."""
     load_env()
     name = require_db_name(db_name)
     store = registry().get(name)
+    request = normalize_search_request(
+        search_request
+        or {
+            "original_question": question,
+            "answer_goal": "evidence",
+        }
+    )
+    question = str(request["original_question"])
     rows, route = adaptive_hybrid_query(
         question,
         top_k=top_k,
@@ -138,6 +173,9 @@ def run_adaptive_search_payload(
             source=source,
             excluded_identifiers={name},
             precomputed_exact_rows=list(route.get("raw_exact_rows") or []),
+            additional_identifiers=list(
+                request.get("literal_identifiers") or []
+            ),
         )
         payload.setdefault("identifier_diagnostics_enabled", True)
     else:
@@ -160,6 +198,20 @@ def run_adaptive_search_payload(
         if payload.get("evidence"):
             payload["status"] = "partial"
             payload["answerability"] = "partial"
+    _add_discovery_lane(
+        payload,
+        store,
+        request,
+        source=source,
+        use_dense=True,
+        precomputed={
+            "dense": list(route.get("dense_rows") or []),
+            "lexical": list(route.get("lexical_rows") or []),
+            "metadata": list(route.get("metadata_rows") or []),
+            "exact": list(route.get("verified_exact_rows") or []),
+            "dense_ran": bool(route.get("dense_used")),
+        },
+    )
     return normalize_search_contract(payload)
 
 
@@ -238,6 +290,418 @@ def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
     if normalized not in RETRIEVAL_MODES:
         raise ValueError(f"retrieval_mode must be one of {sorted(RETRIEVAL_MODES)}")
     return normalized
+
+
+def _add_discovery_lane(
+    payload: dict[str, Any],
+    store: Any,
+    request: dict[str, Any],
+    *,
+    source: str,
+    use_dense: bool,
+    precomputed: dict[str, Any] | None = None,
+) -> None:
+    """Build a recall-first document lane independently from evidence packing."""
+    question = str(request["original_question"])
+    coverage_request = dict(request.get("coverage") or {})
+    chunks: dict[str, dict[str, Any]] = {}
+    dense_used = False
+    discovery_warnings: list[str] = []
+    requested_facets = [
+        str(facet.get("query") or "")
+        for facet in request.get("facets") or []
+        if facet.get("query")
+    ]
+
+    def add_rows(
+        rows: list[dict[str, Any]],
+        *,
+        signal: str,
+        facet: str,
+        weight: float,
+        literal: str | None = None,
+    ) -> None:
+        for rank, row in enumerate(rows, start=1):
+            if _is_test_fixture_row(row):
+                continue
+            chunk_id = str(row.get("id") or "")
+            if not chunk_id:
+                continue
+            item = chunks.setdefault(
+                chunk_id,
+                {
+                    "row": row,
+                    "score": 0.0,
+                    "signals": set(),
+                    "facets": set(),
+                    "ranks": {},
+                    "literal_identifiers": set(),
+                },
+            )
+            score = weight / (60.0 + rank)
+            if score > float(item["score"]):
+                item["score"] = score
+                item["row"] = row
+            item["signals"].add(signal)
+            if facet:
+                item["facets"].add(facet[:100])
+            previous = item["ranks"].get(signal)
+            item["ranks"][signal] = (
+                rank if previous is None else min(int(previous), rank)
+            )
+            if literal and _raw_identifier_occurs(row, literal):
+                item["literal_identifiers"].add(literal)
+
+    original_label = question[:100]
+    if precomputed:
+        add_rows(
+            list(precomputed.get("lexical") or []),
+            signal="lexical",
+            facet=original_label,
+            weight=1.1,
+        )
+        add_rows(
+            list(precomputed.get("metadata") or []),
+            signal="metadata",
+            facet=original_label,
+            weight=0.7,
+        )
+        add_rows(
+            list(precomputed.get("exact") or []),
+            signal="exact",
+            facet=original_label,
+            weight=1.4,
+        )
+        if precomputed.get("dense_ran"):
+            add_rows(
+                list(precomputed.get("dense") or []),
+                signal="dense",
+                facet=original_label,
+                weight=1.0,
+            )
+            dense_used = True
+
+    lexical_queries: list[tuple[str, str, float]] = []
+    if not precomputed:
+        lexical_queries.append((question, original_label, 1.0))
+    for facet in request.get("facets") or []:
+        query = str(facet.get("query") or "")
+        if query and query != question:
+            lexical_queries.append((query, query[:100], 0.85))
+    for entity in request.get("entities") or []:
+        if entity and entity != question:
+            lexical_queries.append((entity, str(entity)[:100], 0.65))
+    for query, label, factor in lexical_queries:
+        try:
+            add_rows(
+                store.bm25_search(
+                    query,
+                    top_k=30,
+                    source=source,
+                ),
+                signal="lexical",
+                facet=label,
+                weight=1.1 * factor,
+            )
+            add_rows(
+                store.metadata_search(
+                    query,
+                    top_k=20,
+                    source=source,
+                ),
+                signal="metadata",
+                facet=label,
+                weight=0.7 * factor,
+            )
+        except Exception as exc:
+            discovery_warnings.append(
+                f"discovery lexical unavailable: {type(exc).__name__}"
+            )
+
+    literal_identifiers = list(request.get("literal_identifiers") or [])
+    for anchor in (payload.get("identifiers") or {}).get("anchors") or []:
+        if anchor not in literal_identifiers:
+            literal_identifiers.append(str(anchor))
+    for literal in literal_identifiers[:3]:
+        try:
+            verified = [
+                row
+                for row in store.exact_search(
+                    literal,
+                    top_k=20,
+                    source=source,
+                )
+                if _raw_identifier_occurs(row, literal)
+            ]
+            add_rows(
+                verified,
+                signal="exact",
+                facet=str(literal),
+                weight=1.4,
+                literal=str(literal),
+            )
+        except Exception as exc:
+            discovery_warnings.append(
+                f"discovery exact unavailable: {type(exc).__name__}"
+            )
+
+    dense_queries: list[tuple[str, str, float]] = []
+    if use_dense and not bool((precomputed or {}).get("dense_ran")):
+        dense_queries.append((question, original_label, 1.0))
+    if use_dense:
+        for facet in request.get("facets") or []:
+            if facet.get("kind") != "semantic":
+                continue
+            query = str(facet.get("query") or "")
+            if query and query != question:
+                dense_queries.append((query, query[:100], 0.85))
+        for concept in request.get("inferred_concepts") or []:
+            term = str(concept.get("term") or "")
+            if term:
+                dense_queries.append((term, term[:100], 0.45))
+    unique_dense: list[tuple[str, str, float]] = []
+    seen_dense: set[str] = set()
+    for item in dense_queries:
+        if item[0] in seen_dense:
+            continue
+        seen_dense.add(item[0])
+        unique_dense.append(item)
+    if unique_dense:
+        try:
+            queries = [item[0] for item in unique_dense]
+            if hasattr(store, "vector_query_many"):
+                dense_batches = store.vector_query_many(
+                    queries,
+                    top_k=30,
+                    source=source,
+                )
+            else:
+                dense_batches = [
+                    store.vector_query(query, top_k=30, source=source)
+                    for query in queries
+                ]
+            for rows, (_query, label, factor) in zip(
+                dense_batches,
+                unique_dense,
+            ):
+                add_rows(
+                    rows,
+                    signal="dense",
+                    facet=label,
+                    weight=1.0 * factor,
+                )
+            dense_used = True
+        except Exception:
+            discovery_warnings.append(
+                "dense_discovery_unavailable_within_deadline"
+            )
+
+    evidence_paths = {
+        str((item.get("source") or {}).get("path") or "")
+        for item in payload.get("evidence") or []
+        if (item.get("source") or {}).get("path")
+    }
+    evidence_texts = {
+        str(item.get("text") or "")
+        for item in payload.get("evidence") or []
+        if item.get("text")
+    }
+    documents: dict[str, dict[str, Any]] = {}
+    for chunk_id, item in chunks.items():
+        row = item["row"]
+        metadata = row.get("metadata") or {}
+        path = str(
+            metadata.get("path")
+            or metadata.get("source_path")
+            or metadata.get("doc_id")
+            or chunk_id
+        )
+        document = documents.setdefault(
+            path,
+            {
+                "path": path,
+                "title": str(
+                    metadata.get("title")
+                    or metadata.get("document_title")
+                    or metadata.get("filename")
+                    or Path(path).name
+                ),
+                "score": 0.0,
+                "best": item,
+                "signals": set(),
+                "facets": set(),
+                "literal_identifiers": set(),
+            },
+        )
+        score = float(item["score"])
+        if score > float(document["score"]):
+            document["score"] = score
+            document["best"] = item
+        document["signals"].update(item["signals"])
+        document["facets"].update(item["facets"])
+        document["literal_identifiers"].update(
+            item["literal_identifiers"]
+        )
+
+    ranked_documents: list[dict[str, Any]] = []
+    for document in documents.values():
+        signals = set(document["signals"])
+        facets = set(document["facets"])
+        document["score"] = (
+            float(document["score"])
+            + min(0.006, 0.0015 * max(0, len(facets) - 1))
+            + min(0.004, 0.0015 * max(0, len(signals) - 1))
+        )
+        is_direct = document["path"] in evidence_paths
+        if is_direct:
+            support_level = "direct"
+        elif document["literal_identifiers"] or len(signals) >= 2:
+            support_level = "strong"
+        elif len(facets) >= 2 or float(document["score"]) >= 0.017:
+            support_level = "moderate"
+        else:
+            support_level = "weak"
+        document["support_level"] = support_level
+        ranked_documents.append(document)
+    support_order = {"direct": 3, "strong": 2, "moderate": 1, "weak": 0}
+    ranked_documents.sort(
+        key=lambda item: (
+            support_order[item["support_level"]],
+            float(item["score"]),
+        ),
+        reverse=True,
+    )
+
+    maximum = int(coverage_request.get("maximum_distinct_documents") or 10)
+    target = min(
+        maximum,
+        int(coverage_request.get("target_distinct_documents") or 8),
+    )
+    selected = ranked_documents[:target]
+    cards: list[dict[str, Any]] = []
+    for index, document in enumerate(selected, start=1):
+        best = document["best"]
+        row = best["row"]
+        metadata = row.get("metadata") or {}
+        preview = _document_preview(
+            str(row.get("text") or ""),
+            evidence_texts=evidence_texts,
+        )
+        support_level = str(document["support_level"])
+        contains_literal = bool(document["literal_identifiers"])
+        cards.append(
+            {
+                "path": document["path"],
+                "title": document["title"],
+                "section": str(
+                    metadata.get("section_path")
+                    or metadata.get("chunk_title")
+                    or (
+                        f"Page {metadata['page']}"
+                        if metadata.get("page") not in (None, "")
+                        else ""
+                    )
+                ),
+                "preview": preview,
+                "support_level": support_level,
+                "authoritative": support_level == "direct",
+                "contains_literal_identifier": contains_literal,
+                "matched_facets": sorted(document["facets"])[:4],
+                "retrieval_signals": sorted(document["signals"]),
+                "relationship": _document_relationship(
+                    support_level,
+                    contains_literal=contains_literal,
+                ),
+                "rank": index,
+            }
+        )
+
+    counts = {
+        level: sum(
+            1 for card in cards if card["support_level"] == level
+        )
+        for level in ("direct", "strong", "moderate", "weak")
+    }
+    covered_facets = {
+        facet
+        for card in cards
+        for facet in card.get("matched_facets") or []
+        if facet in requested_facets
+    }
+    payload["document_results"] = cards
+    payload["coverage"] = {
+        "policy": coverage_request.get("policy") or "wide",
+        "exact_identifier_found": any(
+            bool(card.get("contains_literal_identifier"))
+            for card in cards
+        ),
+        "candidate_chunks": len(chunks),
+        "candidate_documents": len(documents),
+        "returned_distinct_documents": len(cards),
+        "direct_documents": counts["direct"],
+        "strong_documents": counts["strong"],
+        "moderate_documents": counts["moderate"],
+        "weak_documents": counts["weak"],
+        "facets_requested": len(requested_facets),
+        "facets_covered": len(covered_facets),
+        "dense_discovery_used": dense_used,
+    }
+    payload["answer_goal"] = request.get("answer_goal")
+    warnings = list(payload.get("warnings") or [])
+    warnings.extend(discovery_warnings)
+    minimum_desired = int(
+        coverage_request.get("minimum_desired_documents") or 6
+    )
+    if len(cards) < minimum_desired:
+        warnings.append("insufficient_distinct_related_documents")
+    payload["warnings"] = sorted(set(warnings))
+    if cards and not payload.get("evidence"):
+        payload["status"] = "partial"
+        payload["answerability"] = "none"
+        payload.pop("legacy_status", None)
+
+
+def _is_test_fixture_row(row: dict[str, Any]) -> bool:
+    value = (row.get("metadata") or {}).get("test_fixture")
+    return value is True or str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _document_preview(
+    text: str,
+    *,
+    evidence_texts: set[str],
+) -> str:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return ""
+    preview = normalized[:220]
+    if len(normalized) > 220:
+        preview = preview.rstrip() + "…"
+    if preview in evidence_texts:
+        preview = preview[: max(1, min(180, len(preview) - 1))].rstrip() + "…"
+    return preview
+
+
+def _document_relationship(
+    support_level: str,
+    *,
+    contains_literal: bool,
+) -> str:
+    if support_level == "direct":
+        return "Contains direct evidence used in the answer."
+    if contains_literal:
+        return (
+            "Contains a verified literal occurrence, but this card is not "
+            "authoritative answer evidence."
+        )
+    if support_level == "strong":
+        return "Matched multiple retrieval signals or a high-ranked facet."
+    if support_level == "moderate":
+        return "Provides useful surrounding material for one or more facets."
+    return (
+        "A weak research lead with a positive retrieval signal; it does not "
+        "prove the answer."
+    )
 
 
 def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_chars: int, *, db_hint: str = "") -> dict[str, Any]:
@@ -483,6 +947,7 @@ def _add_identifier_diagnostics(
     source: str,
     excluded_identifiers: set[str] | None = None,
     precomputed_exact_rows: list[dict[str, Any]] | None = None,
+    additional_identifiers: list[str] | None = None,
 ) -> None:
     excluded = {
         canonicalize(identifier)
@@ -495,6 +960,13 @@ def _add_identifier_diagnostics(
         if _diagnostic_identifier_anchor(anchor)
         and canonicalize(anchor) not in excluded
     ]
+    for identifier in additional_identifiers or []:
+        if (
+            identifier
+            and canonicalize(identifier) not in excluded
+            and identifier not in anchors
+        ):
+            anchors.append(identifier)
     if not anchors:
         return
     unmatched = []
@@ -727,6 +1199,7 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
     evidence = list(payload.get("evidence") or payload.get("contexts") or [])
     background = list(payload.get("background_context") or [])
     related = list(payload.get("related_context") or [])
+    document_results = list(payload.get("document_results") or [])
     warnings = [str(value) for value in payload.get("warnings") or [] if value]
     lines = ["## Retrieved evidence", f"Database: {db_name}", ""]
     if db_hint:
@@ -786,6 +1259,26 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
             lines.append("")
         lines.append("Do not use related search candidates as direct proof.")
         lines.append("")
+    if document_results:
+        lines.extend(["## Related documents (discovery results)", ""])
+        for item in document_results:
+            support = str(item.get("support_level") or "weak")
+            path = str(item.get("path") or "")
+            title = str(item.get("title") or "")
+            heading = title if title and title != path else path
+            lines.append(f"- [{support}] {heading} ({path})")
+            if item.get("relationship"):
+                lines.append(f"  {item['relationship']}")
+            if item.get("preview"):
+                lines.append(f"  {item['preview']}")
+        lines.extend(
+            [
+                "",
+                "Related documents are discovery leads. Only direct evidence "
+                "may support factual claims.",
+                "",
+            ]
+        )
     if unmatched:
         lines.append("取得済みの直接根拠は、根拠がある部分の回答にだけ使用すること。")
         lines.append("背景情報や関連候補を、未一致識別子そのものの根拠として引用しないこと。")
@@ -808,9 +1301,18 @@ def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
     db_name = str(normalized.get("selected_db") or normalized.get("db") or "")
     normalized.setdefault("db", db_name)
     normalized["selected_db"] = db_name
-    for key in ("evidence", "contexts", "background_context", "related_context", "warnings"):
+    for key in (
+        "evidence",
+        "contexts",
+        "background_context",
+        "related_context",
+        "document_results",
+        "warnings",
+    ):
         value = normalized.get(key)
         normalized[key] = list(value) if isinstance(value, list) else []
+    if not isinstance(normalized.get("coverage"), dict):
+        normalized["coverage"] = {}
     if status == "ok":
         normalized.setdefault("answerability", "full" if normalized["evidence"] else "none")
     elif status == "partial":
@@ -860,7 +1362,19 @@ def compact_search_contract(
         item_limit=COMPACT_RELATED_LIMIT,
         explain=explain,
     )
-    projection_truncated = evidence_truncated or background_truncated or related_truncated
+    (
+        compact["document_results"],
+        documents_truncated,
+    ) = _project_document_results(
+        list(normalized.get("document_results") or []),
+        limit=COMPACT_DOCUMENT_RESULT_LIMIT,
+    )
+    projection_truncated = (
+        evidence_truncated
+        or background_truncated
+        or related_truncated
+        or documents_truncated
+    )
     if isinstance(compact.get("execution_metadata"), dict):
         metadata = compact["execution_metadata"]
         compact["execution_metadata"] = {
@@ -878,6 +1392,7 @@ def compact_search_contract(
         "evidence",
         "background_context",
         "related_context",
+        "document_results",
         "warnings",
     ):
         compact.setdefault(key, [])
@@ -889,10 +1404,68 @@ def compact_search_contract(
     if len(str(compact.get("query") or "")) > 2_000:
         compact["query"] = str(compact["query"])[:1_980] + "...[truncated]"
         projection_truncated = True
-    return _fit_compact_utf8_limit(
+    fitted = _fit_compact_utf8_limit(
         compact,
         projection_truncated=projection_truncated,
     )
+    if (
+        isinstance(fitted.get("coverage"), dict)
+        and "returned_distinct_documents" in fitted["coverage"]
+    ):
+        cards = list(fitted.get("document_results") or [])
+        fitted["coverage"]["returned_distinct_documents"] = len(cards)
+        for level in ("direct", "strong", "moderate", "weak"):
+            fitted["coverage"][f"{level}_documents"] = sum(
+                1
+                for card in cards
+                if card.get("support_level") == level
+            )
+    return fitted
+
+
+def _project_document_results(
+    results: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    projected: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    truncated = len(results) > limit
+    for result in results:
+        path = str(result.get("path") or "")[:400]
+        if not path or path in seen_paths:
+            truncated = True
+            continue
+        seen_paths.add(path)
+        item: dict[str, Any] = {
+            "path": path,
+            "title": str(result.get("title") or "")[:160],
+            "section": str(result.get("section") or "")[:160],
+            "preview": str(result.get("preview") or "")[:220],
+            "support_level": str(
+                result.get("support_level") or "weak"
+            )[:20],
+            "authoritative": bool(result.get("authoritative")),
+            "contains_literal_identifier": bool(
+                result.get("contains_literal_identifier")
+            ),
+            "matched_facets": [
+                str(value)[:100]
+                for value in (result.get("matched_facets") or [])[:4]
+            ],
+            "retrieval_signals": [
+                str(value)[:30]
+                for value in (result.get("retrieval_signals") or [])[:5]
+            ],
+            "relationship": str(
+                result.get("relationship") or ""
+            )[:220],
+        }
+        projected.append(item)
+        if len(projected) >= limit:
+            truncated = truncated or len(results) > len(projected)
+            break
+    return projected, truncated
 
 
 def _project_contexts(
@@ -1014,6 +1587,24 @@ def _fit_compact_utf8_limit(
     compact["warnings"] = sorted(
         set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
     )
+    # Preserve document breadth first. Shorten cards before removing a
+    # distinct document from the discovery lane.
+    for preview_limit in (160, 120, 80):
+        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+            return compact
+        for item in compact.get("document_results") or []:
+            preview = str(item.get("preview") or "")
+            if len(preview) > preview_limit:
+                item["preview"] = preview[: preview_limit - 1].rstrip() + "…"
+            relationship = str(item.get("relationship") or "")
+            if len(relationship) > 120:
+                item["relationship"] = relationship[:119].rstrip() + "…"
+    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        for item in compact.get("document_results") or []:
+            item.pop("section", None)
+            item["matched_facets"] = list(
+                item.get("matched_facets") or []
+            )[:2]
     for key in ("related_context", "background_context"):
         while compact.get(key) and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
             compact[key].pop()
@@ -1057,6 +1648,11 @@ def _fit_compact_utf8_limit(
             compact["evidence"].pop()
         else:
             item["text"] = text[: max(32, len(text) // 2)] + "...[truncated]"
+    while (
+        len(compact.get("document_results") or []) > 1
+        and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES
+    ):
+        compact["document_results"].pop()
     if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
         compact = {
             "schema": str(compact.get("schema") or "local-rag.search.v1"),
@@ -1066,8 +1662,18 @@ def _fit_compact_utf8_limit(
             "evidence": [],
             "background_context": [],
             "related_context": [],
+            "document_results": list(
+                compact.get("document_results") or []
+            )[:1],
+            "coverage": dict(compact.get("coverage") or {}),
             "warnings": [COMPACT_TRUNCATION_WARNING],
         }
+    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
+        for item in compact.get("document_results") or []:
+            item["preview"] = str(item.get("preview") or "")[:80]
+            item.pop("matched_facets", None)
+            item.pop("retrieval_signals", None)
+            item.pop("relationship", None)
     return compact
 
 

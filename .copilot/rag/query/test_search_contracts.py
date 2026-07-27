@@ -408,6 +408,11 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             include_db_hint=False,
             disable_identifier_diagnostics=False,
             timeout=15,
+            search_request={
+                "original_question": "original complete question",
+                "literal_identifiers": ["A2W"],
+                "facets": ["A2W", "A2Wの意味と用途"],
+            },
         )
         completed = subprocess.CompletedProcess(
             args=["query"],
@@ -431,7 +436,7 @@ class SyncFallbackMetadataTests(unittest.TestCase):
         ):
             with self.assertRaises(SystemExit) as raised:
                 SEARCH._run_sync_script(
-                    python="python",
+                    python=r"C:\Users\tester\.copilot\rag\query\.venv\Scripts\python.exe",
                     env={},
                     args=args,
                     db_name="ac-rag",
@@ -444,8 +449,15 @@ class SyncFallbackMetadataTests(unittest.TestCase):
                 )
         self.assertEqual(0, raised.exception.code)
         command = child.call_args.args[0]
+        self.assertEqual(
+            r"C:\Users\tester\.copilot\rag\query\.venv\Scripts\python.exe",
+            command[0],
+        )
         self.assertIn("--adaptive-hybrid", command)
+        self.assertIn("--literal-identifier", command)
+        self.assertIn("A2Wの意味と用途", command)
         self.assertEqual(1, command.count("original complete question"))
+        self.assertIsNone(child.call_args.kwargs["input_text"])
         self.assertEqual(14.5, child.call_args.kwargs["timeout"])
         payload = json.loads(output.getvalue())
         self.assertEqual("no-daemon", payload["execution_metadata"]["actual_execution"])

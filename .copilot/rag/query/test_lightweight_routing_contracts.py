@@ -29,7 +29,10 @@ class LightweightRoutingContractTests(unittest.TestCase):
     def test_lookup_contract_is_one_list_then_one_search(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("Run `list_dbs.py --format json` exactly once.", text)
-        self.assertIn("Pass the user's complete original question to `search.py` exactly once.", text)
+        self.assertIn(
+            "Pass the user's complete original question as the final argument",
+            text,
+        )
         self.assertIn("## One-command decision", text)
         self.assertIn("Never run `list_dbs.py` merely to confirm", text)
         self.assertIn("Do not issue a second search automatically.", text)
@@ -46,8 +49,13 @@ class LightweightRoutingContractTests(unittest.TestCase):
     def test_lookup_uses_only_platform_venv_commands(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("~/.copilot/rag/query/.venv/bin/python", text)
-        self.assertIn(r"$HOME\.copilot\rag\query\.venv\Scripts\python.exe", text)
+        self.assertIn(
+            r"$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe",
+            text,
+        )
         self.assertIn("Do not try `python`,", text)
+        self.assertIn("`--literal-identifier`", text)
+        self.assertIn("Do not use `cmd.exe /c`", text)
 
     def test_admin_preserves_required_management_operations(self) -> None:
         text = ADMIN.read_text(encoding="utf-8").lower()

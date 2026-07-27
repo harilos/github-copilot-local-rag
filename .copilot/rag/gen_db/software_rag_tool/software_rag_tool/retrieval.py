@@ -60,6 +60,7 @@ _GENERIC_IDENTIFIER_LOOKUP_TERMS = {
 
 class SearchBackend(Protocol):
     def vector_query(self, question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
+    def vector_query_many(self, questions: list[str], top_k: int, source: str = "any") -> list[list[dict[str, Any]]]: ...
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
     def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]: ...
@@ -73,6 +74,20 @@ class _GlobalBackend:
         from .store import vector_query
 
         return vector_query(question, top_k=top_k, source=source)
+
+    def vector_query_many(
+        self,
+        questions: list[str],
+        top_k: int,
+        source: str = "any",
+    ) -> list[list[dict[str, Any]]]:
+        from .store import vector_query_many
+
+        return vector_query_many(
+            questions,
+            top_k=top_k,
+            source=source,
+        )
 
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         return catalog.exact_search(question, top_k=top_k, source=source)
@@ -401,6 +416,7 @@ def adaptive_hybrid_query(
         "certificate": certificate,
         "raw_exact_rows": raw_exact_rows,
         "verified_exact_rows": verified_exact_rows,
+        "dense_rows": dense_rows,
         "lexical_rows": lexical_rows,
         "metadata_rows": metadata_rows,
         "anchor_rows": anchor_rows,
