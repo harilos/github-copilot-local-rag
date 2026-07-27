@@ -1,0 +1,3 @@
+LOCAL_RAG_SOURCE_LINK_FIXTURE_V1
+
+This is a public, synthetic fixture for Local RAG Source-Link E2E tests.
