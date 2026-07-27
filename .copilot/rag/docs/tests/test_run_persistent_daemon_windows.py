@@ -491,6 +491,39 @@ class CommandTests(unittest.TestCase):
             process.terminate()
             process.wait(timeout=5)
 
+    def test_darwin_framework_launcher_is_narrowly_allowlisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            framework_python = (
+                root
+                / "Resources"
+                / "Python.app"
+                / "Contents"
+                / "MacOS"
+                / "Python"
+            )
+            framework_python.parent.mkdir(parents=True)
+            framework_python.write_bytes(b"framework launcher")
+            near_match = framework_python.with_name("Python-copy")
+            near_match.write_bytes(b"not the launcher")
+            allowed = MODULE.allowed_daemon_executables(
+                Path(sys.executable),
+                platform="darwin",
+                base_prefix=root,
+            )
+            self.assertTrue(
+                MODULE.daemon_executable_is_allowed(
+                    framework_python,
+                    allowed,
+                )
+            )
+            self.assertFalse(
+                MODULE.daemon_executable_is_allowed(
+                    near_match,
+                    allowed,
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -415,22 +415,11 @@ class PersistentDaemonWindowsRunner:
         executable = process_executable(pid)
         if executable is None:
             return 0
-        allowed_executables = {
-            os.path.normcase(str(self.python)),
-            os.path.normcase(str(Path(sys.executable).resolve())),
-            os.path.normcase(
-                str(
-                    Path(
-                        getattr(
-                            sys,
-                            "_base_executable",
-                            sys.executable,
-                        )
-                    ).resolve()
-                )
-            ),
-        }
-        if os.path.normcase(str(Path(executable).resolve())) not in allowed_executables:
+        allowed_executables = allowed_daemon_executables(self.python)
+        if not daemon_executable_is_allowed(
+            executable,
+            allowed_executables,
+        ):
             return 0
         return pid
 
@@ -2710,6 +2699,46 @@ def process_executable(pid: int) -> str | None:
         return buffer.value
     finally:
         kernel32.CloseHandle(handle)
+
+
+def normalized_executable_path(path: str | Path) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def allowed_daemon_executables(
+    installed_python: Path,
+    *,
+    platform: str | None = None,
+    base_prefix: Path | None = None,
+) -> set[str]:
+    selected_platform = platform or sys.platform
+    candidates = {
+        Path(installed_python),
+        Path(sys.executable),
+        Path(getattr(sys, "_base_executable", sys.executable)),
+    }
+    if selected_platform == "darwin":
+        framework_python = (
+            Path(base_prefix or sys.base_prefix)
+            / "Resources"
+            / "Python.app"
+            / "Contents"
+            / "MacOS"
+            / "Python"
+        )
+        if framework_python.is_file():
+            candidates.add(framework_python)
+    return {
+        normalized_executable_path(candidate)
+        for candidate in candidates
+    }
+
+
+def daemon_executable_is_allowed(
+    executable: str | Path,
+    allowed_executables: set[str],
+) -> bool:
+    return normalized_executable_path(executable) in allowed_executables
 
 
 def terminate_pid(pid: int) -> bool:
