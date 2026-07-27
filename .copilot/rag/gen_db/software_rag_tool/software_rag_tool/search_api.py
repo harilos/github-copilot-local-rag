@@ -913,6 +913,7 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
     truncated = False
     for row in rows:
         warnings.extend((row.get("debug") or {}).get("warnings") or [])
+        warnings.extend(row.get("context_warnings") or [])
         meta = row.get("metadata") or {}
         text = row.get("text") or ""
         if len(text) > max_chars:
@@ -934,6 +935,22 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
             "text": text,
             "signals": row.get("signals") or [],
         }
+        item["matched_excerpt"] = text
+        heading = str(
+            row.get("heading")
+            or meta.get("section_path")
+            or meta.get("chunk_title")
+            or ""
+        )
+        if heading:
+            item["heading"] = heading
+        for key in ("context_before", "context_after", "context_reason"):
+            if row.get(key) not in (None, ""):
+                item[key] = row[key]
+        if row.get("source_ranges"):
+            item["source_ranges"] = list(row["source_ranges"])
+        if row.get("context_warnings"):
+            item["context_warnings"] = list(row["context_warnings"])
         for key in (
             "support_kind",
             "anchor_chunk_uid",
@@ -1440,7 +1457,17 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
         section = location.get("section") or ""
         suffix = f" - {section}" if section else ""
         lines.append(f"[{item.get('id')}] {source.get('path') or ''}{suffix}")
-        lines.append(str(item.get("text") or ""))
+        if item.get("context_before"):
+            lines.append(
+                "Context before: " + str(item["context_before"])
+            )
+        lines.append(
+            str(item.get("matched_excerpt") or item.get("text") or "")
+        )
+        if item.get("context_after"):
+            lines.append(
+                "Context after: " + str(item["context_after"])
+            )
         if explain and item.get("debug"):
             lines.append(f"signals={','.join(item.get('signals') or [])} debug={json.dumps(item['debug'], ensure_ascii=False)}")
         lines.append("")
@@ -1684,8 +1711,22 @@ def _project_contexts(
     selected = contexts if item_limit is None else contexts[:item_limit]
     for context in selected:
         item = _project_context(context, explain=explain)
+        for key in ("context_before", "context_after"):
+            value = str(item.get(key) or "")
+            if _conservative_token_count(value) > COMPACT_AUXILIARY_TOKEN_LIMIT:
+                item[key] = _truncate_to_token_limit(
+                    value,
+                    COMPACT_AUXILIARY_TOKEN_LIMIT,
+                )
+                truncated = True
         overhead = dict(item)
-        overhead["text"] = ""
+        for key in (
+            "text",
+            "matched_excerpt",
+            "context_before",
+            "context_after",
+        ):
+            overhead[key] = ""
         overhead_tokens = _conservative_token_count(
             json.dumps(overhead, ensure_ascii=False, separators=(",", ":"))
         )
@@ -1693,7 +1734,23 @@ def _project_contexts(
             truncated = True
             break
         text = str(item.get("text") or "")
-        text_budget = max(0, remaining - overhead_tokens - 30)
+        context_tokens = sum(
+            _conservative_token_count(str(item.get(key) or ""))
+            for key in ("context_before", "context_after")
+        )
+        # text and matched_excerpt intentionally carry the same primary
+        # excerpt for backward compatibility and the additive API contract.
+        excerpt_copies = 2 if item.get("matched_excerpt") else 1
+        text_budget = max(
+            0,
+            (
+                remaining
+                - overhead_tokens
+                - context_tokens
+                - 30
+            )
+            // excerpt_copies,
+        )
         if item_limit is not None:
             text_budget = min(
                 text_budget,
@@ -1702,6 +1759,8 @@ def _project_contexts(
         if _conservative_token_count(text) > text_budget:
             text = _truncate_to_token_limit(text, text_budget)
             item["text"] = text
+            if item.get("matched_excerpt"):
+                item["matched_excerpt"] = text
             item["truncated"] = True
             truncated = True
         used = _conservative_token_count(
@@ -1723,6 +1782,29 @@ def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any
         "id": str(context.get("id") or "")[:120],
         "text": str(context.get("text") or ""),
     }
+    matched_excerpt = str(context.get("matched_excerpt") or "")
+    if matched_excerpt:
+        projected["matched_excerpt"] = matched_excerpt
+    if context.get("heading"):
+        projected["heading"] = str(context["heading"])[:160]
+    for key in ("context_before", "context_after"):
+        if context.get(key):
+            projected[key] = str(context[key])[:300]
+    if context.get("context_reason"):
+        projected["context_reason"] = str(
+            context["context_reason"]
+        )[:80]
+    if context.get("source_ranges"):
+        projected["source_ranges"] = [
+            dict(value)
+            for value in list(context["source_ranges"])[:3]
+            if isinstance(value, dict)
+        ]
+    if context.get("context_warnings"):
+        projected["context_warnings"] = [
+            str(value)[:80]
+            for value in list(context["context_warnings"])[:3]
+        ]
     source_limits = {"path": 400, "title": 160, "revision": 100}
     filtered_source = {}
     for key, limit in source_limits.items():
@@ -1790,6 +1872,27 @@ def _fit_compact_utf8_limit(
     compact["warnings"] = sorted(
         set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
     )
+    # Optional surrounding context is reduced before primary excerpts or
+    # distinct discovery documents.
+    for context_limit in (200, 120, 0):
+        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
+            return compact
+        for item in compact.get("evidence") or []:
+            for key in ("context_before", "context_after"):
+                value = str(item.get(key) or "")
+                if context_limit <= 0:
+                    item.pop(key, None)
+                elif len(value) > context_limit:
+                    item[key] = (
+                        value[: context_limit - 1].rstrip() + "…"
+                    )
+            if context_limit <= 0:
+                item.pop("context_reason", None)
+                item["source_ranges"] = [
+                    value
+                    for value in item.get("source_ranges") or []
+                    if value.get("kind") == "matched"
+                ]
     # Preserve document breadth first. Shorten cards before removing a
     # distinct document from the discovery lane.
     for preview_limit in (160, 120, 80):

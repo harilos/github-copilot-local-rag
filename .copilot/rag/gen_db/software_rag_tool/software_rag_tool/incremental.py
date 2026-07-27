@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 from .jsonl import write_jsonl
 from .manifest import write_manifest
 from .paths import clean_dir, logs_dir
@@ -20,6 +21,8 @@ from .store import collection_count, delete_ids, reset_collection, upsert_record
 def add_or_update_root(
     root: Path,
     source_id: str,
+    scan_subdir: str | None = None,
+    include_root_name_in_path: bool = True,
     batch_size_files: int = 20,
     reset_db: bool = False,
     reset_clean: bool = False,
@@ -27,6 +30,7 @@ def add_or_update_root(
     operation: str = "add",
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
+    resume: bool = False,
 ) -> dict[str, Any]:
     if batch_size_files <= 0:
         raise ValueError("batch_size_files must be positive")
@@ -34,18 +38,34 @@ def add_or_update_root(
         raise ValueError("chunk_max_chars must be positive")
     if chunk_overlap < 0:
         raise ValueError("chunk_overlap must be zero or positive")
+    if resume and (reset_db or reset_clean):
+        raise ValueError(
+            "resume cannot be combined with reset_db or reset_clean"
+        )
 
-    root = root.resolve()
-    if not root.exists():
-        raise FileNotFoundError(root)
+    if include_root_name_in_path is not True:
+        raise ValueError("root-name inclusion is mandatory")
+    scope = resolve_ingestion_scope(root, scan_subdir)
+    if reset_clean:
+        _reset_clean_dir()
+        state = _initial_state()
+    else:
+        state = _load_state()
+    if resume:
+        _validate_resume_state(state, scope, source_id)
+    state["ingestion"] = scope.state_fields(source_id=source_id)
+    # Persist the effective scope before discovery.  If scanning is
+    # interrupted, a later --resume must still validate against the exact
+    # root/source/scope that started the run.
+    _save_state(state)
+    scope_fields = scope.state_fields(source_id=source_id)
 
     started_at = datetime.now(timezone.utc).isoformat()
     write_progress(
         status="running",
         phase="scan",
         operation=operation,
-        root=str(root),
-        source_id=source_id,
+        **scope_fields,
         batch_size_files=batch_size_files,
         reset_db=reset_db,
         reset_clean=reset_clean,
@@ -66,30 +86,26 @@ def add_or_update_root(
     emit_event(
         "run_started",
         operation=operation,
-        root=str(root),
-        source_id=source_id,
+        **scope_fields,
         reset_db=reset_db,
         reset_clean=reset_clean,
         chunk_max_chars=chunk_max_chars,
         chunk_overlap=chunk_overlap,
     )
 
-    if reset_clean:
-        _reset_clean_dir()
-        state = _initial_state()
-    else:
-        state = _load_state()
-
     if reset_db:
         reset_collection()
         reset_catalog()
         emit_event("collection_reset")
 
-    files = list(iter_input_files(root))
+    files = list(iter_input_files(scope.scan_root))
+    discovered_keys = {
+        _state_key(source_id, scope.file(path).stored_path)
+        for path in files
+    }
     summary = {
         "operation": operation,
-        "root": str(root),
-        "source_id": source_id,
+        **scope_fields,
         "file_count": len(files),
         "indexed_files": 0,
         "skipped_files": 0,
@@ -103,10 +119,10 @@ def add_or_update_root(
         pending: list[dict[str, Any]] = []
         force_index = reset_db or reset_clean
         for path in files:
-            rel = str(path.resolve().relative_to(root))
+            rel = scope.file(path).stored_path
             write_progress(status="running", phase="extract", current_file=rel)
             item = _prepare_file(
-                root,
+                scope,
                 path,
                 source_id,
                 state,
@@ -156,6 +172,16 @@ def add_or_update_root(
             _save_state(state)
             print(_progress_line(summary))
 
+        reconciled = _reconcile_missing_files(
+            state,
+            scope=scope,
+            source_id=source_id,
+            discovered_keys=discovered_keys,
+        )
+        summary["deleted_records"] += reconciled["deleted_records"]
+        summary["deleted_files"] = reconciled["deleted_files"]
+        _save_state(state)
+
         write_progress(status="running", phase="verify", current_file="")
         count = collection_count()
         write_manifest(count)
@@ -169,6 +195,7 @@ def add_or_update_root(
             phase="completed",
             files_done=_files_done(summary),
             collection_count=count,
+            deleted_records=summary["deleted_records"],
             completed_at=summary["completed_at"],
             current_file="",
         )
@@ -181,7 +208,7 @@ def add_or_update_root(
 
 
 def _prepare_file(
-    root: Path,
+    scope: IngestionScope,
     path: Path,
     source_id: str,
     state: dict[str, Any],
@@ -190,7 +217,7 @@ def _prepare_file(
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
 ) -> dict[str, Any]:
-    rel = str(path.resolve().relative_to(root))
+    rel = scope.file(path).stored_path
     key = _state_key(source_id, rel)
     content_hash = file_content_hash(path)
     prev = state["files"].get(key)
@@ -204,12 +231,13 @@ def _prepare_file(
 
     try:
         records = build_records_for_file(
-            root,
+            scope.logical_root,
             path,
             source_id=source_id,
             content_hash=content_hash,
             chunk_max_chars=chunk_max_chars,
             chunk_overlap=chunk_overlap,
+            ingestion_scope=scope,
         )
     except Exception as exc:
         return {
@@ -217,6 +245,8 @@ def _prepare_file(
             "key": key,
             "rel": rel,
             "source_id": source_id,
+            "scan_subdir": scope.scan_subdir,
+            "resolved_root": str(scope.resolved_root),
             "content_hash": content_hash,
             "chunker_config": chunker_config,
             "previous_record_ids": list((prev or {}).get("record_ids") or []),
@@ -228,6 +258,8 @@ def _prepare_file(
         "key": key,
         "rel": rel,
         "source_id": source_id,
+        "scan_subdir": scope.scan_subdir,
+        "resolved_root": str(scope.resolved_root),
         "content_hash": content_hash,
         "chunker_config": chunker_config,
         "previous_record_ids": list((prev or {}).get("record_ids") or []),
@@ -295,11 +327,14 @@ def _flush_batch(
         state["files"][item["key"]] = {
             "source_id": item["source_id"],
             "path": item["rel"],
+            "stored_path": item["rel"],
+            "scan_subdir": item.get("scan_subdir") or ".",
+            "resolved_root": item.get("resolved_root") or "",
             "content_hash": item["content_hash"],
             "chunker_config": item.get("chunker_config") or {},
             "record_ids": record_ids,
             "record_count": len(record_ids),
-            "records_path": str(record_path),
+            "records_path": record_path.relative_to(clean_dir()).as_posix(),
             "status": "indexed",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -309,6 +344,9 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
     state["files"][item["key"]] = {
         "source_id": item["source_id"],
         "path": item["rel"],
+        "stored_path": item["rel"],
+        "scan_subdir": item.get("scan_subdir") or ".",
+        "resolved_root": item.get("resolved_root") or "",
         "content_hash": item["content_hash"],
         "record_ids": item["previous_record_ids"],
         "record_count": len(item["previous_record_ids"]),
@@ -319,7 +357,7 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
 
 
 def _initial_state() -> dict[str, Any]:
-    return {"version": 1, "files": {}}
+    return {"version": 2, "files": {}, "ingestion": {}}
 
 
 def _load_state() -> dict[str, Any]:
@@ -327,8 +365,17 @@ def _load_state() -> dict[str, Any]:
     if not path.exists():
         return _initial_state()
     data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    version = int(data.get("version") or 1)
     if "files" not in data or not isinstance(data["files"], dict):
         data["files"] = {}
+    if version < 2 and data["files"]:
+        raise RuntimeError(
+            "Existing index state uses pre-root-prefixed document paths. "
+            "Rebuild the database once with --force-rebuild."
+        )
+    data["version"] = 2
+    if not isinstance(data.get("ingestion"), dict):
+        data["ingestion"] = {}
     return data
 
 
@@ -367,6 +414,84 @@ def _record_jsonl_path(source_id: str, rel: str) -> Path:
 
 def _state_key(source_id: str, rel: str) -> str:
     return f"{source_id}:{rel}"
+
+
+def _validate_resume_state(
+    state: dict[str, Any],
+    scope: IngestionScope,
+    source_id: str,
+) -> None:
+    saved = state.get("ingestion")
+    if not isinstance(saved, dict) or not saved:
+        return
+    expected = scope.state_fields(source_id=source_id)
+    mismatches = [
+        key
+        for key in ("resolved_root", "source_id", "scan_subdir")
+        if str(saved.get(key) or "") != str(expected.get(key) or "")
+    ]
+    if mismatches:
+        raise ValueError(
+            "resume settings do not match saved index state: "
+            + ", ".join(mismatches)
+        )
+
+
+def _reconcile_missing_files(
+    state: dict[str, Any],
+    *,
+    scope: IngestionScope,
+    source_id: str,
+    discovered_keys: set[str],
+) -> dict[str, int]:
+    missing_keys: list[str] = []
+    record_ids: list[str] = []
+    record_paths: list[Path] = []
+    for key, item in list(state.get("files", {}).items()):
+        if not isinstance(item, dict):
+            continue
+        stored_path = str(
+            item.get("stored_path") or item.get("path") or ""
+        )
+        if (
+            str(item.get("source_id") or "") != source_id
+            or str(item.get("resolved_root") or "")
+            != str(scope.resolved_root)
+            or not scope.contains_stored_path(stored_path)
+            or key in discovered_keys
+        ):
+            continue
+        missing_keys.append(key)
+        record_ids.extend(
+            str(value) for value in item.get("record_ids") or []
+        )
+        record_paths.append(_record_jsonl_path(source_id, stored_path))
+
+    if not missing_keys:
+        return {"deleted_files": 0, "deleted_records": 0}
+    deleted = delete_ids(record_ids)
+    delete_catalog_chunks(record_ids)
+    clean_root = clean_dir().resolve()
+    for record_path in record_paths:
+        try:
+            resolved = record_path.expanduser().resolve()
+            resolved.relative_to(clean_root)
+        except (OSError, ValueError):
+            continue
+        resolved.unlink(missing_ok=True)
+    for key in missing_keys:
+        state["files"].pop(key, None)
+    emit_event(
+        "scope_reconciled",
+        source_id=source_id,
+        scan_subdir=scope.scan_subdir,
+        deleted_files=len(missing_keys),
+        deleted_records=deleted,
+    )
+    return {
+        "deleted_files": len(missing_keys),
+        "deleted_records": deleted,
+    }
 
 
 def _reset_clean_dir() -> None:

@@ -259,6 +259,27 @@ After checking status, build:
 After completion, report document, chunk, and collection counts plus
 extraction errors.
 
+When only part of a larger source tree should be ingested, preserve the larger
+directory as `--root` and pass the selected relative folder through
+`--scan-subdir`.
+
+Root-name inclusion in stored document paths is always enabled.
+
+Example:
+
+- root: `Project Knowledge`
+- scan subdirectory: `plans/FY26`
+- stored path: `Project Knowledge/plans/FY26/...`
+
+Do not replace `--root` with the selected scan subdirectory.
+
+Before resuming, compare the saved root, source ID, and scan subdirectory.
+Do not resume when they differ.
+
+Changing from old relative paths to root-prefixed paths changes path-derived
+document IDs. Rebuild an existing database once if it must adopt the new path
+format.
+
 ## Add or update data
 
 Check status first. Preserve existing contents and run:
@@ -281,7 +302,7 @@ the user explicitly excludes one.
 ## Resume and force rebuild
 
 Use the saved `resume_command` only when `can_resume` is true and the saved
-root and source ID match the user's intended input.
+root, source ID, and scan subdirectory match the user's intended input.
 
 Never run `force_rebuild_command` or `--force-rebuild` unless the user clearly
 asks to discard prior work. Ask for confirmation when the saved input identity

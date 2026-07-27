@@ -23,6 +23,23 @@ def main() -> None:
     parser.add_argument("--db", required=True, help="Target DB name, e.g. project-rag")
     parser.add_argument("--root", required=True, help="Input document directory")
     parser.add_argument("--source-id", default="local")
+    parser.add_argument(
+        "--scan-subdir",
+        help="Relative subdirectory to scan while keeping paths relative to --root",
+    )
+    parser.add_argument(
+        "--include-root-name-in-path",
+        action="store_true",
+        help=(
+            "Accepted for compatibility. The root directory name is always "
+            "included in stored document paths."
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume only when root, source ID, and scan subdirectory match saved state",
+    )
     parser.add_argument("--batch-size-files", type=int, default=20)
     parser.add_argument("--reset-db", action="store_true", help="Delete and recreate the Chroma collection before adding data")
     parser.add_argument("--reset-clean", action="store_true", help="Delete clean records and resume state before adding data")
@@ -31,6 +48,8 @@ def main() -> None:
     parser.add_argument("--chunk-overlap", type=int, default=160, help="Optional chunk overlap for evaluation builds")
     parser.add_argument("--operation", default="add", choices=["add", "build"], help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.resume and (args.reset_db or args.reset_clean):
+        parser.error("--resume cannot be combined with --reset-db or --reset-clean")
 
     db_name = require_db_name(args.db)
     with database_mutation_guard(db_name, rag_root=RAG_ROOT):
@@ -44,6 +63,8 @@ def main() -> None:
         summary = add_or_update_root(
             root=Path(args.root),
             source_id=args.source_id,
+            scan_subdir=args.scan_subdir,
+            include_root_name_in_path=True,
             batch_size_files=args.batch_size_files,
             reset_db=args.reset_db,
             reset_clean=args.reset_clean,
@@ -51,6 +72,7 @@ def main() -> None:
             operation=args.operation,
             chunk_max_chars=args.chunk_max_chars,
             chunk_overlap=args.chunk_overlap,
+            resume=args.resume,
         )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 

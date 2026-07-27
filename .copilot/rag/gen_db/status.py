@@ -45,9 +45,35 @@ def main() -> None:
 
     status = _effective_status(progress, args.stale_minutes)
     operation = str(progress.get("operation") or "")
-    root = str(progress.get("root") or "")
-    source_id = str(progress.get("source_id") or "")
-    resume_command = _resume_command(db_name, operation, root, source_id)
+    saved_ingestion = (
+        state.get("ingestion")
+        if isinstance(state, dict)
+        and isinstance(state.get("ingestion"), dict)
+        else {}
+    )
+    ingestion = {
+        key: progress.get(key, saved_ingestion.get(key))
+        for key in (
+            "root",
+            "resolved_root",
+            "root_display_name",
+            "scan_subdir",
+            "scan_root",
+            "stored_path_prefix",
+            "include_root_name_in_path",
+            "source_id",
+        )
+    }
+    root = str(ingestion.get("root") or "")
+    source_id = str(ingestion.get("source_id") or "")
+    scan_subdir = str(ingestion.get("scan_subdir") or ".")
+    resume_command = _resume_command(
+        db_name,
+        operation,
+        root,
+        source_id,
+        scan_subdir,
+    )
     state_files = state.get("files") if isinstance(state, dict) else {}
     if not isinstance(state_files, dict):
         state_files = {}
@@ -63,6 +89,18 @@ def main() -> None:
         "updated_at": progress.get("updated_at") or "",
         "operation": operation,
         "root": root,
+        "resolved_root": str(ingestion.get("resolved_root") or ""),
+        "root_display_name": str(
+            ingestion.get("root_display_name") or ""
+        ),
+        "scan_subdir": scan_subdir,
+        "scan_root": str(ingestion.get("scan_root") or ""),
+        "stored_path_prefix": str(
+            ingestion.get("stored_path_prefix") or ""
+        ),
+        # This is a mandatory policy for every new build.  Keep the status
+        # contract truthful even before a run has written progress fields.
+        "include_root_name_in_path": True,
         "source_id": source_id,
         "files_total": progress.get("files_total") or 0,
         "files_done": progress.get("files_done") or 0,
@@ -84,7 +122,12 @@ def main() -> None:
         "can_resume": bool(resume_command and status in {"failed", "stale_running", "completed", "not_started"}),
         "appears_active": status == "running",
         "resume_command": resume_command,
-        "force_rebuild_command": _force_rebuild_command(db_name, root, source_id),
+        "force_rebuild_command": _force_rebuild_command(
+            db_name,
+            root,
+            source_id,
+            scan_subdir,
+        ),
     }
 
     if args.json:
@@ -144,50 +187,78 @@ def _count_state(files: dict[str, Any], status: str) -> int:
     return sum(1 for item in files.values() if isinstance(item, dict) and item.get("status") == status)
 
 
-def _resume_command(db_name: str, operation: str, root: str, source_id: str) -> list[str]:
+def _resume_command(
+    db_name: str,
+    operation: str,
+    root: str,
+    source_id: str,
+    scan_subdir: str = ".",
+) -> list[str]:
     if not root or not source_id:
         return []
     if operation == "build":
-        return [
-            "python",
-            "~/.copilot/rag/gen_db/build_db.py",
+        command = [
+            sys.executable,
+            str(RAG_ROOT / "gen_db" / "build_db.py"),
             "--db",
             db_name,
             "--root",
             root,
             "--source-id",
             source_id,
+            "--include-root-name-in-path",
             "--resume",
         ]
-    return [
-        "python",
-        "~/.copilot/rag/gen_db/add_data.py",
-        "--db",
-        db_name,
-        "--root",
-        root,
-        "--source-id",
-        source_id,
-    ]
+    else:
+        command = [
+            sys.executable,
+            str(RAG_ROOT / "gen_db" / "add_data.py"),
+            "--db",
+            db_name,
+            "--root",
+            root,
+            "--source-id",
+            source_id,
+            "--include-root-name-in-path",
+            "--resume",
+        ]
+    if scan_subdir and scan_subdir != ".":
+        command.extend(["--scan-subdir", scan_subdir])
+    return command
 
 
-def _force_rebuild_command(db_name: str, root: str, source_id: str) -> list[str]:
+def _force_rebuild_command(
+    db_name: str,
+    root: str,
+    source_id: str,
+    scan_subdir: str = ".",
+) -> list[str]:
     if not root or not source_id:
         return []
-    return [
-        "python",
-        "~/.copilot/rag/gen_db/build_db.py",
+    command = [
+        sys.executable,
+        str(RAG_ROOT / "gen_db" / "build_db.py"),
         "--db",
         db_name,
         "--root",
         root,
         "--source-id",
         source_id,
+        "--include-root-name-in-path",
         "--force-rebuild",
     ]
+    if scan_subdir and scan_subdir != ".":
+        command.extend(["--scan-subdir", scan_subdir])
+    return command
 
 
 def _format_command(command: list[str]) -> str:
+    if os.name == "nt":
+        quoted = [
+            "'" + str(part).replace("'", "''") + "'"
+            for part in command
+        ]
+        return "& " + " ".join(quoted)
     return " ".join(shlex.quote(part) for part in command)
 
 
@@ -197,7 +268,15 @@ def _print_human(output: dict[str, Any]) -> None:
     if version:
         print(f"Version: created_at={version.get('created_at')} db_hash={version.get('db_hash')}")
     print(f"Status: {output['status']} phase={output['phase']} updated_at={output['updated_at']}")
-    print(f"Root: {output['root']}")
+    print(f"Root:                {output['root']}")
+    print(f"Root display name:   {output['root_display_name']}")
+    print(f"Scan subdirectory:   {output['scan_subdir']}")
+    print(f"Scan root:           {output['scan_root']}")
+    print(f"Stored path prefix:  {output['stored_path_prefix']}")
+    print(
+        "Root name included: "
+        + ("yes" if output["include_root_name_in_path"] else "no")
+    )
     print(f"Source: {output['source_id']}")
     print(
         "Files: "

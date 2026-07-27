@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
 from .extractors import SUPPORTED_EXTENSIONS, extract_sections
+from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 
 
 def sha256_text(text: str) -> str:
@@ -20,9 +22,23 @@ def file_content_hash(path: Path) -> str:
 
 
 def iter_input_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
-            yield path
+    discovered: list[Path] = []
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, child_directories, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        child_directories.sort()
+        for filename in sorted(filenames):
+            path = Path(directory) / filename
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                discovered.append(path)
+    yield from sorted(discovered)
 
 
 def _source_type(path: Path) -> str:
@@ -60,13 +76,19 @@ def build_records_for_file(
     content_hash: str | None = None,
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
+    ingestion_scope: IngestionScope | None = None,
 ) -> list[dict[str, Any]]:
-    root = root.resolve()
-    path = path.resolve()
-    rel = str(path.relative_to(root))
-    sections = extract_sections(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
-    content_hash = content_hash or file_content_hash(path)
-    doc_id = sha256_text(f"{source_id}:{rel}:{content_hash}")
+    scope = ingestion_scope or resolve_ingestion_scope(root)
+    stored = scope.file(path)
+    sections = extract_sections(
+        stored.resolved_path,
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
+    )
+    content_hash = content_hash or file_content_hash(stored.resolved_path)
+    doc_id = sha256_text(
+        f"{source_id}:{stored.stored_path}:{content_hash}"
+    )
     chunker_version = f"jp-sw-v1:max_chars={chunk_max_chars}:overlap={chunk_overlap}"
 
     records: list[dict[str, Any]] = []
@@ -77,7 +99,9 @@ def build_records_for_file(
             continue
         text_hash = sha256_text(text)
         chunk_id = sha256_text(f"{doc_id}:{chunker_version}:{chunk_index}")
-        embedding_text = f"{rel}\n{section.title}\n{text}"
+        embedding_text = (
+            f"{stored.stored_path}\n{section.title}\n{text}"
+        )
         records.append(
             {
                 "id": chunk_id,
@@ -88,13 +112,13 @@ def build_records_for_file(
                 "metadata": {
                     "source": source_id,
                     "source_id": source_id,
-                    "source_type": _source_type(path),
-                    "path": rel,
-                    "uri": str(path),
-                    "title": path.name,
+                    "source_type": _source_type(stored.resolved_path),
+                    "path": stored.stored_path,
+                    "uri": stored.stored_path,
+                    "title": stored.resolved_path.name,
                     "section_path": section.title,
-                    "language": _language(path),
-                    "root": str(root),
+                    "language": _language(stored.resolved_path),
+                    "root": scope.root_display_name,
                     "chunk_title": section.title,
                     "chunk_index": chunk_index,
                     "content_hash": content_hash,
@@ -118,22 +142,28 @@ def build_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    root = root.resolve()
+    scope = resolve_ingestion_scope(root)
 
-    for path in iter_input_files(root):
-        rel = str(path.relative_to(root))
+    for path in iter_input_files(scope.scan_root):
+        stored = scope.file(path)
         try:
             records.extend(
                 build_records_for_file(
-                    root,
+                    scope.logical_root,
                     path,
                     source_id=source_id,
                     chunk_max_chars=chunk_max_chars,
                     chunk_overlap=chunk_overlap,
+                    ingestion_scope=scope,
                 )
             )
         except Exception as exc:
-            errors.append({"path": rel, "error": f"{type(exc).__name__}: {exc}"})
+            errors.append(
+                {
+                    "path": stored.stored_path,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             continue
 
     return records, errors

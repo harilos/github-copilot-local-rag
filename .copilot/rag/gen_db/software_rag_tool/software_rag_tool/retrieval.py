@@ -24,7 +24,9 @@ DEFAULT_RRF_K = 24
 DEFAULT_FAMILY_FLOOR_K = 3
 DEFAULT_ANCHORED_MAX_PER_DOC = 4
 DEFAULT_PRIMARY_PROTECTED_COUNT = 3
-DEFAULT_PRIMARY_BUDGET_RATIO = 0.80
+DEFAULT_PRIMARY_BUDGET_RATIO = 0.75
+DEFAULT_CONTEXT_MAX_CHARS = 280
+DEFAULT_CONTEXT_TOKEN_BUDGET = 240
 _GENERIC_IDENTIFIER_LOOKUP_TERMS = {
     "about",
     "detail",
@@ -196,6 +198,7 @@ def hybrid_query(
         max_per_doc=max_per_doc,
         relaxed_doc_limits=_relaxed_doc_limits(document_anchors),
     )
+    rows = rows[:top_k]
     rows = _expand_and_pack(
         rows,
         question=question,
@@ -205,7 +208,6 @@ def hybrid_query(
         document_anchors=document_anchors,
     )
     rows = _without_test_fixtures(rows)
-    rows = rows[:top_k]
 
     for rank, row in enumerate(rows, start=1):
         row["rank"] = rank
@@ -382,6 +384,7 @@ def adaptive_hybrid_query(
         relaxed_doc_limits=_relaxed_doc_limits(document_anchors),
     )
     diversified_rows = list(materialized)
+    materialized = materialized[:top_k]
     postprocess_primary_count = len(materialized)
     packing_diagnostics: dict[str, list[dict[str, Any]]] = {}
     materialized = _expand_and_pack(
@@ -393,7 +396,7 @@ def adaptive_hybrid_query(
         document_anchors=document_anchors,
         packing_diagnostics=packing_diagnostics,
     )
-    materialized = _without_test_fixtures(materialized)[:top_k]
+    materialized = _without_test_fixtures(materialized)
     for rank, row in enumerate(materialized, start=1):
         row["rank"] = rank
         if explain:
@@ -524,6 +527,7 @@ def cold_lexical_fast_path(
         max_per_doc=max_per_doc,
         relaxed_doc_limits=_relaxed_doc_limits(document_anchors),
     )
+    rows = rows[:top_k]
     rows = _expand_and_pack(
         rows,
         question=question,
@@ -532,7 +536,6 @@ def cold_lexical_fast_path(
         budget_tokens=budget_tokens,
         document_anchors=document_anchors,
     )
-    rows = rows[:top_k]
     for rank, row in enumerate(rows, start=1):
         row["rank"] = rank
         debug = dict(row.get("debug") or {})
@@ -1033,12 +1036,12 @@ def _same_semantic_section(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return False
     if left_section.casefold() == right_section.casefold():
         return True
-    left_page = re.fullmatch(r"(Page\s+\d+)\s+#\d+", left_section, re.IGNORECASE)
-    right_page = re.fullmatch(r"(Page\s+\d+)\s+#\d+", right_section, re.IGNORECASE)
+    left_base = re.sub(r"\s+#\d+$", "", left_section).strip()
+    right_base = re.sub(r"\s+#\d+$", "", right_section).strip()
     return bool(
-        left_page
-        and right_page
-        and left_page.group(1).casefold() == right_page.group(1).casefold()
+        left_base
+        and right_base
+        and left_base.casefold() == right_base.casefold()
     )
 
 
@@ -1093,97 +1096,425 @@ def _expand_and_pack(
     document_anchors: dict[str, dict[str, Any]],
     packing_diagnostics: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Protect top primary rows, then spend the remaining budget on neighbors."""
+    """Pack every selected primary before attaching optional structure context."""
     primary_rows = _without_test_fixtures(rows)
     if not primary_rows:
         return []
-    family_signals = _family_signals_by_id(family_rankings)
-    protected_count = min(DEFAULT_PRIMARY_PROTECTED_COUNT, len(primary_rows))
+
+    prepared = [
+        {**row, "packing_phase": "primary"}
+        for row in primary_rows
+    ]
     if budget_tokens and budget_tokens > 0:
-        protected_budget = max(
+        primary_budget = max(
             1,
             int(budget_tokens * DEFAULT_PRIMARY_BUDGET_RATIO),
         )
-        used = 0
-        for index, row in enumerate(primary_rows):
-            if index < protected_count:
-                used += conservative_token_count(str(row.get("text") or ""))
-                continue
-            if used >= protected_budget or protected_count >= 4:
-                break
-            used += conservative_token_count(str(row.get("text") or ""))
-            protected_count += 1
+        packed_primaries = _pack_protected_rows(
+            prepared,
+            question=question,
+            budget_tokens=primary_budget,
+        )
+        context_budget = max(
+            0,
+            budget_tokens - _packed_rows_token_count(packed_primaries),
+        )
+    else:
+        packed_primaries = prepared
+        context_budget = DEFAULT_CONTEXT_TOKEN_BUDGET
 
-    protected = [
-        {**row, "packing_phase": "protected_primary"}
-        for row in primary_rows[:protected_count]
-    ]
-    remaining = [
-        {**row, "packing_phase": "remaining_primary"}
-        for row in primary_rows[protected_count:]
-    ]
-    seen_ids = {
+    packed_primaries, context_candidates = _attach_structure_context(
+        packed_primaries,
+        question=question,
+        backend=backend,
+        context_budget_tokens=context_budget,
+        verified_anchor_ids=set(document_anchors),
+    )
+    if packing_diagnostics is not None:
+        packing_diagnostics["protected_primaries"] = list(
+            packed_primaries
+        )
+        packing_diagnostics["neighbor_candidates"] = list(
+            context_candidates
+        )
+        packing_diagnostics["remaining_primaries"] = []
+    return packed_primaries
+
+
+def _attach_structure_context(
+    primary_rows: list[dict[str, Any]],
+    *,
+    question: str,
+    backend: SearchBackend,
+    context_budget_tokens: int,
+    verified_anchor_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if context_budget_tokens <= 0:
+        return primary_rows, []
+    primary_ids = {
         str(row.get("id") or "")
         for row in primary_rows
         if row.get("id")
     }
+    identifier_only_lookup = _is_identifier_only_lookup(question)
+    claimed_context_ids: set[str] = set()
+    output: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    remaining = context_budget_tokens
 
-    def neighbors_for(selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
-        for primary in selected:
-            primary_id = str(primary.get("id") or "")
-            document_anchor = document_anchors.get(primary_id)
-            neighbors = _without_test_fixtures(
-                backend.get_neighbor_rows(primary_id, window=1)
-            )
-            for neighbor in neighbors:
-                neighbor_id = str(neighbor.get("id") or "")
-                if not neighbor_id or neighbor_id in seen_ids:
-                    continue
-                copy = _decorate_anchored_neighbor(
-                    neighbor,
-                    primary,
-                    document_anchor=document_anchor,
-                    family_signals=family_signals,
-                )
-                copy["packing_phase"] = "neighbor"
-                debug = dict(copy.get("debug") or {})
-                debug.pop("exact_match", None)
-                debug.pop("lexical_anchor", None)
-                debug.pop("fast_path_certificate", None)
-                if debug:
-                    copy["debug"] = debug
-                else:
-                    copy.pop("debug", None)
-                output.append(copy)
-                seen_ids.add(neighbor_id)
-        return output
-
-    protected_for_packing = protected
-    if budget_tokens and budget_tokens > 0:
-        protected_for_packing = _pack_protected_rows(
-            protected,
-            question=question,
-            budget_tokens=max(
-                1,
-                int(budget_tokens * DEFAULT_PRIMARY_BUDGET_RATIO),
-            ),
+    for primary in primary_rows:
+        primary_id = str(primary.get("id") or "")
+        copy = dict(primary)
+        copy["matched_excerpt"] = str(copy.get("text") or "")
+        copy["heading"] = str(
+            (copy.get("metadata") or {}).get("section_path")
+            or (copy.get("metadata") or {}).get("chunk_title")
+            or ""
         )
-    neighbor_candidates = neighbors_for(protected)
-    if packing_diagnostics is not None:
-        packing_diagnostics["protected_primaries"] = list(protected_for_packing)
-        packing_diagnostics["neighbor_candidates"] = list(neighbor_candidates)
-        packing_diagnostics["remaining_primaries"] = list(remaining)
-    ordered = [
-        *protected_for_packing,
-        *neighbor_candidates,
-        *remaining,
-    ]
-    return _pack_budget(
-        ordered,
-        budget_tokens=budget_tokens,
-        question=question,
+        copy["source_ranges"] = [
+            _source_range(primary, kind="matched")
+        ]
+        primary_signals = {
+            str(value) for value in primary.get("signals") or []
+        }
+        if (
+            (
+                identifier_only_lookup
+                and primary_id not in verified_anchor_ids
+            )
+            or (
+                "exact" in primary_signals
+                and primary.get("exact_evidence_eligible") is False
+            )
+        ):
+            output.append(copy)
+            continue
+
+        before: tuple[dict[str, Any], str, str] | None = None
+        after: tuple[dict[str, Any], str, str] | None = None
+        neighbors = _without_test_fixtures(
+            backend.get_neighbor_rows(primary_id, window=1)
+        )
+        for neighbor in neighbors:
+            neighbor_id = str(neighbor.get("id") or "")
+            if (
+                not neighbor_id
+                or neighbor_id in primary_ids
+                or neighbor_id in claimed_context_ids
+            ):
+                continue
+            relationship = _structural_context_relationship(
+                primary,
+                neighbor,
+            )
+            if not relationship:
+                continue
+            direction = _neighbor_direction(primary, neighbor)
+            if direction not in {"before", "after"}:
+                continue
+            text = _trim_context_overlap(
+                str(primary.get("text") or ""),
+                str(neighbor.get("text") or ""),
+                direction=direction,
+            )
+            if not text:
+                continue
+            text = (
+                text[-DEFAULT_CONTEXT_MAX_CHARS:]
+                if direction == "before"
+                else text[:DEFAULT_CONTEXT_MAX_CHARS]
+            )
+            candidate = (neighbor, text, relationship)
+            if direction == "before":
+                before = candidate
+            else:
+                after = candidate
+
+        attached_reasons: list[str] = []
+        for direction, candidate in (
+            ("before", before),
+            ("after", after),
+        ):
+            if candidate is None or remaining <= 0:
+                continue
+            neighbor, text, relationship = candidate
+            text_tokens = conservative_token_count(text)
+            if text_tokens > remaining:
+                text = truncate_to_token_limit(text, remaining)
+                text_tokens = conservative_token_count(text)
+            if not text or text_tokens <= 0:
+                continue
+            field = f"context_{direction}"
+            copy[field] = text
+            attached_reasons.append(relationship)
+            source_range = _source_range(
+                neighbor,
+                kind=field,
+                relationship=relationship,
+            )
+            copy["source_ranges"].append(source_range)
+            neighbor_id = str(neighbor.get("id") or "")
+            claimed_context_ids.add(neighbor_id)
+            diagnostics.append(
+                {
+                    "id": neighbor_id,
+                    "text": text,
+                    "metadata": dict(neighbor.get("metadata") or {}),
+                    "signals": ["structural_context"],
+                    "support_kind": relationship,
+                    "anchor_chunk_uid": primary_id,
+                    "packing_phase": "context",
+                }
+            )
+            remaining -= text_tokens
+        if attached_reasons:
+            copy["context_reason"] = (
+                attached_reasons[0]
+                if len(set(attached_reasons)) == 1
+                else "structure_aware_neighbors"
+            )
+        if _looks_like_table_row(str(primary.get("text") or "")):
+            has_header = any(
+                reason == "table_header"
+                for reason in attached_reasons
+            ) or _contains_table_header(str(primary.get("text") or ""))
+            if not has_header:
+                copy["context_warnings"] = ["table_headers_incomplete"]
+        output.append(copy)
+    return output, diagnostics
+
+
+def _neighbor_direction(
+    primary: dict[str, Any],
+    neighbor: dict[str, Any],
+) -> str:
+    try:
+        primary_index = int(
+            (primary.get("metadata") or {}).get("chunk_index")
+        )
+        neighbor_index = int(
+            (neighbor.get("metadata") or {}).get("chunk_index")
+        )
+    except (TypeError, ValueError):
+        return ""
+    if neighbor_index < primary_index:
+        return "before"
+    if neighbor_index > primary_index:
+        return "after"
+    return ""
+
+
+def _structural_context_relationship(
+    primary: dict[str, Any],
+    neighbor: dict[str, Any],
+) -> str:
+    if _doc_key(primary) != _doc_key(neighbor):
+        return ""
+    if _neighbor_distance(primary, neighbor) != 1:
+        return ""
+    if not _same_semantic_section(primary, neighbor):
+        return ""
+    primary_text = str(primary.get("text") or "")
+    neighbor_text = str(neighbor.get("text") or "")
+    direction = _neighbor_direction(primary, neighbor)
+    source_type = str(
+        (primary.get("metadata") or {}).get("source_type") or ""
     )
+    path = str((primary.get("metadata") or {}).get("path") or "")
+    if (
+        _path_suffix(path) == ".md"
+        and _crosses_markdown_heading_boundary(
+            primary_text,
+            neighbor_text,
+            direction=direction,
+        )
+    ):
+        return ""
+    if _looks_like_table_row(primary_text):
+        if direction == "before" and _contains_table_header(neighbor_text):
+            return "table_header"
+        if direction == "after" and _contains_table_footnote(neighbor_text):
+            return "table_footnote"
+    if source_type == "code" or _path_suffix(path) in {
+        ".py",
+        ".js",
+        ".ts",
+        ".java",
+        ".go",
+        ".rs",
+        ".cs",
+    }:
+        if direction == "before" and re.search(
+            r"(?m)^\s*(?:class|def|function|func|fn|public|private)\b",
+            neighbor_text,
+        ):
+            return "enclosing_function"
+    if _path_suffix(path) in {
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+    } and direction == "before":
+        if re.search(
+            r"(?m)^\s*(?:\[.+\]|[\"']?[\w.-]+[\"']?\s*[:={])",
+            neighbor_text,
+        ):
+            return "enclosing_configuration"
+    if not _context_is_useful(primary_text, primary):
+        return ""
+    return "same_section_neighbor"
+
+
+def _path_suffix(path: str) -> str:
+    match = re.search(r"(\.[A-Za-z0-9]+)$", path)
+    return match.group(1).casefold() if match else ""
+
+
+def _context_is_useful(text: str, row: dict[str, Any]) -> bool:
+    signals = {str(value) for value in row.get("signals") or []}
+    return bool(
+        signals & {"exact", "lexical_anchor"}
+        or _looks_like_table_row(text)
+        or re.search(
+            r"(?:this|that|these|those|the above|以下|以上|これ|それ|同上|前述)",
+            text,
+            re.IGNORECASE,
+        )
+        or (text and text[0].islower())
+        or (text and text[-1] not in "。.!?！？）)]}\"'")
+    )
+
+
+def _crosses_markdown_heading_boundary(
+    primary_text: str,
+    neighbor_text: str,
+    *,
+    direction: str,
+) -> bool:
+    primary_headings = _markdown_headings(primary_text)
+    neighbor_headings = _markdown_headings(neighbor_text)
+    primary_first_is_heading = bool(
+        re.match(r"^\s{0,3}#{1,6}\s+\S", primary_text)
+    )
+    neighbor_first_is_heading = bool(
+        re.match(r"^\s{0,3}#{1,6}\s+\S", neighbor_text)
+    )
+
+    if (
+        primary_headings
+        and neighbor_headings
+        and primary_headings[-1] != neighbor_headings[-1]
+    ):
+        return True
+    if direction == "before" and primary_first_is_heading:
+        return (
+            not neighbor_headings
+            or neighbor_headings[-1] != primary_headings[0]
+        )
+    if direction == "after" and neighbor_first_is_heading:
+        return (
+            not primary_headings
+            or primary_headings[-1] != neighbor_headings[0]
+        )
+    return False
+
+
+def _markdown_headings(text: str) -> list[str]:
+    return [
+        re.sub(r"\s+#+\s*$", "", match.group(1)).strip().casefold()
+        for match in re.finditer(
+            r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$",
+            text,
+        )
+        if match.group(1).strip()
+    ]
+
+
+def _looks_like_table_row(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any(
+        (line.count("|") >= 2 or line.count("\t") >= 2)
+        and bool(re.search(r"\d", line))
+        for line in lines
+    )
+
+
+def _contains_table_header(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines[:4]:
+        if line.count("|") < 2 and line.count("\t") < 2:
+            continue
+        cells = [
+            cell.strip()
+            for cell in re.split(r"[|\t]", line)
+            if cell.strip()
+        ]
+        if len(cells) >= 2 and sum(
+            bool(re.search(r"[A-Za-zぁ-んァ-ヶ一-龠]", cell))
+            for cell in cells
+        ) >= 2:
+            return True
+    return False
+
+
+def _contains_table_footnote(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?im)^\s*(?:note|notes|source|注|備考|出典|脚注)\s*[:：]",
+            text,
+        )
+    )
+
+
+def _trim_context_overlap(
+    primary_text: str,
+    context_text: str,
+    *,
+    direction: str,
+) -> str:
+    primary_text = primary_text.strip()
+    context_text = context_text.strip()
+    limit = min(320, len(primary_text), len(context_text))
+    for size in range(limit, 19, -1):
+        if (
+            direction == "before"
+            and context_text[-size:] == primary_text[:size]
+        ):
+            return context_text[:-size].strip()
+        if (
+            direction == "after"
+            and primary_text[-size:] == context_text[:size]
+        ):
+            return context_text[size:].strip()
+    return context_text
+
+
+def _source_range(
+    row: dict[str, Any],
+    *,
+    kind: str,
+    relationship: str = "",
+) -> dict[str, Any]:
+    metadata = row.get("metadata") or {}
+    output: dict[str, Any] = {
+        "kind": kind,
+        "chunk_uid": str(row.get("id") or ""),
+        "chunk_index": metadata.get("chunk_index"),
+        "section": str(
+            metadata.get("section_path")
+            or metadata.get("chunk_title")
+            or ""
+        ),
+    }
+    for key in ("page", "slide", "lines"):
+        if metadata.get(key) not in (None, ""):
+            output[key] = metadata[key]
+    if relationship:
+        output["relationship"] = relationship
+    return output
 
 
 def _pack_protected_rows(
@@ -1898,7 +2229,12 @@ def _bounded_anchor_excerpt(
 
 def _packed_rows_token_count(rows: list[dict[str, Any]]) -> int:
     return sum(
-        conservative_token_count(str(row.get("text") or ""))
+        conservative_token_count(
+            "\n".join(
+                str(row.get(key) or "")
+                for key in ("context_before", "text", "context_after")
+            )
+        )
         for row in rows
     )
 

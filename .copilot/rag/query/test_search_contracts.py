@@ -269,6 +269,65 @@ class NoHitContractTests(unittest.TestCase):
         self.assertEqual("anchor-uid", payload["evidence"][0]["anchor_chunk_uid"])
         self.assertEqual(["dense"], payload["evidence"][0]["independent_signals"])
 
+    def test_compact_contract_preserves_structure_context_fields(self) -> None:
+        evidence = {
+            "id": "R1",
+            "text": "matched text",
+            "matched_excerpt": "matched text",
+            "heading": "Results",
+            "context_before": "preceding explanation",
+            "context_after": "following explanation",
+            "context_reason": "same_section_neighbor",
+            "source_ranges": [
+                {
+                    "kind": "matched",
+                    "chunk_uid": "primary",
+                    "chunk_index": 1,
+                    "section": "Results",
+                },
+                {
+                    "kind": "context_after",
+                    "chunk_uid": "after",
+                    "chunk_index": 2,
+                    "section": "Results",
+                    "relationship": "same_section_neighbor",
+                },
+            ],
+        }
+        payload = compact_search_contract(
+            {
+                "status": "ok",
+                "evidence": [evidence],
+                "document_results": [
+                    {
+                        "path": f"docs/{index}.md",
+                        "preview": "short",
+                    }
+                    for index in range(6)
+                ],
+            }
+        )
+        selected = payload["evidence"][0]
+        self.assertEqual("matched text", selected["matched_excerpt"])
+        self.assertEqual(
+            "preceding explanation",
+            selected["context_before"],
+        )
+        self.assertEqual(
+            "following explanation",
+            selected["context_after"],
+        )
+        self.assertEqual(2, len(selected["source_ranges"]))
+        self.assertEqual(6, len(payload["document_results"]))
+        self.assertLessEqual(
+            len(
+                json.dumps(payload, ensure_ascii=False, indent=2).encode(
+                    "utf-8"
+                )
+            ),
+            10_240,
+        )
+
     def test_compact_cli_output_stays_below_lightweight_tool_limit(self) -> None:
         evidence = [{"id": "R1", "text": "x" * 900}]
         payload = {

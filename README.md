@@ -26,6 +26,8 @@ Copilotへ「RAGの初期設定をして」「RAGを使ってローカル資料�
 - 検索結果の重複や特定ファイルへの偏りを抑制
 - 長時間のDB構築を中断地点から再開
 - 新規・変更されたファイルだけを既存DBへ追加
+- 大きな入力ツリーの一部だけを選択して構築・追加
+- 一致箇所を優先しつつ、見出しや表ヘッダーなどの周辺文脈を返却
 - ベクトルを再計算せず、SQLite検索インデックスだけを再構築
 
 通常利用では、検索モードや内部オプションを指定する必要はありません。
@@ -186,6 +188,29 @@ DBがまだない場合:
 
 DB名は用途が分かる英数字名とし、原則として`-rag`で終わらせます。`source-id`は入力資料の出所を識別する安定した名前です。同じ資料群を更新するときは同じ値を使用します。
 
+入力ツリーの一部だけを対象にする場合も、`--root`には安定した上位
+ディレクトリを指定し、対象範囲を`--scan-subdir`で指定します。
+
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/gen_db/build_db.py \
+  --db project-rag \
+  --root "/data/Project Knowledge" \
+  --source-id project \
+  --scan-subdir "plans/FY26" \
+  --resume
+```
+
+この例で保存されるpathは
+`Project Knowledge/plans/FY26/...`です。root名は常に含まれ、
+Windowsでも永続pathの区切りは`/`になります。`add_data.py`の削除照合は
+指定したscan範囲内に限定されるため、別の年度や別scopeの資料は削除扱いに
+なりません。
+
+> [!IMPORTANT]
+> root名を含むpathへ変わると、path由来のdocument IDも変わります。
+> 旧形式で作成したDBは、この形式を採用するときに一度再構築してください。
+
 <details>
 <summary>Windowsのフォルダを指定してDBを作る例</summary>
 
@@ -206,6 +231,13 @@ Copilotは次の順で検索対象DBを決めます。
 4. 複数候補が妥当なら利用者へ確認
 
 質問全文は一度だけ`search.py`へ渡します。Copilot側でキーワード分割したり、dense・BM25・exactを個別に実行したりしません。
+
+検索では複数文書のprimary一致箇所を先に確保し、残りの出力予算だけで
+同じsection、表ヘッダー、前後段落、関数・設定ブロックなどの周辺文脈を
+補います。周辺文脈はprimaryのExactやBM25等のsignalを継承しません。
+表の列見出しを確認できない場合は`table_headers_incomplete`警告を返し、
+数値列の意味を推測しません。広域検索用の短いdocument cardは、周辺文脈を
+付けず従来どおり独立して返します。
 
 ### RAGを使わない場合
 

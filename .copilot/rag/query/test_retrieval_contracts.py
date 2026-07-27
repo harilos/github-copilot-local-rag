@@ -209,6 +209,28 @@ class HybridAnchorContractTests(unittest.TestCase):
             backend.calls,
         )
 
+    def test_only_final_primaries_share_the_answer_context_budget(self) -> None:
+        backend = FakeBackend()
+        backend.dense_rows = [
+            result_row(
+                f"dense-{index}",
+                chr(65 + index % 26) * 1_000,
+                signals=["dense"],
+                path=f"document-{index}.txt",
+            )
+            for index in range(24)
+        ]
+        rows = hybrid_query(
+            "semantic question",
+            top_k=2,
+            budget_tokens=400,
+            use_dense=True,
+            use_lexical=False,
+            backend=backend,
+        )
+        self.assertEqual(2, len(rows))
+        self.assertTrue(all(len(row["text"]) > 300 for row in rows))
+
     def test_primary_protection_prevents_neighbors_from_evicting_top_primary_rows(self) -> None:
         backend = FakeBackend()
         primaries = [
@@ -244,6 +266,206 @@ class HybridAnchorContractTests(unittest.TestCase):
             [row["id"] for row in rows[:3]],
         )
         self.assertLessEqual(_packed_rows_token_count(rows), 1_200)
+
+    def test_table_row_uses_available_header_as_context(self) -> None:
+        backend = FakeBackend()
+        header = result_row(
+            "header",
+            "Region | Metric | Year",
+            path="table.pdf",
+            section="Page 3 #1",
+            chunk_index=0,
+        )
+        row = result_row(
+            "row",
+            "North | 25 | 31",
+            path="table.pdf",
+            section="Page 3 #2",
+            chunk_index=1,
+        )
+        backend.neighbor_rows = {"row": [header, row]}
+        selected = _expand_and_pack(
+            [row],
+            question="regional values",
+            family_rankings=[("dense", 1.0, [row])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertEqual("Region | Metric | Year", selected[0]["context_before"])
+        self.assertEqual("table_header", selected[0]["context_reason"])
+        self.assertNotIn("context_warnings", selected[0])
+
+    def test_missing_table_header_adds_machine_readable_warning(self) -> None:
+        backend = FakeBackend()
+        row = result_row(
+            "row",
+            "North | 25 | 31",
+            path="table.pdf",
+            section="Page 3 #2",
+            chunk_index=1,
+        )
+        backend.neighbor_rows = {"row": [row]}
+        selected = _expand_and_pack(
+            [row],
+            question="regional values",
+            family_rankings=[("dense", 1.0, [row])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertEqual(
+            ["table_headers_incomplete"],
+            selected[0]["context_warnings"],
+        )
+
+    def test_structure_context_does_not_cross_a_heading_boundary(self) -> None:
+        backend = FakeBackend()
+        primary = result_row(
+            "primary",
+            "this result continues",
+            path="guide.md",
+            section="Results #2",
+            chunk_index=1,
+        )
+        other_heading = result_row(
+            "other",
+            "Unrelated introduction",
+            path="guide.md",
+            section="Introduction #1",
+            chunk_index=0,
+        )
+        backend.neighbor_rows = {"primary": [other_heading, primary]}
+        selected = _expand_and_pack(
+            [primary],
+            question="result explanation",
+            family_rankings=[("dense", 1.0, [primary])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertNotIn("context_before", selected[0])
+
+    def test_visible_markdown_heading_blocks_blind_numbered_neighbor(self) -> None:
+        backend = FakeBackend()
+        primary = result_row(
+            "primary",
+            "# Results\nThis result continues",
+            path="guide.md",
+            section="guide.md #2",
+            chunk_index=1,
+        )
+        other_heading = result_row(
+            "other",
+            "# Introduction\nUnrelated introduction",
+            path="guide.md",
+            section="guide.md #1",
+            chunk_index=0,
+        )
+        backend.neighbor_rows = {"primary": [other_heading, primary]}
+        selected = _expand_and_pack(
+            [primary],
+            question="result explanation",
+            family_rankings=[("dense", 1.0, [primary])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertNotIn("context_before", selected[0])
+
+    def test_numbered_plain_chunks_do_not_expand_without_a_reason(self) -> None:
+        backend = FakeBackend()
+        before = result_row(
+            "before",
+            "A complete preceding paragraph.",
+            path="guide.txt",
+            section="guide.txt #1",
+            chunk_index=0,
+        )
+        primary = result_row(
+            "primary",
+            "A complete matched paragraph.",
+            path="guide.txt",
+            section="guide.txt #2",
+            chunk_index=1,
+        )
+        backend.neighbor_rows = {"primary": [before, primary]}
+        selected = _expand_and_pack(
+            [primary],
+            question="matched paragraph",
+            family_rankings=[("dense", 1.0, [primary])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertNotIn("context_before", selected[0])
+
+    def test_overlapping_text_is_not_repeated_in_context(self) -> None:
+        backend = FakeBackend()
+        overlap = "shared overlap between neighboring chunks"
+        before = result_row(
+            "before",
+            "Earlier explanation. " + overlap,
+            path="guide.md",
+            section="Topic #1",
+            chunk_index=0,
+        )
+        primary = result_row(
+            "primary",
+            overlap + " and this result continues",
+            path="guide.md",
+            section="Topic #2",
+            chunk_index=1,
+        )
+        backend.neighbor_rows = {"primary": [before, primary]}
+        selected = _expand_and_pack(
+            [primary],
+            question="result explanation",
+            family_rankings=[("dense", 1.0, [primary])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertEqual(
+            "Earlier explanation.",
+            selected[0]["context_before"],
+        )
+
+    def test_code_hit_uses_enclosing_function_context(self) -> None:
+        backend = FakeBackend()
+        function = result_row(
+            "function",
+            "def calculate_total(items):",
+            path="src/calculate.py",
+            section="calculate.py #1",
+            chunk_index=0,
+        )
+        function["metadata"]["source_type"] = "code"
+        body = result_row(
+            "body",
+            "    return sum(items)",
+            path="src/calculate.py",
+            section="calculate.py #2",
+            chunk_index=1,
+        )
+        body["metadata"]["source_type"] = "code"
+        backend.neighbor_rows = {"body": [function, body]}
+        selected = _expand_and_pack(
+            [body],
+            question="calculate total behavior",
+            family_rankings=[("lexical", 1.0, [body])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={},
+        )
+        self.assertEqual(
+            "def calculate_total(items):",
+            selected[0]["context_before"],
+        )
+        self.assertEqual(
+            "enclosing_function",
+            selected[0]["context_reason"],
+        )
 
     def test_verified_document_anchor_relaxes_only_its_document_limit(self) -> None:
         anchored = [
@@ -339,7 +561,7 @@ class HybridAnchorContractTests(unittest.TestCase):
             [row["id"] for row in selected],
         )
 
-    def test_same_section_verified_exact_neighbor_becomes_evidence_without_exact_signal(self) -> None:
+    def test_same_section_verified_exact_neighbor_becomes_attached_context(self) -> None:
         backend = FakeBackend()
         anchor = result_row(
             "anchor",
@@ -370,14 +592,28 @@ class HybridAnchorContractTests(unittest.TestCase):
             db_scope_confirmed=True,
             backend=backend,
         )
-        promoted = next(row for row in rows if row["id"] == "cause")
-        self.assertEqual(["neighbor"], promoted["signals"])
-        self.assertEqual("anchored_neighbor", promoted["support_kind"])
-        self.assertEqual("anchor", promoted["anchor_chunk_uid"])
-        self.assertEqual("M-4", promoted["anchor_term"])
-        self.assertEqual(1, promoted["neighbor_distance"])
+        self.assertNotIn("cause", [row["id"] for row in rows])
+        primary = next(row for row in rows if row["id"] == "anchor")
+        self.assertEqual(
+            "The probable cause was loss of directional control.",
+            primary["context_after"],
+        )
+        context_range = next(
+            item
+            for item in primary["source_ranges"]
+            if item["kind"] == "context_after"
+        )
+        self.assertEqual("cause", context_range["chunk_uid"])
+        self.assertEqual(
+            "same_section_neighbor",
+            context_range["relationship"],
+        )
         payload = json_payload(rows, "What caused the M-4 accident?", "incident-rag", 6_000)
-        self.assertIn("R2", [item["id"] for item in payload["evidence"]])
+        self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
+        self.assertEqual(
+            "The probable cause was loss of directional control.",
+            payload["evidence"][0]["context_after"],
+        )
         self.assertEqual(1, route["retrieval_funnel"]["verified_document_anchor_count"])
 
     def test_unrelated_neighbor_is_not_promoted_by_verified_exact(self) -> None:
@@ -410,10 +646,11 @@ class HybridAnchorContractTests(unittest.TestCase):
             db_scope_confirmed=True,
             backend=backend,
         )
-        selected = next(row for row in rows if row["id"] == "unrelated")
-        self.assertNotIn("support_kind", selected)
+        self.assertNotIn("unrelated", [row["id"] for row in rows])
+        selected = next(row for row in rows if row["id"] == "anchor")
+        self.assertNotIn("context_after", selected)
         payload = json_payload(rows, "What caused the M-4 accident?", "incident-rag", 6_000)
-        self.assertIn("R2", [item["id"] for item in payload["background_context"]])
+        self.assertEqual([], payload["background_context"])
 
     def test_ambiguous_exact_documents_do_not_promote_a_neighbor(self) -> None:
         backend = FakeBackend()
@@ -455,8 +692,10 @@ class HybridAnchorContractTests(unittest.TestCase):
             backend=backend,
         )
         self.assertEqual(0, route["retrieval_funnel"]["verified_document_anchor_count"])
-        selected = next(row for row in rows if row["id"] == "neighbor")
-        self.assertNotIn("support_kind", selected)
+        self.assertNotIn("neighbor", [row["id"] for row in rows])
+        self.assertTrue(
+            all("context_after" not in row for row in rows)
+        )
         exact_rows = [row for row in rows if "exact" in row["signals"]]
         self.assertTrue(exact_rows)
         self.assertTrue(
@@ -1096,15 +1335,45 @@ class HybridAnchorContractTests(unittest.TestCase):
 
     def test_neighbor_chunks_do_not_inherit_direct_evidence_signals(self) -> None:
         backend = FakeBackend()
-        exact = result_row("exact", "A2L direct evidence", signals=["exact"])
-        neighbor = result_row("neighbor", "Nearby explanation", signals=["exact"])
+        exact = result_row(
+            "exact",
+            "A2L direct evidence",
+            signals=["exact"],
+            path="same.txt",
+            section="Section #1",
+            chunk_index=0,
+            debug={"exact_match": {"matched_terms": ["A2L"]}},
+        )
+        neighbor = result_row(
+            "neighbor",
+            "Nearby explanation",
+            signals=["exact"],
+            path="same.txt",
+            section="Section #2",
+            chunk_index=1,
+        )
         backend.exact_rows = [exact]
+        backend.lexical_rows = [exact]
         backend.get_neighbor_rows = (  # type: ignore[method-assign]
             lambda _chunk_uid, *, window=1: [exact, neighbor]
         )
-        rows = hybrid_query("A2Lについて", top_k=3, backend=backend)
-        selected = next(row for row in rows if row["id"] == "neighbor")
-        self.assertEqual(["neighbor"], selected["signals"])
+        rows = _expand_and_pack(
+            [exact],
+            question="A2Lについて",
+            family_rankings=[("exact", 1.0, [exact])],
+            backend=backend,
+            budget_tokens=400,
+            document_anchors={"exact": {"anchor_chunk_uid": "exact"}},
+        )
+        self.assertNotIn("neighbor", [row["id"] for row in rows])
+        selected = next(row for row in rows if row["id"] == "exact")
+        self.assertEqual("Nearby explanation", selected["context_after"])
+        context_range = next(
+            item
+            for item in selected["source_ranges"]
+            if item["kind"] == "context_after"
+        )
+        self.assertNotIn("signals", context_range)
 
     def test_anchor_rescue_is_disabled_for_lexical_only_evaluation(self) -> None:
         backend = FakeBackend()

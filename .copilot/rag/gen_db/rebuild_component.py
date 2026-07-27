@@ -66,11 +66,17 @@ def _rebuild(args: argparse.Namespace, db_name: str) -> None:
         summary = add_or_update_root(
             root=Path(root),
             source_id=source_id,
+            scan_subdir=str(progress.get("scan_subdir") or "."),
+            include_root_name_in_path=True,
             batch_size_files=args.batch_size_files,
             reset_db=True,
             reset_clean=True,
             retry_errors=True,
             operation=str(progress.get("operation") or "build"),
+            chunk_max_chars=int(
+                progress.get("chunk_max_chars") or 1400
+            ),
+            chunk_overlap=int(progress.get("chunk_overlap") or 160),
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
         return

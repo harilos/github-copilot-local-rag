@@ -116,7 +116,7 @@ RAG setup to recreate the virtual environment.
 
 ## Search
 
-Search uses hybrid retrieval internally: Chroma dense search, SQLite FTS5 BM25, identifier exact match, metadata/path search, weighted RRF, duplicate suppression, and context packing. Copilot only passes the full question once.
+Search uses hybrid retrieval internally: Chroma dense search, SQLite FTS5 BM25, identifier exact match, metadata/path search, weighted RRF, duplicate suppression, and context packing. Copilot only passes the full question once. Distinct primary excerpts are reserved first; optional same-section, table-header, code, or configuration context uses only the remaining budget. Context does not inherit retrieval signals. A table row without available headers adds `table_headers_incomplete`.
 
 `search.py` auto-starts `ragd` when dense search is needed. The daemon keeps the ONNX Runtime session, Sudachi, and Chroma client warm, then exits after 3 idle hours. When the daemon is cold and SQLite has a strong exact/path/BM25 hit, `search.py` can return a lexical fast-path result without loading the embedding model.
 
@@ -174,6 +174,26 @@ python ~/.copilot/rag/gen_db/build_db.py --db project-rag --root /path/to/docs -
 python ~/.copilot/rag/gen_db/add_data.py --db project-rag --root /path/to/more-docs --source-id project-extra
 python ~/.copilot/rag/gen_db/rebuild_component.py --db project-rag --component lexical
 ```
+
+To scan only part of a stable logical root:
+
+```bash
+python ~/.copilot/rag/gen_db/build_db.py \
+  --db project-rag \
+  --root "/data/Project Knowledge" \
+  --source-id project \
+  --scan-subdir "plans/FY26" \
+  --resume
+```
+
+Stored paths always include the logical root directory name, such as
+`Project Knowledge/plans/FY26/report.pdf`, and always use `/`. The
+`--include-root-name-in-path` option remains accepted for compatibility but
+cannot disable this rule. `add_data.py` reconciles deletions only inside the
+selected scan scope, so a later `plans/FY27` add does not remove FY26 data.
+
+Changing to root-prefixed paths changes path-derived document IDs. Rebuild an
+existing database once to adopt this behavior; there is no old-ID migration.
 
 Each DB gets `VERSION.json` at creation time. It contains `created_at`, `db_hash`, the Chroma collection name, and the tool hash used to create the DB layout.
 

@@ -59,7 +59,17 @@ def payload_to_prompt(
             f"[{item.get('id')}] {source.get('path') or ''}"
             + (f" - {section}" if section else "")
         )
-        lines.append(str(item.get("text") or ""))
+        if item.get("context_before"):
+            lines.append(
+                "Context before: " + str(item["context_before"])
+            )
+        lines.append(
+            str(item.get("matched_excerpt") or item.get("text") or "")
+        )
+        if item.get("context_after"):
+            lines.append(
+                "Context after: " + str(item["context_after"])
+            )
         if explain and item.get("debug"):
             lines.append(
                 "debug="
