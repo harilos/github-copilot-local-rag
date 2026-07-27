@@ -122,6 +122,7 @@ def run_search_payload(
     payload["retrieval_mode"] = mode
     payload["retrieval_route"] = mode
     payload["dense_used"] = mode in {"hybrid", "dense"}
+    _apply_answer_goal_ranking(payload, str(request["answer_goal"]))
     _add_discovery_lane(
         payload,
         store,
@@ -206,6 +207,7 @@ def run_adaptive_search_payload(
         if payload.get("evidence"):
             payload["status"] = "partial"
             payload["answerability"] = "partial"
+    _apply_answer_goal_ranking(payload, str(request["answer_goal"]))
     _add_discovery_lane(
         payload,
         store,
@@ -326,6 +328,7 @@ def _add_discovery_lane(
         for facet in request.get("facets") or []
         if facet.get("query")
     ]
+    answer_goal = str(request.get("answer_goal") or "evidence")
 
     def add_rows(
         rows: list[dict[str, Any]],
@@ -398,10 +401,21 @@ def _add_discovery_lane(
     lexical_queries: list[tuple[str, str, float]] = []
     if not precomputed:
         lexical_queries.append((question, original_label, 1.0))
-    for facet in request.get("facets") or []:
+    for facet_index, facet in enumerate(request.get("facets") or []):
         query = str(facet.get("query") or "")
         if query and query != question:
-            lexical_queries.append((query, query[:100], 0.85))
+            lexical_queries.append(
+                (
+                    query,
+                    query[:100],
+                    0.85
+                    * _answer_goal_facet_factor(
+                        answer_goal,
+                        kind=str(facet.get("kind") or "semantic"),
+                        index=facet_index,
+                    ),
+                )
+            )
     for entity in request.get("entities") or []:
         if entity and entity != question:
             lexical_queries.append((entity, str(entity)[:100], 0.65))
@@ -444,6 +458,11 @@ def _add_discovery_lane(
     for anchor in (payload.get("identifiers") or {}).get("anchors") or []:
         if anchor not in literal_identifiers:
             literal_identifiers.append(str(anchor))
+    literal_weight = 1.4 * _answer_goal_facet_factor(
+        answer_goal,
+        kind="literal",
+        index=0,
+    )
     for literal in literal_identifiers[:3]:
         try:
             verified = [
@@ -459,7 +478,7 @@ def _add_discovery_lane(
                 verified,
                 signal="exact",
                 facet=str(literal),
-                weight=1.4,
+                weight=literal_weight,
                 literal=str(literal),
             )
         except Exception as exc:
@@ -471,12 +490,23 @@ def _add_discovery_lane(
     if use_dense and not bool((precomputed or {}).get("dense_ran")):
         dense_queries.append((question, original_label, 1.0))
     if use_dense:
-        for facet in request.get("facets") or []:
+        for facet_index, facet in enumerate(request.get("facets") or []):
             if facet.get("kind") != "semantic":
                 continue
             query = str(facet.get("query") or "")
             if query and query != question:
-                dense_queries.append((query, query[:100], 0.85))
+                dense_queries.append(
+                    (
+                        query,
+                        query[:100],
+                        0.85
+                        * _answer_goal_facet_factor(
+                            answer_goal,
+                            kind="semantic",
+                            index=facet_index,
+                        ),
+                    )
+                )
         for concept in request.get("inferred_concepts") or []:
             term = str(concept.get("term") or "")
             if term:
@@ -758,6 +788,73 @@ def _add_discovery_lane(
         payload["status"] = "partial"
         payload["answerability"] = "none"
         payload.pop("legacy_status", None)
+
+
+def _apply_answer_goal_ranking(
+    payload: dict[str, Any],
+    answer_goal: str,
+) -> None:
+    """Apply a small, stable signal preference without changing evidence."""
+    priorities = {
+        "definition": {
+            "exact": 5,
+            "lexical_anchor": 4,
+            "lexical": 3,
+            "metadata": 2,
+            "dense": 1,
+        },
+        "evidence": {
+            "exact": 5,
+            "lexical_anchor": 4,
+            "lexical": 3,
+            "dense": 3,
+            "metadata": 2,
+        },
+        "comparison": {"dense": 4, "lexical": 3, "metadata": 2},
+        "procedure": {"lexical": 4, "dense": 3, "metadata": 2},
+        "history": {"lexical": 4, "metadata": 3, "dense": 2},
+        "survey": {"dense": 4, "lexical": 3, "metadata": 3},
+    }.get(answer_goal, {})
+    evidence = list(payload.get("evidence") or [])
+    if len(evidence) < 2 or not priorities:
+        payload["answer_goal"] = answer_goal
+        return
+    indexed = list(enumerate(evidence))
+    indexed.sort(
+        key=lambda entry: (
+            -max(
+                (
+                    priorities.get(str(signal), 0)
+                    for signal in entry[1].get("signals") or []
+                ),
+                default=0,
+            ),
+            entry[0],
+        )
+    )
+    ranked = [item for _index, item in indexed]
+    payload["evidence"] = ranked
+    payload["contexts"] = list(ranked)
+    payload["answer_goal"] = answer_goal
+
+
+def _answer_goal_facet_factor(
+    answer_goal: str,
+    *,
+    kind: str,
+    index: int,
+) -> float:
+    if kind == "literal":
+        return 1.15 if answer_goal in {"definition", "evidence"} else 1.0
+    base = {
+        "comparison": 1.12,
+        "procedure": 1.08,
+        "history": 1.08,
+        "survey": 1.12,
+        "definition": 1.0,
+        "evidence": 1.04,
+    }.get(answer_goal, 1.0)
+    return max(0.85, base - (0.03 * max(0, index)))
 
 
 def _is_test_fixture_row(row: dict[str, Any]) -> bool:

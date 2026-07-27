@@ -13,6 +13,8 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.search_api import (  # noqa: E402
     _add_discovery_lane,
+    _answer_goal_facet_factor,
+    _apply_answer_goal_ranking,
     compact_search_contract,
 )
 from software_rag_tool.search_request import (  # noqa: E402
@@ -87,6 +89,35 @@ class DiscoveryStore:
 
 
 class StructuredRequestTests(unittest.TestCase):
+    def test_answer_goal_changes_signal_and_facet_priority(self) -> None:
+        payload = {
+            "evidence": [
+                {"id": "dense", "signals": ["dense"]},
+                {"id": "exact", "signals": ["exact"]},
+            ],
+            "contexts": [],
+        }
+        _apply_answer_goal_ranking(payload, "definition")
+        self.assertEqual(["exact", "dense"], [
+            item["id"] for item in payload["evidence"]
+        ])
+        _apply_answer_goal_ranking(payload, "comparison")
+        self.assertEqual(["dense", "exact"], [
+            item["id"] for item in payload["evidence"]
+        ])
+        self.assertGreater(
+            _answer_goal_facet_factor(
+                "evidence",
+                kind="literal",
+                index=0,
+            ),
+            _answer_goal_facet_factor(
+                "survey",
+                kind="literal",
+                index=0,
+            ),
+        )
+
     def test_repeated_windows_safe_arguments_match_json_request(self) -> None:
         question = 'A2W "rev-1" と C:\\資料\\仕様 を確認して'
         repeated = argparse.Namespace(
