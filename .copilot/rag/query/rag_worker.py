@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ def worker_main(
         "model_load_count": 0,
         "open_database_count": 0,
         "handled_request_count": 0,
+        "dense_warmup_state": "not_started",
         **_current_process_metrics(),
     }
     connection.send(
@@ -47,6 +49,31 @@ def worker_main(
     )
 
     dense_loaded = False
+    dense_ready = threading.Event()
+    dense_warmup_finished = threading.Event()
+
+    def warm_dense_runtime() -> None:
+        try:
+            from software_rag_tool.embeddings import get_embedder
+
+            get_embedder().encode(["Local RAG warmup"], mode="query")
+        except Exception as exc:
+            state["dense_warmup_state"] = (
+                f"error:{type(exc).__name__}"
+            )
+        else:
+            state["dense_warmup_state"] = "ready"
+            dense_ready.set()
+        finally:
+            dense_warmup_finished.set()
+
+    state["dense_warmup_state"] = "starting"
+    threading.Thread(
+        target=warm_dense_runtime,
+        name="rag-dense-warmup",
+        daemon=True,
+    ).start()
+
     while True:
         try:
             message = connection.recv()
@@ -63,15 +90,40 @@ def worker_main(
         client_id = str(message.get("client_id") or "")
         db_name = str(message.get("db") or "")
         payload = dict(message.get("payload") or {})
+        if dense_ready.is_set() and not dense_loaded:
+            dense_loaded = True
+            state["model_load_count"] = 1
         remaining_deadline_ms = max(
             0,
             int(message.get("remaining_deadline_ms") or 0),
         )
-        deadline_monotonic = (
-            time.monotonic() + (remaining_deadline_ms / 1000.0)
-            if remaining_deadline_ms
-            else None
-        )
+        try:
+            deadline_monotonic = float(message["deadline_monotonic"])
+        except (KeyError, TypeError, ValueError):
+            deadline_monotonic = (
+                time.monotonic() + (remaining_deadline_ms / 1000.0)
+                if remaining_deadline_ms
+                else None
+            )
+        if (
+            not dense_warmup_finished.is_set()
+            and deadline_monotonic is not None
+        ):
+            # Give the persistent generation one bounded chance to finish its
+            # single background model load, while preserving time for lexical
+            # retrieval, serialization, and client output.
+            dense_warmup_finished.wait(
+                max(
+                    0.0,
+                    min(
+                        8.0 if os.name == "nt" else 6.0,
+                        deadline_monotonic - time.monotonic() - 4.0,
+                    ),
+                )
+            )
+        if dense_ready.is_set() and not dense_loaded:
+            dense_loaded = True
+            state["model_load_count"] = 1
         started = time.monotonic()
         try:
             result = _execute_search_payload(
@@ -159,6 +211,23 @@ def _execute_search_payload(
         "deadline_monotonic": deadline_monotonic,
         "dense_runtime_ready": dense_runtime_ready,
     }
+    if retrieval_mode in {"hybrid", "dense"} and not dense_runtime_ready:
+        result = run_search_payload(
+            **common,
+            retrieval_mode="lexical",
+        )
+        warnings = list(result.get("warnings") or [])
+        warnings.append("dense_discovery_unavailable_within_deadline")
+        result["warnings"] = sorted(set(warnings))
+        result["retrieval_mode"] = retrieval_mode
+        result["retrieval_route"] = (
+            "persistent_lexical_while_dense_warming"
+        )
+        result["dense_used"] = False
+        result["dense_skipped_reason"] = (
+            "background_dense_warmup_incomplete"
+        )
+        return result
     if (
         bool(payload.get("adaptive_hybrid"))
         and retrieval_mode == "hybrid"

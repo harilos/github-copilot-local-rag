@@ -18,9 +18,45 @@ sys.path.insert(0, str(TOOL_ROOT))
 from software_rag_tool.daemon_control import (  # noqa: E402
     release_db_before_mutation,
 )
+from rag_worker import _execute_search_payload  # noqa: E402
 
 
 class PersistentDaemonContracts(unittest.TestCase):
+    def test_cold_worker_never_enters_dense_evidence_path(self) -> None:
+        calls: list[str] = []
+
+        def adaptive(**_kwargs):
+            calls.append("adaptive")
+            raise AssertionError("cold worker must not enter adaptive Dense")
+
+        def standard(**kwargs):
+            calls.append(str(kwargs["retrieval_mode"]))
+            return {
+                "status": "partial",
+                "warnings": [],
+                "evidence": [],
+                "document_results": [],
+            }
+
+        result = _execute_search_payload(
+            {
+                "db": "ac-rag",
+                "question": "general semantic question",
+                "retrieval_mode": "hybrid",
+                "adaptive_hybrid": True,
+            },
+            run_adaptive_search_payload=adaptive,
+            run_search_payload=standard,
+            deadline_monotonic=None,
+            dense_runtime_ready=False,
+        )
+        self.assertEqual(["lexical"], calls)
+        self.assertFalse(result["dense_used"])
+        self.assertEqual(
+            "background_dense_warmup_incomplete",
+            result["dense_skipped_reason"],
+        )
+
     def test_client_and_manager_imports_are_native_runtime_free(self) -> None:
         script = f"""
 import importlib.util, json, sys

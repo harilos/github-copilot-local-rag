@@ -109,6 +109,7 @@ def _server_health_payload(server: RagDaemonServer | RagUnixDaemonServer) -> dic
         "ready": lifecycle_state == "READY",
         "dense_ready": worker["model_load_count"] > 0,
         "model_load_count": worker["model_load_count"],
+        "dense_warmup_state": worker.get("dense_warmup_state"),
         "open_database_count": worker["open_database_count"],
         "worker_job_object_active": worker[
             "worker_job_object_active"

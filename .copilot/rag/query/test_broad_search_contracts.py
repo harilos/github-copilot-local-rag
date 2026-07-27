@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 QUERY_ROOT = Path(__file__).resolve().parent
@@ -211,6 +213,58 @@ class StructuredRequestTests(unittest.TestCase):
         self.assertEqual([["A2Wについての関連資料や根拠を教えて", "A2Wの意味、役割、用途", "air-to-water"]], store.dense_batches)
         self.assertEqual(["A2W"], store.exact_queries)
         self.assertNotIn("air-to-water", store.exact_queries)
+
+    def test_macos_cold_dense_is_deferred_but_warm_dense_runs(self) -> None:
+        request = normalize_search_request(
+            {"original_question": "broad topic"}
+        )
+        cold_store = DiscoveryStore()
+        cold_payload = {
+            "status": "no_hit",
+            "answerability": "none",
+            "evidence": [],
+            "warnings": [],
+        }
+        with mock.patch(
+            "software_rag_tool.search_api.sys.platform",
+            "darwin",
+        ):
+            _add_discovery_lane(
+                cold_payload,
+                cold_store,
+                request,
+                source="any",
+                use_dense=True,
+                deadline_monotonic=time.monotonic() + 14,
+                dense_runtime_ready=False,
+            )
+        self.assertEqual([], cold_store.dense_batches)
+        self.assertEqual(
+            "insufficient_remaining_deadline",
+            cold_payload["dense_skipped_reason"],
+        )
+
+        warm_store = DiscoveryStore()
+        warm_payload = {
+            "status": "no_hit",
+            "answerability": "none",
+            "evidence": [],
+            "warnings": [],
+        }
+        with mock.patch(
+            "software_rag_tool.search_api.sys.platform",
+            "darwin",
+        ):
+            _add_discovery_lane(
+                warm_payload,
+                warm_store,
+                request,
+                source="any",
+                use_dense=True,
+                deadline_monotonic=time.monotonic() + 14,
+                dense_runtime_ready=True,
+            )
+        self.assertTrue(warm_store.dense_batches)
 
     def test_compact_output_keeps_document_cards_within_hard_limit(self) -> None:
         documents = [

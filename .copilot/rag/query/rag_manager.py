@@ -393,6 +393,9 @@ class PersistentWorkerManager:
             "ready": lifecycle == "READY",
             "handled_request_count": self._handled_request_count,
             "model_load_count": int(state.get("model_load_count") or 0),
+            "dense_warmup_state": str(
+                state.get("dense_warmup_state") or "not_started"
+            ),
             "open_database_count": int(
                 state.get("open_database_count") or 0
             ),
@@ -510,6 +513,7 @@ class PersistentWorkerManager:
             "client_id": item.client_id,
             "db": item.db_name,
             "remaining_deadline_ms": remaining_ms,
+            "deadline_monotonic": item.deadline,
             "payload": worker_payload,
         }
         try:
@@ -704,6 +708,9 @@ class PersistentWorkerManager:
             "queue_depth": queue_depth,
             "model_load_count": int(
                 state.get("model_load_count") or 0
+            ),
+            "dense_warmup_state": str(
+                state.get("dense_warmup_state") or "not_started"
             ),
             "open_database_count": int(
                 state.get("open_database_count") or 0

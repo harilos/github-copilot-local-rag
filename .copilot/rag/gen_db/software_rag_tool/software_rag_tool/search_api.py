@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -518,11 +519,17 @@ def _add_discovery_lane(
             continue
         seen_dense.add(item[0])
         unique_dense.append(item)
-    dense_minimum_seconds = (
-        13.0
-        if os.name == "nt" and not dense_runtime_ready
-        else 3.0
-    )
+    if dense_runtime_ready:
+        dense_minimum_seconds = 3.0
+    elif os.name == "nt":
+        dense_minimum_seconds = 13.0
+    elif sys.platform == "darwin":
+        # A fresh ONNX session can exceed the complete user deadline on macOS.
+        # Return lexical discovery first and let the persistent worker warm the
+        # model after it has sent that bounded response.
+        dense_minimum_seconds = 30.0
+    else:
+        dense_minimum_seconds = 15.0
     dense_remaining = (
         deadline_monotonic - time.monotonic()
         if deadline_monotonic is not None
