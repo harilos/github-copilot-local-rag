@@ -672,6 +672,73 @@ class PersistentDaemonWindowsRunner:
             ]
             return [future.result() for future in futures]
 
+    def wait_for_dense_ready(
+        self,
+        *,
+        manager_pid: int,
+        worker_pid: int,
+        manager_generation: str,
+        worker_generation: str,
+        timeout_seconds: float = 30.0,
+        poll_seconds: float = 0.2,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        deadline = started + max(0.0, timeout_seconds)
+        polls = 0
+        last_health: dict[str, Any] | None = None
+        while True:
+            last_health = self.health()
+            polls += 1
+            if last_health:
+                identity = (
+                    int(last_health.get("manager_pid") or 0),
+                    int(last_health.get("worker_pid") or 0),
+                    str(last_health.get("manager_generation") or ""),
+                    str(last_health.get("worker_generation") or ""),
+                )
+                expected = (
+                    manager_pid,
+                    worker_pid,
+                    manager_generation,
+                    worker_generation,
+                )
+                if identity != expected:
+                    return {
+                        "status": "generation_changed",
+                        "health": last_health,
+                        "polls": polls,
+                        "elapsed_seconds": round(
+                            time.monotonic() - started,
+                            6,
+                        ),
+                    }
+                if (
+                    str(last_health.get("dense_warmup_state") or "")
+                    == "ready"
+                    and int(last_health.get("model_load_count") or 0) == 1
+                ):
+                    return {
+                        "status": "ready",
+                        "health": last_health,
+                        "polls": polls,
+                        "elapsed_seconds": round(
+                            time.monotonic() - started,
+                            6,
+                        ),
+                    }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "status": "timeout",
+                    "health": last_health,
+                    "polls": polls,
+                    "elapsed_seconds": round(
+                        time.monotonic() - started,
+                        6,
+                    ),
+                }
+            time.sleep(min(max(0.0, poll_seconds), remaining))
+
     def wait_for_daemon_quiescence(
         self,
         *,
@@ -1098,6 +1165,13 @@ class PersistentDaemonWindowsRunner:
             return
 
         pre_shutdown = self.shutdown_and_verify("mac-smoke-pre")
+        if pre_shutdown.get("result") != "PASS":
+            self.gate(
+                "mac_short_smoke",
+                "FAIL",
+                "pre_shutdown_failed",
+            )
+            return
         rows: list[dict[str, Any]] = []
         cold = self.run_concurrent(
             [
@@ -1107,6 +1181,113 @@ class PersistentDaemonWindowsRunner:
             phase="mac-smoke-cold-c2",
         )
         rows.extend(cold)
+        cold_identity = stable_identity(cold)
+        cold_ok = bool(
+            len(cold) == 2
+            and all(row.get("result") == "PASS" for row in cold)
+            and cold_identity
+        )
+        if not cold_ok:
+            final_shutdown = self.shutdown_and_verify(
+                "mac-smoke-cold-failure"
+            )
+            self.gate(
+                "mac_short_smoke",
+                "FAIL",
+                f"cold=FAIL, shutdown={final_shutdown.get('result')}",
+            )
+            return
+        expected_manager_pid = int(cold[0].get("manager_pid") or 0)
+        expected_worker_pid = int(cold[0].get("worker_pid") or 0)
+        expected_manager_generation = str(
+            cold[0].get("manager_generation") or ""
+        )
+        expected_worker_generation = str(
+            cold[0].get("worker_generation") or ""
+        )
+        readiness_probe = self.run_client(
+            make_case(
+                "mac-dense-readiness-probe",
+                "ac-rag",
+                "V",
+                0,
+            ),
+            phase="mac-smoke-dense-readiness-probe",
+            record=False,
+        )
+        dense_ready = self.wait_for_dense_ready(
+            manager_pid=expected_manager_pid,
+            worker_pid=expected_worker_pid,
+            manager_generation=expected_manager_generation,
+            worker_generation=expected_worker_generation,
+            timeout_seconds=2.0,
+        )
+        readiness_probe_ok = dense_readiness_probe_contract(
+            readiness_probe,
+            dense_ready,
+            manager_pid=expected_manager_pid,
+            worker_pid=expected_worker_pid,
+            manager_generation=str(
+                expected_manager_generation
+            ),
+            worker_generation=str(
+                expected_worker_generation
+            ),
+            deadline_seconds=self.deadline_seconds,
+        )
+        self.artifacts.append(
+            "event",
+            {
+                "phase": "mac-smoke",
+                "event": "excluded_dense_readiness_probe",
+                "at": utc_now(),
+                "recorded_as_case": False,
+                "automatic_retry": False,
+                "probe_case_id": readiness_probe.get("case_id"),
+                "probe_result": readiness_probe.get("result"),
+                "probe_elapsed_seconds": readiness_probe.get(
+                    "elapsed_seconds"
+                ),
+                "probe_json_valid": readiness_probe.get(
+                    "stdout_json_valid"
+                ),
+                "probe_fallback_used": readiness_probe.get(
+                    "fallback_used"
+                ),
+                "probe_identity_match": readiness_probe.get(
+                    "response_identity_match"
+                ),
+                "status": dense_ready["status"],
+                "polls": dense_ready["polls"],
+                "elapsed_seconds": dense_ready["elapsed_seconds"],
+                "manager_generation": (
+                    dense_ready.get("health") or {}
+                ).get("manager_generation"),
+                "worker_generation": (
+                    dense_ready.get("health") or {}
+                ).get("worker_generation"),
+                "dense_warmup_state": (
+                    dense_ready.get("health") or {}
+                ).get("dense_warmup_state"),
+                "model_load_count": (
+                    dense_ready.get("health") or {}
+                ).get("model_load_count"),
+                "result": "PASS" if readiness_probe_ok else "FAIL",
+            },
+        )
+        if not readiness_probe_ok:
+            final_shutdown = self.shutdown_and_verify(
+                "mac-smoke-dense-not-ready"
+            )
+            self.gate(
+                "mac_short_smoke",
+                "FAIL",
+                f"readiness_probe={readiness_probe.get('result')}, "
+                f"dense_ready={dense_ready['status']}, "
+                f"polls={dense_ready['polls']}, "
+                f"shutdown={final_shutdown.get('result')}",
+            )
+            return
 
         warm_rows: list[dict[str, Any]] = []
         for offset in range(2, 18, 2):
@@ -1245,6 +1426,11 @@ class PersistentDaemonWindowsRunner:
                 "event": "short_smoke_summary",
                 "at": utc_now(),
                 "cold_requests": len(cold),
+                "cold_identity": cold_identity,
+                "dense_ready_status": dense_ready["status"],
+                "dense_ready_wait_seconds": dense_ready[
+                    "elapsed_seconds"
+                ],
                 "warm_requests": len(warm_rows),
                 "recovery_requests": len(recovery),
                 "total_requests": len(rows),
@@ -1263,6 +1449,8 @@ class PersistentDaemonWindowsRunner:
             "PASS" if passed else "FAIL",
             f"cold={len(cold)}/2, warm={len(warm_rows)}/16, "
             f"recovery={len(recovery)}/2, total={len(rows)}/20, "
+            f"dense_ready={dense_ready['status']}/"
+            f"{dense_ready['elapsed_seconds']}s, "
             f"pre_identity={pre_recycle_identity}, "
             f"worker_recovered={worker_recovered}, identity={identity_ok}, "
             f"contract={contract_ok}, shutdown={graceful_shutdown}",
@@ -2539,6 +2727,41 @@ def stable_identity(rows: list[dict[str, Any]]) -> bool:
         and len({row.get("manager_generation") for row in usable}) == 1
         and len({row.get("worker_generation") for row in usable}) == 1
         and all(row.get("model_load_count") in {0, 1} for row in usable)
+    )
+
+
+def dense_readiness_probe_contract(
+    row: dict[str, Any],
+    readiness: dict[str, Any],
+    *,
+    manager_pid: int,
+    worker_pid: int,
+    manager_generation: str,
+    worker_generation: str,
+    deadline_seconds: float,
+) -> bool:
+    health = readiness.get("health") or {}
+    return bool(
+        row.get("result") == "PASS"
+        and row.get("stdout_json_valid")
+        and not row.get("fallback_used")
+        and row.get("response_identity_match")
+        and float(row.get("elapsed_seconds") or 0.0) <= deadline_seconds
+        and int(row.get("manager_pid") or 0) == manager_pid
+        and int(row.get("worker_pid") or 0) == worker_pid
+        and str(row.get("manager_generation") or "")
+        == manager_generation
+        and str(row.get("worker_generation") or "")
+        == worker_generation
+        and readiness.get("status") == "ready"
+        and int(health.get("manager_pid") or 0) == manager_pid
+        and int(health.get("worker_pid") or 0) == worker_pid
+        and str(health.get("manager_generation") or "")
+        == manager_generation
+        and str(health.get("worker_generation") or "")
+        == worker_generation
+        and str(health.get("dense_warmup_state") or "") == "ready"
+        and int(health.get("model_load_count") or 0) == 1
     )
 
 

@@ -524,6 +524,126 @@ class CommandTests(unittest.TestCase):
                 )
             )
 
+    def test_dense_ready_wait_observes_ready_transition(self) -> None:
+        runner = self._runner()
+        starting = {
+            "manager_pid": 10,
+            "worker_pid": 11,
+            "manager_generation": "manager",
+            "worker_generation": "worker",
+            "dense_warmup_state": "starting",
+            "model_load_count": 0,
+        }
+        ready = {
+            **starting,
+            "dense_warmup_state": "ready",
+            "model_load_count": 1,
+        }
+        with mock.patch.object(
+            runner,
+            "health",
+            side_effect=[starting, ready],
+        ) as health:
+            result = runner.wait_for_dense_ready(
+                manager_pid=10,
+                worker_pid=11,
+                manager_generation="manager",
+                worker_generation="worker",
+                timeout_seconds=1,
+                poll_seconds=0,
+            )
+        self.assertEqual("ready", result["status"])
+        self.assertEqual(2, result["polls"])
+        self.assertEqual(2, health.call_count)
+
+    def test_dense_ready_wait_times_out_without_search(self) -> None:
+        runner = self._runner()
+        starting = {
+            "manager_pid": 10,
+            "worker_pid": 11,
+            "manager_generation": "manager",
+            "worker_generation": "worker",
+            "dense_warmup_state": "starting",
+            "model_load_count": 0,
+        }
+        with mock.patch.object(
+            runner,
+            "health",
+            return_value=starting,
+        ) as health, mock.patch.object(
+            runner,
+            "run_client",
+        ) as search:
+            result = runner.wait_for_dense_ready(
+                manager_pid=10,
+                worker_pid=11,
+                manager_generation="manager",
+                worker_generation="worker",
+                timeout_seconds=0,
+                poll_seconds=0,
+            )
+        self.assertEqual("timeout", result["status"])
+        self.assertEqual(1, health.call_count)
+        search.assert_not_called()
+
+    def test_excluded_dense_readiness_probe_contract(self) -> None:
+        row = {
+            "result": "PASS",
+            "stdout_json_valid": True,
+            "fallback_used": False,
+            "response_identity_match": True,
+            "elapsed_seconds": 4.5,
+            "manager_pid": 10,
+            "worker_pid": 11,
+            "manager_generation": "manager",
+            "worker_generation": "worker",
+        }
+        readiness = {
+            "status": "ready",
+            "health": {
+                "manager_pid": 10,
+                "worker_pid": 11,
+                "manager_generation": "manager",
+                "worker_generation": "worker",
+                "dense_warmup_state": "ready",
+                "model_load_count": 1,
+            },
+        }
+        arguments = {
+            "manager_pid": 10,
+            "worker_pid": 11,
+            "manager_generation": "manager",
+            "worker_generation": "worker",
+            "deadline_seconds": 15,
+        }
+        self.assertTrue(
+            MODULE.dense_readiness_probe_contract(
+                row,
+                readiness,
+                **arguments,
+            )
+        )
+        self.assertFalse(
+            MODULE.dense_readiness_probe_contract(
+                {**row, "fallback_used": True},
+                readiness,
+                **arguments,
+            )
+        )
+        self.assertFalse(
+            MODULE.dense_readiness_probe_contract(
+                row,
+                {
+                    **readiness,
+                    "health": {
+                        **readiness["health"],
+                        "worker_generation": "replacement",
+                    },
+                },
+                **arguments,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

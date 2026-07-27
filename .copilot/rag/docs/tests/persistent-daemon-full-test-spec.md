@@ -1195,6 +1195,9 @@ mkdir -p "$OUT"
 Minimum macOS coverage:
 
 - one cold concurrency-two cohort;
+- one excluded one-shot Dense readiness probe after the cold cohort and before
+  warm concurrency; this probe is test orchestration only, is not retried, and
+  is not counted among the 20 formal mixed-request rows;
 - one warm concurrency-two cohort;
 - 20 mixed requests;
 - one graceful shutdown;
