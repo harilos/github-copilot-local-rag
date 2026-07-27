@@ -33,6 +33,7 @@ EXPECTED_OVERLOAD_ERRORS = {
 }
 PHASE_GATE_NAMES = {
     "structured-contract": ("structured_request_equivalence",),
+    "mac-smoke": ("mac_short_smoke",),
     "lifecycle-20": ("lifecycle_20",),
     "clients-100": ("clients_100",),
     "concurrency": ("cold_concurrency_4", "warm_concurrency_2_4"),
@@ -1088,6 +1089,194 @@ class PersistentDaemonWindowsRunner:
             "structured_request_equivalence",
             "PASS" if passed else "FAIL",
             detail,
+        )
+
+    def phase_mac_smoke(self) -> None:
+        if sys.platform != "darwin":
+            self.gate(
+                "mac_short_smoke",
+                "NOT_RUN",
+                "not_applicable_platform",
+            )
+            return
+        required_databases = ("ac-rag", "incident-rag")
+        if any(db not in self.databases for db in required_databases):
+            self.gate(
+                "mac_short_smoke",
+                "NOT_RUN",
+                "missing_required_databases:ac-rag,incident-rag",
+            )
+            return
+
+        pre_shutdown = self.shutdown_and_verify("mac-smoke-pre")
+        rows: list[dict[str, Any]] = []
+        cold = self.run_concurrent(
+            [
+                make_case("mac-cold-c2", "ac-rag", "H", 0),
+                make_case("mac-cold-c2", "incident-rag", "L", 1),
+            ],
+            phase="mac-smoke-cold-c2",
+        )
+        rows.extend(cold)
+
+        warm_rows: list[dict[str, Any]] = []
+        for offset in range(2, 18, 2):
+            cohort = [
+                make_case(
+                    "mac-warm-c2",
+                    required_databases[(offset + client) % 2],
+                    ("H", "L", "V")[(offset + client) % 3],
+                    offset + client,
+                )
+                for client in range(2)
+            ]
+            warm_rows.extend(
+                self.run_concurrent(
+                    cohort,
+                    phase="mac-smoke-warm-c2",
+                )
+            )
+            if any(row["result"] != "PASS" for row in warm_rows[-2:]):
+                break
+        rows.extend(warm_rows)
+
+        before_recycle = self.health()
+        old_manager = self.validated_daemon_pid(before_recycle, "manager")
+        old_worker = self.validated_daemon_pid(before_recycle, "worker")
+        pre_recycle_identity = bool(
+            stable_identity(cold + warm_rows)
+            and before_recycle
+            and int(before_recycle.get("model_load_count") or 0) == 1
+        )
+        worker_terminated = bool(
+            len(rows) == 18
+            and all(row["result"] == "PASS" for row in rows)
+            and old_manager > 0
+            and old_worker > 0
+            and terminate_pid(old_worker)
+        )
+        old_worker_gone = (
+            worker_terminated and wait_process_gone(old_worker, 8.0)
+        )
+        recovery: list[dict[str, Any]] = []
+        if old_worker_gone:
+            recovery = self.run_concurrent(
+                [
+                    make_case("mac-worker-recovery-c2", "ac-rag", "V", 18),
+                    make_case(
+                        "mac-worker-recovery-c2",
+                        "incident-rag",
+                        "H",
+                        19,
+                    ),
+                ],
+                phase="mac-smoke-worker-recovery",
+            )
+            rows.extend(recovery)
+
+        model_deadline = time.monotonic() + 30.0
+        final_health = self.health()
+        while (
+            final_health
+            and int(final_health.get("model_load_count") or 0) != 1
+            and time.monotonic() < model_deadline
+        ):
+            time.sleep(0.2)
+            final_health = self.health()
+
+        recovery_identity = stable_identity(recovery)
+        worker_recovered = bool(
+            recovery_identity
+            and final_health
+            and int(final_health.get("manager_pid") or 0) == old_manager
+            and int(final_health.get("worker_pid") or 0)
+            not in {0, old_worker}
+            and int(final_health.get("model_load_count") or 0) == 1
+            and all(
+                int(row.get("manager_pid") or 0) == old_manager
+                and int(row.get("worker_pid") or 0)
+                == int(final_health.get("worker_pid") or 0)
+                for row in recovery
+            )
+        )
+        request_ids = [str(row.get("request_id") or "") for row in rows]
+        client_ids = [str(row.get("client_id") or "") for row in rows]
+        identity_ok = bool(
+            len(rows) == 20
+            and all(row.get("response_identity_match") for row in rows)
+            and all(row.get("client_process_reaped") for row in rows)
+            and all(
+                int(row.get("manager_pid") or 0) == old_manager
+                for row in rows
+            )
+            and all(
+                int(row.get("worker_pid") or 0) == old_worker
+                for row in rows[:18]
+            )
+            and all(request_ids)
+            and len(set(request_ids)) == len(request_ids)
+            and all(client_ids)
+            and len(set(client_ids)) == len(client_ids)
+        )
+        contract_ok = bool(
+            len(rows) == 20
+            and all(row.get("result") == "PASS" for row in rows)
+            and all(row.get("stdout_json_valid") for row in rows)
+            and all(not row.get("fallback_used") for row in rows)
+            and all(
+                float(row.get("elapsed_seconds") or 0.0)
+                <= self.deadline_seconds
+                for row in rows
+            )
+            and {row.get("db") for row in rows}
+            == set(required_databases)
+            and {row.get("profile") for row in rows} == {"H", "L", "V"}
+        )
+        final_shutdown = self.shutdown_and_verify("mac-smoke-final")
+        graceful_shutdown = bool(
+            final_shutdown.get("acknowledged")
+            and final_shutdown.get("result") == "PASS"
+            and final_shutdown.get("manager_gone")
+            and final_shutdown.get("worker_gone")
+        )
+        passed = bool(
+            pre_shutdown.get("result") == "PASS"
+            and pre_recycle_identity
+            and worker_terminated
+            and old_worker_gone
+            and worker_recovered
+            and identity_ok
+            and contract_ok
+            and graceful_shutdown
+        )
+        self.artifacts.append(
+            "event",
+            {
+                "phase": "mac-smoke",
+                "event": "short_smoke_summary",
+                "at": utc_now(),
+                "cold_requests": len(cold),
+                "warm_requests": len(warm_rows),
+                "recovery_requests": len(recovery),
+                "total_requests": len(rows),
+                "pre_recycle_identity": pre_recycle_identity,
+                "worker_terminated": worker_terminated,
+                "old_worker_gone": old_worker_gone,
+                "worker_recovered": worker_recovered,
+                "identity_ok": identity_ok,
+                "contract_ok": contract_ok,
+                "graceful_shutdown": graceful_shutdown,
+                "result": "PASS" if passed else "FAIL",
+            },
+        )
+        self.gate(
+            "mac_short_smoke",
+            "PASS" if passed else "FAIL",
+            f"cold={len(cold)}/2, warm={len(warm_rows)}/16, "
+            f"recovery={len(recovery)}/2, total={len(rows)}/20, "
+            f"pre_identity={pre_recycle_identity}, "
+            f"worker_recovered={worker_recovered}, identity={identity_ok}, "
+            f"contract={contract_ok}, shutdown={graceful_shutdown}",
         )
 
     def phase_lifecycle(self, cycles: int = 20) -> None:
@@ -2462,6 +2651,29 @@ def process_executable(pid: int) -> str | None:
     if os.name != "nt":
         if pid == os.getpid():
             return sys.executable
+        if sys.platform == "darwin":
+            try:
+                libproc = ctypes.CDLL(
+                    "/usr/lib/libproc.dylib",
+                    use_errno=True,
+                )
+                libproc.proc_pidpath.argtypes = (
+                    ctypes.c_int,
+                    ctypes.c_void_p,
+                    ctypes.c_uint32,
+                )
+                libproc.proc_pidpath.restype = ctypes.c_int
+                buffer = ctypes.create_string_buffer(4096)
+                length = libproc.proc_pidpath(
+                    pid,
+                    buffer,
+                    ctypes.sizeof(buffer),
+                )
+                if length > 0:
+                    return os.fsdecode(buffer.value)
+            except (AttributeError, OSError):
+                return None
+            return None
         try:
             return os.readlink(f"/proc/{pid}/exe")
         except OSError:
@@ -2742,6 +2954,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "all",
             "structured-contract",
+            "mac-smoke",
             "lifecycle-20",
             "clients-100",
             "concurrency",
@@ -2791,6 +3004,7 @@ def main() -> int:
             "overload-c8",
             "exact-30",
             "broad-18",
+            "mac-smoke",
         )
         if args.phase == "all"
         else (args.phase,)
@@ -2802,12 +3016,17 @@ def main() -> int:
     )
     for phase in phases:
         print(f"[{utc_now()}] phase={phase}", file=sys.stderr, flush=True)
+        if phase == "mac-smoke" and sys.platform != "darwin":
+            runner.phase_mac_smoke()
+            continue
         if runner.safety_stop:
             for name in PHASE_GATE_NAMES[phase]:
                 runner.gate(name, "NOT_RUN", "prior_safety_stop")
             continue
         if phase == "structured-contract":
             runner.phase_structured_contract()
+        elif phase == "mac-smoke":
+            runner.phase_mac_smoke()
         elif phase == "lifecycle-20":
             runner.phase_lifecycle(args.lifecycle_cycles)
         elif phase == "clients-100":

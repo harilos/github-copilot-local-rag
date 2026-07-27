@@ -246,6 +246,7 @@ mapping when invoking
 | `client-crash`, `worker-crash`, and `manager-crash` | `crash` |
 | `soak-200-c4` | `soak-200-c4` |
 | `overload-c8` | `overload-c8` |
+| `mac-smoke` | `mac-smoke` |
 
 Specification-only orchestration and reporting labels that are not accepted
 by the Python driver's `--phase` option must not be reported as executed

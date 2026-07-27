@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name(
@@ -394,6 +393,10 @@ class CommandTests(unittest.TestCase):
             ("structured_request_equivalence",),
             MODULE.PHASE_GATE_NAMES["structured-contract"],
         )
+        self.assertEqual(
+            ("mac_short_smoke",),
+            MODULE.PHASE_GATE_NAMES["mac-smoke"],
+        )
 
     def test_structured_json_and_repeated_argv_normalize_equally(self) -> None:
         rag_root = MODULE_PATH.parents[2]
@@ -441,6 +444,52 @@ class CommandTests(unittest.TestCase):
             ]
         )
         self.assertEqual("structured-contract", args.phase)
+
+    def test_mac_smoke_is_a_parser_choice(self) -> None:
+        args = MODULE.build_parser().parse_args(
+            [
+                "--phase",
+                "mac-smoke",
+                "--installed-rag",
+                "rag",
+                "--output-dir",
+                "out",
+                "--run-id",
+                "unit",
+            ]
+        )
+        self.assertEqual("mac-smoke", args.phase)
+
+    def test_mac_smoke_is_not_run_off_darwin(self) -> None:
+        runner = self._runner()
+        with mock.patch.object(MODULE.sys, "platform", "win32"):
+            runner.phase_mac_smoke()
+        self.assertEqual(
+            "NOT_RUN",
+            runner.gates["mac_short_smoke"]["result"],
+        )
+        self.assertEqual(
+            "not_applicable_platform",
+            runner.gates["mac_short_smoke"]["detail"],
+        )
+
+    def test_process_executable_resolves_child_interpreter(self) -> None:
+        process = MODULE.subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            stdin=MODULE.subprocess.DEVNULL,
+            stdout=MODULE.subprocess.DEVNULL,
+            stderr=MODULE.subprocess.DEVNULL,
+        )
+        try:
+            executable = MODULE.process_executable(process.pid)
+            self.assertIsNotNone(executable)
+            self.assertEqual(
+                Path(sys.executable).resolve(),
+                Path(str(executable)).resolve(),
+            )
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
 
 
 if __name__ == "__main__":
