@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 SCHEMA = "local-rag.persistent-daemon-test.v1"
@@ -78,6 +78,12 @@ QUESTIONS = {
         "L": "RFC 10026の目的を教えて。",
         "V": "インターネットプロトコルの相互運用性について教えて。",
     },
+}
+MAC_SMOKE_DENSE_REQUIRED_QUESTIONS = {
+    (
+        "incident-rag",
+        "H",
+    ): "航空事故の原因と再発防止策について、操縦・気象・機体故障の観点から関連資料を教えて。",
 }
 PROFILE_MODE = {
     "H": "hybrid",
@@ -745,6 +751,7 @@ class PersistentDaemonWindowsRunner:
         timeout_seconds: float = RESOURCE_QUIESCENCE_TIMEOUT_SECONDS,
         stable_polls: int = RESOURCE_QUIESCENCE_STABLE_POLLS,
         poll_seconds: float = RESOURCE_QUIESCENCE_POLL_SECONDS,
+        health_predicate: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any] | None:
         deadline = time.monotonic() + timeout_seconds
         consecutive = 0
@@ -755,6 +762,10 @@ class PersistentDaemonWindowsRunner:
                 last_health
                 and int(last_health.get("active_requests") or 0) == 0
                 and int(last_health.get("queue_depth") or 0) == 0
+                and (
+                    health_predicate is None
+                    or health_predicate(last_health)
+                )
             ):
                 consecutive += 1
                 if consecutive >= stable_polls:
@@ -1173,6 +1184,7 @@ class PersistentDaemonWindowsRunner:
             )
             return
         rows: list[dict[str, Any]] = []
+        generation_started = time.monotonic()
         cold = self.run_concurrent(
             [
                 make_case("mac-cold-c2", "ac-rag", "H", 0),
@@ -1205,35 +1217,111 @@ class PersistentDaemonWindowsRunner:
         expected_worker_generation = str(
             cold[0].get("worker_generation") or ""
         )
-        readiness_probe = self.run_client(
-            make_case(
-                "mac-dense-readiness-probe",
-                "ac-rag",
-                "V",
-                0,
-            ),
-            phase="mac-smoke-dense-readiness-probe",
-            record=False,
+        readiness_remaining = max(
+            0.0,
+            60.0 - (time.monotonic() - generation_started),
         )
         dense_ready = self.wait_for_dense_ready(
             manager_pid=expected_manager_pid,
             worker_pid=expected_worker_pid,
             manager_generation=expected_manager_generation,
             worker_generation=expected_worker_generation,
-            timeout_seconds=2.0,
+            timeout_seconds=readiness_remaining,
         )
-        readiness_probe_ok = dense_readiness_probe_contract(
-            readiness_probe,
-            dense_ready,
-            manager_pid=expected_manager_pid,
-            worker_pid=expected_worker_pid,
-            manager_generation=str(
-                expected_manager_generation
-            ),
-            worker_generation=str(
-                expected_worker_generation
-            ),
-            deadline_seconds=self.deadline_seconds,
+        quiescence_remaining = max(
+            0.0,
+            60.0 - (time.monotonic() - generation_started),
+        )
+        quiescent_health = (
+            self.wait_for_daemon_quiescence(
+                timeout_seconds=min(10.0, quiescence_remaining),
+                stable_polls=3,
+                health_predicate=lambda health: (
+                    int(health.get("manager_pid") or 0)
+                    == expected_manager_pid
+                    and int(health.get("worker_pid") or 0)
+                    == expected_worker_pid
+                    and str(health.get("manager_generation") or "")
+                    == expected_manager_generation
+                    and str(health.get("worker_generation") or "")
+                    == expected_worker_generation
+                    and str(health.get("dense_warmup_state") or "")
+                    == "ready"
+                    and int(health.get("model_load_count") or 0) == 1
+                ),
+            )
+            if (
+                dense_ready["status"] == "ready"
+                and quiescence_remaining > 0
+            )
+            else None
+        )
+        readiness_quiescent = bool(
+            quiescent_health
+            and int(quiescent_health.get("manager_pid") or 0)
+            == expected_manager_pid
+            and int(quiescent_health.get("worker_pid") or 0)
+            == expected_worker_pid
+            and str(
+                quiescent_health.get("manager_generation") or ""
+            )
+            == expected_manager_generation
+            and str(
+                quiescent_health.get("worker_generation") or ""
+            )
+            == expected_worker_generation
+            and str(
+                quiescent_health.get("dense_warmup_state") or ""
+            )
+            == "ready"
+            and int(quiescent_health.get("model_load_count") or 0) == 1
+            and int(quiescent_health.get("active_requests") or 0) == 0
+            and int(quiescent_health.get("queue_depth") or 0) == 0
+        )
+        readiness_within_60 = (
+            time.monotonic() - generation_started <= 60.0
+        )
+        readiness_boundary_ok = bool(
+            dense_ready["status"] == "ready"
+            and readiness_quiescent
+            and readiness_within_60
+        )
+        readiness_probe = (
+            self.run_client(
+                make_case(
+                    "mac-dense-readiness-probe",
+                    "ac-rag",
+                    "V",
+                    0,
+                ),
+                phase="mac-smoke-dense-readiness-probe",
+                record=False,
+            )
+            if readiness_boundary_ok
+            else {"result": "NOT_RUN"}
+        )
+        post_probe_health = (
+            self.wait_for_dense_ready(
+                manager_pid=expected_manager_pid,
+                worker_pid=expected_worker_pid,
+                manager_generation=expected_manager_generation,
+                worker_generation=expected_worker_generation,
+                timeout_seconds=2.0,
+            )
+            if readiness_boundary_ok
+            else dense_ready
+        )
+        readiness_probe_ok = bool(
+            readiness_boundary_ok
+            and dense_readiness_probe_contract(
+                readiness_probe,
+                post_probe_health,
+                manager_pid=expected_manager_pid,
+                worker_pid=expected_worker_pid,
+                manager_generation=expected_manager_generation,
+                worker_generation=expected_worker_generation,
+                deadline_seconds=self.deadline_seconds,
+            )
         )
         self.artifacts.append(
             "event",
@@ -1257,6 +1345,7 @@ class PersistentDaemonWindowsRunner:
                 "probe_identity_match": readiness_probe.get(
                     "response_identity_match"
                 ),
+                "probe_dense_used": readiness_probe.get("dense_used"),
                 "status": dense_ready["status"],
                 "polls": dense_ready["polls"],
                 "elapsed_seconds": dense_ready["elapsed_seconds"],
@@ -1272,6 +1361,9 @@ class PersistentDaemonWindowsRunner:
                 "model_load_count": (
                     dense_ready.get("health") or {}
                 ).get("model_load_count"),
+                "quiescence_stable_polls": 3,
+                "readiness_quiescent": readiness_quiescent,
+                "readiness_within_60_seconds": readiness_within_60,
                 "result": "PASS" if readiness_probe_ok else "FAIL",
             },
         )
@@ -1284,6 +1376,8 @@ class PersistentDaemonWindowsRunner:
                 "FAIL",
                 f"readiness_probe={readiness_probe.get('result')}, "
                 f"dense_ready={dense_ready['status']}, "
+                f"quiescent={readiness_quiescent}, "
+                f"within_60s={readiness_within_60}, "
                 f"polls={dense_ready['polls']}, "
                 f"shutdown={final_shutdown.get('result')}",
             )
@@ -1292,7 +1386,7 @@ class PersistentDaemonWindowsRunner:
         warm_rows: list[dict[str, Any]] = []
         for offset in range(2, 18, 2):
             cohort = [
-                make_case(
+                make_mac_smoke_case(
                     "mac-warm-c2",
                     required_databases[(offset + client) % 2],
                     ("H", "L", "V")[(offset + client) % 3],
@@ -1332,8 +1426,13 @@ class PersistentDaemonWindowsRunner:
         if old_worker_gone:
             recovery = self.run_concurrent(
                 [
-                    make_case("mac-worker-recovery-c2", "ac-rag", "V", 18),
-                    make_case(
+                    make_mac_smoke_case(
+                        "mac-worker-recovery-c2",
+                        "ac-rag",
+                        "V",
+                        18,
+                    ),
+                    make_mac_smoke_case(
                         "mac-worker-recovery-c2",
                         "incident-rag",
                         "H",
@@ -1388,6 +1487,11 @@ class PersistentDaemonWindowsRunner:
             and all(client_ids)
             and len(set(client_ids)) == len(client_ids)
         )
+        warm_dense_ok = all(
+            row.get("profile") == "L"
+            or row.get("dense_used") is True
+            for row in warm_rows
+        )
         contract_ok = bool(
             len(rows) == 20
             and all(row.get("result") == "PASS" for row in rows)
@@ -1401,6 +1505,7 @@ class PersistentDaemonWindowsRunner:
             and {row.get("db") for row in rows}
             == set(required_databases)
             and {row.get("profile") for row in rows} == {"H", "L", "V"}
+            and warm_dense_ok
         )
         final_shutdown = self.shutdown_and_verify("mac-smoke-final")
         graceful_shutdown = bool(
@@ -1440,6 +1545,7 @@ class PersistentDaemonWindowsRunner:
                 "worker_recovered": worker_recovered,
                 "identity_ok": identity_ok,
                 "contract_ok": contract_ok,
+                "warm_hybrid_dense_used": warm_dense_ok,
                 "graceful_shutdown": graceful_shutdown,
                 "result": "PASS" if passed else "FAIL",
             },
@@ -1453,7 +1559,8 @@ class PersistentDaemonWindowsRunner:
             f"{dense_ready['elapsed_seconds']}s, "
             f"pre_identity={pre_recycle_identity}, "
             f"worker_recovered={worker_recovered}, identity={identity_ok}, "
-            f"contract={contract_ok}, shutdown={graceful_shutdown}",
+            f"warm_dense={warm_dense_ok}, contract={contract_ok}, "
+            f"shutdown={graceful_shutdown}",
         )
 
     def phase_lifecycle(self, cycles: int = 20) -> None:
@@ -2492,6 +2599,23 @@ def make_case(prefix: str, db: str, profile: str, index: int) -> ClientCase:
     )
 
 
+def make_mac_smoke_case(
+    prefix: str,
+    db: str,
+    profile: str,
+    index: int,
+) -> ClientCase:
+    return ClientCase(
+        case_id=f"{prefix}-{index + 1:04d}",
+        db=db,
+        profile=profile,
+        question=MAC_SMOKE_DENSE_REQUIRED_QUESTIONS.get(
+            (db, profile),
+            QUESTIONS[db][profile],
+        ),
+    )
+
+
 def structured_request_arguments(request: dict[str, Any]) -> list[str]:
     arguments = [
         "--answer-goal",
@@ -2746,6 +2870,8 @@ def dense_readiness_probe_contract(
         and row.get("stdout_json_valid")
         and not row.get("fallback_used")
         and row.get("response_identity_match")
+        and row.get("profile") == "V"
+        and row.get("dense_used") is True
         and float(row.get("elapsed_seconds") or 0.0) <= deadline_seconds
         and int(row.get("manager_pid") or 0) == manager_pid
         and int(row.get("worker_pid") or 0) == worker_pid

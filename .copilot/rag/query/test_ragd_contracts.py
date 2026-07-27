@@ -98,6 +98,71 @@ class DaemonOwnershipTests(unittest.TestCase):
 
 
 class PersistentManagerTests(unittest.TestCase):
+    def test_idle_health_merges_generation_scoped_worker_telemetry(self) -> None:
+        manager = PersistentWorkerManager(
+            rag_root=QUERY_ROOT.parent,
+            dbs_root=QUERY_ROOT.parent / "dbs",
+            manager_generation="manager-telemetry-test",
+        )
+        receive, send = RAG_MANAGER.multiprocessing.get_context(
+            "spawn"
+        ).Pipe(duplex=False)
+        with manager._worker_lifecycle_lock:
+            manager._status_connection = receive
+            manager._worker_generation = "worker-current"
+            manager._worker_pid = 321
+            manager._worker_state_revision = 1
+            manager._worker_state = {
+                "worker_pid": 321,
+                "worker_generation": "worker-current",
+                "state_revision": 1,
+                "dense_warmup_state": "starting",
+                "model_load_count": 0,
+            }
+        send.send(
+            {
+                "op": "worker_status",
+                "worker_generation": "worker-current",
+                "state_revision": 2,
+                "worker_state": {
+                    "worker_pid": 321,
+                    "worker_generation": "worker-current",
+                    "state_revision": 2,
+                    "dense_warmup_state": "ready",
+                    "model_load_count": 1,
+                },
+            }
+        )
+        ready = manager.health()
+        self.assertEqual("ready", ready["dense_warmup_state"])
+        self.assertEqual(1, ready["model_load_count"])
+
+        # Neither an older snapshot nor another generation may regress the
+        # terminal readiness state.
+        for generation, revision in (
+            ("worker-current", 1),
+            ("worker-replacement", 99),
+        ):
+            send.send(
+                {
+                    "op": "worker_status",
+                    "worker_generation": generation,
+                    "state_revision": revision,
+                    "worker_state": {
+                        "worker_pid": 999,
+                        "worker_generation": generation,
+                        "state_revision": revision,
+                        "dense_warmup_state": "starting",
+                        "model_load_count": 0,
+                    },
+                }
+            )
+        still_ready = manager.health()
+        self.assertEqual("ready", still_ready["dense_warmup_state"])
+        self.assertEqual(1, still_ready["model_load_count"])
+        send.close()
+        manager.shutdown()
+
     def test_release_lease_blocks_search_until_matching_resume(self) -> None:
         manager = PersistentWorkerManager(
             rag_root=QUERY_ROOT.parent,

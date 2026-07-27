@@ -8,8 +8,19 @@ from pathlib import Path
 from typing import Any
 
 
+def _final_dense_loaded(
+    dense_loaded: bool,
+    dense_ready: threading.Event,
+) -> bool:
+    # Warmup may complete after the request's initial readiness check but
+    # before its response snapshot is built. Read the terminal Event again so
+    # model readiness can never regress from ready/1 to ready/0.
+    return bool(dense_loaded or dense_ready.is_set())
+
+
 def worker_main(
     connection: Any,
+    status_connection: Any,
     *,
     rag_root: str,
     dbs_root: str,
@@ -22,20 +33,36 @@ def worker_main(
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     from rag_manager import _current_process_metrics
 
+    state_lock = threading.Lock()
+    state_revision = 1
     state = {
         "worker_pid": os.getpid(),
         "worker_generation": worker_generation,
         "model_load_count": 0,
         "open_database_count": 0,
         "handled_request_count": 0,
-        "dense_warmup_state": "not_started",
+        "dense_warmup_state": "starting",
+        "state_revision": state_revision,
         **_current_process_metrics(),
     }
+
+    def snapshot_state() -> dict[str, Any]:
+        with state_lock:
+            return dict(state)
+
+    def update_state(**updates: Any) -> dict[str, Any]:
+        nonlocal state_revision
+        with state_lock:
+            state.update(updates)
+            state_revision += 1
+            state["state_revision"] = state_revision
+            return dict(state)
+
     connection.send(
         {
             "op": "ready",
             "worker_generation": worker_generation,
-            "worker_state": dict(state),
+            "worker_state": snapshot_state(),
         }
     )
 
@@ -58,16 +85,36 @@ def worker_main(
 
             get_embedder().encode(["Local RAG warmup"], mode="query")
         except Exception as exc:
-            state["dense_warmup_state"] = (
-                f"error:{type(exc).__name__}"
+            terminal_state = update_state(
+                dense_warmup_state=f"error:{type(exc).__name__}",
+                model_load_count=0,
             )
         else:
-            state["dense_warmup_state"] = "ready"
+            # Publish the Event before creating the terminal snapshot. A
+            # concurrent search response re-reads this Event, so it cannot
+            # create a newer ready/model_load_count=0 revision between these
+            # operations.
             dense_ready.set()
+            terminal_state = update_state(
+                dense_warmup_state="ready",
+                model_load_count=1,
+            )
         finally:
             dense_warmup_finished.set()
-
-    state["dense_warmup_state"] = "starting"
+        try:
+            # This dedicated one-way channel has exactly one writer: the
+            # background warmup thread. Search responses continue to use the
+            # request/response Pipe only from the worker main thread.
+            status_connection.send(
+                {
+                    "op": "worker_status",
+                    "worker_generation": worker_generation,
+                    "state_revision": terminal_state["state_revision"],
+                    "worker_state": terminal_state,
+                }
+            )
+        except (BrokenPipeError, EOFError, OSError, ValueError):
+            pass
     threading.Thread(
         target=warm_dense_runtime,
         name="rag-dense-warmup",
@@ -92,7 +139,6 @@ def worker_main(
         payload = dict(message.get("payload") or {})
         if dense_ready.is_set() and not dense_loaded:
             dense_loaded = True
-            state["model_load_count"] = 1
         remaining_deadline_ms = max(
             0,
             int(message.get("remaining_deadline_ms") or 0),
@@ -123,7 +169,6 @@ def worker_main(
             )
         if dense_ready.is_set() and not dense_loaded:
             dense_loaded = True
-            state["model_load_count"] = 1
         started = time.monotonic()
         try:
             result = _execute_search_payload(
@@ -149,23 +194,34 @@ def worker_main(
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
-        state["handled_request_count"] += 1
         coverage = result.get("coverage") or {}
         if (
             result.get("dense_used") is True
             or coverage.get("dense_discovery_used") is True
         ) and not dense_loaded:
             dense_loaded = True
-            state["model_load_count"] = 1
-        try:
-            state["open_database_count"] = registry().cached_count
-        except Exception:
-            state["open_database_count"] = 0
-        state["last_request_seconds"] = round(
-            time.monotonic() - started,
-            6,
+        dense_loaded = _final_dense_loaded(
+            dense_loaded,
+            dense_ready,
         )
-        state.update(_current_process_metrics())
+        try:
+            open_database_count = registry().cached_count
+        except Exception:
+            open_database_count = 0
+        with state_lock:
+            handled_request_count = int(
+                state.get("handled_request_count") or 0
+            ) + 1
+        response_state = update_state(
+            handled_request_count=handled_request_count,
+            model_load_count=1 if dense_loaded else 0,
+            open_database_count=open_database_count,
+            last_request_seconds=round(
+                time.monotonic() - started,
+                6,
+            ),
+            **_current_process_metrics(),
+        )
         try:
             connection.send(
                 {
@@ -174,7 +230,7 @@ def worker_main(
                     "client_id": client_id,
                     "db": db_name,
                     "result": result,
-                    "worker_state": dict(state),
+                    "worker_state": response_state,
                 }
             )
         except (BrokenPipeError, EOFError, OSError):

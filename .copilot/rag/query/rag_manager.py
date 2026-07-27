@@ -36,6 +36,7 @@ class _PendingRequest:
 
 def worker_process_entry(
     connection: Any,
+    status_connection: Any,
     *,
     rag_root: str,
     dbs_root: str,
@@ -47,6 +48,7 @@ def worker_process_entry(
 
         worker_main(
             connection,
+            status_connection,
             rag_root=rag_root,
             dbs_root=dbs_root,
             worker_generation=worker_generation,
@@ -54,6 +56,10 @@ def worker_process_entry(
     finally:
         try:
             connection.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            status_connection.close()
         except (OSError, ValueError):
             pass
 
@@ -95,9 +101,11 @@ class PersistentWorkerManager:
 
         self._process: multiprocessing.Process | None = None
         self._connection: Any | None = None
+        self._status_connection: Any | None = None
         self._worker_generation = ""
         self._worker_pid = 0
         self._worker_state: dict[str, Any] = {}
+        self._worker_state_revision = -1
         self._job: _WindowsJobObject | None = None
         self._last_worker_start_error: str | None = None
         self._worker_lifecycle_lock = threading.RLock()
@@ -355,6 +363,58 @@ class PersistentWorkerManager:
             "manager_generation": self.manager_generation,
         }
 
+    def _accept_worker_state_locked(
+        self,
+        worker_state: dict[str, Any],
+        *,
+        worker_generation: str,
+    ) -> bool:
+        if (
+            not worker_state
+            or worker_generation != self._worker_generation
+            or str(worker_state.get("worker_generation") or "")
+            != self._worker_generation
+        ):
+            return False
+        revision = int(worker_state.get("state_revision") or 0)
+        if revision <= getattr(self, "_worker_state_revision", -1):
+            return False
+        self._worker_state = dict(worker_state)
+        self._worker_state_revision = revision
+        return True
+
+    def _drain_worker_status_locked(self) -> None:
+        status_connection = getattr(self, "_status_connection", None)
+        if status_connection is None:
+            return
+        try:
+            while status_connection.poll():
+                message = status_connection.recv()
+                if (
+                    isinstance(message, dict)
+                    and message.get("op") == "worker_status"
+                ):
+                    worker_state = dict(
+                        message.get("worker_state") or {}
+                    )
+                    if int(message.get("state_revision") or 0) != int(
+                        worker_state.get("state_revision") or 0
+                    ):
+                        continue
+                    self._accept_worker_state_locked(
+                        worker_state,
+                        worker_generation=str(
+                            message.get("worker_generation") or ""
+                        ),
+                    )
+        except (EOFError, OSError, ValueError):
+            try:
+                status_connection.close()
+            except (OSError, ValueError):
+                pass
+            if status_connection is self._status_connection:
+                self._status_connection = None
+
     def health(self) -> dict[str, Any]:
         # Worker retirement can spend several seconds in bounded
         # join/terminate/kill calls while holding the lifecycle lock. Health
@@ -366,6 +426,8 @@ class PersistentWorkerManager:
             timeout=0.01
         )
         try:
+            if lifecycle_snapshot_acquired:
+                self._drain_worker_status_locked()
             process = self._process
             connection = self._connection
             state = dict(self._worker_state)
@@ -565,8 +627,18 @@ class PersistentWorkerManager:
                             "worker_response_mismatch",
                         )
                     with self._worker_lifecycle_lock:
-                        self._worker_state = dict(
+                        self._drain_worker_status_locked()
+                        response_state = dict(
                             response.get("worker_state") or {}
+                        )
+                        self._accept_worker_state_locked(
+                            response_state,
+                            worker_generation=str(
+                                response_state.get(
+                                    "worker_generation"
+                                )
+                                or ""
+                            ),
                         )
                     result = dict(response.get("result") or {})
                     result["daemon_state"] = self._request_metadata(
@@ -601,11 +673,13 @@ class PersistentWorkerManager:
             return False
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
+        status_receive, status_send = context.Pipe(duplex=False)
         generation = uuid.uuid4().hex
         process = context.Process(
             target=worker_process_entry,
             kwargs={
                 "connection": child_connection,
+                "status_connection": status_send,
                 "rag_root": str(self.rag_root),
                 "dbs_root": str(self.dbs_root),
                 "worker_generation": generation,
@@ -613,11 +687,45 @@ class PersistentWorkerManager:
             name="local-rag-search-worker",
             daemon=False,
         )
-        process.start()
+        try:
+            process.start()
+        except BaseException:
+            try:
+                if process.pid and process.is_alive():
+                    process.terminate()
+                    process.join(timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+                    if process.is_alive():
+                        try:
+                            process.kill()
+                        except AttributeError:
+                            process.terminate()
+                        process.join(
+                            timeout=WORKER_SHUTDOWN_TIMEOUT_SECONDS
+                        )
+            except (AssertionError, OSError, ValueError):
+                pass
+            for endpoint in (
+                parent_connection,
+                child_connection,
+                status_receive,
+                status_send,
+            ):
+                try:
+                    endpoint.close()
+                except (OSError, ValueError):
+                    pass
+            try:
+                process.close()
+            except (OSError, ValueError):
+                pass
+            raise
         child_connection.close()
+        status_send.close()
         self._process = process
         self._connection = parent_connection
+        self._status_connection = status_receive
         self._worker_generation = generation
+        self._worker_state_revision = -1
         self._worker_pid = int(process.pid or 0)
         self._job = _WindowsJobObject.assign(process)
         if os.name == "nt" and self._job is None:
@@ -644,8 +752,12 @@ class PersistentWorkerManager:
                         ready.get("op") == "ready"
                         and ready.get("worker_generation") == generation
                     ):
-                        self._worker_state = dict(
+                        ready_state = dict(
                             ready.get("worker_state") or {}
+                        )
+                        self._accept_worker_state_locked(
+                            ready_state,
+                            worker_generation=generation,
                         )
                         self._worker_pid = int(
                             self._worker_state.get("worker_pid")
@@ -671,11 +783,17 @@ class PersistentWorkerManager:
     def _stop_worker_locked(self, *, graceful: bool) -> bool:
         process = self._process
         connection = self._connection
+        status_connection = self._status_connection
         job = self._job
         if process is None:
             if connection is not None:
                 try:
                     connection.close()
+                except (OSError, ValueError):
+                    pass
+            if status_connection is not None:
+                try:
+                    status_connection.close()
                 except (OSError, ValueError):
                     pass
             if job is not None:
@@ -709,6 +827,11 @@ class PersistentWorkerManager:
                 connection.close()
             except (OSError, ValueError):
                 pass
+        if status_connection is not None:
+            try:
+                status_connection.close()
+            except (OSError, ValueError):
+                pass
         if job is not None:
             job.close()
         if worker_reaped:
@@ -722,10 +845,12 @@ class PersistentWorkerManager:
     def _clear_worker_references(self) -> None:
         self._process = None
         self._connection = None
+        self._status_connection = None
         self._job = None
         self._worker_pid = 0
         self._worker_generation = ""
         self._worker_state = {}
+        self._worker_state_revision = -1
 
     def _request_metadata(
         self,
@@ -735,6 +860,7 @@ class PersistentWorkerManager:
     ) -> dict[str, Any]:
         self._request_sequence += 1
         with self._worker_lifecycle_lock:
+            self._drain_worker_status_locked()
             worker_pid = self._worker_pid
             worker_generation = self._worker_generation
             state = dict(self._worker_state)

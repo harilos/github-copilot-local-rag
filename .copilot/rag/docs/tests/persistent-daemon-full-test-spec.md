@@ -1198,12 +1198,21 @@ Minimum macOS coverage:
 - one excluded one-shot Dense readiness probe after the cold cohort and before
   warm concurrency; this probe is test orchestration only, is not retried, and
   is not counted among the 20 formal mixed-request rows;
+- readiness must be observed within 60 seconds of starting the worker
+  generation as `dense_warmup_state=ready` and `model_load_count=1`, followed
+  by three consecutive idle health samples;
 - one warm concurrency-two cohort;
 - 20 mixed requests;
 - one graceful shutdown;
 - one worker termination and recovery;
 - request/client/DB identity checks;
 - no fallback, orphan, JSON corruption, or generation duplication.
+- the excluded Dense probe and every Dense-required H/V request in the warm
+  cohort must report `dense_used=true`;
+- the Mac runtime smoke uses a non-identifier incident H question so the
+  runtime Dense gate cannot be bypassed by Exact/path fast paths. The original
+  filename question remains in the separate Broad-quality regression gate,
+  where skipping Discovery Dense after Exact is still a failure.
 
 Windows Job Object and Windows DB sharing tests are
 `NOT_RUN/not_applicable_platform` on macOS.

@@ -24,6 +24,17 @@ SPEC.loader.exec_module(MODULE)
 
 
 class JsonContractTests(unittest.TestCase):
+    def test_mac_hybrid_runtime_question_requires_dense_discovery(self) -> None:
+        case = MODULE.make_mac_smoke_case(
+            "mac",
+            "incident-rag",
+            "H",
+            0,
+        )
+        self.assertNotIn("ntsb_aviation_report", case.question)
+        self.assertIn("操縦", case.question)
+        self.assertEqual("H", case.profile)
+
     def test_parses_exactly_one_utf8_object(self) -> None:
         payload, error = MODULE.parse_one_json(
             '{"status":"ok","question":"日本語"}'.encode("utf-8")
@@ -592,6 +603,8 @@ class CommandTests(unittest.TestCase):
             "stdout_json_valid": True,
             "fallback_used": False,
             "response_identity_match": True,
+            "profile": "V",
+            "dense_used": True,
             "elapsed_seconds": 4.5,
             "manager_pid": 10,
             "worker_pid": 11,

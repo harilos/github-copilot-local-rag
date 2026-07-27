@@ -21,12 +21,34 @@ sys.path.insert(0, str(TOOL_ROOT))
 from software_rag_tool.daemon_control import (  # noqa: E402
     release_db_before_mutation,
 )
-from rag_worker import _execute_search_payload  # noqa: E402
+from rag_worker import (  # noqa: E402
+    _execute_search_payload,
+    _final_dense_loaded,
+)
 from rag_manager import PersistentWorkerManager  # noqa: E402
 from ragd import _drain_worker_then_stop_listener  # noqa: E402
 
 
 class PersistentDaemonContracts(unittest.TestCase):
+    def test_search_response_cannot_regress_completed_warmup(self) -> None:
+        ready = threading.Event()
+        self.assertFalse(_final_dense_loaded(False, ready))
+        # Simulate warmup completing after the request-start readiness check
+        # and immediately before response state is serialized.
+        ready.set()
+        self.assertTrue(_final_dense_loaded(False, ready))
+
+    def test_warmup_event_is_published_before_ready_snapshot(self) -> None:
+        source = (QUERY_ROOT / "rag_worker.py").read_text(encoding="utf-8")
+        success_branch = source.split("        else:", 1)[1].split(
+            "        finally:",
+            1,
+        )[0]
+        self.assertLess(
+            success_branch.index("dense_ready.set()"),
+            success_branch.index('dense_warmup_state="ready"'),
+        )
+
     def test_cold_worker_never_enters_dense_evidence_path(self) -> None:
         calls: list[str] = []
 
@@ -111,6 +133,17 @@ for name in ('search', 'ragd'):
         for filename in ("rag_manager.py", "rag_worker.py"):
             self.assertIn(filename, search_source)
             self.assertIn(filename, daemon_source)
+
+    def test_warmup_telemetry_uses_a_dedicated_one_way_pipe(self) -> None:
+        worker_source = (QUERY_ROOT / "rag_worker.py").read_text(
+            encoding="utf-8"
+        )
+        manager_source = (QUERY_ROOT / "rag_manager.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(1, worker_source.count("status_connection.send("))
+        self.assertIn("context.Pipe(duplex=False)", manager_source)
+        self.assertIn('"op": "worker_status"', worker_source)
 
     def test_admin_mutations_request_db_release(self) -> None:
         for relative in (
