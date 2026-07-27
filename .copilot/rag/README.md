@@ -33,6 +33,54 @@ For requests to use RAG, local documents, internal or company information, or in
 
 This pack does not include `copilot-instructions.md` and will not overwrite your existing top-level Copilot instructions.
 
+## Export For Migration
+
+Create a private migration archive from an installed Local RAG environment:
+
+```bash
+~/.copilot/rag/export_migration.sh
+```
+
+Specify an output path when needed:
+
+```bash
+~/.copilot/rag/export_migration.sh \
+  --output "$HOME/local-rag-migration.tar.gz"
+```
+
+The archive includes the RAG databases, indexes, local ONNX model, RAG code,
+the RAG instruction, and the two RAG skills. New files under `rag` are
+included automatically unless they match the transient/private blacklist.
+Outside `rag`, only these exact integration files are included:
+
+```text
+instructions/rag.instructions.md
+skills/local-rag/SKILL.md
+skills/local-rag-admin/SKILL.md
+```
+
+The platform-specific `query/.venv`, daemon state, caches, and SQLite
+transient files are excluded. Machine-local `config/network.json` is included
+by default when present. Export fails without displaying the URL if that file
+contains a proxy username, password, token, secret, or other persisted
+credential. Use `--exclude-network-config` when the destination should receive
+new proxy/CA settings instead. The script refuses to export while the daemon
+or a DB maintenance operation is active, or while an uncheckpointed SQLite
+WAL or journal exists.
+
+Verify an archive after copying it:
+
+```bash
+~/.copilot/rag/export_migration.sh \
+  --verify "$HOME/local-rag-migration.tar.gz"
+```
+
+The archive is created with mode `0600`, includes a manifest and per-file
+SHA-256 checksums, and may contain company documents. It is never uploaded
+automatically. On the destination, extract it privately, copy the bundled
+`.copilot` contents without deleting unrelated Copilot files, and run Local
+RAG setup to recreate the virtual environment.
+
 ## Layout
 
 ```text

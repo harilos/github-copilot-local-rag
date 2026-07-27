@@ -153,6 +153,56 @@ After setup, list databases without loading the embedding model:
   --format json
 ```
 
+## Migration export
+
+When the user asks to move, back up, or export the installed Local RAG
+environment, use the installed POSIX exporter:
+
+```bash
+~/.copilot/rag/export_migration.sh \
+  --output "$HOME/local-rag-migration.tar.gz"
+```
+
+The exporter uses a blacklist under `~/.copilot/rag`, so new RAG files are
+included by default. Outside `rag`, it includes only the RAG instruction and
+the `local-rag` and `local-rag-admin` skills. It intentionally excludes the
+platform-specific virtual environment, daemon state, caches, SQLite
+transients, and private credential files.
+
+Do not start or terminate the daemon or a database maintenance operation
+implicitly for export. If the exporter reports an active daemon, active DB
+maintenance, or an uncheckpointed SQLite WAL, explain the condition and stop
+or perform a separately authorized graceful maintenance action.
+
+Persistent `network.json` is included by default when present. The export must
+fail without displaying the URL when `proxy_url` contains a username or
+password, or when the configuration contains a persisted password, token,
+secret, or credential field. Never export embedded proxy credentials.
+
+Exclude the persistent network configuration when the user wants to configure
+the destination separately:
+
+```bash
+~/.copilot/rag/export_migration.sh \
+  --exclude-network-config \
+  --output "$HOME/local-rag-migration.tar.gz"
+```
+
+Never print the configuration contents or proxy credentials. Treat every
+migration archive as sensitive because it can contain local or company
+documents. Do not upload, commit, email, or otherwise transmit it unless the
+user explicitly requests that separate action.
+
+Verify a transferred archive before restoring it:
+
+```bash
+~/.copilot/rag/export_migration.sh \
+  --verify "$HOME/local-rag-migration.tar.gz"
+```
+
+On the destination, preserve unrelated Copilot files and recreate the RAG
+virtual environment with the normal setup workflow.
+
 ## Status
 
 Inspect status before starting or resuming a long operation:
