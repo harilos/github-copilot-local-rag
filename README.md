@@ -1,6 +1,8 @@
 # GitHub Copilot Local RAG
 
-**Current release: 1.0.1**
+**Current development version: 1.0.1**
+
+**Release status: Unreleased release candidate**
 
 GitHub Copilotから、ローカル文書や社内資料を自然な日本語で検索するためのRAGパックです。
 
@@ -96,45 +98,16 @@ $HOME/.copilot/
 
 既存の`~/.copilot/copilot-instructions.md`は上書きしません。ただし、既存の`rag/`や`instructions/rag.instructions.md`と同名のファイルは更新される場合があります。
 
-別の場所へインストールする場合:
-
-```bash
-COPILOT_HOME=/path/to/.copilot bash ./install.sh
-```
-
-```powershell
-.\install.ps1 -Target "C:\path\to\.copilot"
-```
-
-インストール先を変更した場合は、Copilot指示内の参照先と、以降のコマンドにある`~/.copilot`も同じ場所へ読み替えてください。
-
-<details>
-<summary>手動でコピーする場合</summary>
-
-macOS / Linux:
-
-```bash
-mkdir -p ~/.copilot
-cp -R .copilot/. ~/.copilot/
-```
-
-Windows PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.copilot" | Out-Null
-Copy-Item -Recurse -Force ".\.copilot\*" "$HOME\.copilot\"
-```
-
-既存の`$HOME/.copilot`全体を削除・置換せず、中身だけをマージしてください。
-
-</details>
+Copilot向けSkillとコマンドは`$HOME/.copilot`を参照するため、通常利用で
+サポートするインストール先はこの既定位置です。実`network.json`を誤って配布・
+上書きしないよう、`.copilot`の手動コピーではなく上記installerを使用してください。
 
 ### 2. CopilotからRAG指示を参照できるようにする
 
 自然言語による間接操作を確実に使うため、既存の`~/.copilot/copilot-instructions.md`へ次の1行を追加します。
 
 ```text
-RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照してください。
+For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
 ```
 
 このファイルが存在しない場合は新しく作成できます。インストーラーは既存の内容を上書きしません。
@@ -143,7 +116,7 @@ RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照�
 
 ```text
 ~/.copilot/copilot-instructions.mdへ、
-「RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照してください。」
+“For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.”
 という1行を、既存内容を残したまま追加して。
 ```
 
@@ -477,26 +450,44 @@ Windowsでは、必要に応じて`python`を`py -3`へ読み替えてくださ�
 
 ```bash
 python ~/.copilot/rag/query/setup.py \
-  --proxy http://proxy.example:8080
+  --proxy http://proxy.example:8080 \
+  --ca-bundle /path/to/company-ca.pem \
+  --format json
 ```
 
-会社のCA証明書が必要な場合:
+セットアップ済み環境を変更せず検証:
 
 ```bash
-export REQUESTS_CA_BUNDLE=/path/to/company-ca.pem
-export SSL_CERT_FILE=/path/to/company-ca.pem
-export PIP_CERT=/path/to/company-ca.pem
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/query/setup.py \
+  --verify-only \
+  --format json
+```
+
+常用する設定は、配布される`network.example.json`を参考に
+`~/.copilot/rag/config/network.json`へ保存できます。既定の`auto`では、実際の
+download開始前にproxyへ一度だけ疎通確認し、到達不能ならsystem CAによるdirect
+routeを選びます。direct accessを禁止する環境だけ`required`を使用します。実際の
+`network.json`はGit・installer・release ZIPの配布対象外です。
+
+```json
+{
+  "version": 1,
+  "mode": "auto",
+  "proxy_url": "http://proxy.example:8080",
+  "ca_bundle": "/path/to/company-ca.pem",
+  "no_proxy": ["localhost", "127.0.0.1", "::1"],
+  "proxy_probe_timeout_seconds": 1.0
+}
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:REQUESTS_CA_BUNDLE="C:\path\company-ca.pem"
-$env:SSL_CERT_FILE="C:\path\company-ca.pem"
-$env:PIP_CERT="C:\path\company-ca.pem"
-
 py -3 "$HOME\.copilot\rag\query\setup.py" `
-  --proxy http://proxy.example:8080
+  --proxy http://proxy.example:8080 `
+  --ca-bundle "C:\certs\company-ca.pem" `
+  --format json
 ```
 
 > [!CAUTION]
@@ -508,6 +499,8 @@ py -3 "$HOME\.copilot\rag\query\setup.py" `
 python ~/.copilot/rag/query/proxy_client.py \
   --url https://example.internal/rag \
   --db project-rag \
+  --proxy http://proxy.example:8080 \
+  --ca-bundle /path/to/company-ca.pem \
   "質問文"
 ```
 

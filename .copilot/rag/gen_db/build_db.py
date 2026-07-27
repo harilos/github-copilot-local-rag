@@ -8,6 +8,10 @@ from pathlib import Path
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
+QUERY_ROOT = RAG_ROOT / "query"
+sys.path.insert(0, str(QUERY_ROOT))
+
+from setup_contract import completion_contract_valid
 
 
 def main() -> None:
@@ -59,7 +63,11 @@ def _runtime_python_or_exit() -> str:
     query_root = RAG_ROOT / "query"
     venv_python = query_root / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = query_root / ".venv" / ".rag-deps-installed"
-    if venv_python.exists() and marker.exists():
+    marker_valid, _marker_reason = completion_contract_valid(
+        marker,
+        RAG_ROOT,
+    )
+    if venv_python.exists() and marker_valid:
         return str(venv_python)
     if os.getenv("RAG_ALLOW_UNINITIALIZED_RUNTIME", "").lower() in {"1", "true", "yes"}:
         return sys.executable

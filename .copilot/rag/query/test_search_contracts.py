@@ -245,6 +245,30 @@ class NoHitContractTests(unittest.TestCase):
         self.assertNotIn("results", payload)
         self.assertNotIn("background_results", payload)
 
+    def test_compact_contract_preserves_anchored_neighbor_support_metadata(self) -> None:
+        anchored = {
+            "id": "R2",
+            "text": "probable cause",
+            "signals": ["neighbor"],
+            "support_kind": "anchored_neighbor",
+            "anchor_chunk_uid": "anchor-uid",
+            "anchor_term": "M-4",
+            "neighbor_distance": 1,
+            "independent_signals": ["dense"],
+        }
+        payload = compact_search_contract(
+            {
+                "status": "ok",
+                "evidence": [anchored],
+                "background_context": [],
+                "related_context": [],
+                "warnings": [],
+            }
+        )
+        self.assertEqual("anchored_neighbor", payload["evidence"][0]["support_kind"])
+        self.assertEqual("anchor-uid", payload["evidence"][0]["anchor_chunk_uid"])
+        self.assertEqual(["dense"], payload["evidence"][0]["independent_signals"])
+
     def test_compact_cli_output_stays_below_lightweight_tool_limit(self) -> None:
         evidence = [{"id": "R1", "text": "x" * 900}]
         payload = {

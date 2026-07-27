@@ -14,6 +14,9 @@ from software_rag_tool.jsonl import write_jsonl
 from software_rag_tool.paths import clean_dir, dbs_dir
 from software_rag_tool.records import build_records
 
+# This preparation command reads local source files only. It intentionally
+# does not resolve or probe network configuration.
+
 
 def main() -> None:
     load_env()

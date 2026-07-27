@@ -292,7 +292,7 @@ def main() -> None:
 
     os.environ.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
     state_file = Path(args.state_file).expanduser().resolve()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
+    _secure_runtime_directory(state_file.parent)
     if args.file_dir:
         _run_file_daemon(
             file_dir=Path(args.file_dir).expanduser().resolve(),
@@ -317,11 +317,11 @@ def main() -> None:
 
 
 def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeout: int, state_file: Path) -> None:
-    file_dir.mkdir(parents=True, exist_ok=True)
+    _secure_runtime_directory(file_dir)
     requests_dir = file_dir / "requests"
     responses_dir = file_dir / "responses"
-    requests_dir.mkdir(exist_ok=True)
-    responses_dir.mkdir(exist_ok=True)
+    _secure_runtime_directory(requests_dir)
+    _secure_runtime_directory(responses_dir)
     heartbeat_file = file_dir / "heartbeat.json"
     code_fingerprint = runtime_code_fingerprint()
     started_monotonic = time.monotonic()
@@ -582,10 +582,18 @@ def _write_state(server: RagDaemonServer) -> None:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_runtime_directory(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
     tmp.replace(path)
+
+
+def _secure_runtime_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
 
 
 def _unlink_state(path: Path) -> None:

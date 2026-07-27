@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
@@ -27,6 +28,7 @@ from software_rag_tool.search_api import (
     normalize_search_contract,
     payload_to_text,
 )
+from setup_contract import completion_contract_valid
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
 STATE_FILE = RUN_DIR / "ragd.json"
@@ -45,6 +47,9 @@ WINDOWS_FALLBACK_DENSE_MIN_SECONDS = 10.0
 DEADLINE_FALLBACK_WARNING = (
     "Dense retrieval was skipped during daemon timeout recovery to meet "
     "the outer deadline."
+)
+_LOCAL_HTTP_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({})
 )
 
 
@@ -153,10 +158,14 @@ def main() -> None:
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
-    if not (venv_python.exists() and marker.exists()):
+    marker_valid, _marker_reason = completion_contract_valid(
+        marker,
+        RAG_ROOT,
+    )
+    if not (venv_python.exists() and marker_valid):
         _print_setup_required(args.format, resolution.db_name, question)
         raise SystemExit(2)
-    python = str(venv_python) if venv_python.exists() and marker.exists() else sys.executable
+    python = str(venv_python)
     env = os.environ.copy()
     env.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -856,10 +865,13 @@ def _retire_daemon(
         "failure_kind": failure_kind,
         **daemon_state_snapshot(state),
     }
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_runtime_directory(RUN_DIR)
     if record_failure:
         try:
-            with (RUN_DIR / "daemon-failures.jsonl").open("a", encoding="utf-8") as handle:
+            failure_log = RUN_DIR / "daemon-failures.jsonl"
+            with failure_log.open("a", encoding="utf-8") as handle:
+                if os.name != "nt":
+                    os.chmod(failure_log, 0o600)
                 handle.write(json.dumps(snapshot, ensure_ascii=False, sort_keys=True) + "\n")
         except OSError:
             pass
@@ -929,7 +941,7 @@ def _request_daemon_shutdown(state: dict, *, timeout: float) -> bool:
             headers={"X-RAGD-Token": str(state["token"])},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_local_url(request, timeout=timeout) as response:
             return response.status == 200
     except Exception:
         return False
@@ -1275,7 +1287,7 @@ def _daemon_health_payload(state: dict, *, timeout: int | float) -> dict | None:
             headers={"X-RAGD-Token": str(state["token"])},
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_local_url(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", errors="replace"))
     except Exception:
         return None
@@ -1324,8 +1336,11 @@ def _read_state() -> dict | None:
     elif data.get("transport") == "file":
         if not data.get("file_dir") or not data.get("heartbeat_file"):
             return None
-    elif not data.get("host") or not data.get("port"):
-        return None
+    else:
+        if not data.get("host") or not data.get("port"):
+            return None
+        if not _is_loopback_host(str(data["host"])):
+            return None
     return data
 
 
@@ -1344,7 +1359,7 @@ def _start_daemon(
 ) -> dict | None:
     if startup_timeout <= 0:
         return None
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_runtime_directory(RUN_DIR)
     deadline = time.monotonic() + startup_timeout
     lock_fd = _acquire_start_lock()
     if lock_fd is None:
@@ -1381,6 +1396,8 @@ def _start_daemon(
         else:
             popen_kwargs["start_new_session"] = True
         with LOG_FILE.open("ab") as log:
+            if os.name != "nt":
+                os.chmod(LOG_FILE, 0o600)
             process = subprocess.Popen(
                 cmd,
                 env=env,
@@ -1519,10 +1536,27 @@ def _query_daemon(state: dict, payload: dict, *, timeout: int | None) -> dict | 
             headers={"Content-Type": "application/json; charset=utf-8", "X-RAGD-Token": str(state["token"])},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_local_url(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", errors="replace"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
         return None
+
+
+def _open_local_url(
+    request: urllib.request.Request,
+    *,
+    timeout: int | float | None,
+) -> object:
+    return _LOCAL_HTTP_OPENER.open(request, timeout=timeout)
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.strip().casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip()).is_loopback
+    except ValueError:
+        return False
 
 
 def _file_request(state: dict, payload: dict, *, timeout: int | float | None) -> dict | None:
@@ -1542,6 +1576,8 @@ def _file_request(state: dict, payload: dict, *, timeout: int | float | None) ->
         request_file = requests_dir / f"{request_id}.request.json"
         tmp = request_file.with_name(f"{request_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
         tmp.replace(request_file)
         request_timeout = 300.0 if timeout is None else max(0.0, float(timeout))
         deadline = time.monotonic() + request_timeout
@@ -1562,6 +1598,12 @@ def _file_request(state: dict, payload: dict, *, timeout: int | float | None) ->
     except (OSError, TimeoutError, json.JSONDecodeError):
         return None
     return None
+
+
+def _secure_runtime_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(path, 0o700)
 
 
 def _unix_request(state: dict, payload: dict, *, timeout: int | float | None) -> dict | None:

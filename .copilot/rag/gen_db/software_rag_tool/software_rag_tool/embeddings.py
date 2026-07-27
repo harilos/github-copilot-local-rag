@@ -73,7 +73,11 @@ class OnnxRuntimeEmbedder:
         options.inter_op_num_threads = 1
         print(f"Loading ONNX embedding model: {model_path}", file=sys.stderr)
         self._session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-        self._tokenizer = _load_tokenizer(AutoTokenizer, str(model_dir))
+        self._tokenizer = _load_tokenizer(
+            AutoTokenizer,
+            str(model_dir),
+            local_files_only=True,
+        )
         self._input_names = {item.name for item in self._session.get_inputs()}
         self._output_names = [item.name for item in self._session.get_outputs()]
         print("ONNX embedding model loaded", file=sys.stderr)
@@ -125,7 +129,10 @@ class SentenceTransformerEmbedder:
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
         print(f"Loading embedding model: {model_name}", file=sys.stderr)
-        self._model = SentenceTransformer(model_name)
+        self._model = SentenceTransformer(
+            model_name,
+            local_files_only=True,
+        )
         print("Embedding model loaded", file=sys.stderr)
 
     def encode(self, texts: list[str], mode: Mode) -> list[list[float]]:
@@ -172,14 +179,30 @@ def get_embedder() -> Embedder:
     return embedder
 
 
-def _load_tokenizer(auto_tokenizer: object, model: str) -> object:
+def _load_tokenizer(
+    auto_tokenizer: object,
+    model: str,
+    *,
+    local_files_only: bool = True,
+) -> object:
     try:
-        return auto_tokenizer.from_pretrained(model, fix_mistral_regex=True)  # type: ignore[attr-defined]
+        return auto_tokenizer.from_pretrained(  # type: ignore[attr-defined]
+            model,
+            fix_mistral_regex=True,
+            local_files_only=local_files_only,
+        )
     except TypeError:
         try:
-            return auto_tokenizer.from_pretrained(model, fix_mistral_regex=False)  # type: ignore[attr-defined]
+            return auto_tokenizer.from_pretrained(  # type: ignore[attr-defined]
+                model,
+                fix_mistral_regex=False,
+                local_files_only=local_files_only,
+            )
         except TypeError:
-            return auto_tokenizer.from_pretrained(model)  # type: ignore[attr-defined]
+            return auto_tokenizer.from_pretrained(  # type: ignore[attr-defined]
+                model,
+                local_files_only=local_files_only,
+            )
 
 
 def embedding_dimension() -> int:

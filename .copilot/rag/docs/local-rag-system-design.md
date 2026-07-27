@@ -100,7 +100,7 @@ Copilotは検索方式を選ばない。Dense検索、BM25、完全一致、フ�
 `~/.copilot/copilot-instructions.md` は本パックでは作らない。ユーザーが既存のCopilot設定やユーザー指示に、必要なら次の短い参照だけ追加する。
 
 ```text
-RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照してください。
+For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
 ```
 
 `~/.copilot/instructions/` がVS CodeやCopilotから自動再帰探索されることは前提にしない。自動読込は環境依存になりやすいため、トップ指示から明示参照する運用にする。

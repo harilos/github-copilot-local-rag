@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "mode": "auto",
+  "proxy_url": "http://proxy.example:8080",
+  "ca_bundle": "/path/to/company-ca.pem",
+  "no_proxy": [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    ".internal.example"
+  ],
+  "proxy_probe_timeout_seconds": 1.0
+}

@@ -6,8 +6,10 @@ from typing import Any, Callable
 
 try:
     import chromadb
+    from chromadb.config import Settings
 except ModuleNotFoundError:
     chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment,misc]
 
 from .catalog import reset_catalog, upsert_records as upsert_catalog_records
 from .embeddings import embedding_fingerprint, get_embedder
@@ -55,7 +57,7 @@ def reset_collection() -> None:
     _require_chromadb()
     cdir = chroma_dir()
     cdir.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(cdir))
+    client = _persistent_client(cdir)
     name = collection_name()
     try:
         client.delete_collection(name)
@@ -67,7 +69,7 @@ def _get_or_create_collection() -> Any:
     _require_chromadb()
     cdir = chroma_dir()
     cdir.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(cdir))
+    client = _persistent_client(cdir)
     name = collection_name()
     metadata = {
         "hnsw:space": "cosine",
@@ -119,7 +121,7 @@ def collection_count() -> int:
 def vector_query(question: str, top_k: int, source: str = "any") -> list[dict[str, Any]]:
     _require_chromadb()
     validate_embedding_manifest()
-    client = chromadb.PersistentClient(path=str(chroma_dir()))
+    client = _persistent_client(chroma_dir())
     collection = client.get_collection(name=collection_name())
     embedder = get_embedder()
     q_embedding = embedder.encode([question], mode="query")[0]
@@ -214,3 +216,11 @@ def _flat_metadata(meta: dict[str, Any]) -> dict[str, str | int | float | bool]:
 def _require_chromadb() -> None:
     if chromadb is None:
         raise RuntimeError("chromadb is not installed. Run python ~/.copilot/rag/query/setup.py before dense search or DB generation.")
+
+
+def _persistent_client(path: Path) -> Any:
+    _require_chromadb()
+    return chromadb.PersistentClient(
+        path=str(path),
+        settings=Settings(anonymized_telemetry=False),
+    )

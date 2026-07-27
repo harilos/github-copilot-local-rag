@@ -40,18 +40,104 @@ After setup, use only the platform-specific RAG virtual-environment Python:
 If the virtual-environment Python or its `.rag-deps-installed` marker is
 missing, report `setup_required` and guide the user through setup.
 
-## Setup, proxy, and CA certificates
+## Setup verification
 
-Run setup only when the user requests it. Use `--proxy` when the user provides
-a corporate proxy:
+Run setup only when the user requests it. Normal setup verifies the runtime,
+model inference, JSON database listing, and installed database health before
+reporting success. Prefer JSON output so completion is machine-verifiable:
 
 ```bash
-python3 ~/.copilot/rag/query/setup.py --proxy http://proxy.example:8080
+python3 ~/.copilot/rag/query/setup.py --format json
 ```
 
-For TLS or certificate failures, explain that the company CA certificate may
-need to be assigned to `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, or `PIP_CERT`.
-Do not recommend disabling certificate verification as the normal solution.
+Verify without installing, downloading, or modifying the runtime or databases:
+
+```bash
+python3 ~/.copilot/rag/query/setup.py --verify-only --format json
+```
+
+On Windows PowerShell:
+
+```powershell
+py -3 "$HOME\.copilot\rag\query\setup.py" --verify-only --format json
+```
+
+Treat `setup_complete: true` as runtime completion. Treat `lookup_ready`
+separately because a complete runtime may have no installed database.
+
+The installers automatically migrate the legacy `ok` completion marker after
+an offline deep verification. If an installation was updated without an
+installer, run this explicit offline migration:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/query/setup.py \
+  --migrate-legacy-marker \
+  --format json
+```
+
+## Temporary proxy and CA configuration
+
+For temporary network configuration, use CLI options:
+
+```bash
+python3 ~/.copilot/rag/query/setup.py \
+  --proxy http://proxy.example:8080 \
+  --ca-bundle /path/to/company-ca.pem \
+  --no-proxy .internal.example \
+  --format json
+```
+
+On Windows PowerShell:
+
+```powershell
+py -3 "$HOME\.copilot\rag\query\setup.py" `
+  --proxy http://proxy.example:8080 `
+  --ca-bundle "C:\certs\company-ca.pem" `
+  --no-proxy .internal.example `
+  --format json
+```
+
+Never place proxy credentials in a response, log, command explanation, or
+configuration preview. Do not disable TLS certificate verification.
+
+## Persistent proxy and CA configuration
+
+The optional persistent file is:
+
+```text
+~/.copilot/rag/config/network.json
+```
+
+Do not require repeated `--proxy` options when this file is valid. When the
+user asks to save persistent configuration:
+
+1. Inspect an existing file before changing it.
+2. Ask for a missing proxy URL.
+3. Ask for a company CA path only when it is required.
+4. Default to `"mode": "auto"`.
+5. Use `"mode": "required"` only when the user explicitly prohibits direct
+   external access.
+6. Preserve existing fields that the user did not ask to change.
+7. Never display stored proxy credentials.
+8. Do not persist credentials embedded in a proxy URL. Store a
+   credential-free endpoint and use deliberate environment configuration for
+   authentication.
+9. On POSIX, make a newly written `network.json` owner-readable and
+   owner-writable only (`0600`). Do not broaden the existing Windows profile
+   ACL.
+
+Use CLI options instead for temporary proxy use. `auto` probes only the
+configured proxy endpoint before an external operation, selects proxy or
+direct once, and never retries the real operation through the other route.
+`required` fails when the configured proxy is unavailable. `off` ignores only
+tool-local proxy and CA values while preserving explicit CLI and environment
+settings.
+
+Use `--network-config <path>` for an explicit alternative file and
+`--ignore-network-config` to ignore persistent configuration for one command.
+Normal lookup and other offline operations must not load or probe this
+configuration.
 
 ## Help and database listing
 

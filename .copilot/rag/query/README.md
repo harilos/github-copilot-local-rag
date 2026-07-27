@@ -9,13 +9,24 @@ python setup.py
 ```
 
 Copilot should run this when the user asks `RAGの初期設定をして` or `RAGをセットアップして`.
-If `.venv/.rag-deps-installed` is missing, `search.py` and `build_db.py` return `setup_required` instead of running setup automatically. Copilot-facing wording is handled by the instruction file, not by these CLI scripts.
+If `.venv/.rag-deps-installed` is missing, invalid, or stale, `search.py` and
+`build_db.py` return `setup_required` instead of running setup automatically.
+Copilot-facing wording is handled by the instruction file, not by these CLI
+scripts.
 
-To skip model preparation and only install Python dependencies:
+To skip model preparation when a valid local model is already installed:
 
 ```bash
 python setup.py --no-prepare-model
 ```
+
+Verification still checks the model and returns an incomplete setup when the
+model is missing or invalid.
+
+Installers automatically perform an offline deep verification when upgrading
+an old runtime whose completion marker contains only `ok`. A successful check
+atomically migrates that marker to the machine-verifiable contract without
+installing packages, downloading a model, or changing databases.
 
 Proxy/certificate environments:
 

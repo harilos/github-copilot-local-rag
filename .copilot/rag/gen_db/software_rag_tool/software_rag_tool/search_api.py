@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
 from .retrieval import adaptive_hybrid_query, cold_lexical_fast_path, hybrid_query
+from .token_budget import conservative_token_count, truncate_to_token_limit
 from .tokenize import canonicalize, extract_anchors, identifier_match_keys
 
 
@@ -146,6 +146,8 @@ def run_adaptive_search_payload(
     payload["retrieval_route"] = route["retrieval_route"]
     payload["dense_used"] = bool(route["dense_used"])
     payload["dense_skipped_reason"] = route.get("dense_skipped_reason")
+    if explain:
+        payload["retrieval_funnel"] = dict(route.get("retrieval_funnel") or {})
     certificate = route.get("certificate") or {}
     if certificate.get("kind") == "db_scope_full_query_lexical":
         warnings = list(payload.get("warnings") or [])
@@ -265,6 +267,15 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
             "text": text,
             "signals": row.get("signals") or [],
         }
+        for key in (
+            "support_kind",
+            "anchor_chunk_uid",
+            "anchor_term",
+            "neighbor_distance",
+            "independent_signals",
+        ):
+            if row.get(key) not in (None, "", []):
+                item[key] = row[key]
         if row.get("debug"):
             item["debug"] = row["debug"]
         result = dict(row)
@@ -280,27 +291,61 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
         if _diagnostic_identifier_anchor(anchor)
     ]
     has_matched_strong_exact = any(
-        "exact" in signals and _context_matches_identifier(item, strong_identifiers)
-        for item, _result, signals in converted
+        "exact" in signals
+        and _exact_result_is_direct(result)
+        and _context_matches_identifier(item, strong_identifiers)
+        for item, result, signals in converted
     )
+    anchored_direct_ids = {
+        item["id"]
+        for item, result, _signals in converted
+        if _anchored_neighbor_is_direct(
+            item,
+            result,
+            converted=converted,
+            strong_identifiers=strong_identifiers,
+        )
+    }
     if has_lexical_anchor or has_matched_strong_exact:
         evidence = [
             item
-            for item, _result, signals in converted
+            for item, result, signals in converted
             if "lexical_anchor" in signals
-            or ("exact" in signals and _context_matches_identifier(item, strong_identifiers))
+            or (
+                "exact" in signals
+                and _exact_result_is_direct(result)
+                and _context_matches_identifier(item, strong_identifiers)
+            )
+            or item["id"] in anchored_direct_ids
         ]
         background_context = [
             item
-            for item, _result, signals in converted
+            for item, result, signals in converted
             if "lexical_anchor" not in signals
-            and not ("exact" in signals and _context_matches_identifier(item, strong_identifiers))
+            and not (
+                "exact" in signals
+                and _exact_result_is_direct(result)
+                and _context_matches_identifier(item, strong_identifiers)
+            )
+            and item["id"] not in anchored_direct_ids
         ]
         background_ids = {item["id"] for item in background_context}
     else:
-        evidence = [item for item, _result, _signals in converted]
-        background_context = []
-        background_ids = set()
+        evidence = [
+            item
+            for item, result, signals in converted
+            if not (
+                "exact" in signals
+                and not _exact_result_is_direct(result)
+            )
+        ]
+        evidence_ids = {item["id"] for item in evidence}
+        background_context = [
+            item
+            for item, _result, _signals in converted
+            if item["id"] not in evidence_ids
+        ]
+        background_ids = {item["id"] for item in background_context}
     results = [result for _item, result, _signals in converted]
     background_results = [
         result
@@ -336,6 +381,98 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
     if status == "no_hit":
         payload["legacy_status"] = "no_evidence"
     return payload
+
+
+def _anchored_neighbor_is_direct(
+    item: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    converted: list[tuple[dict[str, Any], dict[str, Any], set[str]]],
+    strong_identifiers: list[str],
+) -> bool:
+    if item.get("support_kind") != "anchored_neighbor":
+        return False
+    anchor_uid = str(item.get("anchor_chunk_uid") or "")
+    anchor_term = str(item.get("anchor_term") or "")
+    try:
+        distance = int(item.get("neighbor_distance"))
+    except (TypeError, ValueError):
+        return False
+    if (
+        not anchor_uid
+        or not anchor_term
+        or distance < 0
+        or distance > 1
+    ):
+        return False
+    anchor_entry = next(
+        (
+            (anchor_item, anchor_result, anchor_signals)
+            for anchor_item, anchor_result, anchor_signals in converted
+            if str(anchor_result.get("id") or "") == anchor_uid
+        ),
+        None,
+    )
+    if anchor_entry is None:
+        return False
+    anchor_item, anchor_result, anchor_signals = anchor_entry
+    if not ({"exact", "lexical_anchor"} & anchor_signals):
+        return False
+    if "exact" in anchor_signals and not _exact_result_is_direct(anchor_result):
+        return False
+    if "lexical_anchor" not in anchor_signals and not (
+        set(identifier_match_keys(anchor_term))
+        & {
+            key
+            for identifier in strong_identifiers
+            for key in identifier_match_keys(identifier)
+        }
+    ):
+        return False
+    if not _raw_identifier_occurs(anchor_result, anchor_term):
+        return False
+    source_path = str((item.get("source") or {}).get("path") or "")
+    anchor_path = str((anchor_item.get("source") or {}).get("path") or "")
+    if not source_path or source_path.casefold() != anchor_path.casefold():
+        return False
+    independent = set(str(value) for value in item.get("independent_signals") or [])
+    same_section = _same_evidence_section(item, anchor_item)
+    if not (independent & {"dense", "lexical", "metadata"}) and not same_section:
+        return False
+    return _raw_result_matches_context(result, item)
+
+
+def _exact_result_is_direct(result: dict[str, Any]) -> bool:
+    return result.get("exact_evidence_eligible") is not False
+
+
+def _same_evidence_section(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_section = str((left.get("location") or {}).get("section") or "").strip()
+    right_section = str((right.get("location") or {}).get("section") or "").strip()
+    if not left_section or not right_section:
+        return False
+    if left_section.casefold() == right_section.casefold():
+        return True
+    left_page = re.fullmatch(r"(Page\s+\d+)\s+#\d+", left_section, re.IGNORECASE)
+    right_page = re.fullmatch(r"(Page\s+\d+)\s+#\d+", right_section, re.IGNORECASE)
+    return bool(
+        left_page
+        and right_page
+        and left_page.group(1).casefold() == right_page.group(1).casefold()
+    )
+
+
+def _raw_result_matches_context(
+    result: dict[str, Any],
+    item: dict[str, Any],
+) -> bool:
+    metadata = result.get("metadata") or {}
+    source = item.get("source") or {}
+    return bool(
+        str(result.get("text") or "") == str(item.get("text") or "")
+        and str(metadata.get("path") or "").casefold()
+        == str(source.get("path") or "").casefold()
+    )
 
 
 def _add_identifier_diagnostics(
@@ -835,49 +972,26 @@ def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any
         projected["location"] = filtered_location
     if context.get("signals"):
         projected["signals"] = list(context["signals"])
+    for key in (
+        "support_kind",
+        "anchor_chunk_uid",
+        "anchor_term",
+        "neighbor_distance",
+        "independent_signals",
+    ):
+        if context.get(key) not in (None, "", []):
+            projected[key] = context[key]
     if explain and context.get("debug"):
         projected["debug"] = context["debug"]
     return projected
 
 
 def _conservative_token_count(text: str) -> int:
-    count = 0
-    ascii_buffer = ""
-    for char in text:
-        if "\u3040" <= char <= "\u30ff" or "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff":
-            if ascii_buffer:
-                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
-                ascii_buffer = ""
-            count += 1
-        elif char.isspace():
-            if ascii_buffer:
-                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
-                ascii_buffer = ""
-        elif char.isalnum() or char in "_-":
-            ascii_buffer += char
-        else:
-            if ascii_buffer:
-                count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
-                ascii_buffer = ""
-            count += 1
-    if ascii_buffer:
-        count += max(len(ascii_buffer.split()), math.ceil(len(ascii_buffer) / 3))
-    return count
+    return conservative_token_count(text)
 
 
 def _truncate_to_token_limit(text: str, limit: int) -> str:
-    if limit <= 8:
-        return ""
-    low, high = 0, len(text)
-    suffix = "...[truncated]"
-    while low < high:
-        middle = (low + high + 1) // 2
-        candidate = text[:middle].rstrip() + suffix
-        if _conservative_token_count(candidate) <= limit:
-            low = middle
-        else:
-            high = middle - 1
-    return text[:low].rstrip() + suffix if low else ""
+    return truncate_to_token_limit(text, limit)
 
 
 def _compact_utf8_size(payload: dict[str, Any]) -> int:

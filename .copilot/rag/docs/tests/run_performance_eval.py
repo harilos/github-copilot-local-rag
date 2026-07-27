@@ -152,6 +152,8 @@ RUN_IDENTITY_FIELDS = (
     "daemon_attempt_timeout_seconds",
     "daemon_fallback_policy",
     "case_spec_fingerprint",
+    "case_file_path",
+    "case_file_sha256",
     "mixed_total",
     "sequence_seed",
     "time_buckets",
@@ -437,6 +439,8 @@ def collect_run_metadata(
         QUERY_ROOT / "ragd.py",
         RAG_ROOT / "gen_db" / "software_rag_tool" / "scripts" / "query.py",
         RAG_ROOT / "gen_db" / "software_rag_tool" / "software_rag_tool" / "search_api.py",
+        RAG_ROOT / "gen_db" / "software_rag_tool" / "software_rag_tool" / "retrieval.py",
+        RAG_ROOT / "gen_db" / "software_rag_tool" / "software_rag_tool" / "token_budget.py",
     ]
     digest = hashlib.sha256()
     for path in source_paths:
@@ -449,6 +453,16 @@ def collect_run_metadata(
     cases_digest = hashlib.sha256(
         json.dumps(cases, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    case_file_path = (
+        Path(args.cases_file).expanduser().resolve()
+        if getattr(args, "cases_file", None)
+        else None
+    )
+    case_file_sha256 = (
+        hashlib.sha256(case_file_path.read_bytes()).hexdigest()
+        if case_file_path is not None
+        else None
+    )
     git_status = git_value(
         ["status", "--short", "--untracked-files=all"],
         allow_empty=True,
@@ -476,6 +490,8 @@ def collect_run_metadata(
         "daemon_attempt_timeout_seconds": args.daemon_attempt_timeout,
         "daemon_fallback_policy": "off",
         "case_spec_fingerprint": cases_digest,
+        "case_file_path": str(case_file_path) if case_file_path is not None else None,
+        "case_file_sha256": case_file_sha256,
         "mixed_total": args.mixed_total,
         "sequence_seed": args.sequence_seed,
         "time_buckets": args.time_buckets,
@@ -955,7 +971,13 @@ def summarize_search(
     authoritative_evidence = payload.get("evidence") or []
     related_context = payload.get("related_context") or []
     evidence = authoritative_evidence
-    results = payload.get("results") or []
+    results = _dedupe_payload_results(
+        [
+            *(payload.get("results") or []),
+            *(payload.get("background_results") or []),
+            *(payload.get("related_results") or []),
+        ]
+    )
     top = evidence[0] if evidence else {}
     signals = sorted({signal for item in evidence for signal in item.get("signals", [])})
     exact_signal_count = sum(1 for item in evidence if "exact" in (item.get("signals") or []))
@@ -1009,6 +1031,7 @@ def summarize_search(
         "warnings": payload.get("warnings") or [],
         "stage_timing_enabled": args.stage_timing,
         "timings": payload.get("timings") or payload.get("latency_breakdown") or {},
+        "retrieval_funnel": payload.get("retrieval_funnel") or {},
         "daemon": payload.get("daemon") or payload.get("daemon_state") or {},
         "execution_metadata": payload.get("execution_metadata") or {},
         "actual_execution": (payload.get("execution_metadata") or {}).get("actual_execution"),
@@ -1056,6 +1079,17 @@ def summarize_search(
             for index, item in enumerate(evidence, start=1)
             if isinstance(item, dict)
         ],
+        "retrieved_results": [
+            {
+                "rank": index,
+                "path": str(((item.get("metadata") or {}).get("path") or "")),
+                "text": str(item.get("text") or ""),
+                "signals": list(item.get("signals") or []),
+                "support_kind": item.get("support_kind"),
+            }
+            for index, item in enumerate(results, start=1)
+            if isinstance(item, dict)
+        ],
         "top1_path": ((top.get("source") or {}).get("path") if isinstance(top, dict) else None),
         "top1_section": ((top.get("location") or {}).get("section") if isinstance(top, dict) else None),
         "stdout_prefix": completed.stdout[:80],
@@ -1075,6 +1109,29 @@ def row_run_metadata(args: argparse.Namespace, *, db_name: str, explain: bool) -
     metadata["db_hash"] = db_identity.get("version_db_hash", "unknown")
     metadata["db_snapshot_hash"] = db_identity.get("db_snapshot_hash", "unknown")
     return metadata
+
+
+def _dedupe_payload_results(results: list[Any]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or {}
+        key = str(item.get("id") or "")
+        if not key:
+            key = "\0".join(
+                [
+                    str(metadata.get("path") or ""),
+                    str(metadata.get("chunk_index") or ""),
+                    str(item.get("text") or ""),
+                ]
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
 
 
 def expectation_snapshot(case: dict[str, Any]) -> dict[str, Any]:
@@ -1136,11 +1193,28 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     gold_groups = list(case.get("gold_groups") or [])
     gold_spans = list(case.get("gold_spans") or [])
     if gold_groups:
+        retrieved_results = list(row.get("retrieved_results") or [])
         group_matches = [
             any(
                 gold_span_matches_context(span, context)
                 for span in group.get("alternatives") or []
                 for context in row.get("retrieved_contexts") or []
+            )
+            for group in gold_groups
+        ]
+        group_document_matches = [
+            any(
+                gold_path_matches_context(span, context)
+                for span in group.get("alternatives") or []
+                for context in retrieved_results
+            )
+            for group in gold_groups
+        ]
+        group_claim_chunk_matches = [
+            any(
+                gold_span_matches_context(span, context)
+                for span in group.get("alternatives") or []
+                for context in retrieved_results
             )
             for group in gold_groups
         ]
@@ -1159,6 +1233,14 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         ]
         required_matches = [group_matches[index] for index in required]
         required_top5_matches = [group_top5_matches[index] for index in required]
+        required_document_matches = [
+            group_document_matches[index]
+            for index in required
+        ]
+        required_claim_chunk_matches = [
+            group_claim_chunk_matches[index]
+            for index in required
+        ]
         flags["semantic_gold_applicable"] = True
         flags["semantic_hit_at_5"] = any(required_top5_matches)
         flags["context_recall"] = (
@@ -1166,7 +1248,21 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
             if required_matches
             else None
         )
+        flags["document_recall"] = (
+            sum(1 for value in required_document_matches if value)
+            / len(required_document_matches)
+            if required_document_matches
+            else None
+        )
+        flags["claim_chunk_recall"] = (
+            sum(1 for value in required_claim_chunk_matches if value)
+            / len(required_claim_chunk_matches)
+            if required_claim_chunk_matches
+            else None
+        )
+        flags["authoritative_evidence_recall"] = flags["context_recall"]
     elif gold_spans:
+        retrieved_results = list(row.get("retrieved_results") or [])
         matched = [
             any(gold_span_matches_context(span, context) for context in row.get("retrieved_contexts") or [])
             for span in gold_spans
@@ -1183,6 +1279,111 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         flags["context_recall"] = (
             sum(1 for value in required_matches if value) / len(required_matches) if required_matches else None
         )
+        required_document_matches = [
+            any(gold_path_matches_context(span, context) for context in retrieved_results)
+            for span in required_spans
+        ]
+        required_claim_chunk_matches = [
+            any(gold_span_matches_context(span, context) for context in retrieved_results)
+            for span in required_spans
+        ]
+        flags["document_recall"] = (
+            sum(1 for value in required_document_matches if value)
+            / len(required_document_matches)
+            if required_document_matches
+            else None
+        )
+        flags["claim_chunk_recall"] = (
+            sum(1 for value in required_claim_chunk_matches if value)
+            / len(required_claim_chunk_matches)
+            if required_claim_chunk_matches
+            else None
+        )
+        flags["authoritative_evidence_recall"] = flags["context_recall"]
+    trace_groups = [
+        {
+            "id": str(group.get("id") or f"group-{index + 1}"),
+            "alternatives": list(group.get("alternatives") or []),
+        }
+        for index, group in enumerate(gold_groups)
+        if group.get("required", True)
+    ] if gold_groups else [
+        {
+            "id": str(span.get("id") or f"span-{index + 1}"),
+            "alternatives": [span],
+        }
+        for index, span in enumerate(gold_spans)
+        if span.get("required", True)
+    ]
+    trace_stages = (row.get("retrieval_funnel") or {}).get("stages") or {}
+    if trace_groups and trace_stages:
+        evidence_contexts = list(row.get("retrieved_contexts") or [])
+
+        def stage_has_group(stage_name: str, alternatives: list[dict[str, Any]]) -> bool:
+            return any(
+                trace_span_matches_item(span, item)
+                for span in alternatives
+                for item in (trace_stages.get(stage_name) or [])
+            )
+
+        group_diagnostics: list[dict[str, Any]] = []
+        for group in trace_groups:
+            alternatives = group["alternatives"]
+            packed_ranks = [
+                int(item.get("rank") or 0)
+                for item in (trace_stages.get("packed") or [])
+                if any(
+                    trace_span_matches_item(span, item)
+                    for span in alternatives
+                )
+            ]
+            evidence_match = any(
+                gold_span_matches_context(span, context)
+                for span in alternatives
+                for context in evidence_contexts
+            )
+            if evidence_match:
+                drop_stage = (
+                    "survived"
+                    if stage_has_group("fused", alternatives)
+                    else "neighbor_rescue"
+                )
+            elif stage_has_group("packed", alternatives):
+                drop_stage = "evidence_classification"
+            elif stage_has_group("diversified", alternatives):
+                drop_stage = "packing"
+            elif stage_has_group("postprocess_pool", alternatives):
+                drop_stage = "diversification"
+            elif stage_has_group("fused", alternatives):
+                drop_stage = "postprocess_pool"
+            elif any(
+                stage_has_group(stage_name, alternatives)
+                for stage_name in ("dense", "lexical", "exact", "metadata")
+            ):
+                drop_stage = "fusion"
+            else:
+                drop_stage = "candidate_generation"
+            group_diagnostics.append(
+                {
+                    "group_id": group["id"],
+                    "first_gold_rank": min(packed_ranks) if packed_ranks else None,
+                    "gold_drop_stage": drop_stage,
+                }
+            )
+        flags["gold_group_diagnostics"] = group_diagnostics
+        packed_ranks = [
+            int(item["first_gold_rank"])
+            for item in group_diagnostics
+            if item.get("first_gold_rank") is not None
+        ]
+        flags["first_gold_rank"] = min(packed_ranks) if packed_ranks else None
+        drop_stages = [item["gold_drop_stage"] for item in group_diagnostics]
+        if all(stage in {"survived", "neighbor_rescue"} for stage in drop_stages):
+            flags["gold_drop_stage"] = "survived"
+        elif len(set(drop_stages)) == 1:
+            flags["gold_drop_stage"] = drop_stages[0]
+        else:
+            flags["gold_drop_stage"] = "mixed"
     if (
         exact_channel
         and case.get("answerable") is False
@@ -1202,6 +1403,41 @@ def quality_flags(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
 
 
 def gold_span_matches_context(span: dict[str, Any], context: dict[str, Any]) -> bool:
+    if not gold_path_matches_context(span, context):
+        return False
+    text = normalize_text(str(context.get("text") or ""))
+    quotes = [span.get("span_text"), span.get("text")]
+    normalized_quotes = [normalize_text(str(value)) for value in quotes if value]
+    return bool(text and normalized_quotes and any(value in text for value in normalized_quotes))
+
+
+def trace_span_matches_item(
+    span: dict[str, Any],
+    item: dict[str, Any],
+) -> bool:
+    if item.get("text"):
+        return gold_span_matches_context(
+            span,
+            {
+                "path": item.get("path"),
+                "text": item.get("text"),
+            },
+        )
+    chunk_uid = str(span.get("chunk_uid") or "")
+    if chunk_uid and chunk_uid == str(item.get("chunk_uid") or ""):
+        return True
+    try:
+        expected_index = int(span.get("chunk_index"))
+        actual_index = int(item.get("chunk_index"))
+    except (TypeError, ValueError):
+        return False
+    return expected_index == actual_index and gold_path_matches_context(
+        span,
+        {"path": item.get("path")},
+    )
+
+
+def gold_path_matches_context(span: dict[str, Any], context: dict[str, Any]) -> bool:
     expected_path = str(span.get("path") or span.get("document_id") or "")
     actual_path = str(context.get("path") or "")
     if not expected_path or not actual_path:
@@ -1214,12 +1450,7 @@ def gold_span_matches_context(span: dict[str, Any], context: dict[str, Any]) -> 
         )
     else:
         path_matches = Path(actual_normalized).name == expected_normalized
-    if not path_matches:
-        return False
-    text = normalize_text(str(context.get("text") or ""))
-    quotes = [span.get("span_text"), span.get("text")]
-    normalized_quotes = [normalize_text(str(value)) for value in quotes if value]
-    return bool(text and normalized_quotes and any(value in text for value in normalized_quotes))
+    return path_matches
 
 
 def normalize_text(value: str) -> str:
@@ -1347,6 +1578,9 @@ def build_report(run_id: str, rows: list[dict[str, Any]], args: argparse.Namespa
                 "semantic_gold_applicable",
                 "semantic_hit_at_5",
                 "context_recall",
+                "document_recall",
+                "claim_chunk_recall",
+                "authoritative_evidence_recall",
                 "no_hit_contract_pass",
             ):
                 row.pop(key, None)
@@ -1491,6 +1725,8 @@ def run_condition_summary(index: int, identity: tuple[Any, ...], rows: list[dict
         f"- daemon_attempt_timeout_seconds: {first.get('daemon_attempt_timeout_seconds', 'unknown')}",
         f"- daemon_fallback_policy: {first.get('daemon_fallback_policy', 'unknown')}",
         f"- case_spec_fingerprint: {first.get('case_spec_fingerprint', 'unknown')}",
+        f"- case_file_path: {first.get('case_file_path') or 'built-in'}",
+        f"- case_file_sha256: {first.get('case_file_sha256') or 'NOT_APPLICABLE'}",
         f"- mixed_total/seed/time_buckets: {first.get('mixed_total', 'unknown')}/{first.get('sequence_seed', 'unknown')}/{first.get('time_buckets', 'unknown')}",
         f"- warmup_runs: {first.get('warmup_runs', 'unknown')}",
         "",
@@ -1694,16 +1930,47 @@ def semantic_summary(rows: list[dict[str, Any]], *, heading: str = "##") -> list
     lines = [
         f"{heading} Semantic gold",
         "",
-        "|profile|N|Hit@5|Context Recall@budget|",
-        "|--|--:|--:|--:|",
+        "|profile|N|Hit@5|Document Recall|Claim Chunk Recall|Authoritative Evidence Recall|",
+        "|--|--:|--:|--:|--:|--:|",
     ]
     for profile in ("H", "L", "V"):
         group = [row for row in semantic if row.get("profile") == profile and is_success(row)]
-        recalls = [float(row["context_recall"]) for row in group if row.get("context_recall") is not None]
+        document_recalls = [
+            float(row["document_recall"])
+            for row in group
+            if row.get("document_recall") is not None
+        ]
+        claim_chunk_recalls = [
+            float(row["claim_chunk_recall"])
+            for row in group
+            if row.get("claim_chunk_recall") is not None
+        ]
+        evidence_recalls = [
+            float(row["authoritative_evidence_recall"])
+            for row in group
+            if row.get("authoritative_evidence_recall") is not None
+        ]
         hits = sum(1 for row in group if row.get("semantic_hit_at_5"))
         hit_value: str | float = (hits / len(group)) if group else "NOT_RUN"
-        recall_value: str | float = statistics.mean(recalls) if recalls else "NOT_RUN"
-        lines.append(f"|{profile}|{len(group)}|{hit_value}|{recall_value}|")
+        document_value: str | float = (
+            statistics.mean(document_recalls)
+            if document_recalls
+            else "NOT_RUN"
+        )
+        claim_chunk_value: str | float = (
+            statistics.mean(claim_chunk_recalls)
+            if claim_chunk_recalls
+            else "NOT_RUN"
+        )
+        evidence_value: str | float = (
+            statistics.mean(evidence_recalls)
+            if evidence_recalls
+            else "NOT_RUN"
+        )
+        lines.append(
+            f"|{profile}|{len(group)}|{hit_value}|{document_value}|"
+            f"{claim_chunk_value}|{evidence_value}|"
+        )
     by_case_profile = {(row.get("case_id"), row.get("profile")): row for row in semantic if is_success(row)}
     l_ids = {case_id for case_id, profile in by_case_profile if profile == "L"}
     h_ids = {case_id for case_id, profile in by_case_profile if profile == "H"}

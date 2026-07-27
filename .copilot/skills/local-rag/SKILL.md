@@ -1,12 +1,20 @@
 ---
 name: local-rag
-description: Performs one read-only lookup against installed local RAG databases when the user explicitly requests RAG or local-document search.
+description: Performs one read-only lookup against installed local RAG databases when the user explicitly asks to answer from RAG, local documents, internal or company information, or information installed in or provided to Copilot.
 ---
 
 # Local RAG Lookup
 
 This workflow is intentionally simple and must be usable by a lightweight,
 fast model selected by Auto. No particular model is required or guaranteed.
+
+## Activation
+
+Use this lookup when the user explicitly asks for an answer based on RAG,
+local documents, internal or company information, or information installed in
+or provided to Copilot. Treat equivalent source-based wording in any language
+as explicit. Do not activate lookup merely because the question mentions a
+company or an internal-sounding term.
 
 ## One-command decision
 

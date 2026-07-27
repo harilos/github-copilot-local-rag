@@ -23,3 +23,6 @@ windows_ac_rag_job/
 
 # Runtime daemon state
 .copilot/rag/query/run/
+
+# Machine-local network configuration (the example remains tracked)
+.copilot/rag/config/network.json

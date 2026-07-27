@@ -12,28 +12,23 @@ From this repository:
 
 This creates `~/.copilot` if it does not exist.
 
-Manual copy:
-
-```bash
-mkdir -p ~/.copilot
-cp -R .copilot/. ~/.copilot/
-```
-
 ## Install On Windows
 
 PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Force "$HOME\.copilot" | Out-Null
-Copy-Item -Recurse -Force ".\.copilot\*" "$HOME\.copilot\"
+.\install.ps1
 ```
 
 This creates `$HOME\.copilot` if it does not exist.
+Use the installers rather than manually copying `.copilot`; they preserve the
+machine-local `rag/config/network.json`. The supported install location for
+Copilot-facing skills and commands is `$HOME/.copilot`.
 
 Then add one short line to your existing `~/.copilot/copilot-instructions.md` if you want Copilot to know the RAG entrypoint:
 
 ```text
-RAGが必要な場合は ~/.copilot/instructions/rag.instructions.md を参照してください。
+For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
 ```
 
 This pack does not include `copilot-instructions.md` and will not overwrite your existing top-level Copilot instructions.
@@ -168,25 +163,54 @@ The query virtual environment belongs under:
 Install it with:
 
 ```bash
-python ~/.copilot/rag/query/setup.py
+python ~/.copilot/rag/query/setup.py --format json
 ```
 
-This creates the query virtual environment and prepares the default Ruri-v3-30m ONNX INT8 model.
+This creates the query virtual environment, prepares the default Ruri-v3-30m
+ONNX INT8 model, runs a real 256-dimensional embedding, validates
+`list_dbs.py` JSON, and performs read-only health checks for installed
+databases.
+
+Verify without installing, downloading, or modifying the runtime or databases:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/query/setup.py \
+  --verify-only \
+  --format json
+```
 
 When using Copilot, `RAGの初期設定をして` means running the same setup command. If the query runtime has not been initialized, search and DB build commands return `setup_required` instead of starting setup automatically. Copilot-facing wording is handled by the instruction file, not by these CLI scripts.
 
-To install dependencies only:
+To skip model preparation when a valid local model is already installed:
 
 ```bash
 python ~/.copilot/rag/query/setup.py --no-prepare-model
 ```
 
-Corporate proxy/certificate environments:
+Post-install verification still runs. A missing or invalid model therefore
+returns `setup_complete: false`; dependencies alone are not a completed
+setup.
+
+During an upgrade, the installers detect the legacy `ok` completion marker
+and migrate it only after the same offline deep verification passes. This
+upgrade path does not install packages, download a model, or modify a
+database.
+
+Temporary corporate proxy/certificate configuration:
 
 ```bash
-python ~/.copilot/rag/query/setup.py --proxy http://proxy.example:8080
+python ~/.copilot/rag/query/setup.py \
+  --proxy http://proxy.example:8080 \
+  --ca-bundle /path/to/company-ca.pem \
+  --format json
 ```
 
-If SSL/certificate errors occur, configure the company CA certificate with `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, or `PIP_CERT`, then retry. Do not disable certificate verification as the normal fix.
+Persistent configuration may be stored in
+`~/.copilot/rag/config/network.json`; use `config/network.example.json` as
+the template. The real file is never installed from the payload or included
+in Git/release ZIP files. `mode=auto` selects the route before the first real
+network operation. Use `mode=required` only when direct external access is
+prohibited. Do not disable certificate verification.
 
 If Python cannot be installed locally, use `rag/query/proxy_client.py` to call a proxy RAG service on another machine.

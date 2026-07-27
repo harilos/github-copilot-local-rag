@@ -10,8 +10,10 @@ from typing import Any, Iterable
 
 try:
     import chromadb
+    from chromadb.config import Settings
 except ModuleNotFoundError:
     chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment,misc]
 
 from . import catalog
 from .dbs import collection_name_for_db, read_db_config, read_db_version, read_profile_hint, require_db_name
@@ -116,7 +118,10 @@ class DbStore:
             if self._collection is not None:
                 return self._collection
             if self._client is None:
-                self._client = chromadb.PersistentClient(path=str(self.context.chroma_dir))
+                self._client = chromadb.PersistentClient(
+                    path=str(self.context.chroma_dir),
+                    settings=Settings(anonymized_telemetry=False),
+                )
             self._collection = self._client.get_collection(name=self.context.collection_name)
             return self._collection
 

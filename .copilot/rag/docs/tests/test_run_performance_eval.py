@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -424,6 +426,11 @@ class RouteIdentityTests(unittest.TestCase):
         self.assertIn("gen_db/software_rag_tool/software_rag_tool/db_runtime.py", names)
         self.assertIn("gen_db/software_rag_tool/requirements.txt", names)
 
+    def test_worktree_fingerprint_covers_retrieval_and_token_budget(self) -> None:
+        source = inspect.getsource(MODULE.collect_run_metadata)
+        self.assertIn('"retrieval.py"', source)
+        self.assertIn('"token_budget.py"', source)
+
     def test_legacy_daemon_route_is_unverified(self) -> None:
         self.assertEqual("UNVERIFIED", MODULE.daemon_first_attempt_state([success_row()]))
 
@@ -457,6 +464,169 @@ class RouteIdentityTests(unittest.TestCase):
 
 
 class SemanticMetricTests(unittest.TestCase):
+    def test_frozen_semantic_v2_bytes_are_immutable(self) -> None:
+        dataset = Path(__file__).parent / "data" / "semantic-gold-v2.jsonl"
+        self.assertEqual(
+            "fdcf70a137d091d6b453495d7ce1d20b44d28f691177d3b8aaf9a9e27c56eafd",
+            hashlib.sha256(dataset.read_bytes()).hexdigest(),
+        )
+
+    def test_document_claim_and_authoritative_recall_are_separate(self) -> None:
+        case = {
+            "id": "three-level-funnel",
+            "db": "incident-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_groups": [
+                {
+                    "id": "cause",
+                    "required": True,
+                    "alternatives": [
+                        {
+                            "path": "report.pdf",
+                            "span_text": "probable cause",
+                        }
+                    ],
+                }
+            ],
+        }
+        document_only = MODULE.quality_flags(
+            case,
+            {
+                "request_success": True,
+                "profile": "H",
+                "retrieved_results": [
+                    {"path": "report.pdf", "text": "wrong chunk"}
+                ],
+                "retrieved_contexts": [],
+            },
+        )
+        self.assertEqual(1.0, document_only["document_recall"])
+        self.assertEqual(0.0, document_only["claim_chunk_recall"])
+        self.assertEqual(0.0, document_only["authoritative_evidence_recall"])
+
+        claim_in_background = MODULE.quality_flags(
+            case,
+            {
+                "request_success": True,
+                "profile": "H",
+                "retrieved_results": [
+                    {"path": "report.pdf", "text": "The probable cause is documented."}
+                ],
+                "retrieved_contexts": [],
+            },
+        )
+        self.assertEqual(1.0, claim_in_background["document_recall"])
+        self.assertEqual(1.0, claim_in_background["claim_chunk_recall"])
+        self.assertEqual(0.0, claim_in_background["authoritative_evidence_recall"])
+
+        authoritative = MODULE.quality_flags(
+            case,
+            {
+                "request_success": True,
+                "profile": "H",
+                "retrieved_results": [
+                    {"path": "report.pdf", "text": "The probable cause is documented."}
+                ],
+                "retrieved_contexts": [
+                    {"path": "report.pdf", "text": "The probable cause is documented."}
+                ],
+            },
+        )
+        self.assertEqual(1.0, authoritative["document_recall"])
+        self.assertEqual(1.0, authoritative["claim_chunk_recall"])
+        self.assertEqual(1.0, authoritative["authoritative_evidence_recall"])
+
+    def test_funnel_trace_reports_first_gold_rank_and_drop_stage(self) -> None:
+        case = {
+            "id": "trace",
+            "db": "rfc-full-20k-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_groups": [
+                {
+                    "id": "claim",
+                    "required": True,
+                    "alternatives": [
+                        {
+                            "path": "rfc.txt",
+                            "chunk_index": 0,
+                            "chunk_uid": "gold",
+                            "span_text": "claim text",
+                        }
+                    ],
+                }
+            ],
+        }
+        row = {
+            "request_success": True,
+            "profile": "H",
+            "retrieved_results": [],
+            "retrieved_contexts": [],
+            "retrieval_funnel": {
+                "stages": {
+                    "fused": [{"chunk_uid": "gold", "path": "rfc.txt", "chunk_index": 0, "rank": 14}],
+                    "postprocess_pool": [{"chunk_uid": "gold", "path": "rfc.txt", "chunk_index": 0, "rank": 20}],
+                    "diversified": [],
+                    "packed": [],
+                }
+            },
+        }
+        flags = MODULE.quality_flags(case, row)
+        self.assertIsNone(flags["first_gold_rank"])
+        self.assertEqual("diversification", flags["gold_drop_stage"])
+        self.assertEqual(
+            "diversification",
+            flags["gold_group_diagnostics"][0]["gold_drop_stage"],
+        )
+
+    def test_funnel_uses_span_text_when_claim_survives_in_an_alternate_chunk(self) -> None:
+        case = {
+            "id": "alternate-trace",
+            "db": "rfc-full-20k-rag",
+            "class": "semantic",
+            "question": "question",
+            "gold_groups": [
+                {
+                    "id": "claim",
+                    "required": True,
+                    "alternatives": [
+                        {
+                            "path": "rfc.txt",
+                            "chunk_index": 0,
+                            "chunk_uid": "stale-coordinate",
+                            "span_text": "claim text",
+                        }
+                    ],
+                }
+            ],
+        }
+        surviving = {
+            "chunk_uid": "alternate",
+            "path": "rfc.txt",
+            "chunk_index": 4,
+            "rank": 2,
+            "text": "prefix claim text suffix",
+        }
+        row = {
+            "request_success": True,
+            "profile": "H",
+            "retrieved_results": [{"path": "rfc.txt", "text": "prefix claim text suffix"}],
+            "retrieved_contexts": [{"path": "rfc.txt", "text": "prefix claim text suffix"}],
+            "retrieval_funnel": {
+                "stages": {
+                    "fused": [surviving],
+                    "postprocess_pool": [surviving],
+                    "diversified": [surviving],
+                    "packed": [surviving],
+                }
+            },
+        }
+        flags = MODULE.quality_flags(case, row)
+        self.assertEqual(1.0, flags["authoritative_evidence_recall"])
+        self.assertEqual(2, flags["first_gold_rank"])
+        self.assertEqual("survived", flags["gold_drop_stage"])
+
     def test_gold_span_requires_a_source_path(self) -> None:
         span = {"span_text": "gold"}
         context = {"path": "doc.txt", "text": "gold"}

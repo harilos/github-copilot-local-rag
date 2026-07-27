@@ -14,6 +14,13 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_EMBEDDING_MODEL, default_onnx_model_dir
 from software_rag_tool.embeddings import embedding_fingerprint
+from software_rag_tool.network import (
+    NetworkConfigError,
+    add_network_arguments,
+    apply_network_environment,
+    redact_text,
+    resolve_network_configuration,
+)
 
 
 def main() -> None:
@@ -21,13 +28,45 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--output", default=str(default_onnx_model_dir()))
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--resolved-network-token",
+        help=argparse.SUPPRESS,
+    )
+    add_network_arguments(parser)
     args = parser.parse_args()
-    os.environ["EMBEDDING_MODEL"] = args.model
-
     output = Path(args.output).expanduser().resolve()
     model_path = output / "model.onnx"
+    needs_external_network = args.force or not model_path.exists()
+    try:
+        network = resolve_network_configuration(
+            cli_proxy=args.proxy,
+            cli_ca_bundle=args.ca_bundle,
+            cli_no_proxy=args.no_proxy,
+            network_config=args.network_config,
+            ignore_network_config=args.ignore_network_config,
+            external_operation=needs_external_network,
+            inherited_route_token=args.resolved_network_token,
+        )
+    except NetworkConfigError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error_kind": exc.kind,
+                    "error": redact_text(str(exc)),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    apply_network_environment(network)
+    for warning in network.warnings:
+        print(warning, file=sys.stderr)
+    os.environ["EMBEDDING_MODEL"] = args.model
+
     if model_path.exists() and not args.force:
-        print(f"Ready: {output}")
+        print(f"Ready: {output}", file=sys.stderr)
         return
 
     try:
@@ -47,7 +86,7 @@ def main() -> None:
     tmp.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
 
-    print(f"Exporting {args.model} to ONNX fp32...")
+    print(f"Exporting {args.model} to ONNX fp32...", file=sys.stderr)
     model = ORTModelForFeatureExtraction.from_pretrained(args.model, export=True)
     tokenizer = _load_tokenizer(AutoTokenizer, args.model)
     model.save_pretrained(tmp)
@@ -60,7 +99,7 @@ def main() -> None:
             raise RuntimeError(f"ONNX export did not create a model under {tmp}")
         source_model = candidates[0]
 
-    print("Quantizing ONNX model to INT8...")
+    print("Quantizing ONNX model to INT8...", file=sys.stderr)
     quantize_dynamic(str(source_model), str(output / "model.onnx"), weight_type=QuantType.QInt8)
 
     for path in tmp.iterdir():
@@ -83,7 +122,7 @@ def main() -> None:
     }
     (output / "MODEL_MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     shutil.rmtree(tmp)
-    print(f"Ready: {output}")
+    print(f"Ready: {output}", file=sys.stderr)
 
 
 def _load_tokenizer(auto_tokenizer: object, model: str) -> object:
