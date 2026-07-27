@@ -134,6 +134,9 @@ The runner:
 - accepts no authorization token, cookie, password, or private key;
 - never logs request headers;
 - never stores credentials in a fixture or report;
+- honors `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` for an explicitly supplied
+  CA bundle, then uses the installed Python CA bundle or system defaults;
+- never disables TLS certificate verification;
 - performs no Git discovery and runs no Git command;
 - creates no database or index content;
 - does not copy reports into release archives.

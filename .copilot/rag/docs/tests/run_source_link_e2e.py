@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import ssl
 import sys
 import tempfile
 import time
@@ -15,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
+    HTTPSHandler,
     ProxyHandler,
     Request,
     build_opener,
@@ -90,7 +93,10 @@ def fetch_url(
             )
         timeout = min(connect_timeout, remaining)
         split = urlsplit(current)
-        handlers: list[Any] = [_NoRedirect()]
+        handlers: list[Any] = [
+            _NoRedirect(),
+            HTTPSHandler(context=_https_context()),
+        ]
         if split.hostname in {"127.0.0.1", "::1", "localhost"}:
             handlers.insert(0, ProxyHandler({}))
         opener = build_opener(*handlers)
@@ -162,6 +168,20 @@ def fetch_url(
             time.monotonic() - started,
             redirects,
         )
+
+
+def _https_context() -> ssl.SSLContext:
+    explicit = (
+        os.getenv("SSL_CERT_FILE", "").strip()
+        or os.getenv("REQUESTS_CA_BUNDLE", "").strip()
+    )
+    if explicit:
+        return ssl.create_default_context(cafile=explicit)
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def _mapping(
