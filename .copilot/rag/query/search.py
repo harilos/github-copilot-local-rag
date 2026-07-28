@@ -22,6 +22,11 @@ DBS_ROOT = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().r
 sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
+from software_rag_tool.db_maintenance import (
+    MaintenanceError,
+    database_search_guard,
+    maintenance_search_payload,
+)
 from software_rag_tool.dbs import resolve_db_name
 from software_rag_tool.search_request import (
     SearchRequestError,
@@ -180,6 +185,15 @@ def main() -> None:
             )
         )
         return
+
+    maintenance_payload = maintenance_search_payload(
+        resolution.db_name,
+        rag_root=RAG_ROOT,
+        dbs_root=DBS_ROOT,
+    )
+    if maintenance_payload:
+        _print_search_payload(maintenance_payload, args=args)
+        raise SystemExit(1)
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
@@ -370,7 +384,7 @@ def main() -> None:
             payload = _query_daemon(state, request, timeout=daemon_timeout)
             attempt_elapsed = time.monotonic() - attempt_started
             if payload:
-                success = payload.get("status") != "error"
+                success = payload.get("status") not in {"error", "busy"}
                 payload["execution_metadata"] = {
                     "request_id": request["request_id"],
                     "requested_execution": "daemon",
@@ -393,7 +407,9 @@ def main() -> None:
                     ],
                 }
                 _print_search_payload(payload, args=args)
-                raise SystemExit(1 if payload.get("status") == "error" else 0)
+                raise SystemExit(
+                    1 if payload.get("status") in {"error", "busy"} else 0
+                )
             failure_kind = "timeout" if attempt_elapsed >= daemon_timeout * 0.95 else "transport_error"
             first_attempt = {
                 "route": "daemon",
@@ -444,15 +460,37 @@ def main() -> None:
             restart=None,
         )
         raise SystemExit(124)
-    _run_sync_script(
-        python=python,
-        env=env,
-        args=args,
-        question=question,
-        db_name=resolution.db_name,
-        timeout_override=remaining_timeout,
-        request_started=request_started,
-    )
+    try:
+        with database_search_guard(
+            resolution.db_name,
+            rag_root=RAG_ROOT,
+            dbs_root=DBS_ROOT,
+        ):
+            _run_sync_script(
+                python=python,
+                env=env,
+                args=args,
+                question=question,
+                db_name=resolution.db_name,
+                timeout_override=remaining_timeout,
+                request_started=request_started,
+            )
+    except MaintenanceError as exc:
+        payload = exc.search_payload or maintenance_search_payload(
+            resolution.db_name,
+            rag_root=RAG_ROOT,
+            dbs_root=DBS_ROOT,
+        )
+        if payload is None:
+            payload = {
+                "schema": "local-rag.search.v1",
+                "status": "busy",
+                "error": exc.error_kind,
+                "db": resolution.db_name,
+                "operation": exc.operation or "maintenance",
+            }
+        _print_search_payload(payload, args=args)
+        raise SystemExit(1)
 
 
 def _run_sync_script(
@@ -1004,6 +1042,15 @@ def _print_deadline_failure(
 
 
 def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
+    if payload.get("status") == "busy":
+        print(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        )
+        return
     if getattr(args, "result_delivery", "stdout") == "file":
         pointer = publish_result_bundle(payload)
         print(

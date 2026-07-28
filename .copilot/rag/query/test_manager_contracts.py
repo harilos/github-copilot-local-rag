@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -150,6 +151,25 @@ class FakeDaemonControl:
     ) -> dict[str, str]:
         self.resume_calls.append(db_name)
         return {"status": "resumed"}
+
+    @contextmanager
+    def database_mutation_guard(
+        self,
+        db_name: str,
+        **kwargs: Any,
+    ):
+        release = self.release_db_before_mutation(db_name, **kwargs)
+        if release.get("status") not in {"no_daemon", "db_released"}:
+            raise RuntimeError("daemon did not release the database")
+        try:
+            yield release
+        finally:
+            lease_id = str(release.get("lease_id") or "")
+            if release.get("status") == "db_released" and lease_id:
+                self.resume_db_after_mutation(
+                    db_name,
+                    lease_id=lease_id,
+                )
 
 
 class ManagerContractTests(unittest.TestCase):

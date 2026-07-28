@@ -60,7 +60,12 @@ def main() -> None:
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
 
     db_name = require_db_name(args.db)
-    with database_mutation_guard(db_name, rag_root=RAG_ROOT):
+    with database_mutation_guard(
+        db_name,
+        operation="resume" if args.resume else args.operation,
+        rag_root=RAG_ROOT,
+        dbs_root=dbs_dir(),
+    ):
         db_root = ensure_db_layout(dbs_dir(), db_name)
         os.environ["RAG_DB_NAME"] = db_name
         os.environ["RAG_OUTPUT_ROOT"] = str(db_root)

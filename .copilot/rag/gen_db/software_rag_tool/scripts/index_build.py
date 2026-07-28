@@ -22,7 +22,11 @@ def main() -> None:
     args = parser.parse_args()
 
     db_name = require_db_name(args.db)
-    with database_mutation_guard(db_name):
+    with database_mutation_guard(
+        db_name,
+        operation="rebuild_vector",
+        dbs_root=dbs_dir(),
+    ):
         db_root = ensure_db_layout(dbs_dir(), db_name)
         os.environ["RAG_DB_NAME"] = db_name
         os.environ["RAG_OUTPUT_ROOT"] = str(db_root)

@@ -71,6 +71,35 @@ Copilot-generated metadata blocks. If they differ, correct the argument before
 execution. Retrieval facets remain separate arguments and never replace or
 modify this verbatim positional argument.
 
+## Conversational context hints
+
+When the latest human prompt contains a contextual reference such as “it,”
+“that design,” “the previous issue,” or an equivalent expression, use relevant
+earlier human-authored messages from the same conversation only to construct
+structured retrieval hints.
+
+Allowed context hints are limited to:
+
+- `--literal-identifier`
+- `--entity`
+- `--facet`
+- `--semantic-hypothesis`
+- `--answer-goal`
+
+Do not append, prepend, quote, or otherwise merge an earlier message into the
+final positional question argument. That argument must remain a
+character-for-character copy of the latest human-authored visible prompt.
+
+Do not treat a previous assistant answer, an inferred acronym expansion, or
+an earlier RAG result as a verified fact. A speculative interpretation may be
+supplied only through `--semantic-hypothesis`.
+
+Use only the minimum recent human-authored context required to resolve the
+reference. Do not include unrelated older conversation content. If more than
+one antecedent is reasonably possible and the ambiguity would materially
+change the database choice or search meaning, ask the user to clarify and do
+not run `list_dbs.py` or `search.py`.
+
 ## Broad one-shot retrieval planning
 
 Local RAG acts as both an evidence retriever and a broad local-document search

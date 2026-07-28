@@ -21,6 +21,7 @@ RAGD = importlib.util.module_from_spec(RAGD_SPEC)
 RAGD_SPEC.loader.exec_module(RAGD)
 import rag_manager as RAG_MANAGER
 from rag_manager import PersistentWorkerManager
+from software_rag_tool import db_maintenance
 
 
 class DaemonOwnershipTests(unittest.TestCase):
@@ -169,7 +170,11 @@ class PersistentManagerTests(unittest.TestCase):
             dbs_root=QUERY_ROOT.parent / "dbs",
             manager_generation="manager-lease-test",
         )
-        release = manager.release_db("ac-rag", lease_id="lease-a")
+        release = manager.release_db(
+            "ac-rag",
+            lease_id="lease-a",
+            operation="add",
+        )
         self.assertEqual("db_released", release["status"])
         blocked = manager.submit_search(
             {
@@ -180,30 +185,40 @@ class PersistentManagerTests(unittest.TestCase):
                 "remaining_deadline_ms": 500,
             }
         )
-        expected_block = (
-            "daemon_restarting_for_maintenance"
-            if os.name == "nt"
-            else "db_release_in_progress"
+        self.assertEqual(
+            {
+                "schema": "local-rag.search.v1",
+                "status": "busy",
+                "error": "db_maintenance_in_progress",
+                "db": "ac-rag",
+                "operation": "add",
+            },
+            blocked,
         )
-        self.assertEqual(expected_block, blocked["error_kind"])
         mismatch = manager.resume_db("ac-rag", lease_id="lease-b")
         self.assertEqual("release_lease_mismatch", mismatch["status"])
         resumed = manager.resume_db("ac-rag", lease_id="lease-a")
         self.assertEqual("db_resumed", resumed["status"])
-        self.assertEqual(
-            os.name == "nt",
-            resumed["manager_restart_required"],
-        )
+        self.assertFalse(resumed["manager_restart_required"])
         manager.shutdown()
 
-    def test_windows_release_blocks_all_dbs_until_manager_restart(self) -> None:
+    def test_windows_release_blocks_only_target_db(self) -> None:
         manager = PersistentWorkerManager(
             rag_root=QUERY_ROOT.parent,
             dbs_root=QUERY_ROOT.parent / "dbs",
             manager_generation="manager-windows-release-test",
         )
+        manager._execute_item = lambda item: {  # type: ignore[method-assign]
+            "status": "ok",
+            "db": item.db_name,
+            "request_id": item.request_id,
+        }
         with patch.object(RAG_MANAGER.os, "name", "nt"):
-            release = manager.release_db("ac-rag", lease_id="lease-a")
+            release = manager.release_db(
+                "ac-rag",
+                lease_id="lease-a",
+                operation="build",
+            )
             self.assertEqual("db_released", release["status"])
             other_db = manager.submit_search(
                 {
@@ -214,12 +229,8 @@ class PersistentManagerTests(unittest.TestCase):
                     "remaining_deadline_ms": 500,
                 }
             )
-            self.assertEqual(
-                "daemon_restarting_for_maintenance",
-                other_db["error_kind"],
-            )
-            resumed = manager.resume_db("ac-rag", lease_id="lease-a")
-            self.assertTrue(resumed["manager_restart_required"])
+            self.assertEqual("ok", other_db["status"])
+            self.assertEqual("incident-rag", other_db["db"])
             same_db = manager.submit_search(
                 {
                     "request_id": "same-db",
@@ -229,7 +240,166 @@ class PersistentManagerTests(unittest.TestCase):
                     "remaining_deadline_ms": 500,
                 }
             )
-            self.assertEqual("daemon_draining", same_db["error_kind"])
+            self.assertEqual("busy", same_db["status"])
+            self.assertEqual(
+                "db_maintenance_in_progress",
+                same_db["error"],
+            )
+            resumed = manager.resume_db("ac-rag", lease_id="lease-a")
+            self.assertFalse(resumed["manager_restart_required"])
+        manager.shutdown()
+
+    def test_finished_persistent_lease_recovers_without_resume_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rag_root = Path(directory) / "rag"
+            manager = PersistentWorkerManager(
+                rag_root=rag_root,
+                dbs_root=rag_root / "dbs",
+                manager_generation="manager-stale-release-test",
+            )
+            lease = db_maintenance.acquire_maintenance_lease(
+                "target-rag",
+                operation="add",
+                rag_root=rag_root,
+            )
+            release = manager.release_db(
+                "target-rag",
+                lease_id=lease.lease_id,
+                operation="add",
+            )
+            self.assertEqual("db_released", release["status"])
+            db_maintenance.finish_maintenance(lease)
+            manager._execute_item = lambda item: {  # type: ignore[method-assign]
+                "status": "ok",
+                "db": item.db_name,
+            }
+            result = manager.submit_search(
+                {
+                    "request_id": "after-stale",
+                    "client_id": "client",
+                    "db": "target-rag",
+                    "question": "q",
+                    "remaining_deadline_ms": 500,
+                }
+            )
+            self.assertEqual("ok", result["status"])
+            self.assertNotIn("target-rag", manager._releasing_dbs)
+            manager.shutdown()
+
+    def test_replacement_manager_accepts_matching_durable_resume(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rag_root = Path(directory) / "rag"
+            lease = db_maintenance.acquire_maintenance_lease(
+                "target-rag",
+                operation="add",
+                rag_root=rag_root,
+            )
+            replacement = PersistentWorkerManager(
+                rag_root=rag_root,
+                dbs_root=rag_root / "dbs",
+                manager_generation="manager-replacement-test",
+            )
+            resumed = replacement.resume_db(
+                "target-rag",
+                lease_id=lease.lease_id,
+            )
+            self.assertEqual("db_resumed", resumed["status"])
+            mismatch = replacement.resume_db(
+                "target-rag",
+                lease_id="different-lease",
+            )
+            self.assertEqual("db_not_released", mismatch["status"])
+            db_maintenance.finish_maintenance(lease)
+            replacement.shutdown()
+
+    def test_new_durable_lease_replaces_stale_in_memory_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rag_root = Path(directory) / "rag"
+            manager = PersistentWorkerManager(
+                rag_root=rag_root,
+                dbs_root=rag_root / "dbs",
+                manager_generation="manager-stale-repair-test",
+            )
+            old = db_maintenance.acquire_maintenance_lease(
+                "target-rag",
+                operation="add",
+                rag_root=rag_root,
+            )
+            old_release = manager.release_db(
+                "target-rag",
+                lease_id=old.lease_id,
+                operation="add",
+            )
+            self.assertEqual("db_released", old_release["status"])
+            db_maintenance.finish_maintenance(old)
+            replacement = db_maintenance.acquire_maintenance_lease(
+                "target-rag",
+                operation="resume",
+                rag_root=rag_root,
+            )
+            new_release = manager.release_db(
+                "target-rag",
+                lease_id=replacement.lease_id,
+                operation="resume",
+            )
+            self.assertEqual("db_released", new_release["status"])
+            self.assertEqual(
+                replacement.lease_id,
+                manager._releasing_dbs["target-rag"]["lease_id"],
+            )
+            manager.resume_db(
+                "target-rag",
+                lease_id=replacement.lease_id,
+            )
+            db_maintenance.finish_maintenance(replacement)
+            manager.shutdown()
+
+    def test_worker_release_transitions_are_serialized(self) -> None:
+        manager = PersistentWorkerManager(
+            rag_root=QUERY_ROOT.parent,
+            dbs_root=QUERY_ROOT.parent / "dbs",
+            manager_generation="manager-transition-lock-test",
+        )
+        lock = threading.Lock()
+        active = 0
+        maximum = 0
+
+        def stop_worker(*, graceful):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return True
+
+        manager._stop_worker = stop_worker  # type: ignore[method-assign]
+        threads = [
+            threading.Thread(
+                target=manager.release_db,
+                args=(db_name,),
+                kwargs={
+                    "lease_id": f"lease-{index}",
+                    "operation": "add",
+                },
+            )
+            for index, db_name in enumerate(
+                ("first-rag", "second-rag"),
+                start=1,
+            )
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+        self.assertEqual(1, maximum)
         manager.shutdown()
 
     def test_manager_serializes_concurrent_clients(self) -> None:

@@ -10,6 +10,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .db_maintenance import (
+    acquire_maintenance_lease,
+    database_integrity_ok,
+    finish_maintenance,
+)
+
 
 _LOCAL_HTTP_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({})
@@ -19,10 +25,12 @@ _LOCAL_HTTP_OPENER = urllib.request.build_opener(
 def release_db_before_mutation(
     db_name: str,
     *,
+    lease_id: str | None = None,
+    operation: str = "maintenance",
     timeout_seconds: float = 10.0,
     rag_root: Path | None = None,
 ) -> dict[str, Any]:
-    lease_id = uuid.uuid4().hex
+    release_lease_id = str(lease_id or uuid.uuid4().hex)
     root = (
         rag_root.resolve()
         if rag_root is not None
@@ -47,20 +55,34 @@ def release_db_before_mutation(
     if transport == "file":
         response = _file_control_request(
             state,
-            {"op": "release_db", "db": db_name, "lease_id": lease_id},
+            {
+                "op": "release_db",
+                "db": db_name,
+                "lease_id": release_lease_id,
+                "operation": operation,
+            },
             timeout_seconds=timeout_seconds,
         )
     elif transport == "unix":
         response = _unix_control_request(
             state,
-            {"op": "release_db", "db": db_name, "lease_id": lease_id},
+            {
+                "op": "release_db",
+                "db": db_name,
+                "lease_id": release_lease_id,
+                "operation": operation,
+            },
             timeout_seconds=timeout_seconds,
         )
     else:
         response = _tcp_control_request(
             state,
             "release-db",
-            {"db": db_name, "lease_id": lease_id},
+            {
+                "db": db_name,
+                "lease_id": release_lease_id,
+                "operation": operation,
+            },
             timeout_seconds=timeout_seconds,
         )
     if not response:
@@ -134,24 +156,107 @@ def resume_db_after_mutation(
 def database_mutation_guard(
     db_name: str,
     *,
+    operation: str = "maintenance",
     timeout_seconds: float = 25.0,
     rag_root: Path | None = None,
+    dbs_root: Path | None = None,
 ) -> Any:
-    release = release_db_before_mutation(
+    lease = acquire_maintenance_lease(
         db_name,
-        timeout_seconds=timeout_seconds,
+        operation=operation,
         rag_root=rag_root,
+        dbs_root=dbs_root,
+        lock_timeout_seconds=timeout_seconds,
+        recover_failed=(
+            operation in {"build", "resume"}
+            or operation.startswith("rebuild_")
+        ),
     )
+    release: dict[str, Any] | None = None
+    mutation_started = False
     try:
+        release = release_db_before_mutation(
+            db_name,
+            lease_id=lease.lease_id,
+            operation=operation,
+            timeout_seconds=timeout_seconds,
+            rag_root=rag_root,
+        )
+        mutation_started = True
         yield release
-    finally:
-        lease_id = str(release.get("lease_id") or "")
-        if release.get("status") == "db_released" and lease_id:
-            resume_db_after_mutation(
+    except BaseException as exc:
+        integrity_ok = (
+            database_integrity_ok(
                 db_name,
-                lease_id=lease_id,
-                timeout_seconds=10.0,
                 rag_root=rag_root,
+                dbs_root=dbs_root,
+            )
+            if mutation_started
+            else True
+        )
+        if (
+            release
+            and release.get("status") == "db_released"
+            and release.get("lease_id")
+        ):
+            try:
+                resume_db_after_mutation(
+                    db_name,
+                    lease_id=str(release["lease_id"]),
+                    timeout_seconds=10.0,
+                    rag_root=rag_root,
+                )
+            except BaseException:
+                # Preserve the original mutation failure. The persistent
+                # state below remains the authoritative target-DB gate.
+                pass
+        finish_maintenance(
+            lease,
+            operation_succeeded=False,
+            integrity_ok=integrity_ok,
+            error_kind=type(exc).__name__,
+        )
+        raise
+    else:
+        integrity_ok = (
+            True
+            if operation == "delete"
+            else database_integrity_ok(
+                db_name,
+                rag_root=rag_root,
+                dbs_root=dbs_root,
+            )
+        )
+        resume_error: BaseException | None = None
+        if (
+            release
+            and release.get("status") == "db_released"
+            and release.get("lease_id")
+        ):
+            try:
+                resume_db_after_mutation(
+                    db_name,
+                    lease_id=str(release["lease_id"]),
+                    timeout_seconds=10.0,
+                    rag_root=rag_root,
+                )
+            except BaseException as exc:
+                resume_error = exc
+        finish_maintenance(
+            lease,
+            operation_succeeded=True,
+            integrity_ok=integrity_ok,
+            error_kind=(
+                None
+                if integrity_ok
+                else "post_mutation_integrity_failed"
+            ),
+        )
+        if resume_error is not None:
+            raise resume_error
+        if not integrity_ok:
+            raise RuntimeError(
+                f"Database integrity verification failed for {db_name}"
             )
 
 

@@ -103,6 +103,32 @@ class ResultDeliveryContractTests(unittest.TestCase):
         self.assertEqual("question", rendered["query"])
         self.assertNotIn("_result_detail_items", rendered)
 
+    def test_busy_bypasses_result_bundle_and_prints_direct_contract(
+        self,
+    ) -> None:
+        args = argparse.Namespace(
+            result_delivery="file",
+            format="json",
+            compact_json=True,
+            explain=False,
+        )
+        payload = {
+            "schema": "local-rag.search.v1",
+            "status": "busy",
+            "error": "db_maintenance_in_progress",
+            "db": "example-rag",
+            "operation": "add",
+        }
+        stream = io.StringIO()
+        with mock.patch.object(
+            SEARCH,
+            "publish_result_bundle",
+        ) as publish:
+            with contextlib.redirect_stdout(stream):
+                SEARCH._print_search_payload(payload, args=args)
+        publish.assert_not_called()
+        self.assertEqual(payload, json.loads(stream.getvalue()))
+
 
 class BrokenStore:
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict]:

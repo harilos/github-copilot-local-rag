@@ -119,6 +119,36 @@ class LightweightRoutingContractTests(unittest.TestCase):
         self.assertIn("exactly one code block", lookup)
         self.assertIn("a second command", lookup)
 
+    def test_context_references_use_hints_without_rewriting_prompt(
+        self,
+    ) -> None:
+        text = LOOKUP.read_text(encoding="utf-8")
+        self.assertIn("## Conversational context hints", text)
+        self.assertIn(
+            "earlier human-authored messages from the same conversation only",
+            text,
+        )
+        for option in (
+            "--literal-identifier",
+            "--entity",
+            "--facet",
+            "--semantic-hypothesis",
+            "--answer-goal",
+        ):
+            self.assertIn(f"- `{option}`", text)
+        self.assertIn(
+            "character-for-character copy of the latest human-authored",
+            text,
+        )
+        self.assertIn("previous assistant answer", text)
+        self.assertIn("only through `--semantic-hypothesis`", text)
+        self.assertIn("minimum recent human-authored context", text)
+        self.assertIn("ask the user to clarify", text)
+        self.assertRegex(
+            text,
+            r"do\s+not run `list_dbs\.py` or `search\.py`",
+        )
+
     def test_lookup_uses_only_platform_venv_commands(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("~/.copilot/rag/query/.venv/bin/python", text)

@@ -13,6 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_RAG_ROOT = Path(__file__).resolve().parents[1]
+_TOOL_ROOT = _RAG_ROOT / "gen_db" / "software_rag_tool"
+if str(_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TOOL_ROOT))
+
+from software_rag_tool.db_maintenance import (
+    maintenance_search_payload,
+    maintenance_status,
+)
+
 
 DEFAULT_MAX_QUEUED_REQUESTS = 16
 DEFAULT_MAX_PENDING_PER_CLIENT = 4
@@ -92,9 +102,8 @@ class PersistentWorkerManager:
         self._client_order: collections.deque[str] = collections.deque()
         self._pending_total = 0
         self._active: _PendingRequest | None = None
-        self._releasing_dbs: dict[str, str] = {}
+        self._releasing_dbs: dict[str, dict[str, str]] = {}
         self._dispatch_paused = False
-        self._maintenance_restart_pending = False
         self._closed = False
         self._request_sequence = 0
         self._handled_request_count = 0
@@ -109,6 +118,7 @@ class PersistentWorkerManager:
         self._job: _WindowsJobObject | None = None
         self._last_worker_start_error: str | None = None
         self._worker_lifecycle_lock = threading.RLock()
+        self._maintenance_transition_lock = threading.Lock()
 
         self._dispatcher = threading.Thread(
             target=self._dispatch_loop,
@@ -138,16 +148,25 @@ class PersistentWorkerManager:
             },
             deadline=now + (remaining_ms / 1000.0),
         )
+        persistent_maintenance = maintenance_search_payload(
+            db_name,
+            rag_root=self.rag_root,
+            dbs_root=self.dbs_root,
+        )
+        if persistent_maintenance:
+            return persistent_maintenance
         with self._condition:
+            in_memory = self._releasing_dbs.get(db_name)
+            if in_memory and in_memory.get("persistent_seen") == "true":
+                self._releasing_dbs.pop(db_name, None)
             if self._closed:
                 return self._manager_error(item, "daemon_draining")
-            if self._maintenance_restart_pending:
-                return self._manager_error(
-                    item,
-                    "daemon_restarting_for_maintenance",
-                )
             if db_name in self._releasing_dbs:
-                return self._manager_error(item, "db_release_in_progress")
+                maintenance = self._releasing_dbs[db_name]
+                return self._maintenance_busy(
+                    item,
+                    operation=maintenance.get("operation") or "maintenance",
+                )
             client_queue = self._queues.get(client_id)
             client_pending = len(client_queue or ())
             if self._active and self._active.client_id == client_id:
@@ -187,22 +206,57 @@ class PersistentWorkerManager:
         db_name: str,
         *,
         lease_id: str | None = None,
+        operation: str = "maintenance",
+        timeout_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        with self._maintenance_transition_lock:
+            return self._release_db_serialized(
+                db_name,
+                lease_id=lease_id,
+                operation=operation,
+                timeout_seconds=timeout_seconds,
+            )
+
+    def _release_db_serialized(
+        self,
+        db_name: str,
+        *,
+        lease_id: str | None = None,
+        operation: str = "maintenance",
         timeout_seconds: float = 20.0,
     ) -> dict[str, Any]:
         release_lease = str(lease_id or uuid.uuid4().hex)
+        maintenance_operation = str(operation or "maintenance")
         deadline = time.monotonic() + max(0.1, timeout_seconds)
         cancelled: list[_PendingRequest] = []
+        persistent = maintenance_status(
+            db_name,
+            rag_root=self.rag_root,
+            dbs_root=self.dbs_root,
+        )
+        persistent_seen = bool(
+            persistent.get("status") == "active"
+            and (
+                not lease_id
+                or persistent.get("lease_id") == release_lease
+            )
+        )
         with self._condition:
-            existing_lease = self._releasing_dbs.get(db_name)
-            if existing_lease and existing_lease != release_lease:
-                return {
-                    "schema": "local-rag.ragd.release-db.v1",
-                    "status": "db_release_in_progress",
-                    "db": db_name,
-                    "manager_pid": os.getpid(),
-                    "manager_generation": self.manager_generation,
-                }
-            self._releasing_dbs[db_name] = release_lease
+            existing = self._releasing_dbs.get(db_name)
+            if existing and existing.get("lease_id") != release_lease:
+                if not persistent_seen:
+                    return {
+                        "schema": "local-rag.ragd.release-db.v1",
+                        "status": "db_release_in_progress",
+                        "db": db_name,
+                        "manager_pid": os.getpid(),
+                        "manager_generation": self.manager_generation,
+                    }
+            self._releasing_dbs[db_name] = {
+                "lease_id": release_lease,
+                "operation": maintenance_operation,
+                "persistent_seen": "true" if persistent_seen else "false",
+            }
             self._dispatch_paused = True
             for client_id, requests in list(self._queues.items()):
                 kept = collections.deque()
@@ -218,15 +272,34 @@ class PersistentWorkerManager:
                 else:
                     self._queues.pop(client_id, None)
                     self._remove_client_order(client_id)
+            for item in cancelled:
+                item.result = self._maintenance_busy(
+                    item,
+                    operation=maintenance_operation,
+                    error="db_maintenance_started",
+                )
+                item.event.set()
             while self._active is not None and time.monotonic() < deadline:
                 self._condition.wait(
                     timeout=min(0.1, deadline - time.monotonic())
                 )
             active_timed_out = self._active is not None
+            active_db = self._active.db_name if self._active else ""
 
-        for item in cancelled:
-            item.result = self._manager_error(item, "db_release_cancelled")
-            item.event.set()
+        if active_timed_out and active_db != db_name:
+            with self._condition:
+                self._releasing_dbs.pop(db_name, None)
+                self._dispatch_paused = False
+                self._condition.notify_all()
+            return {
+                "schema": "local-rag.ragd.release-db.v1",
+                "status": "error",
+                "error": "unrelated_search_drain_timeout",
+                "db": db_name,
+                "lease_id": release_lease,
+                "manager_pid": os.getpid(),
+                "manager_generation": self.manager_generation,
+            }
 
         # Chroma does not expose a reliable cross-platform close operation.
         # Recycling the sole worker guarantees that all native DB handles are
@@ -235,27 +308,12 @@ class PersistentWorkerManager:
             graceful=not active_timed_out
         )
 
-        restart_cancelled: list[_PendingRequest] = []
         with self._condition:
-            if os.name == "nt" or not worker_reaped:
-                self._maintenance_restart_pending = True
-                for requests in self._queues.values():
-                    restart_cancelled.extend(requests)
-                self._queues.clear()
-                self._client_order.clear()
-                self._pending_total = 0
-                self._dispatch_paused = True
-            else:
-                self._dispatch_paused = False
+            self._dispatch_paused = False
             self._condition.notify_all()
-        for item in restart_cancelled:
-            item.cancelled = True
-            item.result = self._manager_error(
-                item,
-                "daemon_restarting_for_maintenance",
-            )
-            item.event.set()
         if not worker_reaped:
+            with self._condition:
+                self._releasing_dbs.pop(db_name, None)
             return {
                 "schema": "local-rag.ragd.release-db.v1",
                 "status": "error",
@@ -270,6 +328,7 @@ class PersistentWorkerManager:
             "status": "db_released",
             "db": db_name,
             "lease_id": release_lease,
+            "operation": maintenance_operation,
             "manager_pid": os.getpid(),
             "manager_generation": self.manager_generation,
             "worker_recycled": True,
@@ -278,20 +337,31 @@ class PersistentWorkerManager:
         }
 
     def resume_db(self, db_name: str, *, lease_id: str) -> dict[str, Any]:
+        persistent = maintenance_status(
+            db_name,
+            rag_root=self.rag_root,
+            dbs_root=self.dbs_root,
+        )
+        persistent_matches = bool(
+            persistent.get("status") == "active"
+            and persistent.get("lease_id") == lease_id
+        )
         with self._condition:
-            active_lease = self._releasing_dbs.get(db_name)
-            if not active_lease:
-                status = "db_not_released"
-            elif active_lease != lease_id:
+            active = self._releasing_dbs.get(db_name)
+            if not active:
+                # A code-fingerprint restart can replace the manager after the
+                # old generation released the worker. The durable lease remains
+                # the target-DB gate, so the replacement manager may
+                # acknowledge the matching resume without an in-memory entry.
+                status = (
+                    "db_resumed"
+                    if persistent_matches
+                    else "db_not_released"
+                )
+            elif active.get("lease_id") != lease_id:
                 status = "release_lease_mismatch"
             else:
                 self._releasing_dbs.pop(db_name, None)
-                if os.name == "nt":
-                    # Prevent the response-to-shutdown window from spawning a
-                    # replacement worker in this retired manager generation.
-                    self._maintenance_restart_pending = True
-                    self._dispatch_paused = True
-                    self._closed = True
                 self._condition.notify_all()
                 status = "db_resumed"
         return {
@@ -300,13 +370,7 @@ class PersistentWorkerManager:
             "db": db_name,
             "manager_pid": os.getpid(),
             "manager_generation": self.manager_generation,
-            # Replacing a native-heavy child in an already-running Windows
-            # manager can fail during DLL initialization on some hosts. Admin
-            # operations are rare, so recycle the lightweight manager after
-            # the maintenance lease ends and start a clean generation lazily.
-            "manager_restart_required": (
-                os.name == "nt" and status == "db_resumed"
-            ),
+            "manager_restart_required": False,
         }
 
     def cancel_request(
@@ -458,7 +522,7 @@ class PersistentWorkerManager:
         with self._condition:
             active = self._active is not None
             queue_depth = self._pending_total
-            closed = self._closed or self._maintenance_restart_pending
+            closed = self._closed
         lifecycle = (
             "DRAINING"
             if closed
@@ -581,6 +645,13 @@ class PersistentWorkerManager:
                 return item
 
     def _execute_item(self, item: _PendingRequest) -> dict[str, Any]:
+        persistent_maintenance = maintenance_search_payload(
+            item.db_name,
+            rag_root=self.rag_root,
+            dbs_root=self.dbs_root,
+        )
+        if persistent_maintenance:
+            return persistent_maintenance
         remaining = item.deadline - time.monotonic()
         if remaining <= 0:
             return self._manager_error(item, "queue_deadline_expired")
@@ -917,6 +988,21 @@ class PersistentWorkerManager:
                 item,
                 queue_depth=self._pending_total,
             ),
+        }
+
+    def _maintenance_busy(
+        self,
+        item: _PendingRequest,
+        *,
+        operation: str,
+        error: str = "db_maintenance_in_progress",
+    ) -> dict[str, Any]:
+        return {
+            "schema": "local-rag.search.v1",
+            "status": "busy",
+            "error": error,
+            "db": item.db_name,
+            "operation": operation,
         }
 
     def _remove_client_order(self, client_id: str) -> None:

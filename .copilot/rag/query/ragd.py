@@ -168,6 +168,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 )
                 db_name = str(body["db"])
                 lease_id = str(body.get("lease_id") or "")
+                operation = str(body.get("operation") or "maintenance")
             except Exception as exc:
                 self._send_json(
                     {
@@ -181,6 +182,7 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
                 self.server.worker_manager.release_db(
                     db_name,
                     lease_id=lease_id or None,
+                    operation=operation,
                 )
             )
             return
@@ -287,6 +289,7 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
             result = self.server.worker_manager.release_db(
                 str(request.get("db") or ""),
                 lease_id=str(request.get("lease_id") or "") or None,
+                operation=str(request.get("operation") or "maintenance"),
             )
             self._send_json(result)
             return
@@ -491,6 +494,9 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                         str(request.get("db") or ""),
                         lease_id=(
                             str(request.get("lease_id") or "") or None
+                        ),
+                        operation=str(
+                            request.get("operation") or "maintenance"
                         ),
                     )
                 elif request.get("op") == "resume_db":

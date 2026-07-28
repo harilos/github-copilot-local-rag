@@ -31,7 +31,12 @@ def main() -> None:
     args = parser.parse_args()
 
     db_name = require_db_name(args.db)
-    with database_mutation_guard(db_name, rag_root=RAG_ROOT):
+    with database_mutation_guard(
+        db_name,
+        operation=f"rebuild_{args.component}",
+        rag_root=RAG_ROOT,
+        dbs_root=dbs_dir(),
+    ):
         _rebuild(args, db_name)
 
 

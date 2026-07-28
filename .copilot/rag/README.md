@@ -328,6 +328,14 @@ Each DB gets `VERSION.json` at creation time. It contains `created_at`, `db_hash
 
 `build_db.py` and `add_data.py` process files in small resumable batches. Use `status.py` before starting another long run. Use `build_db.py --force-rebuild` only when you intentionally want to discard prior clean records and recreate the Chroma collection.
 
+Build, add, resume, and index-repair operations place only their target
+database in maintenance. Searches for that database return immediately with
+`status: "busy"` and `error: "db_maintenance_in_progress"`; they are not
+queued, retried, or routed through no-daemon fallback. Other databases remain
+searchable after the short worker-handle release/restart interval. The
+maintenance lease is persisted per database, prevents a second writer, and is
+not an immutable-generation or blue-green database mechanism.
+
 Evaluation-only chunk variants can be built without changing defaults:
 
 ```bash

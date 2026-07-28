@@ -1487,50 +1487,21 @@ class LocalRagManager:
         root = self._validated_database_root(db_name)
         self._ensure_no_active_mutation(root)
         daemon = self._import_daemon_control()
-        release = daemon.release_db_before_mutation(
-            db_name,
-            timeout_seconds=10.0,
-            rag_root=self.rag_root,
-        )
-        release_status = str(release.get("status") or "")
-        if (
-            release_status not in {"no_daemon", "db_released"}
-            or str(release.get("db") or "") != db_name
-            or (
-                release_status == "db_released"
-                and not str(release.get("lease_id") or "")
-            )
-        ):
-            raise ManagerError("daemon did not release the database")
-        deleted = False
-        resume_error: Exception | None = None
         try:
-            # Revalidate after daemon coordination, immediately before the
-            # destructive operation.
-            root = self._validated_database_root(db_name)
-            self._ensure_no_active_mutation(root)
-            shutil.rmtree(root)
-            deleted = True
-        finally:
-            lease_id = str(release.get("lease_id") or "")
-            if release.get("status") == "db_released" and lease_id:
-                try:
-                    daemon.resume_db_after_mutation(
-                        db_name,
-                        lease_id=lease_id,
-                        timeout_seconds=10.0,
-                        rag_root=self.rag_root,
-                    )
-                except Exception as exc:
-                    resume_error = exc
-        if resume_error is not None:
-            if deleted:
-                self.output(
-                    "Database deletion completed, but daemon lease cleanup "
-                    f"reported {type(resume_error).__name__}."
-                )
-            else:
-                raise resume_error
+            with daemon.database_mutation_guard(
+                db_name,
+                operation="delete",
+                timeout_seconds=10.0,
+                rag_root=self.rag_root,
+                dbs_root=self.dbs_root,
+            ):
+                # Revalidate after daemon coordination, immediately before
+                # the destructive operation.
+                root = self._validated_database_root(db_name)
+                self._ensure_no_active_mutation(root)
+                shutil.rmtree(root)
+        except RuntimeError as exc:
+            raise ManagerError(str(exc)) from exc
 
     def _validated_database_root(self, db_name: str) -> Path:
         if not self._valid_database_name(db_name):
