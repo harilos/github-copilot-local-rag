@@ -106,16 +106,34 @@ _STATUS_JA = {
     "invalid": "不正",
 }
 _PROVIDER_JA = {
+    "git_repository": "Gitリポジトリ",
     "github": "GitHub",
+    "gitlab": "GitLab",
+    "azure_devops": "Azure DevOps",
+    "svn": "Subversion（SVN）",
     "sharepoint": "SharePoint",
     "redmine": "Redmine",
     "other": "その他のWebサイト",
 }
 _STRATEGY_JA = {
     "github-blob": "GitHubファイルリンク",
+    "gitlab-blob": "GitLabファイルリンク",
+    "azure-devops-item": "Azure DevOpsファイルリンク",
+    "svn-http": "Apache HTTP(S)互換（各ファイルを直接開く）",
+    "svn-web-root": "その他のSVN Web画面（トップページを開く）",
     "home-only": "トップページのみ",
     "append-relative-path": "相対パスをURL末尾へ追加",
     "regex-template": "正規表現テンプレート",
+}
+_GIT_PROVIDERS = ("github", "gitlab", "azure_devops")
+_GIT_STRATEGIES = {
+    "github": "github-blob",
+    "gitlab": "gitlab-blob",
+    "azure_devops": "azure-devops-item",
+}
+_BOOLEAN_CHOICE_JA = {
+    "enabled": "有効",
+    "disabled": "無効",
 }
 
 
@@ -884,6 +902,10 @@ class LocalRagManager:
                 "  読込範囲: "
                 f"{status.get('scan_subdir') or '論理ルート全体'}"
             )
+            self.output(
+                "  確定単位: "
+                f"{int(status.get('batch_size_files') or 5)}文書"
+            )
             if self._confirm(f"DB「{db_name}」の保存済み処理を再開しますか？"):
                 self._resume_saved_operation(db_name, status)
             return
@@ -949,6 +971,7 @@ class LocalRagManager:
         root = str(status.get("root") or "")
         source_id = str(status.get("source_id") or "")
         scan_subdir = str(status.get("scan_subdir") or ".")
+        batch_size_files = int(status.get("batch_size_files") or 5)
         if not root or not source_id:
             self._print_error(
                 "再開に必要な論理ルートまたはSource IDが保存されていません。"
@@ -969,6 +992,8 @@ class LocalRagManager:
             source_id,
             "--include-root-name-in-path",
             "--resume",
+            "--batch-size-files",
+            str(batch_size_files),
         ]
         if scan_subdir and scan_subdir != ".":
             arguments.extend(["--scan-subdir", scan_subdir])
@@ -1057,10 +1082,14 @@ class LocalRagManager:
                     "文書の取り込み元を識別する、変更しないIDです。\n"
                     "同じ取り込み元を更新するときは同じIDを使用します。\n"
                     "1 Sourceは1つのProvider・1つのURL生成単位です。"
-                    "GitHub、SharePoint、Redmineを同じIDへ混在させないでください。"
+                    "GitHub、GitLab、Azure DevOps、SharePoint、Redmineを"
+                    "同じIDへ混在させないでください。"
                 ),
                 examples=(
                     "github-repository",
+                    "gitlab-repository",
+                    "azure-repository",
+                    "svn-repository",
                     "sharepoint-docs",
                     "redmine-issues",
                     "filesystem-docs",
@@ -1125,8 +1154,9 @@ class LocalRagManager:
             f"{new_index}. 新しいSource IDを入力"
         )
         self.output(
-            "例: sharepoint-docs、redmine-issues、"
-            "github-repository、filesystem-docs"
+            "例: sharepoint-docs、redmine-issues、github-repository、"
+            "gitlab-repository、azure-repository、svn-repository、"
+            "filesystem-docs"
         )
         choice = self._ask("番号を入力してください（0: キャンセル）: ")
         if choice in (None, "0"):
@@ -1459,8 +1489,8 @@ class LocalRagManager:
             )
             self.output(
                 "Source Linkとは:\n"
-                "RAGの検索結果に、元のGitHub・SharePoint・Redmine等を"
-                "開くURLを付ける設定です。\n"
+                "RAGの検索結果に、元のGitHub・GitLab・Azure DevOps・"
+                "Subversion・SharePoint・Redmine等を開くURLを付ける設定です。\n"
                 "検索順位や検索内容には影響しません。設定できない場合も"
                 "RAG内の保存パスは表示されます。"
             )
@@ -1664,13 +1694,16 @@ class LocalRagManager:
         self.output(
             f"リンク方式: {self._strategy_label(source.get('strategy'))}"
         )
-        if provider == "github":
+        if provider in _GIT_PROVIDERS:
+            provider_label = self._provider_label(provider)
             self.output(
                 f"リポジトリ: {settings.get('repository_url') or '未設定'}"
             )
-            self.output(f"通常表示版: {settings.get('ref') or '未設定'}")
             self.output(
-                "GitHubリポジトリ内の追加パス: "
+                f"通常表示版: {settings.get('ref') or '未設定'}"
+            )
+            self.output(
+                f"{provider_label}リポジトリ内の追加パス: "
                 f"{settings.get('repository_path_prefix') or '未設定'}"
             )
             self.output(
@@ -1679,6 +1712,26 @@ class LocalRagManager:
             )
             if settings.get("commit"):
                 self.output(f"固定コミット: {settings['commit']}")
+        elif provider == "svn":
+            self.output(
+                f"SVN URL: {settings.get('repository_url') or '未設定'}"
+            )
+            if source.get("strategy") == "svn-http":
+                self.output(
+                    "SVNリポジトリ内の追加パス: "
+                    f"{settings.get('repository_path_prefix') or '未設定'}"
+                )
+                self.output(
+                    "固定リビジョンリンク: "
+                    f"{'有効' if settings.get('permalink_enabled') else '無効'}"
+                )
+                if settings.get("revision") is not None:
+                    self.output(f"リビジョン: {settings['revision']}")
+            else:
+                self.output(
+                    "検索結果ごとのファイルURLは生成せず、"
+                    "すべて同じトップURLを開きます。"
+                )
         elif provider == "sharepoint":
             self.output(
                 f"SharePoint上の基準フォルダURL: "
@@ -1741,7 +1794,10 @@ class LocalRagManager:
         root_status = str(
             source_payload.get("observed_root_status") or "no_observed_root"
         )
-        if link.get("strategy") != "home-only" and root_status != "ready":
+        if (
+            link.get("strategy") not in {"home-only", "svn-web-root"}
+            and root_status != "ready"
+        ):
             if link.get("provider") == "sharepoint":
                 self._print_error("SharePointのファイルURLを生成できません。")
                 self.output(
@@ -1927,16 +1983,31 @@ class LocalRagManager:
         *,
         preview: list[dict[str, Any]],
     ) -> None:
-        try:
-            roots = tuple(source_links.observed_root_from_paths(paths))
-        except Exception:
-            roots = ()
+        root_independent = (
+            source_link.get("provider") == "svn"
+            and source_link.get("strategy") == "svn-web-root"
+        )
+        if root_independent:
+            roots: tuple[str, ...] = ()
+        else:
+            try:
+                roots = tuple(source_links.observed_root_from_paths(paths))
+            except Exception:
+                roots = ()
         settings = source_link.get("settings") or {}
         for index, item in enumerate(preview, start=1):
             stored_path = str(item.get("path") or "")
             self.output(f"\n文書{index}")
             self.output(f"RAG保存パス: {stored_path or '不明'}")
-            if len(roots) == 1:
+            if root_independent:
+                self.output(
+                    "自動検出された保存ルート: "
+                    "このリンク方式では使用しません"
+                )
+                self.output(
+                    "Source相対パス: このリンク方式では使用しません"
+                )
+            elif len(roots) == 1:
                 self.output(f"自動除去された保存ルート: {roots[0]}")
                 try:
                     relative = source_links.source_relative_path(
@@ -1954,8 +2025,11 @@ class LocalRagManager:
                     + ", ".join(roots)
                 )
             if settings.get("repository_path_prefix"):
+                provider_label = self._provider_label(
+                    str(source_link.get("provider") or "")
+                )
                 self.output(
-                    "GitHub上の追加パス: "
+                    f"{provider_label}上の追加パス: "
                     f"{settings['repository_path_prefix']}"
                 )
             generated = (
@@ -2071,29 +2145,60 @@ class LocalRagManager:
         )
         if display_name is None:
             return None
+        current_provider = str(current.get("provider") or "")
+        current_category = (
+            "git_repository"
+            if current_provider in _GIT_PROVIDERS
+            else current_provider
+        )
+        provider_categories = [
+            "sharepoint",
+            "git_repository",
+            "redmine",
+            "other",
+            "svn",
+        ]
         if existing is not None:
-            provider = self._prompt_choice_preserving(
+            provider_category = self._prompt_choice_preserving(
                 "Provider",
-                ["sharepoint", "github", "redmine", "other"],
-                str(current.get("provider") or ""),
+                provider_categories,
+                current_category,
             )
         else:
-            provider = self._select_value(
+            provider_category = self._select_value(
                 "Providerを選択",
-                ["sharepoint", "github", "redmine", "other"],
+                provider_categories,
             )
-        if provider is None:
+        if provider_category is None:
             return None
+        if provider_category == "git_repository":
+            if existing is not None and current_provider in _GIT_PROVIDERS:
+                provider = self._prompt_choice_preserving(
+                    "Gitホスティングサービス",
+                    list(_GIT_PROVIDERS),
+                    current_provider,
+                )
+            else:
+                provider = self._select_value(
+                    "Gitホスティングサービスを選択",
+                    _GIT_PROVIDERS,
+                )
+            if provider is None:
+                return None
+        else:
+            provider = provider_category
         if provider == "sharepoint":
             strategy = "append-relative-path"
             choices: list[str] = []
-        elif provider == "github":
-            strategy = "github-blob"
+        elif provider in _GIT_PROVIDERS:
+            strategy = _GIT_STRATEGIES[provider]
             choices = []
+        elif provider == "svn":
+            choices = ["svn-http", "svn-web-root"]
         else:
             choices = ["home-only", "append-relative-path", "regex-template"]
-        if provider not in {"sharepoint", "github"}:
-            if existing is not None:
+        if provider not in {"sharepoint", *_GIT_PROVIDERS}:
+            if existing is not None and provider == current_provider:
                 current_strategy = self._infer_source_link_strategy(
                     str(current.get("provider") or ""),
                     current_settings,
@@ -2139,71 +2244,19 @@ class LocalRagManager:
             if root is None:
                 return None
             settings["source_web_root"] = root
-        elif provider == "github":
-            repository = self._prompt_preserving_value(
-                "GitHubリポジトリURL",
-                str(prior.get("repository_url") or ""),
-                required=True,
-                description=(
-                    "GitHubリポジトリのトップページURLです。"
-                    "/blob/、/tree/、/commit/以下のファイルURLは入力しません。"
-                ),
-                examples=(
-                    "https://github.com/owner/repository",
-                    "https://git.example.com/owner/repository",
-                ),
+        elif provider in _GIT_PROVIDERS:
+            git_settings = self._prompt_git_repository_settings(
+                provider,
+                prior,
             )
-            ref = self._prompt_preserving_value(
-                "ブランチ・タグ・コミット（ref）",
-                str(prior.get("ref") or ""),
-                required=True,
-                description=(
-                    "GitHub上で通常表示する版を指定します。"
-                    "ブランチは将来更新されるとリンク先の内容も更新されます。"
-                ),
-                examples=("main", "develop", "release/v2", "v1.2.3"),
-            )
-            if repository is None or ref is None:
+            if git_settings is None:
                 return None
-            settings = {
-                "repository_url": repository,
-                "ref": ref,
-                "permalink_enabled": False,
-            }
-            repository_prefix = self._prompt_preserving_value(
-                "GitHubリポジトリ内の追加パス",
-                str(prior.get("repository_path_prefix") or ""),
-                required=False,
-                description=(
-                    "RAGのSource相対パスより、GitHub上の実ファイルが"
-                    "さらに深い場所にある場合だけ指定します。通常は空欄です。\n"
-                    "これはRAG保存パスから取り除くprefixではありません。"
-                    "保存ルートの除去はManagerが自動で行います。"
-                ),
-                examples=(
-                    "RAG: docs/manual.md / GitHub: product-a/docs/manual.md"
-                    " → product-a",
-                ),
-                empty_help="GitHubリポジトリ直下として扱う",
-            )
-            commit = self._prompt_preserving_value(
-                "固定リンク用コミット",
-                str(prior.get("commit") or ""),
-                required=False,
-                description=(
-                    "将来内容が変わらない固定URLを付ける場合に、"
-                    "完全なコミットSHAを指定します。回答では固定リンクが優先されます。"
-                ),
-                examples=("0123456789abcdef0123456789abcdef01234567",),
-                empty_help="通常のref URLだけを生成",
-            )
-            if repository_prefix is None or commit is None:
+            settings = git_settings
+        elif provider == "svn":
+            svn_settings = self._prompt_svn_settings(strategy, prior)
+            if svn_settings is None:
                 return None
-            if repository_prefix:
-                settings["repository_path_prefix"] = repository_prefix
-            if commit:
-                settings["commit"] = commit
-                settings["permalink_enabled"] = True
+            settings = svn_settings
         elif strategy == "home-only":
             value = self._prompt_preserving_value(
                 "SourceトップURL",
@@ -2277,13 +2330,227 @@ class LocalRagManager:
             "settings": settings,
         }
 
+    def _prompt_git_repository_settings(
+        self,
+        provider: str,
+        prior: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        provider_label = _PROVIDER_JA.get(provider, provider)
+        if provider == "github":
+            repository_examples = (
+                "https://github.com/owner/repository",
+                "https://git.example.com/owner/repository",
+            )
+            repository_help = (
+                "GitHubまたはGitHub EnterpriseのリポジトリトップURLです。"
+                "/blob/や/tree/以下のURLは入力しません。"
+            )
+            ref_help = (
+                "GitHub上で通常表示するブランチ、タグ、またはコミットです。"
+            )
+            ref_examples = ("main", "develop", "release/v2", "v1.2.3")
+        elif provider == "gitlab":
+            repository_examples = (
+                "https://gitlab.com/group/subgroup/repository",
+                "https://gitlab.example.com/group/repository",
+            )
+            repository_help = (
+                "GitLab.comまたはセルフホストGitLabのプロジェクトトップURLです。"
+                "/-/blob/や/-/tree/以下のURLは入力しません。"
+            )
+            ref_help = (
+                "GitLab上で通常表示するブランチ、タグ、またはコミットです。"
+            )
+            ref_examples = ("main", "develop", "release/v2", "v1.2.3")
+        else:
+            repository_examples = (
+                "https://dev.azure.com/organization/project/_git/repository",
+                "https://organization.visualstudio.com/project/_git/repository",
+            )
+            repository_help = (
+                "Azure DevOps ReposのリポジトリルートURLです。"
+                "ファイル表示用のqueryやfragmentは入力しません。"
+            )
+            ref_help = (
+                "通常リンクで開くブランチ名です。Azure DevOpsでは今回、"
+                "通常refをブランチとして扱います。"
+            )
+            ref_examples = ("main", "develop", "release/v2")
+
+        repository = self._prompt_preserving_value(
+            f"{provider_label}リポジトリURL",
+            str(prior.get("repository_url") or ""),
+            required=True,
+            description=repository_help,
+            examples=repository_examples,
+        )
+        ref = self._prompt_preserving_value(
+            "ブランチ・タグ・コミット（ref）"
+            if provider != "azure_devops"
+            else "ブランチ（ref）",
+            str(prior.get("ref") or ""),
+            required=True,
+            description=ref_help,
+            examples=ref_examples,
+        )
+        if repository is None or ref is None:
+            return None
+        settings: dict[str, Any] = {
+            "repository_url": repository,
+            "ref": ref,
+            "permalink_enabled": False,
+        }
+        repository_prefix = self._prompt_preserving_value(
+            f"{provider_label}リポジトリ内の追加パス",
+            str(prior.get("repository_path_prefix") or ""),
+            required=False,
+            description=(
+                "RAGのSource相対パスより、リポジトリ上の実ファイルが"
+                "さらに深い場所にある場合だけ指定します。通常は空欄です。\n"
+                "これはRAG保存パスから取り除くprefixではありません。"
+                "保存ルートの除去はManagerが自動で行います。"
+            ),
+            examples=(
+                "RAG: docs/manual.md / リポジトリ: "
+                "product-a/docs/manual.md → product-a",
+            ),
+            empty_help=f"{provider_label}リポジトリ直下として扱う",
+        )
+        commit = self._prompt_preserving_value(
+            "固定リンク用コミット",
+            str(prior.get("commit") or ""),
+            required=False,
+            description=(
+                "将来内容が変わらない固定URLを付ける場合に、"
+                "完全なコミットSHAを指定します。回答では固定リンクが優先されます。"
+            ),
+            examples=("0123456789abcdef0123456789abcdef01234567",),
+            empty_help="通常のref URLだけを生成",
+        )
+        if repository_prefix is None or commit is None:
+            return None
+        if repository_prefix:
+            settings["repository_path_prefix"] = repository_prefix
+        if commit:
+            settings["commit"] = commit
+            settings["permalink_enabled"] = True
+        return settings
+
+    def _prompt_svn_settings(
+        self,
+        strategy: str,
+        prior: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if strategy == "svn-web-root":
+            self.output(
+                "\n検索結果ごとのファイルURLは生成されません。\n"
+                "どの検索結果から開いても、設定したSVN Web画面の"
+                "トップページへ移動します。製品固有URLの推測は行いません。"
+            )
+            repository = self._prompt_preserving_value(
+                "SVN Web画面のトップURL",
+                str(prior.get("repository_url") or ""),
+                required=True,
+                description=(
+                    "VisualSVN、ViewVC、WebSVN、Trac等のトップURLです。"
+                    "query、fragment、末尾の/は入力どおり保持します。"
+                ),
+                examples=(
+                    "https://svn-web.example.com/project?view=summary#files",
+                ),
+            )
+            return (
+                {"repository_url": repository}
+                if repository is not None
+                else None
+            )
+
+        self.output(
+            "\nApache HTTP(S)＋mod_dav_svn互換URLとして、"
+            "各ファイルを直接開くリンクを生成します。\n"
+            "checkout、認証、リビジョン自動取得は行いません。"
+        )
+        repository = self._prompt_preserving_value(
+            "SVNリポジトリURL",
+            str(prior.get("repository_url") or ""),
+            required=True,
+            description=(
+                "取り込んだローカルルートに対応するHTTP(S) URLです。"
+                "trunk、branches、tagsを含むURLもそのまま使用できます。"
+            ),
+            examples=(
+                "https://svn.example.com/repos/project/trunk",
+                "https://svn.example.com/repos/project/branches/release-2",
+            ),
+        )
+        repository_prefix = self._prompt_preserving_value(
+            "SVNリポジトリ内の追加パス",
+            str(prior.get("repository_path_prefix") or ""),
+            required=False,
+            description=(
+                "SVN URLとSource相対パスの間へ追加するディレクトリです。"
+                "通常は空欄です。"
+            ),
+            examples=("docs", "manuals/ja"),
+            empty_help="SVNリポジトリURL直下として扱う",
+        )
+        current_choice = (
+            "enabled"
+            if prior.get("permalink_enabled") is True
+            else "disabled"
+        )
+        permalink_choice = self._prompt_choice_preserving(
+            "固定リビジョンリンク",
+            ["disabled", "enabled"],
+            current_choice,
+        )
+        if (
+            repository is None
+            or repository_prefix is None
+            or permalink_choice is None
+        ):
+            return None
+        settings: dict[str, Any] = {
+            "repository_url": repository,
+            "permalink_enabled": permalink_choice == "enabled",
+        }
+        if repository_prefix:
+            settings["repository_path_prefix"] = repository_prefix
+        if permalink_choice == "enabled":
+            revision = self._prompt_preserving_value(
+                "SVNリビジョン番号",
+                str(prior.get("revision") or ""),
+                required=True,
+                description=(
+                    "固定リンクのpとrへ使用する1以上の整数です。"
+                    "HEADやBASEは使用できません。\n"
+                    "混在リビジョンの作業コピーでは、単一revisionの固定リンクが"
+                    "各ファイルの実際の版と一致しない場合があります。"
+                ),
+                examples=("1234",),
+            )
+            if revision is None:
+                return None
+            settings["revision"] = revision
+        return settings
+
     @staticmethod
     def _infer_source_link_strategy(
         provider: str,
         settings: dict[str, Any],
     ) -> str:
-        if provider == "github":
-            return "github-blob"
+        if provider in _GIT_PROVIDERS:
+            return _GIT_STRATEGIES[provider]
+        if provider == "svn":
+            return (
+                "svn-http"
+                if (
+                    "permalink_enabled" in settings
+                    or "repository_path_prefix" in settings
+                    or "revision" in settings
+                )
+                else "svn-web-root"
+            )
         if settings.get("path_pattern") or settings.get("url_template"):
             return "regex-template"
         if settings.get("source_web_root"):
@@ -2543,6 +2810,9 @@ class LocalRagManager:
             f"{status.get('stored_path_prefix') or '未設定'}"
         )
         self.output(f"Source ID: {status.get('source_id') or '未設定'}")
+        self.output(
+            f"確定単位: {int(status.get('batch_size_files') or 5):,}文書"
+        )
         self.output(f"文書数: {int(documents or 0):,}")
         self.output(f"チャンク数: {int(chunks or 0):,}")
         self.output(f"Source数: {len(sources):,}")
@@ -2757,7 +3027,19 @@ class LocalRagManager:
         for index, value in enumerate(choices, start=1):
             self.output(f"{index}. {self._choice_label(value)}")
             description = {
+                "git_repository": (
+                    "GitHub、GitLab、Azure DevOps Reposから"
+                    "ホスティングサービスを選びます。"
+                ),
                 "github": "GitHubリポジトリ内のファイルへリンクします。",
+                "gitlab": "GitLabリポジトリ内のファイルへリンクします。",
+                "azure_devops": (
+                    "Azure DevOps Repos内のファイルへリンクします。"
+                ),
+                "svn": (
+                    "SubversionのApache HTTP(S)ファイルリンク、または"
+                    "製品固有Web画面のトップリンクを設定します。"
+                ),
                 "sharepoint": (
                     "SharePointのサイト、文書ライブラリ、"
                     "フォルダ内のファイルへリンクします。"
@@ -2776,6 +3058,20 @@ class LocalRagManager:
                 ),
                 "github-blob": (
                     "リポジトリURL、ref、Source相対パスからGitHub URLを作ります。"
+                ),
+                "gitlab-blob": (
+                    "リポジトリURL、ref、Source相対パスからGitLab URLを作ります。"
+                ),
+                "azure-devops-item": (
+                    "リポジトリURL、ブランチ、Source相対パスから"
+                    "Azure DevOps URLを作ります。"
+                ),
+                "svn-http": (
+                    "mod_dav_svn互換URLで各ファイルを直接開きます。"
+                ),
+                "svn-web-root": (
+                    "製品固有のファイルURLを推測せず、"
+                    "設定したトップページを開きます。"
                 ),
             }.get(value)
             if description:
@@ -2799,6 +3095,8 @@ class LocalRagManager:
             return f"{_PROVIDER_JA[value]}（{value}）"
         if value in _STRATEGY_JA:
             return f"{_STRATEGY_JA[value]}（{value}）"
+        if value in _BOOLEAN_CHOICE_JA:
+            return _BOOLEAN_CHOICE_JA[value]
         return value or "未設定"
 
     def _confirm(self, question: str) -> bool:

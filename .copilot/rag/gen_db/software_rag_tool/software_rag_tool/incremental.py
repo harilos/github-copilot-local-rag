@@ -15,6 +15,7 @@ from .profile import update_profile_from_clean
 from .progress import emit_event, write_progress
 from .records import build_records_for_file, file_content_hash, iter_input_files, sha256_text
 from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
+from .config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from .store import collection_count, delete_ids, reset_collection, upsert_records
 
 
@@ -23,7 +24,7 @@ def add_or_update_root(
     source_id: str,
     scan_subdir: str | None = None,
     include_root_name_in_path: bool = True,
-    batch_size_files: int = 20,
+    batch_size_files: int | None = None,
     reset_db: bool = False,
     reset_clean: bool = False,
     retry_errors: bool = False,
@@ -32,8 +33,6 @@ def add_or_update_root(
     chunk_overlap: int = 160,
     resume: bool = False,
 ) -> dict[str, Any]:
-    if batch_size_files <= 0:
-        raise ValueError("batch_size_files must be positive")
     if chunk_max_chars <= 0:
         raise ValueError("chunk_max_chars must be positive")
     if chunk_overlap < 0:
@@ -51,14 +50,30 @@ def add_or_update_root(
         state = _initial_state()
     else:
         state = _load_state()
+    effective_batch_size_files = _effective_batch_size_files(
+        state,
+        requested=batch_size_files,
+        resume=resume,
+    )
     if resume:
-        _validate_resume_state(state, scope, source_id)
-    state["ingestion"] = scope.state_fields(source_id=source_id)
+        _validate_resume_state(
+            state,
+            scope,
+            source_id,
+            effective_batch_size_files,
+        )
+    state["ingestion"] = {
+        **scope.state_fields(source_id=source_id),
+        "batch_size_files": effective_batch_size_files,
+    }
     # Persist the effective scope before discovery.  If scanning is
     # interrupted, a later --resume must still validate against the exact
     # root/source/scope that started the run.
     _save_state(state)
-    scope_fields = scope.state_fields(source_id=source_id)
+    scope_fields = {
+        **scope.state_fields(source_id=source_id),
+        "batch_size_files": effective_batch_size_files,
+    }
 
     started_at = datetime.now(timezone.utc).isoformat()
     write_progress(
@@ -66,7 +81,6 @@ def add_or_update_root(
         phase="scan",
         operation=operation,
         **scope_fields,
-        batch_size_files=batch_size_files,
         reset_db=reset_db,
         reset_clean=reset_clean,
         retry_errors=retry_errors,
@@ -160,7 +174,7 @@ def add_or_update_root(
 
             pending.append(item)
             emit_event("file_extracted", path=rel, records=len(item["records"]))
-            if len(pending) >= batch_size_files:
+            if len(pending) >= effective_batch_size_files:
                 _flush_batch(pending, state, summary, reset_db=reset_db)
                 pending.clear()
                 _save_state(state)
@@ -379,6 +393,38 @@ def _load_state() -> dict[str, Any]:
     return data
 
 
+def _effective_batch_size_files(
+    state: dict[str, Any],
+    *,
+    requested: int | None,
+    resume: bool,
+) -> int:
+    if requested is not None and requested <= 0:
+        raise ValueError("batch_size_files must be positive")
+    saved_ingestion = state.get("ingestion")
+    saved = (
+        saved_ingestion.get("batch_size_files")
+        if isinstance(saved_ingestion, dict)
+        else None
+    )
+    if resume and saved is not None:
+        try:
+            saved_value = int(saved)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "saved batch_size_files is invalid"
+            ) from exc
+        if saved_value <= 0:
+            raise ValueError("saved batch_size_files must be positive")
+        if requested is not None and requested != saved_value:
+            raise ValueError(
+                "resume settings do not match saved index state: "
+                "batch_size_files"
+            )
+        return saved_value
+    return requested or DEFAULT_INGESTION_BATCH_SIZE_FILES
+
+
 def _save_state(state: dict[str, Any]) -> None:
     path = _state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -420,14 +466,20 @@ def _validate_resume_state(
     state: dict[str, Any],
     scope: IngestionScope,
     source_id: str,
+    batch_size_files: int | None = None,
 ) -> None:
     saved = state.get("ingestion")
     if not isinstance(saved, dict) or not saved:
         return
     expected = scope.state_fields(source_id=source_id)
+    if batch_size_files is not None:
+        expected["batch_size_files"] = batch_size_files
+    keys = ["resolved_root", "source_id", "scan_subdir"]
+    if "batch_size_files" in saved and batch_size_files is not None:
+        keys.append("batch_size_files")
     mismatches = [
         key
-        for key in ("resolved_root", "source_id", "scan_subdir")
+        for key in keys
         if str(saved.get(key) or "") != str(expected.get(key) or "")
     ]
     if mismatches:

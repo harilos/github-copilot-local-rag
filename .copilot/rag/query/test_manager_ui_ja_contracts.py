@@ -114,6 +114,7 @@ class ManagerJapaneseUiTests(unittest.TestCase):
             [
                 "",
                 "2",
+                "1",
                 "https://github.com/owner/repository",
                 "release/v2",
                 "product-a",
@@ -134,6 +135,221 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         self.assertIn("RAG保存パスから取り除くprefixではありません", text)
         self.assertIn("固定リンク用コミット【任意】", text)
         self.assertNotIn("リンク方式を選択", text)
+
+    def test_git_repository_group_exposes_gitlab_and_azure_values(self) -> None:
+        gitlab, gitlab_outputs = self.manager(
+            [
+                "",
+                "2",
+                "2",
+                "https://gitlab.com/group/subgroup/repository",
+                "release/v2",
+                "",
+                "",
+            ]
+        )
+        gitlab_value = gitlab._prompt_source_link()
+        assert gitlab_value is not None
+        self.assertEqual("gitlab", gitlab_value["provider"])
+        self.assertEqual("gitlab-blob", gitlab_value["strategy"])
+        self.assertIn(
+            "Gitホスティングサービスを選択",
+            "\n".join(gitlab_outputs),
+        )
+
+        azure, azure_outputs = self.manager(
+            [
+                "",
+                "2",
+                "3",
+                "https://dev.azure.com/organization/project/_git/repository",
+                "main",
+                "docs",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]
+        )
+        azure_value = azure._prompt_source_link()
+        assert azure_value is not None
+        self.assertEqual("azure_devops", azure_value["provider"])
+        self.assertEqual("azure-devops-item", azure_value["strategy"])
+        self.assertEqual("docs", azure_value["settings"]["repository_path_prefix"])
+        self.assertIn("ブランチ（ref）【必須】", "\n".join(azure_outputs))
+
+    def test_existing_github_form_preserves_values(self) -> None:
+        existing = {
+            "provider": "github",
+            "strategy": "github-blob",
+            "enabled": True,
+            "settings": {
+                "repository_url": "https://github.com/owner/repository",
+                "ref": "release/v2",
+                "repository_path_prefix": "docs",
+                "commit": "a" * 40,
+                "permalink_enabled": True,
+            },
+        }
+        manager, _outputs = self.manager(["", "", "", "", "", "", ""])
+        value = manager._prompt_source_link(existing=existing)
+        assert value is not None
+        self.assertEqual("github", value["provider"])
+        self.assertEqual("github-blob", value["strategy"])
+        self.assertEqual(existing["settings"], value["settings"])
+
+    def test_git_provider_switch_drops_previous_provider_settings(self) -> None:
+        existing = {
+            "provider": "github",
+            "strategy": "github-blob",
+            "enabled": True,
+            "settings": {
+                "repository_url": "https://github.com/owner/repository",
+                "ref": "release/v1",
+                "repository_path_prefix": "old-path",
+                "commit": "a" * 40,
+                "permalink_enabled": True,
+            },
+        }
+        manager, _outputs = self.manager(
+            [
+                "",
+                "",
+                "2",
+                "https://gitlab.com/group/repository",
+                "main",
+                "",
+                "",
+            ]
+        )
+        value = manager._prompt_source_link(existing=existing)
+        assert value is not None
+        self.assertEqual("gitlab", value["provider"])
+        self.assertEqual("gitlab-blob", value["strategy"])
+        self.assertEqual(
+            {
+                "repository_url": "https://gitlab.com/group/repository",
+                "ref": "main",
+                "permalink_enabled": False,
+            },
+            value["settings"],
+        )
+
+    def test_svn_forms_are_explicit_and_strategy_specific(self) -> None:
+        svn_http, http_outputs = self.manager(
+            [
+                "",
+                "5",
+                "1",
+                "https://svn.example.com/repos/project/trunk",
+                "docs",
+                "2",
+                "1234",
+            ]
+        )
+        http_value = svn_http._prompt_source_link()
+        assert http_value is not None
+        self.assertEqual("svn", http_value["provider"])
+        self.assertEqual("svn-http", http_value["strategy"])
+        self.assertEqual("1234", http_value["settings"]["revision"])
+        self.assertIn(
+            "Apache HTTP(S)互換（各ファイルを直接開く）",
+            "\n".join(http_outputs),
+        )
+
+        svn_web, web_outputs = self.manager(
+            [
+                "",
+                "5",
+                "2",
+                "https://svn-web.example.com/project/?view=summary#files",
+            ]
+        )
+        web_value = svn_web._prompt_source_link()
+        assert web_value is not None
+        self.assertEqual("svn-web-root", web_value["strategy"])
+        self.assertEqual(
+            {
+                "repository_url": (
+                    "https://svn-web.example.com/project/"
+                    "?view=summary#files"
+                )
+            },
+            web_value["settings"],
+        )
+        web_text = "\n".join(web_outputs)
+        self.assertNotIn("SVNリポジトリ内の追加パス【任意】", web_text)
+        self.assertNotIn("SVNリビジョン番号", web_text)
+
+    def test_svn_strategy_switch_drops_hidden_settings(self) -> None:
+        existing = {
+            "provider": "svn",
+            "strategy": "svn-http",
+            "enabled": True,
+            "settings": {
+                "repository_url": "https://svn.example.com/repos/project",
+                "repository_path_prefix": "docs",
+                "permalink_enabled": True,
+                "revision": 1234,
+            },
+        }
+        manager, _outputs = self.manager(
+            [
+                "",
+                "",
+                "2",
+                "https://svn-web.example.com/project#files",
+            ]
+        )
+        value = manager._prompt_source_link(existing=existing)
+        assert value is not None
+        self.assertEqual("svn-web-root", value["strategy"])
+        self.assertEqual(
+            {"repository_url": "https://svn-web.example.com/project#files"},
+            value["settings"],
+        )
+
+    def test_svn_web_root_preview_does_not_imply_path_use(self) -> None:
+        class PreviewSourceLinks:
+            @staticmethod
+            def observed_root_from_paths(_paths):
+                raise AssertionError(
+                    "svn-web-root must not inspect observed roots"
+                )
+
+            @staticmethod
+            def source_relative_path(_path, _root):
+                raise AssertionError("svn-web-root must not derive a path")
+
+        manager, outputs = self.manager()
+        manager._print_source_link_preview(
+            PreviewSourceLinks,
+            {
+                "provider": "svn",
+                "strategy": "svn-web-root",
+                "settings": {
+                    "repository_url": (
+                        "https://svn-web.example.com/project#files"
+                    )
+                },
+            },
+            ["Root/docs/manual.md"],
+            preview=[
+                {
+                    "path": "Root/docs/manual.md",
+                    "source_url": (
+                        "https://svn-web.example.com/project#files"
+                    ),
+                    "status": "resolved",
+                }
+            ],
+        )
+        text = "\n".join(outputs)
+        self.assertIn(
+            "自動検出された保存ルート: このリンク方式では使用しません",
+            text,
+        )
+        self.assertIn(
+            "Source相対パス: このリンク方式では使用しません",
+            text,
+        )
 
     def test_search_result_is_human_summary_not_raw_json(self) -> None:
         manager, outputs = self.manager()

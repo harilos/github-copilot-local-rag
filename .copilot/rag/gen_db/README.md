@@ -58,7 +58,7 @@ python ~/.copilot/rag/gen_db/build_db.py --db project-c1000-rag --root /path/to/
 
 If omitted, the default chunker remains `1400` characters with `160` character overlap.
 
-`add_data.py` keeps existing DB contents and only processes changed or new files. With `--scan-subdir`, discovery and deletion reconciliation are limited to that scope. Disjoint scopes remain unchanged, and overlapping parent/child scans use the same stored path and document identity. Progress is saved after each batch in `logs/index_state.json`, and current status is written to `logs/progress.json`, so rerunning the same command resumes instead of starting over. Resume requires the saved root, source ID, and scan subdirectory to match. Each batch updates both Chroma and `catalog.sqlite`.
+`add_data.py` keeps existing DB contents and only processes changed or new files. With `--scan-subdir`, discovery and deletion reconciliation are limited to that scope. Disjoint scopes remain unchanged, and overlapping parent/child scans use the same stored path and document identity. By default, every five indexed documents are committed to Chroma and `catalog.sqlite`, then progress is saved in `logs/index_state.json`; the final batch is committed even when it contains fewer than five documents. Use `--batch-size-files <count>` to change this checkpoint size. Resume preserves the saved batch size and rejects a conflicting explicit value, so at most four successfully prepared documents normally need to be repeated with the default. Current status is written to `logs/progress.json`.
 
 Changing to root-prefixed paths changes path-derived document IDs. Existing
 databases must be rebuilt once to adopt this behavior. No in-place old-ID

@@ -588,6 +588,9 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("sharepoint-docs", text)
         self.assertIn("redmine-issues", text)
         self.assertIn("github-repository", text)
+        self.assertIn("gitlab-repository", text)
+        self.assertIn("azure-repository", text)
+        self.assertIn("svn-repository", text)
 
     def test_source_link_edit_preserves_enter_and_clears_optional_dash(
         self,

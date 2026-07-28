@@ -391,6 +391,79 @@ class ResultBundleContractTests(unittest.TestCase):
             packet["answer_draft_markdown"],
         )
 
+    def test_new_provider_links_survive_summary_and_detail(self) -> None:
+        providers = (
+            (
+                "gitlab",
+                "https://gitlab.example.invalid/group/repository"
+                "/-/blob/main/document.pdf",
+                None,
+            ),
+            (
+                "azure_devops",
+                "https://dev.azure.com/organization/project/_git/repository"
+                "?path=/document.pdf&version=GBmain",
+                None,
+            ),
+            (
+                "svn",
+                "https://svn-web.example.invalid/project/"
+                "?view=summary#files",
+                None,
+            ),
+            (
+                "svn",
+                "https://svn.example.invalid/repos/project/trunk/document.pdf",
+                (
+                    "https://svn.example.invalid/repos/project/trunk/"
+                    "document.pdf?p=1234&r=1234"
+                ),
+            ),
+        )
+        for provider, source_url, source_permalink in providers:
+            with self.subTest(provider=provider):
+                payload = synthetic_payload()
+                payload["evidence"][0].update(
+                    {
+                        "source_provider": provider,
+                        "source_url": source_url,
+                    }
+                )
+                if source_permalink:
+                    payload["evidence"][0]["source_permalink"] = (
+                        source_permalink
+                    )
+                pointer = self.publish(payload)
+                summary = self.read_summary(pointer)
+                self.assertEqual(
+                    provider,
+                    summary["evidence"][0]["source_provider"],
+                )
+                self.assertEqual(
+                    source_url,
+                    summary["evidence"][0]["source_url"],
+                )
+                packet, _expires = result_bundle.load_expanded_result(
+                    pointer["result_set_id"],
+                    ["E1"],
+                    detail_level="expanded",
+                    spool_root=self.spool,
+                    now=self.now + timedelta(minutes=1),
+                )
+                self.assertEqual(
+                    source_url,
+                    packet["expanded_items"][0]["source_url"],
+                )
+                if source_permalink:
+                    self.assertEqual(
+                        source_permalink,
+                        summary["evidence"][0]["source_permalink"],
+                    )
+                    self.assertEqual(
+                        source_permalink,
+                        packet["expanded_items"][0]["source_permalink"],
+                    )
+
     def test_summary_never_truncates_a_valid_source_url(self) -> None:
         payload = synthetic_payload()
         source_url = "https://example.invalid/" + ("a" * 2_500)

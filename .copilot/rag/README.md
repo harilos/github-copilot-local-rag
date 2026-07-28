@@ -188,10 +188,41 @@ contains documents from several top-level roots, add those provider roots
 again under separate stable Source IDs; the manager does not split or reindex
 the database automatically.
 
-GitHub repository URLs and refs are entered manually; the manager does not
-inspect `.git` or run Git. SharePoint has one normal input: the document-library
+Git repository links support GitHub and GitHub Enterprise (`github` /
+`github-blob`), GitLab.com and self-hosted GitLab (`gitlab` /
+`gitlab-blob`), and Azure DevOps Repos (`azure_devops` /
+`azure-devops-item`). Repository URLs and refs are entered manually; the
+manager does not inspect `.git`, clone repositories, run Git, call hosting
+APIs, or store credentials. Private repositories rely on the browser's
+authenticated session. Azure DevOps currently treats the normal `ref` as a
+branch and accepts `dev.azure.com` plus the compatible `visualstudio.com`
+repository-root form. SharePoint has one normal input: the document-library
 or folder root used for direct file links. Its strategy is fixed to
 `append-relative-path`; Microsoft Graph and a separate home URL are not used.
+
+Repository-root examples:
+
+```text
+GitHub:       https://github.com/<owner>/<repository>
+GitLab:       https://gitlab.com/<group>/<repository>
+GitLab:       https://<gitlab-host>/<group>/<subgroup>/<repository>
+Azure DevOps: https://dev.azure.com/<organization>/<project>/_git/<repository>
+```
+
+Normal links follow the configured branch/tag/ref. When a full commit is
+provided and permalinks are enabled, the result also contains a fixed commit
+URL and answer rendering prefers that permalink.
+
+Subversion is a separate provider (`svn`). `svn-http` supports direct
+HTTP(S)/mod_dav_svn file links and optional fixed revision links using
+`?p=<revision>&r=<revision>`. `svn-web-root` preserves a configured HTTP(S)
+top URL, including its query and fragment, and attaches that same URL to every
+result. The latter supports entry links for interfaces such as VisualSVN,
+ViewVC, WebSVN, and Trac without guessing their product-specific file routes.
+Local RAG does not checkout/update SVN, inspect `.svn`, call an SVN API or
+command, authenticate, or discover revisions. A single fixed revision may be
+inaccurate for a mixed-revision working copy.
+
 Older home-only settings remain readable for compatibility but are not offered
 or newly saved by the manager.
 

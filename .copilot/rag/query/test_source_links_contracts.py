@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -1166,6 +1167,511 @@ class SourceLinksContractTests(unittest.TestCase):
                             )
                         )
                     )
+
+    def test_gitlab_saas_self_hosted_subgroup_and_permalink(self) -> None:
+        self.set_paths(
+            {"source-a": ["Root/日本語 空白 # % + (final).md"]}
+        )
+        for repository_url in (
+            "https://gitlab.com/group/subgroup/repository.git",
+            "https://gitlab.example.invalid/base/group/repository",
+        ):
+            with self.subTest(repository_url=repository_url):
+                current = self.db_root / source_links.SIDECAR_NAME
+                current.unlink(missing_ok=True)
+                self.save(
+                    sidecar(
+                        link(
+                            provider="gitlab",
+                            strategy="gitlab-blob",
+                            settings={
+                                "repository_url": repository_url,
+                                "ref": "release/v2",
+                                "repository_path_prefix": "docs",
+                                "commit": "b" * 40,
+                                "permalink_enabled": True,
+                            },
+                        )
+                    )
+                )
+                enriched = source_links.enrich_search_payload(
+                    search_payload("Root/日本語 空白 # % + (final).md"),
+                    self.db_root,
+                    "example-rag",
+                )
+                item = enriched["evidence"][0]
+                self.assertIn("/-/blob/release/v2/docs/", item["source_url"])
+                self.assertIn(
+                    "/-/blob/" + "b" * 40 + "/docs/",
+                    item["source_permalink"],
+                )
+                for encoded in (
+                    "%E6%97%A5%E6%9C%AC%E8%AA%9E",
+                    "%20",
+                    "%23",
+                    "%25",
+                    "%2B",
+                    "%28final%29",
+                ):
+                    self.assertIn(encoded, item["source_url"])
+
+    def test_azure_devops_modern_legacy_prefix_and_permalink(self) -> None:
+        self.set_paths({"source-a": ["Root/日本語 file #1?.md"]})
+        repositories = (
+            "https://dev.azure.com/organization/project/_git/repository",
+            "https://organization.visualstudio.com/project/_git/repository",
+            (
+                "https://organization.visualstudio.com/"
+                "DefaultCollection/project/_git/repository"
+            ),
+        )
+        for repository_url in repositories:
+            with self.subTest(repository_url=repository_url):
+                current = self.db_root / source_links.SIDECAR_NAME
+                current.unlink(missing_ok=True)
+                self.save(
+                    sidecar(
+                        link(
+                            provider="azure_devops",
+                            strategy="azure-devops-item",
+                            settings={
+                                "repository_url": repository_url,
+                                "ref": "release/v2",
+                                "repository_path_prefix": "product docs",
+                                "commit": "c" * 40,
+                                "permalink_enabled": True,
+                            },
+                        )
+                    )
+                )
+                item = source_links.enrich_search_payload(
+                    search_payload("Root/日本語 file #1?.md"),
+                    self.db_root,
+                    "example-rag",
+                )["evidence"][0]
+                self.assertIn(
+                    "?path=/product%20docs/"
+                    "%E6%97%A5%E6%9C%AC%E8%AA%9E%20file%20%231%3F.md",
+                    item["source_url"],
+                )
+                self.assertIn("&version=GBrelease%2Fv2", item["source_url"])
+                self.assertIn("&version=GC" + "c" * 40, item["source_permalink"])
+
+    def test_new_git_provider_repository_roots_are_strict(self) -> None:
+        invalid = (
+            (
+                "gitlab",
+                "gitlab-blob",
+                "https://gitlab.example.invalid",
+            ),
+            (
+                "gitlab",
+                "gitlab-blob",
+                "https://gitlab.example.invalid/group",
+            ),
+            (
+                "gitlab",
+                "gitlab-blob",
+                "https://gitlab.example.invalid/group/repository/-/tree/main",
+            ),
+            (
+                "gitlab",
+                "gitlab-blob",
+                "https://user:password@gitlab.example.invalid/group/repository",
+            ),
+            (
+                "azure_devops",
+                "azure-devops-item",
+                "https://dev.azure.com/organization/project/_git",
+            ),
+            (
+                "azure_devops",
+                "azure-devops-item",
+                (
+                    "https://dev.azure.com/organization/project/_git/repository"
+                    "?path=/file.md"
+                ),
+            ),
+            (
+                "azure_devops",
+                "azure-devops-item",
+                (
+                    "https://dev.azure.com/organization/project/_git/repository"
+                    "#fragment"
+                ),
+            ),
+        )
+        for provider, strategy, repository_url in invalid:
+            with self.subTest(
+                provider=provider,
+                repository_url=repository_url,
+            ):
+                with self.assertRaises(source_links.SourceLinkError):
+                    self.save(
+                        sidecar(
+                            link(
+                                provider=provider,
+                                strategy=strategy,
+                                settings={
+                                    "repository_url": repository_url,
+                                    "ref": "main",
+                                    "permalink_enabled": False,
+                                },
+                            )
+                        )
+                    )
+
+    def test_moved_database_keeps_gitlab_source_links_portable(self) -> None:
+        self.save(
+            sidecar(
+                link(
+                    provider="gitlab",
+                    strategy="gitlab-blob",
+                    settings={
+                        "repository_url": (
+                            "https://gitlab.example.invalid/group/repository"
+                        ),
+                        "ref": "main",
+                        "permalink_enabled": False,
+                    },
+                )
+            )
+        )
+        moved = Path(self.temporary.name) / "moved-rag"
+        shutil.copytree(self.db_root, moved)
+        item = source_links.enrich_search_payload(
+            search_payload("Root/a.txt"),
+            moved,
+            "moved-rag",
+        )["evidence"][0]
+        self.assertEqual(
+            "https://gitlab.example.invalid/group/repository"
+            "/-/blob/main/a.txt",
+            item["source_url"],
+        )
+
+    def test_moved_database_keeps_azure_and_svn_http_links_portable(
+        self,
+    ) -> None:
+        cases = (
+            (
+                link(
+                    provider="azure_devops",
+                    strategy="azure-devops-item",
+                    settings={
+                        "repository_url": (
+                            "https://dev.azure.com/organization/project/"
+                            "_git/repository"
+                        ),
+                        "ref": "main",
+                        "permalink_enabled": False,
+                    },
+                ),
+                (
+                    "https://dev.azure.com/organization/project/"
+                    "_git/repository?path=/a.txt&version=GBmain"
+                ),
+            ),
+            (
+                link(
+                    provider="svn",
+                    strategy="svn-http",
+                    settings={
+                        "repository_url": (
+                            "https://svn.example.invalid/repos/project/trunk"
+                        ),
+                        "permalink_enabled": False,
+                    },
+                ),
+                "https://svn.example.invalid/repos/project/trunk/a.txt",
+            ),
+        )
+        for index, (source, expected_url) in enumerate(cases):
+            with self.subTest(provider=source["provider"]):
+                self.save(sidecar(source))
+                moved = Path(self.temporary.name) / f"moved-{index}-rag"
+                shutil.copytree(self.db_root, moved)
+                item = source_links.enrich_search_payload(
+                    search_payload("Root/a.txt"),
+                    moved,
+                    f"moved-{index}-rag",
+                )["evidence"][0]
+                self.assertEqual(expected_url, item["source_url"])
+
+    def test_svn_http_generates_file_and_revision_links(self) -> None:
+        self.set_paths(
+            {"source-a": ["Root/日本語 空白 @ # % + (final).md"]}
+        )
+        saved = self.save(
+            sidecar(
+                link(
+                    provider="svn",
+                    strategy="svn-http",
+                    settings={
+                        "repository_url": (
+                            "https://svn.example.invalid/repos/project/trunk/"
+                        ),
+                        "repository_path_prefix": r"docs\ja",
+                        "permalink_enabled": True,
+                        "revision": "1234",
+                    },
+                )
+            )
+        )
+        self.assertEqual(
+            1234,
+            saved["sources"][0]["settings"]["revision"],
+        )
+        item = source_links.enrich_search_payload(
+            search_payload("Root/日本語 空白 @ # % + (final).md"),
+            self.db_root,
+            "example-rag",
+        )["evidence"][0]
+        self.assertEqual(
+            "https://svn.example.invalid/repos/project/trunk/docs/ja/"
+            "%E6%97%A5%E6%9C%AC%E8%AA%9E%20%E7%A9%BA%E7%99%BD"
+            "%20%40%20%23%20%25%20%2B%20%28final%29.md",
+            item["source_url"],
+        )
+        self.assertEqual(
+            item["source_url"] + "?p=1234&r=1234",
+            item["source_permalink"],
+        )
+
+    def test_svn_revision_validation_is_strict(self) -> None:
+        invalid_revisions = (0, -1, 1.5, True, False, "0", "-1", "HEAD")
+        for revision in invalid_revisions:
+            with self.subTest(revision=revision):
+                with self.assertRaises(source_links.SourceLinkError):
+                    self.save(
+                        sidecar(
+                            link(
+                                provider="svn",
+                                strategy="svn-http",
+                                settings={
+                                    "repository_url": (
+                                        "https://svn.example.invalid/"
+                                        "repos/project/trunk"
+                                    ),
+                                    "permalink_enabled": True,
+                                    "revision": revision,
+                                },
+                            )
+                            )
+                        )
+
+    def test_svn_saved_revision_is_ignored_when_permalink_is_disabled(
+        self,
+    ) -> None:
+        saved = self.save(
+            sidecar(
+                link(
+                    provider="svn",
+                    strategy="svn-http",
+                    settings={
+                        "repository_url": (
+                            "https://svn.example.invalid/repos/project/trunk"
+                        ),
+                        "permalink_enabled": False,
+                        "revision": 1234,
+                    },
+                )
+            )
+        )
+        self.assertEqual(
+            1234,
+            saved["sources"][0]["settings"]["revision"],
+        )
+        item = source_links.enrich_search_payload(
+            search_payload("Root/a.txt"),
+            self.db_root,
+            "example-rag",
+        )["evidence"][0]
+        self.assertEqual(
+            "https://svn.example.invalid/repos/project/trunk/a.txt",
+            item["source_url"],
+        )
+        self.assertNotIn("source_permalink", item)
+
+    def test_svn_http_rejects_unsafe_roots_and_prefixes(self) -> None:
+        invalid_values = (
+            (
+                "https://svn.example.invalid/repos/project?view=1",
+                "docs",
+            ),
+            (
+                "https://svn.example.invalid/repos/project#fragment",
+                "docs",
+            ),
+            (
+                "https://user:password@svn.example.invalid/repos/project",
+                "docs",
+            ),
+            (
+                "svn://svn.example.invalid/repos/project",
+                "docs",
+            ),
+            (
+                "https://svn.example.invalid/repos/project",
+                "../outside",
+            ),
+            (
+                "https://svn.example.invalid/repos/project",
+                r"C:\outside",
+            ),
+            (
+                "https://svn.example.invalid/repos/project",
+                r"\\server\share",
+            ),
+        )
+        for repository_url, prefix in invalid_values:
+            with self.subTest(
+                repository_url=repository_url,
+                prefix=prefix,
+            ):
+                with self.assertRaises(source_links.SourceLinkError):
+                    self.save(
+                        sidecar(
+                            link(
+                                provider="svn",
+                                strategy="svn-http",
+                                settings={
+                                    "repository_url": repository_url,
+                                    "repository_path_prefix": prefix,
+                                    "permalink_enabled": False,
+                                },
+                            )
+                        )
+                    )
+
+    def test_svn_web_root_is_preserved_for_every_file(self) -> None:
+        top_url = (
+            "https://svn-web.example.invalid/project/"
+            "?view=summary&path=%2Fdocs#files"
+        )
+        self.set_paths(
+            {
+                "source-a": [
+                    "Root-A/one.md",
+                    "Root-B/two.md",
+                ]
+            }
+        )
+        self.save(
+            sidecar(
+                link(
+                    provider="svn",
+                    strategy="svn-web-root",
+                    settings={"repository_url": top_url},
+                )
+            )
+        )
+        loaded = source_links.load_source_links(
+            self.db_root,
+            "example-rag",
+        )
+        assert loaded.payload is not None
+        self.assertEqual(
+            "svn-web-root",
+            loaded.payload["sources"][0]["strategy"],
+        )
+        for stored_path in ("Root-A/one.md", "Root-B/two.md"):
+            with self.subTest(stored_path=stored_path):
+                item = source_links.enrich_search_payload(
+                    search_payload(stored_path),
+                    self.db_root,
+                    "example-rag",
+                )["evidence"][0]
+                self.assertEqual(top_url, item["source_url"])
+                self.assertNotIn("source_permalink", item)
+                self.assertNotIn("one.md", item["source_url"])
+                self.assertNotIn("two.md", item["source_url"])
+                self.assertNotIn("&r=", item["source_url"])
+        self.set_paths({"source-b": ["Other/only.md"]})
+        no_root_item = source_links.enrich_search_payload(
+            search_payload("Unobserved/file.md"),
+            self.db_root,
+            "example-rag",
+        )["evidence"][0]
+        self.assertEqual(top_url, no_root_item["source_url"])
+
+    def test_svn_web_root_preserves_query_fragment_and_trailing_slash(
+        self,
+    ) -> None:
+        urls = (
+            "https://svn-web.example.invalid/project/?view=summary",
+            "https://svn-web.example.invalid/project/#files",
+            (
+                "https://svn-web.example.invalid/project/"
+                "?view=summary#files"
+            ),
+        )
+        for repository_url in urls:
+            with self.subTest(repository_url=repository_url):
+                saved = self.save(
+                    sidecar(
+                        link(
+                            provider="svn",
+                            strategy="svn-web-root",
+                            settings={"repository_url": repository_url},
+                        )
+                    )
+                )
+                self.assertEqual(
+                    repository_url,
+                    saved["sources"][0]["settings"]["repository_url"],
+                )
+                item = source_links.enrich_search_payload(
+                    search_payload("Root/a.txt"),
+                    self.db_root,
+                    "example-rag",
+                )["evidence"][0]
+                self.assertEqual(repository_url, item["source_url"])
+
+    def test_svn_web_root_rejects_credentials_and_non_http(self) -> None:
+        invalid_urls = (
+            "https://user:password@svn-web.example.invalid/project",
+            (
+                "https://user%3Apassword%40svn-web.example.invalid/"
+                "project"
+            ),
+            "svn://svn.example.invalid/repos/project",
+            "svn+ssh://svn.example.invalid/repos/project",
+            "file:///repos/project",
+            "https://svn-web.example.invalid/project%0d%0aInjected",
+        )
+        for repository_url in invalid_urls:
+            with self.subTest(repository_url=repository_url):
+                with self.assertRaises(source_links.SourceLinkError):
+                    self.save(
+                        sidecar(
+                            link(
+                                provider="svn",
+                                strategy="svn-web-root",
+                                settings={"repository_url": repository_url},
+                            )
+                        )
+                    )
+
+    def test_moved_database_keeps_svn_web_root_portable(self) -> None:
+        top_url = "https://svn-web.example.invalid/project/?view=summary#files"
+        self.save(
+            sidecar(
+                link(
+                    provider="svn",
+                    strategy="svn-web-root",
+                    settings={"repository_url": top_url},
+                )
+            )
+        )
+        moved = Path(self.temporary.name) / "moved-svn-rag"
+        shutil.copytree(self.db_root, moved)
+        item = source_links.enrich_search_payload(
+            search_payload("Root/a.txt"),
+            moved,
+            "moved-svn-rag",
+        )["evidence"][0]
+        self.assertEqual(top_url, item["source_url"])
 
     def test_home_only_never_exposes_home_url(self) -> None:
         self.save(

@@ -215,7 +215,8 @@ Source画面からSourceを作成・削除・改名することはできませ�
 <db-root>/source-links.json.bak
 ```
 
-SharePoint、GitHub、Redmine、一般WebのHTTP(S)リンクに対応します。
+SharePoint、GitHub／GitHub Enterprise、GitLab.com／セルフホストGitLab、
+Azure DevOps Repos、Subversion、Redmine、一般WebのHTTP(S)リンクに対応します。
 1 Sourceは1 Provider・1設定です。現在有効なcatalog文書からSourceごとの
 先頭stored rootを自動導出し、そのroot componentを1回だけ除いた
 Source-relative pathからURLを生成します。Source Link用の人間入力prefix、
@@ -224,10 +225,18 @@ Source-relative pathからURLを生成します。Source Link用の人間入力p
 一致する場合だけread互換を提供します。0件は未設定、複数mapping・root不一致・
 rootなし・複数rootはpath-onlyへfail-openします。明示保存時だけv2へ移行し、
 以前のprimaryをbackupへ残します。
-GitHubのrepository/refは人が入力します。SharePointは文書library/folderの
-基準URLだけを入力し、ファイル直接リンク方式を自動適用します。別のHome URLや
-方式選択はありません。`.git`の検査、Gitコマンド、Microsoft Graphによる
-自動検出は行いません。
+GitリポジトリはManagerでGitHub、GitLab、Azure DevOpsからサービスを選び、
+repository URLとrefを人が入力します。GitHub EnterpriseとセルフホストGitLabも
+同じ選択肢で扱います。Source LinkはWeb上のファイルURLを生成するだけで、
+clone、APIアクセス、認証処理は行いません。非公開リポジトリはブラウザ側で
+ログインしてください。SharePointは文書library/folderの基準URLだけを入力し、
+ファイル直接リンク方式を自動適用します。別のHome URLや方式選択はありません。
+`.git`の検査、Gitコマンド、Microsoft Graphによる自動検出は行いません。
+Subversionは、Apache HTTP(S)／mod_dav_svn互換のファイル直リンク、または
+VisualSVN、ViewVC、WebSVN、Trac等のトップページリンクを明示選択できます。
+製品固有画面のファイルURLは推測しません。checkout、update、SVNコマンド、
+APIアクセス、認証、revision自動取得も行いません。固定revisionを設定する場合、
+混在revisionの作業コピーでは各ファイルの実際の版と一致しないことがあります。
 sidecarがないDBは従来どおりpath-onlyで動作します。設定不備も検索失敗には
 せずpath-onlyへ戻り、検索順位・根拠性・`doc_id`・`chunk_uid`は変わりません。
 リンク設定だけでDBや索引を再構築する必要はありません。
@@ -255,7 +264,7 @@ sidecarがないDBは従来どおりpath-onlyで動作します。設定不備�
 | 中断した構築を再開 | `project-ragの前回の構築を再開して。` |
 | SQLite検索を更新 | `project-ragのSQLite検索インデックスだけ再構築して。` |
 
-DB名は用途が分かる英数字名とし、原則として`-rag`で終わらせます。`source-id`は入力資料の出所を識別する安定した名前です。同じ資料群を更新するときは同じ値を使用します。例として、SharePoint資料なら`sharepoint-docs`、Redmineなら`redmine-issues`、GitHubなら`github-repository`、一般のファイル群なら`filesystem-docs`のように指定できます。
+DB名は用途が分かる英数字名とし、原則として`-rag`で終わらせます。`source-id`は入力資料の出所を識別する安定した名前です。同じ資料群を更新するときは同じ値を使用します。例として、SharePoint資料なら`sharepoint-docs`、Redmineなら`redmine-issues`、GitHubなら`github-repository`、GitLabなら`gitlab-repository`、Azure DevOpsなら`azure-repository`、Subversionなら`svn-repository`、一般のファイル群なら`filesystem-docs`のように指定できます。
 
 入力ツリーの一部だけを対象にする場合も、`--root`には安定した上位
 ディレクトリを指定し、対象範囲を`--scan-subdir`で指定します。

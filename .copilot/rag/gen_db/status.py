@@ -15,6 +15,7 @@ sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
+from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
@@ -67,17 +68,23 @@ def main() -> None:
             "stored_path_prefix",
             "include_root_name_in_path",
             "source_id",
+            "batch_size_files",
         )
     }
     root = str(ingestion.get("root") or "")
     source_id = str(ingestion.get("source_id") or "")
     scan_subdir = str(ingestion.get("scan_subdir") or ".")
+    batch_size_files = int(
+        ingestion.get("batch_size_files")
+        or DEFAULT_INGESTION_BATCH_SIZE_FILES
+    )
     resume_command = _resume_command(
         db_name,
         operation,
         root,
         source_id,
         scan_subdir,
+        batch_size_files,
     )
     state_files = state.get("files") if isinstance(state, dict) else {}
     if not isinstance(state_files, dict):
@@ -107,6 +114,7 @@ def main() -> None:
         # contract truthful even before a run has written progress fields.
         "include_root_name_in_path": True,
         "source_id": source_id,
+        "batch_size_files": batch_size_files,
         "files_total": progress.get("files_total") or 0,
         "files_done": progress.get("files_done") or 0,
         "indexed_files": progress.get("indexed_files") or _count_state(state_files, "indexed"),
@@ -198,6 +206,7 @@ def _resume_command(
     root: str,
     source_id: str,
     scan_subdir: str = ".",
+    batch_size_files: int | None = None,
 ) -> list[str]:
     if not root or not source_id:
         return []
@@ -229,6 +238,8 @@ def _resume_command(
         ]
     if scan_subdir and scan_subdir != ".":
         command.extend(["--scan-subdir", scan_subdir])
+    if batch_size_files is not None:
+        command.extend(["--batch-size-files", str(batch_size_files)])
     return command
 
 
@@ -283,6 +294,7 @@ def _print_human(output: dict[str, Any]) -> None:
         + ("yes" if output["include_root_name_in_path"] else "no")
     )
     print(f"Source: {output['source_id']}")
+    print(f"Checkpoint batch:    {output['batch_size_files']} documents")
     print(
         "Files: "
         f"{output['files_done']}/{output['files_total']} "

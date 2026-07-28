@@ -11,9 +11,11 @@ TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 QUERY_ROOT = RAG_ROOT / "query"
 sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(QUERY_ROOT))
+sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
 from setup_contract import completion_contract_valid
+from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 
 
 def main() -> None:
@@ -29,7 +31,8 @@ def main() -> None:
         help=(
             "Stable ingestion Source ID. Keep each provider separate; "
             "generic examples: sharepoint-docs, redmine-issues, "
-            "github-repository, filesystem-docs."
+            "github-repository, gitlab-repository, azure-repository, "
+            "svn-repository, filesystem-docs."
         ),
     )
     parser.add_argument(
@@ -44,8 +47,23 @@ def main() -> None:
             "included in stored document paths."
         ),
     )
-    parser.add_argument("--batch-size-files", type=int, default=20)
-    parser.add_argument("--resume", action="store_true", help="Resume from logs/index_state.json when possible")
+    parser.add_argument(
+        "--batch-size-files",
+        type=int,
+        default=None,
+        help=(
+            "Documents committed per checkpoint (default: "
+            f"{DEFAULT_INGESTION_BATCH_SIZE_FILES}; resume reuses the saved value)"
+        ),
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume from logs/index_state.json and reuse the saved document "
+            "batch size"
+        ),
+    )
     parser.add_argument("--force-rebuild", action="store_true", help="Delete clean records and recreate the Chroma collection")
     parser.add_argument("--append", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
@@ -69,8 +87,6 @@ def main() -> None:
         "--source-id",
         args.source_id,
         "--include-root-name-in-path",
-        "--batch-size-files",
-        str(args.batch_size_files),
         "--operation",
         "build",
         "--chunk-max-chars",
@@ -78,6 +94,8 @@ def main() -> None:
         "--chunk-overlap",
         str(args.chunk_overlap),
     ]
+    if args.batch_size_files is not None:
+        cmd.extend(["--batch-size-files", str(args.batch_size_files)])
     if args.force_rebuild:
         cmd.extend(["--reset-db", "--reset-clean"])
     if args.scan_subdir is not None:

@@ -107,7 +107,8 @@ scan subdirectory: manuals/ja
 
 ## 9. Source Linkとは
 
-検索結果に元のGitHub、SharePoint、Redmine等を開くURLを付ける設定です。
+検索結果に元のGitHub、GitLab、Azure DevOps、SharePoint、Redmine等を
+開くURLを付ける設定です。
 検索順位、検索内容、回答可能性、DB内容には影響しません。URL生成に失敗した
 場合もRAG保存パスは表示されます。
 
@@ -121,13 +122,17 @@ scan subdirectory: manuals/ja
 - `no_observed_root`: 未検出。トップページのみ設定できます。
 - `multiple_observed_roots`: 複数検出。ProviderごとにSource IDを分けます。
 
-## 11. GitHub設定
+## 11. Gitリポジトリ設定
 
-Managerは`.git`を調査せず、Gitコマンドも実行しません。
+Managerでは「Gitリポジトリ」からGitHub、GitLab、Azure DevOpsを選択します。
+`.git`の調査、clone、Gitコマンド、APIアクセス、認証処理は行いません。
+非公開リポジトリは、生成URLを開いたブラウザでログインしてください。
+
+### GitHub／GitHub Enterprise
 
 ```text
 Repository URL:
-https://github.com/harilos/github-copilot-local-rag
+https://github.com/<owner>/<repository>
 
 Ref:
 main
@@ -136,38 +141,105 @@ GitHubリポジトリ内の追加パス:
 空欄
 
 Commit:
-666161c58fac1e0837ab39ce4f1b8b96943e9489
+0123456789abcdef0123456789abcdef01234567
 ```
 
 保存パス:
 
 ```text
-github-copilot-local-rag/.copilot/rag/query/search.py
+<root-name>/docs/manual.md
 ```
 
 自動検出保存ルート:
 
 ```text
-github-copilot-local-rag
+<root-name>
 ```
 
 Source相対パス:
 
 ```text
-.copilot/rag/query/search.py
+docs/manual.md
 ```
 
 通常URL:
 
 ```text
-https://github.com/harilos/github-copilot-local-rag/blob/main/.copilot/rag/query/search.py
+https://github.com/<owner>/<repository>/blob/main/docs/manual.md
 ```
 
 固定URL:
 
 ```text
-https://github.com/harilos/github-copilot-local-rag/blob/666161c58fac1e0837ab39ce4f1b8b96943e9489/.copilot/rag/query/search.py
+https://github.com/<owner>/<repository>/blob/0123456789abcdef0123456789abcdef01234567/docs/manual.md
 ```
+
+### GitLab.com／セルフホストGitLab
+
+グループやサブグループを含むプロジェクトトップURLを入力します。
+
+```text
+Repository URL:
+https://gitlab.com/<group>/<subgroup>/<repository>
+
+通常URL:
+https://gitlab.com/<group>/<subgroup>/<repository>/-/blob/main/docs/manual.md
+
+固定URL:
+https://gitlab.com/<group>/<subgroup>/<repository>/-/blob/<commit>/docs/manual.md
+```
+
+`/-/blob/`や`/-/tree/`以下の表示URLではなく、プロジェクトトップURLを
+入力します。セルフホストの場合もhostと既存base pathをそのまま維持します。
+
+### Azure DevOps Repos
+
+リポジトリルートURLを入力します。通常refはブランチ名として扱います。
+
+```text
+Repository URL:
+https://dev.azure.com/<organization>/<project>/_git/<repository>
+
+通常URL:
+https://dev.azure.com/<organization>/<project>/_git/<repository>?path=/docs/manual.md&version=GBmain
+
+固定URL:
+https://dev.azure.com/<organization>/<project>/_git/<repository>?path=/docs/manual.md&version=GC<commit>
+```
+
+`https://<organization>.visualstudio.com/<project>/_git/<repository>`形式も
+利用できます。queryやfragment付きのファイル表示URLは入力できません。
+
+### Subversion（SVN）
+
+SubversionはGitリポジトリとは別のProviderです。設定時にリンク形式を明示的に
+選び、自動判定は行いません。
+
+`Apache HTTP(S)互換（各ファイルを直接開く）`では、取り込んだローカルルートに
+対応するmod_dav_svnのURLを入力します。
+
+```text
+SVNリポジトリURL:
+https://svn.example.com/repos/<project>/trunk
+
+SVNリポジトリ内の追加パス:
+docs
+
+通常URL:
+https://svn.example.com/repos/<project>/trunk/docs/manual.md
+
+固定URL:
+https://svn.example.com/repos/<project>/trunk/docs/manual.md?p=1234&r=1234
+```
+
+固定リンクには1以上のrevision番号を使用します。checkout、update、API、
+認証、revision自動取得は行いません。混在revisionの作業コピーでは、1つの
+revisionで生成した固定リンクが各ファイルの実際の版と一致しない場合があります。
+
+`その他のSVN Web画面（トップページを開く）`では、VisualSVN、ViewVC、
+WebSVN、Trac等のトップURLだけを入力します。query、fragment、末尾の`/`を
+含めてそのまま保持し、すべての検索結果へ同じトップURLを付けます。製品固有の
+ファイルURL形式は推測せず、ファイル単位のリンクは保証しません。
 
 ## 12. SharePoint設定
 
@@ -223,7 +295,8 @@ named groupとtemplate placeholderは同じ名前にします。
 
 ## 15. Refとは
 
-RefはGitHub上で通常表示する版です。
+RefはGitHubまたはGitLab上で通常表示する版です。Azure DevOpsでは通常refを
+ブランチ名として扱います。
 
 - ブランチ: `main`、`develop`、`release/v2`
 - タグ: `v1.2.3`
@@ -231,9 +304,9 @@ RefはGitHub上で通常表示する版です。
 
 ブランチが更新されるとリンク先の表示内容も更新されます。
 
-## 16. GitHubリポジトリ内の追加パスとは
+## 16. Gitリポジトリ内の追加パスとは
 
-RAGのSource相対パスよりGitHub上の実ファイルが深い場合だけ指定します。
+RAGのSource相対パスよりGitサービス上の実ファイルが深い場合だけ指定します。
 
 ```text
 RAG上: manuals/setup.md

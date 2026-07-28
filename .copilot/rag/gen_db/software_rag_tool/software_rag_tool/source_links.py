@@ -44,7 +44,18 @@ MAX_PATTERN_LENGTH = 300
 LOCK_WAIT_SECONDS = 2.0
 WINDOWS_REPLACE_RETRY_SECONDS = 2.0
 
-_ALLOWED_PROVIDERS = {"sharepoint", "github", "redmine", "other"}
+_GIT_PROVIDER_STRATEGIES = {
+    "github": "github-blob",
+    "gitlab": "gitlab-blob",
+    "azure_devops": "azure-devops-item",
+}
+_ALLOWED_PROVIDERS = {
+    "sharepoint",
+    *_GIT_PROVIDER_STRATEGIES,
+    "svn",
+    "redmine",
+    "other",
+}
 _SENSITIVE_KEY_PARTS = (
     "access_token",
     "bearer",
@@ -549,7 +560,7 @@ def _validate_observed_root_contract(
         if (
             not isinstance(source, dict)
             or not source.get("provider")
-            or source.get("strategy") == "home-only"
+            or source.get("strategy") in {"home-only", "svn-web-root"}
             or (
                 known_sources is not None
                 and source_id not in known_sources
@@ -580,6 +591,7 @@ def resolve_mapping_preview(
     stored_paths: Iterable[str],
 ) -> list[dict[str, Any]]:
     normalized = validate_source_link(mapping)
+    root_independent = normalized["strategy"] == "svn-web-root"
     values = list(stored_paths)[:5]
     try:
         roots = observed_root_from_paths(values)
@@ -598,9 +610,13 @@ def resolve_mapping_preview(
                 else "unconfigured"
             )
         )
-        if normalized["enabled"] and len(roots) == 1:
+        if normalized["enabled"] and (len(roots) == 1 or root_independent):
             try:
-                relative = source_relative_path(path, roots[0])
+                relative = (
+                    path
+                    if root_independent
+                    else source_relative_path(path, roots[0])
+                )
                 resolved = _generate_provider_urls(normalized, relative)
             except (SourcePathError, SourceLinkError):
                 status = "resolution_failed"
@@ -710,11 +726,6 @@ def _resolve_from_payload(
         path = _normalize_stored_path(stored_path)
     except SourceLinkError:
         return {}, "resolution_failed"
-    roots = tuple(str(value) for value in observed_roots.get(source_id, ()))
-    if not roots:
-        return {}, "no_observed_root"
-    if len(roots) > 1:
-        return {}, "multiple_observed_roots"
     source = next(
         (
             item
@@ -731,6 +742,21 @@ def _resolve_from_payload(
         or not isinstance(source.get("settings"), dict)
     ):
         return {}, "unconfigured"
+    if source.get("strategy") == "svn-web-root":
+        try:
+            resolved = _generate_provider_urls(source, path)
+        except (SourcePathError, SourceLinkError, ValueError, KeyError):
+            return {}, "resolution_failed"
+        return (
+            (resolved, "resolved")
+            if resolved
+            else ({}, "unconfigured")
+        )
+    roots = tuple(str(value) for value in observed_roots.get(source_id, ()))
+    if not roots:
+        return {}, "no_observed_root"
+    if len(roots) > 1:
+        return {}, "multiple_observed_roots"
     try:
         relative = source_relative_path(path, roots[0])
         resolved = _generate_provider_urls(source, relative)
@@ -772,55 +798,14 @@ def _validate_provider_settings(
         # source_home_url was accepted by older sidecars. File links do not
         # use it, so canonical v2 saves deliberately omit it.
         return {"source_web_root": web_root}
-    if provider == "github":
-        if strategy != "github-blob":
-            raise SourceLinkError("unsupported GitHub strategy")
-        repository_url = _required_url(settings.get("repository_url"))
-        split = urlsplit(repository_url)
-        if split.query or split.fragment:
-            raise SourceLinkError("repository_url cannot contain query or fragment")
-        if any(
-            marker in split.path.casefold()
-            for marker in ("/blob/", "/tree/")
-        ):
-            raise SourceLinkError(
-                "repository_url must identify the repository root"
-            )
-        path = split.path.rstrip("/")
-        if path.endswith(".git"):
-            path = path[:-4]
-        repository_url = urlunsplit(
-            (split.scheme, split.netloc, path, "", "")
-        ).rstrip("/")
-        ref = _validate_git_ref(
-            _bounded_text(settings.get("ref"), "ref", 300)
+    if provider in _GIT_PROVIDER_STRATEGIES:
+        return _validate_git_repository_settings(
+            provider,
+            strategy,
+            settings,
         )
-        prefix = _normalize_optional_relative_path(
-            settings.get("repository_path_prefix")
-        )
-        commit = str(settings.get("commit") or "").strip()
-        if commit and not re.fullmatch(r"[0-9A-Fa-f]{40,64}", commit):
-            raise SourceLinkError(
-                "commit must be a full 40-64 character hexadecimal ID"
-            )
-        commit = commit.lower()
-        permalink_enabled = settings.get("permalink_enabled", False)
-        if not isinstance(permalink_enabled, bool):
-            raise SourceLinkError("permalink_enabled must be boolean")
-        if permalink_enabled and not commit:
-            raise SourceLinkError(
-                "commit is required when permalinks are enabled"
-            )
-        output = {
-            "repository_url": repository_url,
-            "ref": ref,
-            "permalink_enabled": permalink_enabled,
-        }
-        if prefix:
-            output["repository_path_prefix"] = prefix
-        if commit:
-            output["commit"] = commit
-        return output
+    if provider == "svn":
+        return _validate_svn_settings(strategy, settings)
     if strategy == "home-only":
         return {"source_home_url": _required_url(settings.get("source_home_url"))}
     if strategy == "append-relative-path":
@@ -869,6 +854,216 @@ def _validate_provider_settings(
     }
 
 
+def _validate_git_repository_settings(
+    provider: str,
+    strategy: str,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    expected_strategy = _GIT_PROVIDER_STRATEGIES[provider]
+    if strategy != expected_strategy:
+        raise SourceLinkError(
+            f"unsupported {_git_provider_name(provider)} strategy"
+        )
+    repository_url = _normalize_repository_url(
+        provider,
+        settings.get("repository_url"),
+    )
+    ref = _validate_git_ref(
+        _bounded_text(settings.get("ref"), "ref", 300)
+    )
+    prefix = _normalize_optional_relative_path(
+        settings.get("repository_path_prefix")
+    )
+    commit = str(settings.get("commit") or "").strip()
+    if commit and not re.fullmatch(r"[0-9A-Fa-f]{40,64}", commit):
+        raise SourceLinkError(
+            "commit must be a full 40-64 character hexadecimal ID"
+        )
+    commit = commit.lower()
+    permalink_enabled = settings.get("permalink_enabled", False)
+    if not isinstance(permalink_enabled, bool):
+        raise SourceLinkError("permalink_enabled must be boolean")
+    if permalink_enabled and not commit:
+        raise SourceLinkError(
+            "commit is required when permalinks are enabled"
+        )
+    output = {
+        "repository_url": repository_url,
+        "ref": ref,
+        "permalink_enabled": permalink_enabled,
+    }
+    if prefix:
+        output["repository_path_prefix"] = prefix
+    if commit:
+        output["commit"] = commit
+    return output
+
+
+def _validate_svn_settings(
+    strategy: str,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    if strategy == "svn-web-root":
+        # Product-specific browser URLs are intentionally opaque. Keep their
+        # query, fragment, path, encoding, and trailing slash exactly as given.
+        return {
+            "repository_url": _required_preserved_web_url(
+                settings.get("repository_url")
+            )
+        }
+    if strategy != "svn-http":
+        raise SourceLinkError("unsupported Subversion strategy")
+    repository_url = _required_root_url(settings.get("repository_url"))
+    prefix = _normalize_optional_relative_path(
+        settings.get("repository_path_prefix")
+    )
+    permalink_enabled = settings.get("permalink_enabled", False)
+    if not isinstance(permalink_enabled, bool):
+        raise SourceLinkError("permalink_enabled must be boolean")
+    revision = _normalize_svn_revision(settings.get("revision"))
+    if permalink_enabled and revision is None:
+        raise SourceLinkError(
+            "revision is required when SVN permalinks are enabled"
+        )
+    output: dict[str, Any] = {
+        "repository_url": repository_url,
+        "permalink_enabled": permalink_enabled,
+    }
+    if prefix:
+        output["repository_path_prefix"] = prefix
+    if revision is not None:
+        output["revision"] = revision
+    return output
+
+
+def _normalize_svn_revision(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise SourceLinkError("SVN revision must be a positive integer")
+    if isinstance(value, int):
+        revision = value
+    elif (
+        isinstance(value, str)
+        and len(value) <= 19
+        and re.fullmatch(r"[1-9][0-9]*", value)
+    ):
+        revision = int(value)
+    else:
+        raise SourceLinkError("SVN revision must be a positive integer")
+    if revision < 1 or revision > 9_223_372_036_854_775_807:
+        raise SourceLinkError("SVN revision must be a positive integer")
+    return revision
+
+
+def _normalize_repository_url(provider: str, value: Any) -> str:
+    repository_url = _required_url(value)
+    split = urlsplit(repository_url)
+    if split.query or split.fragment:
+        raise SourceLinkError(
+            "repository_url cannot contain query or fragment"
+        )
+    decoded_path = _fully_unquote(split.path)
+    lowered_path = decoded_path.casefold()
+    if provider == "github":
+        # Keep the established GitHub/GHE compatibility boundary unchanged.
+        invalid_markers = ("/blob/", "/tree/")
+    elif provider == "gitlab":
+        invalid_markers = (
+            "/-/blob/",
+            "/-/tree/",
+            "/-/raw/",
+            "/-/commit/",
+        )
+    else:
+        invalid_markers = ()
+    if any(marker in lowered_path for marker in invalid_markers):
+        raise SourceLinkError(
+            "repository_url must identify the repository root"
+        )
+    if provider == "gitlab" and (
+        "/-/" in lowered_path or lowered_path.rstrip("/").endswith("/-")
+    ):
+        raise SourceLinkError(
+            "repository_url must identify the repository root"
+        )
+
+    path = split.path.rstrip("/")
+    if provider in {"github", "gitlab"} and path.casefold().endswith(".git"):
+        path = path[:-4]
+    if provider == "gitlab":
+        project_components = [
+            component
+            for component in _fully_unquote(path).strip("/").split("/")
+            if component
+        ]
+        if len(project_components) < 2:
+            raise SourceLinkError(
+                "GitLab repository_url must include a namespace and project"
+            )
+    if provider == "azure_devops":
+        _validate_azure_devops_repository_root(split.hostname or "", path)
+    return urlunsplit(
+        (split.scheme, split.netloc, path, "", "")
+    ).rstrip("/")
+
+
+def _validate_azure_devops_repository_root(hostname: str, path: str) -> None:
+    host = hostname.casefold()
+    decoded_path = _fully_unquote(path)
+    components = [
+        component
+        for component in decoded_path.strip("/").split("/")
+        if component
+    ]
+    if host == "dev.azure.com":
+        valid = (
+            len(components) == 4
+            and components[2].casefold() == "_git"
+        )
+    elif host.endswith(".visualstudio.com") and host != ".visualstudio.com":
+        valid = (
+            (
+                len(components) == 3
+                and components[1].casefold() == "_git"
+            )
+            or (
+                len(components) == 4
+                and components[0].casefold() == "defaultcollection"
+                and components[2].casefold() == "_git"
+            )
+        )
+    else:
+        valid = False
+    if not valid:
+        raise SourceLinkError(
+            "Azure DevOps repository_url must identify a repository root"
+        )
+
+
+def _git_provider_name(provider: str) -> str:
+    return {
+        "github": "GitHub",
+        "gitlab": "GitLab",
+        "azure_devops": "Azure DevOps",
+    }.get(provider, "Git repository")
+
+
+def _azure_devops_item_url(
+    repository_url: str,
+    file_path: str,
+    *,
+    version_kind: str,
+    version: str,
+) -> str:
+    encoded_path = "/" + _encode_path(file_path)
+    encoded_version = quote(f"{version_kind}{version}", safe="")
+    return (
+        f"{repository_url}?path={encoded_path}"
+        f"&version={encoded_version}"
+    )
+
+
 def _generate_provider_urls(
     source_link: dict[str, Any],
     stored_path: str,
@@ -885,7 +1080,7 @@ def _generate_provider_urls(
             str(settings["source_web_root"]),
             path,
         )
-    elif provider == "github":
+    elif provider in _GIT_PROVIDER_STRATEGIES:
         repository = str(settings["repository_url"]).rstrip("/")
         repo_prefix = str(
             settings.get("repository_path_prefix") or ""
@@ -893,15 +1088,58 @@ def _generate_provider_urls(
         file_path = "/".join(
             value for value in (repo_prefix, path) if value
         )
-        output["source_url"] = (
-            f"{repository}/blob/{_encode_path(str(settings['ref']))}"
-            + (f"/{_encode_path(file_path)}" if file_path else "")
-        )
-        if settings.get("permalink_enabled") and settings.get("commit"):
-            output["source_permalink"] = (
-                f"{repository}/blob/{_encode_path(str(settings['commit']))}"
+        ref = str(settings["ref"])
+        if provider == "azure_devops":
+            output["source_url"] = _azure_devops_item_url(
+                repository,
+                file_path,
+                version_kind="GB",
+                version=ref,
+            )
+        else:
+            marker = "blob" if provider == "github" else "-/blob"
+            output["source_url"] = (
+                f"{repository}/{marker}/{_encode_path(ref)}"
                 + (f"/{_encode_path(file_path)}" if file_path else "")
             )
+        if settings.get("permalink_enabled") and settings.get("commit"):
+            commit = str(settings["commit"])
+            if provider == "azure_devops":
+                output["source_permalink"] = _azure_devops_item_url(
+                    repository,
+                    file_path,
+                    version_kind="GC",
+                    version=commit,
+                )
+            else:
+                marker = "blob" if provider == "github" else "-/blob"
+                output["source_permalink"] = (
+                    f"{repository}/{marker}/{_encode_path(commit)}"
+                    + (f"/{_encode_path(file_path)}" if file_path else "")
+                )
+    elif provider == "svn":
+        repository = str(settings["repository_url"])
+        if strategy == "svn-web-root":
+            output["source_url"] = repository
+        else:
+            repo_prefix = str(
+                settings.get("repository_path_prefix") or ""
+            ).strip("/")
+            file_path = "/".join(
+                value for value in (repo_prefix, path) if value
+            )
+            output["source_url"] = _append_encoded_path(
+                repository,
+                file_path,
+            )
+            if (
+                settings.get("permalink_enabled")
+                and settings.get("revision") is not None
+            ):
+                revision = int(settings["revision"])
+                output["source_permalink"] = (
+                    f"{output['source_url']}?p={revision}&r={revision}"
+                )
     elif strategy == "append-relative-path":
         output["source_url"] = _append_encoded_path(
             str(settings["source_web_root"]),
@@ -965,8 +1203,16 @@ def _required_url(value: Any) -> str:
         or split.username is not None
         or split.password is not None
         or any(char.isspace() for char in text)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", text)
     ):
         raise SourceLinkError("URL must be HTTP(S) without credentials")
+    decoded_text = _fully_unquote(text)
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for character in decoded_text
+    ):
+        raise SourceLinkError("URL must not contain control characters")
+    _reject_sensitive_credential_expressions(decoded_text)
     _reject_sensitive_url_path(split.path)
     for key, query_value in parse_qsl(
         split.query,
@@ -1156,6 +1402,11 @@ def _required_root_url(value: Any) -> str:
             "a per-document URL root cannot contain a query or fragment"
         )
     return text.rstrip("/")
+
+
+def _required_preserved_web_url(value: Any) -> str:
+    text = _required_url(value)
+    return text
 
 
 def _optional_url(value: Any) -> str:

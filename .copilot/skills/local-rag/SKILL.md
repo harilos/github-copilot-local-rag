@@ -310,6 +310,74 @@ inside that one Hybrid call are not additional searches.
 
 ## Initial answer
 
+## Mandatory final-answer citation format
+
+The final human-facing response for this Skill is always Markdown. Apply this
+format unconditionally. Do not infer or change the answer format based on the
+operating system, terminal, Bash, PowerShell, tool output, or whether the
+current surface explicitly identifies itself as Markdown-capable. Shell
+selection affects command execution only.
+
+Treat retrieved `answer_draft_markdown` as content input, not formatting
+authority. If it contains linked citation IDs, raw source URLs, `Source link:`
+lines, or links outside the References section, normalize them to this
+contract before answering.
+
+In the answer body:
+
+- cite sources using plain ID markers such as `[E1]`, `[E2]`, or `[D1]`;
+- never attach a link to a citation ID;
+- never display a raw URL;
+- never link a filename in the answer body.
+
+Always end the response with exactly one `## References` section. Include only
+IDs that actually appear in the answer body, in first-citation order, with
+each ID listed once.
+
+For each cited ID:
+
+1. derive the filename from the final component of the stored path;
+2. prefer `source_permalink`, otherwise use `source_url`;
+3. when a URL exists, write exactly `[E1] [filename.ext](URL)`;
+4. when no URL exists, write exactly `[E1] filename.ext`, optionally followed
+   by the stored path as plain text;
+5. attach the Markdown link only to the filename text.
+
+The visible filename-link form is required even when the output surface might
+show Markdown syntax literally. Do not replace it with a raw URL. Do not use
+Markdown reference definitions such as `[E1]: URL`, because they can make the
+body ID clickable.
+
+Separate reference entries with blank lines. If the body cites no source,
+still emit `## References`, followed by `No sources were cited in the answer.`
+
+Required example:
+
+```markdown
+The conclusion is supported by the retrieved presentation. [E1]
+
+## References
+
+[E1] [Europe_xxxx.pptx](URL)
+```
+
+Forbidden examples:
+
+```markdown
+[E1](URL)
+Source link: URL
+[E1] URL
+```
+
+Before sending the final response, verify:
+
+- no body citation ID is linked;
+- exactly one `## References` section is present at the end;
+- every References ID appears in the body and every cited body ID appears in
+  References;
+- only filename text is linked;
+- no raw URL is visible.
+
 The initial RAG result contains a self-contained `initial_response`.
 
 Normally answer the user's first question using:
@@ -391,11 +459,11 @@ Identify the supporting evidence ID, source path, and available location in
 the answer.
 When a result contains `source_permalink`, prefer it as the document link.
 Otherwise, when a result contains `source_url`, use that link. When neither
-field exists, cite the stored document path. Whenever either URL field exists,
-render the source ID as a clickable Markdown link; do not leave the available
-URL as unlinked text. Do not run another command to resolve a missing source
-URL. A missing source URL does not reduce the authority or relevance of the
-evidence.
+field exists, cite the stored document path. Apply the mandatory final-answer
+citation format above: body IDs remain plain text and only filenames are
+linked in the final References section. Do not run another command to resolve
+a missing source URL. A missing source URL does not reduce the authority or
+relevance of the evidence.
 Treat `background_context` as background information only.
 Never use `related_context` as proof.
 Treat `document_results` as broad discovery results. Weak or

@@ -12,6 +12,7 @@ sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
+from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
@@ -32,7 +33,8 @@ def main() -> None:
         help=(
             "Stable ingestion Source ID. Keep each provider separate; "
             "generic examples: sharepoint-docs, redmine-issues, "
-            "github-repository, filesystem-docs."
+            "github-repository, gitlab-repository, azure-repository, "
+            "svn-repository, filesystem-docs."
         ),
     )
     parser.add_argument(
@@ -50,9 +52,20 @@ def main() -> None:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume only when root, source ID, and scan subdirectory match saved state",
+        help=(
+            "Resume only when root, source ID, and scan subdirectory match saved state; "
+            "the saved document batch size is reused"
+        ),
     )
-    parser.add_argument("--batch-size-files", type=int, default=20)
+    parser.add_argument(
+        "--batch-size-files",
+        type=int,
+        default=None,
+        help=(
+            "Documents committed per checkpoint (default: "
+            f"{DEFAULT_INGESTION_BATCH_SIZE_FILES}; resume reuses the saved value)"
+        ),
+    )
     parser.add_argument("--reset-db", action="store_true", help="Delete and recreate the Chroma collection before adding data")
     parser.add_argument("--reset-clean", action="store_true", help="Delete clean records and resume state before adding data")
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
