@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -186,6 +188,108 @@ def read_profile_hint(db_root: Path, max_chars: int = 500) -> str:
         text = re.split(r"\n##\s+", text, maxsplit=1)[0]
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
     return " ".join(lines)[:max_chars]
+
+
+def update_db_metadata(
+    db_root: Path,
+    db_name: str,
+    *,
+    title: str,
+    query_hint: str,
+) -> dict[str, str]:
+    """Update presentation metadata without changing DB or index identity."""
+
+    name = require_db_name(db_name)
+    root = Path(db_root).resolve()
+    if root.name != name or not root.is_dir():
+        raise ValueError("DB root does not match DB name")
+    normalized_title = title.strip() or name
+    normalized_hint = query_hint.strip()
+    if "\n" in normalized_title or "\r" in normalized_title:
+        raise ValueError("DB title must be one line")
+    if len(normalized_title) > 200:
+        raise ValueError("DB title exceeds 200 characters")
+    if len(normalized_hint) > 2_000:
+        raise ValueError("DB query hint exceeds 2000 characters")
+
+    config_path = root / "db.json"
+    config = read_db_config(root)
+    if not config or str(config.get("db_name") or "") != name:
+        raise ValueError("DB configuration is missing or has a mismatched name")
+    config["title"] = normalized_title
+
+    profile_path = root / str(config.get("profile") or "DB_PROFILE.md")
+    if profile_path.parent.resolve() != root:
+        raise ValueError("DB profile path must be inside the DB root")
+    profile = (
+        profile_path.read_text(encoding="utf-8", errors="strict")
+        if profile_path.is_file()
+        else ""
+    )
+    updated_profile = _updated_profile_text(
+        profile,
+        title=normalized_title,
+        query_hint=normalized_hint,
+    )
+
+    _atomic_write_text(
+        config_path,
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+    )
+    _atomic_write_text(profile_path, updated_profile)
+    return {
+        "db_name": name,
+        "title": normalized_title,
+        "query_hint": normalized_hint,
+    }
+
+
+def _updated_profile_text(
+    text: str,
+    *,
+    title: str,
+    query_hint: str,
+) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].startswith("# "):
+        lines[0] = f"# {title}"
+        text = "\n".join(lines).rstrip() + "\n"
+    elif text.strip():
+        text = f"# {title}\n\n{text.lstrip()}"
+    else:
+        text = f"# {title}\n"
+
+    marker = "## Query Hint"
+    replacement = f"{marker}\n\n{query_hint}".rstrip() + "\n"
+    if marker not in text:
+        return text.rstrip() + "\n\n" + replacement
+    before, after = text.split(marker, 1)
+    next_section = re.search(r"(?m)^##\s+", after)
+    suffix = after[next_section.start() :] if next_section else ""
+    return before.rstrip() + "\n\n" + replacement + (
+        "\n" + suffix.lstrip() if suffix else ""
+    )
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _tool_hash() -> str:

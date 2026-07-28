@@ -120,6 +120,9 @@ RAG setup to recreate the virtual environment.
 Run the interactive manager when a person wants to inspect or maintain Local
 RAG without assembling command-line arguments:
 
+The selected-DB screen can update the human-facing title and Copilot database
+selection hint without changing the DB name, documents, or indexes.
+
 - [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja.md)
 - [Local RAG Manager 設定項目レビュー](docs/local-rag-manager-settings-review-ja.md)
 

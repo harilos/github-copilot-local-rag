@@ -178,6 +178,7 @@ class ManagerContractTests(unittest.TestCase):
                 "文書を追加・更新する",
                 "詳細状態を確認する",
                 "検索索引を修復する",
+                "DBの表示名・検索ヒントを変更する",
                 "このDBを削除する【危険】",
                 "戻る",
             ],
@@ -321,6 +322,70 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
         self.assertTrue(
             any("[エラー] DB名は" in value for value in self.output)
+        )
+
+    def test_database_display_name_and_query_hint_can_be_edited(
+        self,
+    ) -> None:
+        root = self.make_db()
+        (root / "db.json").write_text(
+            json.dumps(
+                {
+                    "db_name": "example-rag",
+                    "title": "Old title",
+                    "profile": "DB_PROFILE.md",
+                    "collection": "unchanged",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "DB_PROFILE.md").write_text(
+            "# Old title\n\n"
+            "## Query Hint\n\nOld hint\n\n"
+            "## Indexed Content\n\nPreserve this section.\n",
+            encoding="utf-8",
+        )
+        self.manager(
+            ["New title", "New selection hint", "y"]
+        )._edit_database_metadata("example-rag")
+        config = json.loads(
+            (root / "db.json").read_text(encoding="utf-8")
+        )
+        profile = (root / "DB_PROFILE.md").read_text(encoding="utf-8")
+        self.assertEqual("New title", config["title"])
+        self.assertEqual("unchanged", config["collection"])
+        self.assertIn("# New title", profile)
+        self.assertIn("New selection hint", profile)
+        self.assertIn("Preserve this section.", profile)
+        self.assertEqual([], self.runner.calls)
+        self.assertIn(
+            "[成功] DBの表示名と検索ヒントを保存しました。",
+            self.output,
+        )
+
+    def test_database_metadata_edit_cancel_preserves_files(self) -> None:
+        root = self.make_db()
+        config_path = root / "db.json"
+        profile_path = root / "DB_PROFILE.md"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "db_name": "example-rag",
+                    "title": "Original",
+                    "profile": "DB_PROFILE.md",
+                }
+            ),
+            encoding="utf-8",
+        )
+        profile_path.write_text(
+            "# Original\n\n## Query Hint\n\nOriginal hint\n",
+            encoding="utf-8",
+        )
+        before = (config_path.read_bytes(), profile_path.read_bytes())
+        self.manager([":q"])._edit_database_metadata("example-rag")
+        self.assertEqual(
+            before,
+            (config_path.read_bytes(), profile_path.read_bytes()),
         )
 
     def test_resume_reconstructs_allowlisted_argv(self) -> None:

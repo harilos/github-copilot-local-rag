@@ -36,7 +36,8 @@ DATABASE_MENU = (
     ("4", "文書を追加・更新する"),
     ("5", "詳細状態を確認する"),
     ("6", "検索索引を修復する"),
-    ("7", "このDBを削除する【危険】"),
+    ("7", "DBの表示名・検索ヒントを変更する"),
+    ("8", "このDBを削除する【危険】"),
     ("0", "戻る"),
 )
 SOURCE_MENU = (
@@ -474,13 +475,16 @@ class LocalRagManager:
             elif choice == "6":
                 self._repair_index(db_name)
             elif choice == "7":
+                self._edit_database_metadata(db_name)
+            elif choice == "8":
                 if self._delete_database_interactive(db_name):
                     return
             else:
-                self._invalid_selection("0～7")
+                self._invalid_selection("0～8")
 
     def _show_database_overview(self, db_name: str) -> None:
         status = self._status_json(db_name) or {}
+        metadata = self._read_database_metadata(db_name)
         inventory = self._load_source_inventory(db_name)
         sources = self._inventory_sources(inventory) if inventory is not None else []
         documents = status.get("document_count")
@@ -518,6 +522,10 @@ class LocalRagManager:
         except Exception:
             sidecar_status = "invalid"
         overview_state = status.get("status")
+        self.output(f"表示名: {metadata['title']}")
+        self.output(
+            f"検索ヒント: {metadata['query_hint'] or '未設定'}"
+        )
         self.output(f"状態: {self._status_label(overview_state)}")
         self.output(f"文書数: {int(documents or 0):,}")
         self.output(f"チャンク数: {int(chunks or 0):,}")
@@ -784,6 +792,70 @@ class LocalRagManager:
         )
         if result is not None and int(result.returncode) == 0:
             self._print_success(f"DB「{name}」を作成しました。")
+
+    def _edit_database_metadata(self, db_name: str) -> None:
+        if not self._guard_valid_database_target(db_name):
+            return
+        self._print_screen_header(
+            "DBの表示名・検索ヒントを変更",
+            db_name=db_name,
+        )
+        self.output(
+            "DB名、文書、索引、検索順位は変更しません。\n"
+            "表示名は人間向け、検索ヒントはCopilotがDBを選ぶ際の説明です。"
+        )
+        current = self._read_database_metadata(db_name)
+        title = self._prompt_preserving_value(
+            "表示名",
+            current["title"],
+            required=False,
+            description="DB一覧で人間が識別しやすい名前です。",
+            examples=("製品A 設計・運用資料",),
+            empty_help="DB名を表示名として利用",
+        )
+        if title is None:
+            self._print_info("DB情報の変更をキャンセルしました。")
+            return
+        query_hint = self._prompt_preserving_value(
+            "検索ヒント",
+            current["query_hint"],
+            required=False,
+            description=(
+                "Copilotが複数のDBから選ぶときに使う短い説明です。"
+                "文書本文や検索索引には入りません。"
+            ),
+            examples=("製品Aの設計、障害、運用手順を収録",),
+            empty_help="検索ヒントなし",
+        )
+        if query_hint is None:
+            self._print_info("DB情報の変更をキャンセルしました。")
+            return
+        normalized_title = title.strip() or db_name
+        normalized_hint = query_hint.strip()
+        self.output("\n変更内容")
+        self.output(f"  DB名（変更不可）: {db_name}")
+        self.output(f"  表示名: {current['title']} → {normalized_title}")
+        self.output(
+            "  検索ヒント: "
+            f"{current['query_hint'] or '未設定'} → "
+            f"{normalized_hint or '未設定'}"
+        )
+        if not self._confirm("この内容で保存しますか？"):
+            self._print_info("DB情報の変更をキャンセルしました。")
+            return
+        try:
+            self._import_dbs().update_db_metadata(
+                self._database_root(db_name),
+                db_name,
+                title=normalized_title,
+                query_hint=normalized_hint,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self._print_error(
+                f"DB情報を保存できませんでした: {type(exc).__name__}: {exc}"
+            )
+            return
+        self._print_success("DBの表示名と検索ヒントを保存しました。")
 
     def _build_or_resume(self, db_name: str) -> None:
         if not self._guard_valid_database_target(db_name):
@@ -2631,6 +2703,33 @@ class LocalRagManager:
 
     def _database_root(self, db_name: str) -> Path:
         return self.dbs_root / db_name
+
+    def _read_database_metadata(self, db_name: str) -> dict[str, str]:
+        root = self._database_root(db_name)
+        try:
+            dbs = self._import_dbs()
+            config = dbs.read_db_config(root)
+            title = str(config.get("title") or db_name)
+            query_hint = str(dbs.read_profile_hint(root, max_chars=2_000))
+        except (OSError, ValueError, json.JSONDecodeError):
+            title = db_name
+            query_hint = ""
+        return {
+            "title": title,
+            "query_hint": query_hint,
+        }
+
+    def _import_dbs(self) -> Any:
+        candidates = (
+            self.rag_root / "gen_db" / "software_rag_tool",
+            TOOL_ROOT,
+        )
+        for tool_root in candidates:
+            if tool_root.is_dir() and str(tool_root) not in sys.path:
+                sys.path.insert(0, str(tool_root))
+        from software_rag_tool import dbs
+
+        return dbs
 
     def _import_source_inventory(self) -> Any:
         tool_root = self.rag_root / "gen_db" / "software_rag_tool"
