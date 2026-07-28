@@ -56,7 +56,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("Run `list_dbs.py --format json` exactly once.", text)
         self.assertIn(
-            "Pass the user's complete original question as the final argument",
+            "Pass the user's complete semantic question",
             text,
         )
         self.assertIn("## One-command decision", text)
@@ -83,11 +83,11 @@ class LightweightRoutingContractTests(unittest.TestCase):
             self.assertIn("human-only", text)
             self.assertRegex(text, r"Local\s+RAG Manager")
         self.assertIn(
-            "including wrapper text before a colon",
+            "Exclude only lookup-routing wording",
             router,
         )
         self.assertIn(
-            "latest human-authored visible prompt",
+            "latest human-authored semantic question",
             lookup,
         )
         for excluded in (
@@ -113,7 +113,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
             lookup,
         )
         self.assertIn(
-            "explicitly overrides the executed-lookup verbatim rule",
+            "explicitly overrides the executed-lookup semantic-question",
             lookup,
         )
         self.assertIn("exactly one code block", lookup)
@@ -137,7 +137,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
         ):
             self.assertIn(f"- `{option}`", text)
         self.assertIn(
-            "character-for-character copy of the latest human-authored",
+            "remaining latest human-authored semantic question must be preserved",
             text,
         )
         self.assertIn("previous assistant answer", text)

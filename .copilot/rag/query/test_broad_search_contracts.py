@@ -24,6 +24,7 @@ from software_rag_tool.search_request import (  # noqa: E402
     normalize_search_request,
     request_from_cli,
     request_to_cli_arguments,
+    semantic_question_from_prompt,
 )
 
 
@@ -91,6 +92,25 @@ class DiscoveryStore:
 
 
 class StructuredRequestTests(unittest.TestCase):
+    def test_lookup_wrapper_is_not_part_of_semantic_question(self) -> None:
+        self.assertEqual(
+            "ORBIT-7の目的は？",
+            semantic_question_from_prompt(
+                "RAGから探してください：ORBIT-7の目的は？"
+            ),
+        )
+        request = normalize_search_request(
+            {
+                "original_question": (
+                    "ローカル資料から調べて、ORBIT-7の目的は？"
+                )
+            }
+        )
+        self.assertEqual(
+            "ORBIT-7の目的は？",
+            request["original_question"],
+        )
+
     def test_answer_goal_changes_signal_and_facet_priority(self) -> None:
         payload = {
             "evidence": [

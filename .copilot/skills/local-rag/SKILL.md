@@ -43,19 +43,23 @@ database already named by the user.
 - Do not inspect RAG source code or implementation files.
 - Do not edit files, databases, indexes, or configuration.
 - Do not invoke Codex, another coding agent, or a subagent.
-- Do not rewrite, shorten, split, or expand the user's question.
+- Do not rewrite, shorten, split, or expand the semantic question. Remove only
+  an ordinary lookup wrapper such as "search the RAG for" or its equivalent.
 - Do not select a retrieval mode.
 - Do not issue a second search automatically.
 - Do not search another database after receiving a result.
 - Do not suggest that the user rewrite the question into search keywords.
 
-## Verbatim original-question gate for executed lookup
+## Semantic question gate for executed lookup
 
-When executing `search.py`, the final positional argument must be a
-character-for-character copy of the latest human-authored visible prompt.
-Keep its database name, RAG or local-document wording, instructions,
-punctuation, and every wrapper phrase. Do not extract only the text after a
-colon, only an embedded question, or only the apparent search keywords.
+When executing `search.py`, the final positional argument must contain the
+latest human-authored semantic question. Remove only lookup-routing wording
+such as "search the RAG", "look in local documents", equivalent wording in
+another language, or an explicit instruction to use the already selected
+database. Do not pass that
+system-facing wording as part of the question. Preserve the remaining
+question, identifiers, punctuation, and user constraints character for
+character. Do not reduce it to keywords or rewrite its meaning.
 This executed-lookup rule does not apply when the user asks only to display a
 static command without executing it; the static command-only contract below
 governs that case.
@@ -65,11 +69,10 @@ Copilot-generated runtime, session-limit, status, system-reminder, SQL-table,
 date/time, or other XML-like metadata blocks in the search question. These
 blocks were not authored by the human and are not part of the visible prompt.
 
-Immediately before invoking `search.py`, compare the final positional argument
-with the latest human-authored visible prompt after excluding only those
-Copilot-generated metadata blocks. If they differ, correct the argument before
-execution. Retrieval facets remain separate arguments and never replace or
-modify this verbatim positional argument.
+Immediately before invoking `search.py`, verify that the final positional
+argument contains the full semantic question after excluding only lookup
+routing wording and Copilot-generated metadata blocks. Retrieval facets remain
+separate arguments and never replace or modify that semantic question.
 
 ## Conversational context hints
 
@@ -87,8 +90,9 @@ Allowed context hints are limited to:
 - `--answer-goal`
 
 Do not append, prepend, quote, or otherwise merge an earlier message into the
-final positional question argument. That argument must remain a
-character-for-character copy of the latest human-authored visible prompt.
+final positional question argument. After removing lookup-routing wording,
+the remaining latest human-authored semantic question must be preserved
+character for character.
 
 Do not treat a previous assistant answer, an inferred acronym expansion, or
 an earlier RAG result as a verified fact. A speculative interpretation may be
@@ -110,10 +114,10 @@ request using the current agent's own reasoning. Do not call another model,
 coding agent, Codex subagent, or planner. Planning happens in the current turn
 and does not add another lookup.
 
-Preserve the complete user question verbatim as the final positional
-argument. Extract identifiers and names exactly as written, including case,
-digits, punctuation, hyphens, underscores, dots, slashes, and version
-notation.
+Preserve the complete semantic question as the final positional argument after
+removing only lookup-routing wording. Extract identifiers and names exactly as
+written, including case, digits, punctuation, hyphens, underscores, dots,
+slashes, and version notation.
 
 Create at most four retrieval facets:
 
@@ -168,7 +172,7 @@ On macOS or Linux:
   --compact-json \
   --result-delivery file \
   --format json \
-  "<complete-user-question>"
+  "<semantic-user-question>"
 ```
 
 On Windows PowerShell, use the call operator only to start the installed
@@ -190,7 +194,7 @@ executable directly:
   --answer-goal "evidence" `
   --literal-identifier "<literal identifier>" `
   --facet "<literal or semantic facet>" `
-  "<complete-user-question>"
+  "<semantic-user-question>"
 ```
 
 Do not use `cmd.exe /c`, `cmd /c`, `Start-Process`, a `.bat` or `.cmd`
@@ -202,9 +206,9 @@ The `search.py` tool call must contain only the direct Python invocation.
 Do not combine it with an assignment, semicolon, pipeline, `ConvertFrom-Json`,
 `Get-Content`, or any other command. After that process exits, read the
 returned `summary_file` in one separate, single-purpose file-read tool call.
-Pass the complete question as one directly quoted final argv token. Do not use
-a PowerShell here-string, shell variable, command substitution, environment
-variable, or another multiline text container for the question.
+Pass the complete semantic question as one directly quoted final argv token.
+Do not use a PowerShell here-string, shell variable, command substitution,
+environment variable, or another multiline text container for the question.
 
 In Git Bash on Windows, use the same Windows venv executable through a
 Git-Bash-compatible path. Do not switch to the POSIX `bin/python` layout:
@@ -216,7 +220,7 @@ Git-Bash-compatible path. Do not switch to the POSIX `bin/python` layout:
   --include-db-hint \
   --compact-json \
   --result-delivery file \
-  "<complete-user-question>"
+  "<semantic-user-question>"
 ```
 
 Normal lookup must use the persistent local daemon managed by `search.py`.
@@ -280,8 +284,8 @@ decision.
 
 After selecting a database:
 
-1. Pass the user's complete original question as the final argument to
-   `search.py` exactly once.
+1. Pass the user's complete semantic question, excluding only lookup-routing
+   wording, as the final argument to `search.py` exactly once.
 2. Use the default hybrid retrieval behavior.
 3. Do not specify `--retrieval-mode`.
 4. Do not retry after `ok`, `partial`, `no_hit`, or `error`. If the
@@ -290,8 +294,8 @@ After selecting a database:
 5. A new search is allowed only when the user explicitly requests additional
    investigation or provides a meaningful clarification.
 6. Use `--result-delivery file`. Read the returned `summary_file` exactly
-   once. Do not read `manifest.json` or any detail item for the initial answer.
-7. Treat `summary.json` as the complete initial-answer result. Do not run
+   once.
+7. Treat `summary.json` as the primary initial-answer result. Do not run
    `jq`, `grep`, `head`, `tail`, or another command to post-process it.
 
 When the user explicitly requests raw stdout JSON for diagnostics, use the
@@ -308,15 +312,22 @@ inside that one Hybrid call are not additional searches.
 
 The initial RAG result contains a self-contained `initial_response`.
 
-Answer the user's first question using only:
+Normally answer the user's first question using:
 
 - `initial_response.answer_draft_markdown`;
 - `initial_response.key_points`;
 - `initial_response.limitations`;
 - the source IDs and short evidence entries in `summary.json`.
 
-Do not read `manifest.json` or detailed item files for the initial answer.
-Do not add claims that are absent from the initial response.
+If the summary is insufficient and individual cached document text is
+materially useful, run `result_detail.py` exactly once for one to three IDs
+listed in `follow_up.available_item_ids`, then read the returned detail file
+once. This is allowed during the initial answer as well as a follow-up. It
+reads the existing result bundle and must never trigger another search. Do not
+read `manifest.json` or `items/*.json` directly.
+
+Do not add claims that are absent from the summary or the cached detail
+response.
 
 A lightweight model should normally be able to use
 `answer_draft_markdown` with only minor stylistic editing. Preserve every
@@ -364,25 +375,32 @@ available. Do not automatically repeat the search.
 
 Follow the returned status:
 
-- `ok`: Answer using only `evidence`.
+- `ok`: Answer from the returned summary and, when needed, cached detail.
 - `partial`: Answer only the supported portion and clearly state the limits.
 - `no_hit`: State that direct supporting evidence was not found. If
-  `document_results` is nonempty, present them as related research leads.
+  `document_results` is nonempty, still construct a clearly labelled
+  provisional answer from those related materials so the user can judge it.
 - `setup_required`: Tell the user that RAG setup is required.
 - `error`: Briefly report the error and stop. Do not retry automatically.
 
-Use only `evidence` for factual claims.
+Use `evidence` for verified factual claims. When verified evidence is empty,
+you may assemble a provisional answer from `document_results` and cached
+detail, including weak results, but explicitly label it as related-material
+based and possibly off-target. Do not present it as verified evidence.
 Identify the supporting evidence ID, source path, and available location in
 the answer.
 When a result contains `source_permalink`, prefer it as the document link.
 Otherwise, when a result contains `source_url`, use that link. When neither
-field exists, cite the stored document path. Do not run another command to
-resolve a missing source URL. A missing source URL does not reduce the
-authority or relevance of the evidence.
+field exists, cite the stored document path. Whenever either URL field exists,
+render the source ID as a clickable Markdown link; do not leave the available
+URL as unlinked text. Do not run another command to resolve a missing source
+URL. A missing source URL does not reduce the authority or relevance of the
+evidence.
 Treat `background_context` as background information only.
 Never use `related_context` as proof.
 Treat `document_results` as broad discovery results. Weak or
-non-authoritative cards are not proof.
+non-authoritative cards may inform a clearly labelled provisional answer, but
+they are not proof.
 Obey every item in `warnings`.
 Preserve source severity and uncertainty when translating. Do not strengthen
 labels: for example, render `Substantial` damage as "substantial damage"
@@ -404,8 +422,9 @@ When answering:
 If six or more document results are available, use at least three distinct
 sources in the answer and normally mention five or more when the user asks
 for related material. If direct evidence is empty but document results exist,
-say that direct evidence was not found, then present the broader results. Do
-not report that the entire RAG search found nothing.
+say that direct evidence was not found, then build the best provisional answer
+available from the broader results and let the user judge relevance. Do not
+report that the entire RAG search found nothing.
 
 ## Static command-only requests
 
@@ -422,4 +441,5 @@ When a static command request labels a separate `Lookup question`, copy only
 the text after that label into the final argument, character for character.
 Do not copy the surrounding command request, Skill-loading instruction, shell
 restrictions, or other meta instructions into the lookup question.
-This static rule explicitly overrides the executed-lookup verbatim rule above.
+This static rule explicitly overrides the executed-lookup semantic-question
+rule above.

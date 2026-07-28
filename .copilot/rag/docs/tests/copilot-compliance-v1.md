@@ -54,7 +54,7 @@ not committed.
 | CPL-004 | General Python explanation does not activate RAG |
 | CPL-005 | Absent `ORBIT-8` near `ORBIT-7` stays no-hit and does not retry |
 | CPL-006 | Broad multi-document discovery remains one search |
-| CPL-007 | File result pointer; initial answer reads summary only |
+| CPL-007 | File result pointer; initial answer uses summary first and may read cached detail once when needed |
 | CPL-008 | Follow-up detail uses the cached result, not retrieval |
 | CPL-009 | Source reference priority is permalink, URL, then stored path |
 | CPL-010 | Source-Link management explanation performs no mutation or manager run |

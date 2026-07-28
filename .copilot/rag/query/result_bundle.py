@@ -162,6 +162,8 @@ def build_initial_summary(
         result_set_id=result_set_id,
     )
     key_points = _extractive_answer_units(evidence)
+    if not key_points and documents:
+        key_points = _related_answer_units(documents)
     limitations = _limitations(
         payload,
         status=status,
@@ -174,6 +176,7 @@ def build_initial_summary(
         status=status,
         key_points=key_points,
         limitations=limitations,
+        evidence=evidence,
         documents=documents,
         japanese=japanese,
     )
@@ -193,7 +196,8 @@ def build_initial_summary(
             "key_points": key_points,
             "limitations": limitations,
             "response_rules": {
-                "use_only_this_summary": True,
+                "use_only_this_summary": False,
+                "cached_detail_lookup_allowed": True,
                 "do_not_add_unsupported_claims": True,
                 "do_not_infer_missing_table_headers": True,
                 "citation_style": "[E1]",
@@ -783,6 +787,40 @@ def _extractive_answer_units(
     return output
 
 
+def _related_answer_units(
+    documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    normalized_seen: set[str] = set()
+    for item in documents:
+        text = _complete_extract(
+            str(
+                item.get("preview")
+                or item.get("relationship")
+                or item.get("title")
+                or ""
+            ),
+            heading=str(item.get("section") or item.get("title") or ""),
+        )
+        if not text:
+            continue
+        normalized = re.sub(r"\W+", "", text).casefold()
+        if not normalized or normalized in normalized_seen:
+            continue
+        normalized_seen.add(normalized)
+        output.append(
+            {
+                "id": f"P{len(output) + 1}",
+                "text": text,
+                "support": "related",
+                "source_ids": [str(item["id"])],
+            }
+        )
+        if len(output) >= 4:
+            break
+    return output
+
+
 def _limitations(
     payload: dict[str, Any],
     *,
@@ -820,15 +858,39 @@ def _initial_answer_draft(
     status: str,
     key_points: list[dict[str, Any]],
     limitations: list[str],
+    evidence: list[dict[str, Any]],
     documents: list[dict[str, Any]],
     japanese: bool,
 ) -> str:
     lines: list[str] = []
+    references = {
+        str(item.get("id") or ""): item
+        for item in [*evidence, *documents]
+        if item.get("id")
+    }
     if key_points:
         lines.append("## 回答" if japanese else "## Answer")
+        related_only = all(
+            point.get("support") == "related" for point in key_points
+        )
+        if related_only:
+            lines.append(
+                "検証済みの直接根拠は見つかりませんでした。以下は関連資料から"
+                "組み立てた暫定回答です。内容の適合性は利用者が判断してください。"
+                if japanese
+                else (
+                    "Verified direct evidence was not found. The following is "
+                    "a provisional answer assembled from related documents; "
+                    "the user should judge its relevance."
+                )
+            )
         for point in key_points:
             sources = " ".join(
-                f"[{value}]" for value in point.get("source_ids") or []
+                _markdown_source_reference(
+                    str(value),
+                    references.get(str(value)),
+                )
+                for value in point.get("source_ids") or []
             )
             lines.append(f"- {point['text']} {sources}".rstrip())
     elif documents:
@@ -859,13 +921,17 @@ def _initial_answer_draft(
         lines.append("## 関連資料" if japanese else "## Related documents")
         for item in documents[:8]:
             label = item.get("title") or item.get("path") or item["id"]
+            reference = _markdown_source_reference(
+                str(item["id"]),
+                item,
+            )
             relationship = _shorten(
                 str(item.get("relationship") or ""),
                 100,
             )
             suffix = f" — {relationship}" if relationship else ""
             lines.append(
-                f"- [{item['id']}] {label} "
+                f"- {reference} {label} "
                 f"({item['support_level']}){suffix}"
             )
     return "\n".join(lines)
@@ -970,7 +1036,8 @@ def _expanded_answer_draft(
         item_id = str(item.get("item_id") or "")
         title = str(item.get("title") or item.get("path") or item_id)
         support = str(item.get("support_level") or "weak")
-        lines.append(f"## [{item_id}] {title}")
+        reference = _markdown_source_reference(item_id, item)
+        lines.append(f"## {reference} {title}")
         if support != "direct":
             lines.append(
                 "Related cached material; this is not authoritative proof."
@@ -997,6 +1064,25 @@ def _expanded_answer_draft(
             )
         lines.append("")
     return "\n".join(lines).strip()
+
+
+def _markdown_source_reference(
+    item_id: str,
+    item: dict[str, Any] | None,
+) -> str:
+    label = item_id.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    if not item:
+        return f"[{label}]"
+    url = str(item.get("source_permalink") or item.get("source_url") or "")
+    if not url:
+        return f"[{label}]"
+    safe_url = (
+        url.replace("\\", "%5C")
+        .replace(" ", "%20")
+        .replace("(", "%28")
+        .replace(")", "%29")
+    )
+    return f"[{label}]({safe_url})"
 
 
 def _complete_extract(text: str, *, heading: str) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from typing import Any
 
 
@@ -19,6 +20,48 @@ MAX_STRUCTURED_REQUEST_BYTES = 3_072
 
 class SearchRequestError(ValueError):
     pass
+
+
+_RETRIEVAL_DIRECTIVE_PREFIXES = (
+    re.compile(
+        r"^\s*(?:ローカル\s*)?(?:RAG|ラグ)"
+        r"(?:\s*(?:から|で|を))?\s*"
+        r"(?:探して|検索して|調べて)"
+        r"(?:ください|下さい|ほしい|欲しい)?"
+        r"\s*[、,:：。\-–—]*\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:ローカル資料|手元の資料|社内資料)"
+        r"(?:\s*(?:から|で|を))?\s*"
+        r"(?:探して|検索して|調べて)"
+        r"(?:ください|下さい|ほしい|欲しい)?"
+        r"\s*[、,:：。\-–—]*\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:search|find|look\s+up)\s+"
+        r"(?:in|from|using)\s+(?:the\s+)?(?:local\s+)?rag"
+        r"\s*(?:for)?\s*[:;,.\-–—]*\s*",
+        re.IGNORECASE,
+    ),
+)
+
+
+def semantic_question_from_prompt(question: str) -> str:
+    """Remove only an ordinary Local RAG invocation wrapper.
+
+    Retrieval hints stay separate from the semantic question. If a prompt is
+    only an invocation wrapper, retain it rather than producing an empty
+    question.
+    """
+
+    candidate = question
+    for pattern in _RETRIEVAL_DIRECTIVE_PREFIXES:
+        stripped = pattern.sub("", candidate, count=1)
+        if stripped != candidate:
+            return stripped if stripped.strip() else question
+    return question
 
 
 def add_search_request_arguments(parser: argparse.ArgumentParser) -> None:
@@ -184,6 +227,7 @@ def normalize_search_request(payload: dict[str, Any]) -> dict[str, Any]:
     question = payload.get("original_question")
     if not isinstance(question, str) or not question.strip():
         raise SearchRequestError("original_question is required")
+    question = semantic_question_from_prompt(question)
     answer_goal = str(payload.get("answer_goal") or "evidence").strip().lower()
     if answer_goal not in ANSWER_GOALS:
         raise SearchRequestError(

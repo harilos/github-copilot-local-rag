@@ -133,9 +133,14 @@ class ResultBundleContractTests(unittest.TestCase):
         draft = summary["initial_response"]["answer_draft_markdown"]
         self.assertIn("immutable result", draft)
         self.assertIn("[E1]", draft)
-        self.assertTrue(
+        self.assertFalse(
             summary["initial_response"]["response_rules"][
                 "use_only_this_summary"
+            ]
+        )
+        self.assertTrue(
+            summary["initial_response"]["response_rules"][
+                "cached_detail_lookup_allowed"
             ]
         )
 
@@ -148,7 +153,7 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertIn("## Answer", rendered)
         self.assertNotIn("manifest.json", rendered)
 
-    def test_factual_units_use_only_direct_evidence(self) -> None:
+    def test_direct_units_use_only_direct_evidence(self) -> None:
         summary = self.read_summary(self.publish())
         points = summary["initial_response"]["key_points"]
         self.assertEqual(["direct"], [point["support"] for point in points])
@@ -158,13 +163,61 @@ class ResultBundleContractTests(unittest.TestCase):
             " ".join(point["text"] for point in points).casefold(),
         )
 
+    def test_related_documents_build_a_labelled_provisional_answer(
+        self,
+    ) -> None:
+        payload = synthetic_payload()
+        payload["query"] = "関連する内容を教えて"
+        payload["status"] = "partial"
+        payload["answerability"] = "none"
+        payload["evidence"] = []
+        payload["document_results"] = [payload["document_results"][1]]
+        payload["document_results"][0]["source_url"] = (
+            "https://example.invalid/related/document"
+        )
+        summary = self.read_summary(self.publish(payload))
+        points = summary["initial_response"]["key_points"]
+        draft = summary["initial_response"]["answer_draft_markdown"]
+        self.assertEqual(["related"], [point["support"] for point in points])
+        self.assertIn("関連資料から組み立てた暫定回答", draft)
+        self.assertIn(
+            "[D1](https://example.invalid/related/document)",
+            draft,
+        )
+
+    def test_answer_draft_prefers_clickable_permalink(self) -> None:
+        payload = synthetic_payload()
+        payload["evidence"][0]["source_url"] = (
+            "https://example.invalid/current/document"
+        )
+        payload["evidence"][0]["source_permalink"] = (
+            "https://example.invalid/fixed/document"
+        )
+        draft = self.read_summary(
+            self.publish(payload)
+        )["initial_response"]["answer_draft_markdown"]
+        self.assertIn(
+            "[E1](https://example.invalid/fixed/document)",
+            draft,
+        )
+        self.assertNotIn(
+            "[E1](https://example.invalid/current/document)",
+            draft,
+        )
+
     def test_explicitly_non_authoritative_evidence_is_not_a_factual_unit(
         self,
     ) -> None:
         payload = synthetic_payload()
         payload["evidence"][0]["authoritative"] = False
         summary = self.read_summary(self.publish(payload))
-        self.assertEqual([], summary["initial_response"]["key_points"])
+        self.assertNotIn(
+            "direct",
+            [
+                point["support"]
+                for point in summary["initial_response"]["key_points"]
+            ],
+        )
         self.assertEqual([], summary["evidence"])
 
     def test_warnings_and_limitations_are_preserved(self) -> None:
@@ -184,7 +237,13 @@ class ResultBundleContractTests(unittest.TestCase):
             "table_headers_incomplete"
         ]
         summary = self.read_summary(self.publish(payload))
-        self.assertEqual([], summary["initial_response"]["key_points"])
+        self.assertNotIn(
+            "direct",
+            [
+                point["support"]
+                for point in summary["initial_response"]["key_points"]
+            ],
+        )
 
     def test_large_summary_preserves_links_evidence_and_documents(
         self,
@@ -326,6 +385,10 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertEqual(
             fixed_url,
             packet["expanded_items"][0]["source_permalink"],
+        )
+        self.assertIn(
+            f"[E1]({fixed_url})",
+            packet["answer_draft_markdown"],
         )
 
     def test_summary_never_truncates_a_valid_source_url(self) -> None:

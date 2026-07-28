@@ -9,9 +9,11 @@ lookup to Codex, a coding agent, or a subagent. The single bounded structured
 request defined by the `local-rag` skill is allowed and is not a separate
 lookup or delegated planning step.
 
-For an executed lookup, pass the entire latest human-authored visible prompt
-as the final `search.py` argument, including wrapper text before a colon.
-Never replace it with only an embedded question or extracted keywords.
+For an executed lookup, pass the full latest human-authored semantic question
+as the final `search.py` argument. Exclude only lookup-routing wording such as
+"search the RAG", equivalent system-facing wording in another language, or an
+instruction to use the already selected database. Preserve the remaining
+wording and never replace it with only keywords.
 
 When the user explicitly asks to answer from RAG, local documents, internal
 or company information, or information installed in or provided to Copilot:
