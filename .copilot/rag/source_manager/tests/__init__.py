@@ -1,0 +1,1 @@
+"""Source Manager contract tests."""

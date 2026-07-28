@@ -14,6 +14,7 @@ from .env import load_env
 from .paths import dbs_dir
 from .retrieval import adaptive_hybrid_query, cold_lexical_fast_path, hybrid_query
 from .search_request import normalize_search_request
+from .source_paths import SourcePathError, canonical_stored_path
 from .token_budget import conservative_token_count, truncate_to_token_limit
 from .tokenize import canonicalize, extract_anchors, identifier_match_keys
 
@@ -322,33 +323,112 @@ def _finalize_search_payload(
     db_name: str,
     explain: bool,
 ) -> dict[str, Any]:
-    """Attach optional source links without changing retrieval semantics."""
-    try:
-        from .source_links import enrich_search_payload
+    """Finalize the retrieval payload without consulting Source Metadata.
 
-        enriched = enrich_search_payload(
-            payload,
-            store.context.root,
-            db_name,
-            explain=explain,
-        )
-        payload.clear()
-        payload.update(enriched)
-    except Exception as exc:
-        # Source links are optional presentation metadata. A missing, stale,
-        # or malformed sidecar must never turn a successful local lookup into
-        # an error. Keep the lookup usable while making enrichment failures
-        # diagnosable without exposing configuration values or a traceback.
-        warnings = list(payload.get("warnings") or [])
-        if "source_link_enrichment_failed" not in warnings:
-            warnings.append("source_link_enrichment_failed")
-        payload["warnings"] = warnings
-        if explain:
-            payload["source_link_status"] = "resolution_failed"
-            payload["source_link_error"] = type(exc).__name__
-    finally:
-        _strip_private_source_ids(payload)
+    Browser URI generation belongs to the public wrapper one level above this
+    search engine.  Keeping this layer path-only makes retrieval independent
+    of the optional DB sidecar and prevents two independent URI resolvers from
+    producing different links.
+    """
+    _strip_source_uri_fields(payload)
+    _normalize_public_source_paths(payload)
+    _strip_private_source_ids(payload)
     return normalize_search_contract(payload)
+
+
+def _strip_source_uri_fields(payload: dict[str, Any]) -> None:
+    """Remove legacy presentation URI fields from every result projection."""
+    for key in (
+        "evidence",
+        "contexts",
+        "background_context",
+        "related_context",
+        "document_results",
+        "_result_detail_items",
+    ):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            for field in (
+                "uri",
+                "source_provider",
+                "source_url",
+                "source_permalink",
+                "source_link_status",
+                "source_link_error",
+            ):
+                item.pop(field, None)
+            source = item.get("source")
+            if isinstance(source, dict):
+                source.pop("uri", None)
+    for key in ("results", "background_results", "related_results"):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                for field in (
+                    "uri",
+                    "root",
+                    "resolved_root",
+                    "source_id",
+                    "source_type",
+                    "source_url",
+                    "source_permalink",
+                ):
+                    metadata.pop(field, None)
+
+
+def _normalize_public_source_paths(payload: dict[str, Any]) -> None:
+    """Expose only canonical DB-relative stored paths as source locations."""
+    invalid_path = False
+    for key in (
+        "evidence",
+        "contexts",
+        "background_context",
+        "related_context",
+        "_result_detail_items",
+    ):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source")
+            if isinstance(source, dict) and "path" in source:
+                normalized = _safe_public_stored_path(source.get("path"))
+                invalid_path = invalid_path or normalized is None
+                source["path"] = normalized or ""
+            elif "path" in item:
+                normalized = _safe_public_stored_path(item.get("path"))
+                invalid_path = invalid_path or normalized is None
+                item["path"] = normalized or ""
+    for item in payload.get("document_results") or []:
+        if not isinstance(item, dict) or "path" not in item:
+            continue
+        normalized = _safe_public_stored_path(item.get("path"))
+        invalid_path = invalid_path or normalized is None
+        item["path"] = normalized or ""
+    for key in ("results", "background_results", "related_results"):
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict) or "path" not in metadata:
+                continue
+            normalized = _safe_public_stored_path(metadata.get("path"))
+            invalid_path = invalid_path or normalized is None
+            metadata["path"] = normalized or ""
+    if invalid_path:
+        warnings = list(payload.get("warnings") or [])
+        if "unsafe_stored_path_omitted" not in warnings:
+            warnings.append("unsafe_stored_path_omitted")
+        payload["warnings"] = warnings
+
+
+def _safe_public_stored_path(value: object) -> str | None:
+    try:
+        return canonical_stored_path(value)
+    except SourcePathError:
+        return None
 
 
 def _strip_private_source_ids(payload: dict[str, Any]) -> None:
@@ -1707,11 +1787,7 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
 
 
 def _preferred_source_link(item: dict[str, Any]) -> str:
-    return str(
-        item.get("source_permalink")
-        or item.get("source_url")
-        or ""
-    )
+    return str(item.get("uri") or "")
 
 
 def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1886,7 +1962,7 @@ def _project_document_results(
                 result.get("relationship") or ""
             )[:220],
         }
-        _copy_projected_source_links(
+        _copy_projected_uri(
             result,
             item,
             explain=explain,
@@ -1925,10 +2001,7 @@ def _project_contexts(
             "matched_excerpt",
             "context_before",
             "context_after",
-            "source_provider",
-            "source_url",
-            "source_permalink",
-            "source_link_status",
+            "uri",
         ):
             overhead[key] = ""
         overhead_tokens = _conservative_token_count(
@@ -1969,10 +2042,7 @@ def _project_contexts(
             truncated = True
         budgeted_item = dict(item)
         for key in (
-            "source_provider",
-            "source_url",
-            "source_permalink",
-            "source_link_status",
+            "uri",
         ):
             budgeted_item.pop(key, None)
         used = _conservative_token_count(
@@ -2055,7 +2125,7 @@ def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any
     ):
         if context.get(key) not in (None, "", []):
             projected[key] = context[key]
-    _copy_projected_source_links(
+    _copy_projected_uri(
         context,
         projected,
         explain=explain,
@@ -2065,24 +2135,15 @@ def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any
     return projected
 
 
-def _copy_projected_source_links(
+def _copy_projected_uri(
     source: dict[str, Any],
     target: dict[str, Any],
     *,
     explain: bool,
 ) -> None:
-    for key in (
-        "source_provider",
-        "source_url",
-        "source_permalink",
-    ):
-        value = str(source.get(key) or "")
-        if value:
-            target[key] = value
-    if explain and source.get("source_link_status"):
-        target["source_link_status"] = str(
-            source["source_link_status"]
-        )[:120]
+    value = str(source.get("uri") or "")
+    if value:
+        target["uri"] = value
 
 
 def _conservative_token_count(text: str) -> int:

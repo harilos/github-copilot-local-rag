@@ -755,15 +755,9 @@ def _copy_source_link_fields(
     source: dict[str, Any],
     target: dict[str, Any],
 ) -> None:
-    for key in (
-        "source_provider",
-        "source_url",
-        "source_permalink",
-        "source_link_status",
-    ):
-        value = str(source.get(key) or "")
-        if value:
-            target[key] = value
+    value = str(source.get("uri") or "")
+    if value:
+        target["uri"] = value
 
 
 def _extractive_answer_units(
@@ -1002,10 +996,7 @@ def _expanded_item(
             "support_level",
             "context_reason",
             "warnings",
-            "source_provider",
-            "source_url",
-            "source_permalink",
-            "source_link_status",
+            "uri",
         )
     }
     if detail_level == "expanded":
@@ -1086,18 +1077,7 @@ def _markdown_source_reference(
     item: dict[str, Any] | None,
 ) -> str:
     label = item_id.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    if not item:
-        return f"[{label}]"
-    url = str(item.get("source_permalink") or item.get("source_url") or "")
-    if not url:
-        return f"[{label}]"
-    safe_url = (
-        url.replace("\\", "%5C")
-        .replace(" ", "%20")
-        .replace("(", "%28")
-        .replace(")", "%29")
-    )
-    return f"[{label}]({safe_url})"
+    return f"[{label}]"
 
 
 def _complete_extract(text: str, *, heading: str) -> str:

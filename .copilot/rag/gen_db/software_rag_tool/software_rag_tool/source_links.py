@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import errno
 import hashlib
 import json
 import os
@@ -42,7 +41,6 @@ MAX_SOURCES = 500
 MAX_URL_LENGTH = 4_096
 MAX_PATH_LENGTH = 2_048
 MAX_PATTERN_LENGTH = 300
-LOCK_WAIT_SECONDS = 2.0
 WINDOWS_REPLACE_RETRY_SECONDS = 2.0
 
 _GIT_PROVIDER_STRATEGIES = {
@@ -115,6 +113,10 @@ class SourceLinkError(ValueError):
     pass
 
 
+class LegacySourceManualRequired(SourceLinkError):
+    pass
+
+
 @dataclass(frozen=True)
 class SourceLinksLoad:
     status: str
@@ -127,11 +129,6 @@ class SourceLinksLoad:
     loaded_schema_version: str = ""
 
 
-@dataclass
-class _SourceLinksLock:
-    descriptor: int | None
-
-
 def load_source_links(
     db_root: Path,
     db_name: str | None = None,
@@ -139,19 +136,23 @@ def load_source_links(
     observed_roots: dict[str, Iterable[str]] | None = None,
 ) -> SourceLinksLoad:
     """Read and validate the optional DB-local sidecar without writing."""
-    root = Path(db_root).expanduser().resolve()
+    unresolved_root = Path(db_root).expanduser()
+    if unresolved_root.is_symlink():
+        return SourceLinksLoad("invalid", None, "unsafe_database_symlink")
+    root = unresolved_root.resolve()
     path = root / SIDECAR_NAME
     effective_db_name = str(db_name or root.name)
     cache_key = (path, effective_db_name)
     try:
-        raw = path.read_bytes()
+        _validate_optional_regular_path(path)
+        raw, file_stat = _read_regular_bytes(path)
     except FileNotFoundError:
         fingerprint = (0, 0, "")
         loaded = SourceLinksLoad("unconfigured", None)
         with _CACHE_LOCK:
             _CACHE[cache_key] = (fingerprint, loaded)
         return loaded
-    except OSError as exc:
+    except (OSError, SourceLinkError) as exc:
         loaded = SourceLinksLoad("invalid", None, type(exc).__name__)
         with _CACHE_LOCK:
             _drop_cached_path(path)
@@ -161,10 +162,6 @@ def load_source_links(
         with _CACHE_LOCK:
             _drop_cached_path(path)
         return loaded
-    try:
-        stat = path.stat()
-    except OSError as exc:
-        return SourceLinksLoad("invalid", None, type(exc).__name__)
     digest = hashlib.sha256(raw).hexdigest()
     try:
         decoded = json.loads(raw.decode("utf-8"))
@@ -198,11 +195,34 @@ def load_source_links(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        fingerprint = (stat.st_mtime_ns, len(raw), digest + roots_digest)
+        fingerprint = (
+            file_stat.st_mtime_ns,
+            len(raw),
+            digest + roots_digest,
+        )
         with _CACHE_LOCK:
             cached = _CACHE.get(cache_key)
             if cached and cached[0] == fingerprint:
                 return _clone_load(cached[1])
+    except LegacySourceManualRequired:
+        fingerprint = (file_stat.st_mtime_ns, len(raw), digest)
+        loaded = SourceLinksLoad(
+            "manual_required",
+            None,
+            "legacy_non_sharepoint_manual_required",
+            revision=(
+                int(decoded.get("revision") or 0)
+                if isinstance(decoded, dict)
+                else 0
+            ),
+            etag=digest,
+            migration_required=True,
+            loaded_schema_version=(
+                str(decoded.get("schema_version") or "")
+                if isinstance(decoded, dict)
+                else ""
+            ),
+        )
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
@@ -211,7 +231,7 @@ def load_source_links(
         OverflowError,
         RecursionError,
     ) as exc:
-        fingerprint = (stat.st_mtime_ns, len(raw), digest)
+        fingerprint = (file_stat.st_mtime_ns, len(raw), digest)
         loaded = SourceLinksLoad(
             "invalid",
             None,
@@ -460,6 +480,10 @@ def _upgrade_v2_source(source: dict[str, Any]) -> dict[str, Any]:
             "legacy v2 Source Link is incomplete"
         )
     if all(present):
+        if str(source.get("provider") or "").strip().lower() != "sharepoint":
+            raise LegacySourceManualRequired(
+                "only legacy SharePoint settings are supported"
+            )
         upgraded["source_type"] = source.get("provider")
         upgraded["link"] = {
             "enabled": source.get("enabled"),
@@ -565,6 +589,10 @@ def _upgrade_legacy_source(
     if former_prefix != observed:
         return (upgraded if display_name else None), "legacy_root_mismatch"
     provider = str(first.get("provider") or "").strip().lower()
+    if provider != "sharepoint":
+        raise LegacySourceManualRequired(
+            "only legacy SharePoint settings are supported"
+        )
     upgraded["source_type"] = provider
     upgraded["link"] = {
         key: first[key]
@@ -585,7 +613,10 @@ def save_source_links(
     expected_revision: int | None = None,
     expected_etag: str | None = None,
 ) -> dict[str, Any]:
-    root = Path(db_root).expanduser().resolve()
+    unresolved_root = Path(db_root).expanduser()
+    if unresolved_root.is_symlink():
+        raise SourceLinkError("database directory cannot be a symlink")
+    root = unresolved_root.resolve()
     if not root.is_dir():
         raise SourceLinkError("database directory does not exist")
     if payload.get("schema_version") != SCHEMA_VERSION:
@@ -615,13 +646,13 @@ def save_source_links(
         raise SourceLinkError("source-links sidecar is too large")
     current = root / SIDECAR_NAME
     backup = root / BACKUP_NAME
-    lock = root / ".source-links.lock"
-    lock_handle = _acquire_lock(lock)
     temporary = root / f".{SIDECAR_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     backup_temporary = root / (
         f".{BACKUP_NAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
     try:
+        _validate_optional_regular_path(current)
+        _validate_optional_regular_path(backup)
         current_revision = _read_current_revision(
             current,
             db_name,
@@ -658,7 +689,7 @@ def save_source_links(
         )
         _write_bytes(temporary, encoded)
         if current.exists():
-            previous = current.read_bytes()
+            previous, _current_stat = _read_regular_bytes(current)
             _write_bytes(backup_temporary, previous)
         if (
             _read_current_revision(current, db_name) != expected_revision
@@ -673,6 +704,8 @@ def save_source_links(
             ) from exc
         if roots_before_publish != authoritative_roots:
             raise SourceLinkError("source_link_catalog_roots_changed")
+        _validate_optional_regular_path(current)
+        _validate_optional_regular_path(backup)
         if backup_temporary.exists():
             _atomic_replace(backup_temporary, backup)
         _atomic_replace(temporary, current)
@@ -683,7 +716,6 @@ def save_source_links(
                 candidate.unlink()
             except OSError:
                 pass
-        _release_lock(lock_handle)
     with _CACHE_LOCK:
         _drop_cached_path(current)
     return normalized
@@ -1759,7 +1791,7 @@ def _read_current_revision(
     db_name: str | None,
 ) -> int:
     try:
-        raw = path.read_bytes()
+        raw, _file_stat = _read_regular_bytes(path)
     except FileNotFoundError:
         return 0
     if len(raw) > MAX_SIDECAR_BYTES:
@@ -1797,9 +1829,38 @@ def _read_current_revision(
 
 def _current_etag(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        raw, _file_stat = _read_regular_bytes(path)
+        return hashlib.sha256(raw).hexdigest()
     except FileNotFoundError:
         return "missing"
+
+
+def _read_regular_bytes(path: Path) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise SourceLinkError(
+                f"{path.name} must be a regular non-symlink file"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read(), file_stat
+    finally:
+        os.close(descriptor)
+
+
+def _validate_optional_regular_path(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SourceLinkError(
+            f"{path.name} must be a regular non-symlink file"
+        )
 
 
 def _bounded_text(value: Any, field: str, limit: int) -> str:
@@ -1822,103 +1883,6 @@ def _write_bytes(path: Path, value: bytes) -> None:
             os.fsync(stream.fileno())
     finally:
         os.close(descriptor)
-
-
-def _acquire_lock(path: Path) -> _SourceLinksLock:
-    deadline = time.monotonic() + LOCK_WAIT_SECONDS
-    while True:
-        descriptor: int | None = None
-        try:
-            if os.name == "nt" and path.is_symlink():
-                raise SourceLinkError(
-                    "source-links update lock must not be a symlink"
-                )
-            flags = (
-                os.O_RDWR
-                | os.O_CREAT
-                | getattr(os, "O_BINARY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            descriptor = os.open(
-                path,
-                flags,
-                0o600,
-            )
-            os.set_inheritable(descriptor, False)
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise SourceLinkError(
-                    "source-links update lock must be a regular file"
-                )
-            if _try_kernel_lock(descriptor):
-                return _SourceLinksLock(descriptor)
-            os.close(descriptor)
-            descriptor = None
-        except SourceLinkError:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            raise
-        except OSError as exc:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            raise SourceLinkError(
-                "source-links update lock is unavailable"
-            ) from exc
-        if time.monotonic() >= deadline:
-            raise SourceLinkError("source-links update is busy")
-        time.sleep(0.05)
-
-
-def _try_kernel_lock(descriptor: int) -> bool:
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    if os.name == "nt":
-        import msvcrt
-
-        try:
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        except OSError as exc:
-            if exc.errno in {
-                errno.EACCES,
-                errno.EAGAIN,
-                errno.EDEADLK,
-            }:
-                return False
-            raise
-        return True
-    import fcntl
-
-    try:
-        fcntl.flock(
-            descriptor,
-            fcntl.LOCK_EX | fcntl.LOCK_NB,
-        )
-    except OSError as exc:
-        if exc.errno in {
-            errno.EACCES,
-            errno.EAGAIN,
-            errno.EDEADLK,
-        }:
-            return False
-        raise
-    return True
-
-
-def _release_lock(handle: _SourceLinksLock) -> None:
-    descriptor = handle.descriptor
-    if descriptor is None:
-        return
-    handle.descriptor = None
-    try:
-        os.close(descriptor)
-    except OSError:
-        # A close failure is diagnostic only. The save has already completed,
-        # and process termination remains the final OS-enforced release.
-        pass
 
 
 def _fsync_directory(path: Path) -> None:

@@ -80,6 +80,29 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
     }
 }
 
+# Overlay installs do not remove files that disappeared from the payload.
+# Delete only this explicit retired-file allowlist; never prune user content.
+$RetiredFiles = @(
+    "rag\export_migration.sh",
+    "rag\migration_archive.py",
+    "rag\gen_db\migrate_source_metadata.py",
+    "rag\gen_db\software_rag_tool\software_rag_tool\source_metadata_migration.py",
+    "skills\local-rag-admin\SKILL.md"
+)
+foreach ($RelativePath in $RetiredFiles) {
+    $RetiredPath = Join-Path $Target $RelativePath
+    if (Test-Path -LiteralPath $RetiredPath -PathType Leaf) {
+        [System.IO.File]::Delete($RetiredPath)
+    }
+}
+$RetiredAdminSkill = Join-Path $Target "skills\local-rag-admin"
+if (
+    (Test-Path -LiteralPath $RetiredAdminSkill -PathType Container) -and
+    -not (Get-ChildItem -LiteralPath $RetiredAdminSkill -Force)
+) {
+    [System.IO.Directory]::Delete($RetiredAdminSkill)
+}
+
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
     & $RuntimePython (Join-Path $Target "rag\query\setup.py") `
         --refresh-completion-marker --format json | Out-Null

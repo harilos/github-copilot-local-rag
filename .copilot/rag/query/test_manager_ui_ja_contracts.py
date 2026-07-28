@@ -398,7 +398,7 @@ class ManagerJapaneseUiTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(0, completed.returncode)
-        self.assertIn("ローカルRAGの初期設定", completed.stdout)
+        self.assertIn("Sourceの追加・更新・再開", completed.stdout)
         self.assertIn(manage.MANAGER_HELP_URL, completed.stdout)
 
 

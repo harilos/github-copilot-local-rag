@@ -162,27 +162,50 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual(
             [label for _, label in manage.TOP_MENU],
             [
-                "初期設定・動作確認",
-                "DB一覧・DBを選択",
-                "新しいDBを作成",
-                "ヘルプを開く",
+                "新しいDBを作る",
+                "DBを選んで管理する",
+                "全DBの全Sourceを更新・再開する",
+                "配布・管理PCの引っ越し",
+                "この端末の設定・動作確認",
                 "終了",
             ],
         )
         self.assertEqual(
             [label for _, label in manage.DATABASE_MENU],
             [
-                "検索を試す",
-                "Source一覧・Source情報設定",
-                "DBを構築・再開する",
-                "文書を追加・更新する",
-                "詳細状態を確認する",
-                "検索索引を修復する",
-                "DBの表示名・検索ヒントを変更する",
+                "Sourceを見る・更新する",
+                "新しいSourceを追加する",
+                "このDBの全Sourceを更新・再開する",
+                "DBの名前・説明を変更する",
+                "問題があるとき",
                 "このDBを削除する【危険】",
                 "戻る",
             ],
         )
+
+    def test_source_update_groups_use_runner_result_contract(self) -> None:
+        groups = manage.LocalRagManager._source_update_groups(
+            {
+                "results": [
+                    {"status": "updated", "display_name": "A"},
+                    {
+                        "status": "skipped",
+                        "display_name": "B",
+                        "skip_reason": "one_shot_source_complete",
+                    },
+                    {"status": "failed", "display_name": "C"},
+                ]
+            }
+        )
+        self.assertEqual(["A"], [
+            item["display_name"] for item in groups["completed"]
+        ])
+        self.assertEqual(["B"], [
+            item["display_name"] for item in groups["skipped"]
+        ])
+        self.assertEqual(["C"], [
+            item["display_name"] for item in groups["failed"]
+        ])
         self.assertEqual(
             [label for _, label in manage.SOURCE_LINK_MENU],
             [
@@ -247,6 +270,10 @@ class ManagerContractTests(unittest.TestCase):
                 "example-rag",
                 "--compact-json",
                 "synthetic question",
+                "--format",
+                "json",
+                "--result-delivery",
+                "stdout",
             ],
         )
 
@@ -296,30 +323,28 @@ class ManagerContractTests(unittest.TestCase):
             self.runner.calls[0][0][0], str(self.runtime.resolve())
         )
 
-    def test_database_selection_shows_lightweight_readiness_counts(self) -> None:
+    def test_database_selection_shows_public_content_summary(self) -> None:
         self.runner.respond(
             "list_dbs.py",
             stdout=json.dumps(
-                {"databases": [{"name": "example-rag", "title": "Example"}]}
-            ),
-        )
-        self.runner.respond(
-            "status.py",
-            stdout=json.dumps(
                 {
-                    "status": "completed",
-                    "document_count": 2,
-                    "chunk_count": 5,
+                    "databases": [
+                        {
+                            "name": "example-rag",
+                            "title": "Example",
+                            "query_hint": "製品資料",
+                            "content_summary": "GitHub「製品コード」",
+                        }
+                    ]
                 }
             ),
         )
         manager = self.manager(["0"])
-        manager._load_source_inventory = lambda _name: FakeInventory()
         self.assertIsNone(manager._select_database())
         text = "\n".join(self.output)
-        self.assertIn("文書数: 2", text)
-        self.assertIn("チャンク数: 5", text)
-        self.assertIn("利用可能（ready）", text)
+        self.assertIn("内容: GitHub「製品コード」", text)
+        self.assertIn("検索向け: 製品資料", text)
+        self.assertNotIn("チャンク数", text)
 
     def test_create_rejects_path_shaped_database_name(self) -> None:
         self.manager(["outside/example-rag"])._create_database()
@@ -442,17 +467,19 @@ class ManagerContractTests(unittest.TestCase):
             {"lexical", "vector", "all"},
         )
 
-    def test_source_list_leads_to_read_only_source_detail(self) -> None:
+    def test_source_list_leads_to_final_source_detail(self) -> None:
         self.make_db()
-        manager = self.manager(["1", "1", "0", "0"])
+        manager = self.manager(["1", "0", "0"])
         manager._load_source_inventory = lambda _name: FakeInventory()
         manager._sources_screen("example-rag")
         text = "\n".join(self.output)
-        self.assertIn("Source一覧（読み取り専用）", text)
-        self.assertIn("追加・削除・名称変更はできません", text)
+        self.assertIn("同じ取得元と検索結果リンク設定", text)
         self.assertIn("画面: Source詳細", text)
+        self.assertIn("1. 更新・再開する", text)
+        self.assertIn("5. 技術情報", text)
 
     def test_source_link_add_uses_sidecar_api_only(self) -> None:
+        self.make_db()
         links = FakeSourceLinks()
         manager = self.manager(
             ["", "4", "1", "https://docs.example.invalid", "y"]
@@ -476,6 +503,7 @@ class ManagerContractTests(unittest.TestCase):
         )
 
     def test_per_file_link_requires_one_observed_root(self) -> None:
+        self.make_db()
         links = FakeSourceLinks()
         inventory = FakeInventory()
         inventory.payload["sources"][0]["observed_root_status"] = (
@@ -503,6 +531,7 @@ class ManagerContractTests(unittest.TestCase):
         )
 
     def test_home_only_link_is_allowed_without_observed_root(self) -> None:
+        self.make_db()
         links = FakeSourceLinks()
         inventory = FakeInventory()
         inventory.payload["sources"][0]["observed_root_status"] = (
@@ -525,116 +554,12 @@ class ManagerContractTests(unittest.TestCase):
         )
         self.assertEqual(1, len(links.saved))
 
-    def test_legacy_sidecar_requires_explicit_migration_confirmation(
-        self,
-    ) -> None:
-        links = FakeSourceLinks()
-        links.payload = {
-            "schema_version": links.SCHEMA_VERSION,
-            "revision": 1,
-            "sources": [
-                {
-                    "source_id": "source-a",
-                    "provider": "other",
-                    "enabled": True,
-                    "strategy": "home-only",
-                    "settings": {
-                        "source_home_url": "https://docs.example.invalid"
-                    },
-                }
-            ],
-        }
-
-        def legacy_load(*_: Any) -> SimpleNamespace:
-            return SimpleNamespace(
-                status="configured",
-                payload=links.payload,
-                error_kind=None,
-                revision=1,
-                etag="legacy-etag",
-                migration_required=True,
-                source_statuses=(
-                    ("source-a", "legacy_migration_available"),
-                ),
-            )
-
-        links.load_source_links = legacy_load
-        manager = self.manager(["y", "n"])
-        manager._import_source_links = lambda: links
-        manager._prompt_source_link = lambda **_: {
-            "provider": "other",
-            "enabled": True,
-            "strategy": "home-only",
-            "settings": {
-                "source_home_url": "https://docs.example.invalid"
-            },
-        }
-        manager._configure_source_link(
-            "example-rag",
-            FakeInventory(),
-            "source-a",
-        )
-        self.assertEqual([], links.saved)
-        text = "\n".join(self.output)
-        self.assertIn("新形式へ移行", text)
-        self.assertIn("移行する」を先に実行", text)
-
-    def test_source_metadata_migration_always_targets_selected_db(self) -> None:
-        preview = {
-            "schema": "local-rag.source-metadata-migration.v1",
-            "apply": False,
-            "results": [
-                {
-                    "db": "example-rag",
-                    "status": "migration_available",
-                    "source_count": 2,
-                }
-            ],
-        }
-        applied = {
-            "schema": "local-rag.source-metadata-migration.v1",
-            "apply": True,
-            "results": [
-                {
-                    "db": "example-rag",
-                    "status": "migrated",
-                    "source_count": 2,
-                }
-            ],
-        }
-        responses = iter(
-            [
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps(preview),
-                    stderr="",
-                ),
-                SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps(applied),
-                    stderr="",
-                ),
-            ]
-        )
-
-        def runner(argv: list[str], **kwargs: Any) -> SimpleNamespace:
-            self.runner.calls.append((list(argv), dict(kwargs)))
-            return next(responses)
-
-        manager = self.manager(["y"])
-        manager.runner = runner
-        manager._migrate_source_metadata("example-rag")
-        self.assertEqual(2, len(self.runner.calls))
-        for argv, kwargs in self.runner.calls:
-            self.assertEqual("migrate_source_metadata.py", Path(argv[1]).name)
-            self.assertEqual(1, argv.count("--db"))
-            db_index = argv.index("--db")
-            self.assertEqual("example-rag", argv[db_index + 1])
-            self.assertFalse(kwargs["shell"])
-        self.assertIn("--apply", self.runner.calls[1][0])
-        self.assertIn(
-            "Source設定を新しい形式へ移行しました",
-            "\n".join(self.output),
+    def test_generic_source_migration_is_not_public(self) -> None:
+        labels = [label for _, label in manage.SOURCE_MENU]
+        self.assertFalse(any("移行" in label for label in labels))
+        self.assertNotIn(
+            "gen_db/migrate_source_metadata.py",
+            manage.ALLOWED_SCRIPTS,
         )
 
     def test_unset_source_type_is_displayed_as_unconfigured(self) -> None:
@@ -645,7 +570,29 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("Source種別: 未設定", text)
         self.assertNotIn("Source種別: フォルダー", text)
 
+    def test_indexed_sharepoint_fetch_root_cannot_be_retargeted(self) -> None:
+        manager = self.manager()
+        manager._edit_source_fetch_settings(
+            "example-rag",
+            {
+                "_local_source_key": "src_sharepoint-fixture",
+                "source_id": "sharepoint-source",
+                "source_type": "sharepoint",
+                "fetch": {
+                    "root_env": "LOCAL_RAG_SHAREPOINT_ROOT",
+                    "relative_path": "Team/Docs",
+                },
+            },
+        )
+        rendered = "\n".join(self.output)
+        self.assertIn(
+            "検索へ反映済みのSharePoint Source",
+            rendered,
+        )
+        self.assertIn("新しいSourceを追加する", rendered)
+
     def test_source_type_can_be_saved_without_a_link(self) -> None:
+        self.make_db()
         links = FakeSourceLinks()
         manager = self.manager(["", "2", "y"])
         manager._import_source_links = lambda: links
@@ -733,6 +680,7 @@ class ManagerContractTests(unittest.TestCase):
     def test_sharepoint_uncertain_observed_root_has_actionable_warning(
         self,
     ) -> None:
+        self.make_db()
         links = FakeSourceLinks()
         inventory = FakeInventory()
         inventory.payload["sources"][0]["observed_root_status"] = (
@@ -817,6 +765,196 @@ class ManagerContractTests(unittest.TestCase):
             manager._delete_database("example-rag", "wrong-rag")
         self.assertTrue(root.exists())
 
+    def test_delete_confirmation_shows_only_normal_summary_fields(self) -> None:
+        root = self.make_db()
+        (root / "payload.bin").write_bytes(b"12345")
+        manager = self.manager(["example-rag"])
+        manager._load_source_inventory = lambda _name: SimpleNamespace(
+            to_dict=lambda: {
+                "document_count": 3,
+                "chunk_count": 99,
+                "sources": [
+                    {
+                        "source_id": "source-a",
+                        "document_count": 2,
+                        "chunk_count": 98,
+                    }
+                ],
+                "documents_without_source_id": 1,
+            }
+        )
+        manager._read_database_metadata = lambda _name: {
+            "title": "Example Database",
+            "query_hint": "secret hint",
+        }
+        deleted: list[tuple[str, str]] = []
+        manager._delete_database = (
+            lambda name, typed: deleted.append((name, typed))
+        )
+
+        self.assertTrue(manager._delete_database_interactive("example-rag"))
+
+        rendered = "\n".join(self.output)
+        self.assertIn("DB名: example-rag", rendered)
+        self.assertIn("表示名: Example Database", rendered)
+        self.assertIn("文書数: 3", rendered)
+        self.assertIn("サイズ: 5 bytes", rendered)
+        self.assertNotIn("チャンク", rendered)
+        self.assertNotIn(str(root.resolve()), rendered)
+        self.assertNotIn("secret hint", rendered)
+        self.assertEqual(deleted, [("example-rag", "example-rag")])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_delete_marks_in_progress_source_interrupted_then_reconfirms(
+        self,
+    ) -> None:
+        root = self.make_db()
+        source_dir = root / "sources" / "src_example-123456789abc"
+        source_dir.mkdir(parents=True)
+        state_path = source_dir / "state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "revision": 4,
+                    "operation": "update",
+                    "phase": "fetching",
+                    "can_resume": False,
+                    "last_error": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        manager = self.manager(["y", "example-rag"])
+        manager._load_source_inventory = lambda _name: None
+        manager._read_database_metadata = lambda _name: {
+            "title": "Example Database",
+            "query_hint": "",
+        }
+        deleted: list[tuple[str, str]] = []
+        manager._delete_database = (
+            lambda name, typed: deleted.append((name, typed))
+        )
+
+        self.assertTrue(manager._delete_database_interactive("example-rag"))
+
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["phase"], "interrupted")
+        self.assertTrue(saved["can_resume"])
+        self.assertEqual(saved["revision"], 5)
+        self.assertIn("updated_at", saved)
+        self.assertEqual(deleted, [("example-rag", "example-rag")])
+        rendered = "\n".join(self.output)
+        self.assertIn("中断状態として記録しました", rendered)
+        self.assertIn("続けてDB削除をもう一度確認します", rendered)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_delete_declined_interruption_keeps_state_and_database(self) -> None:
+        root = self.make_db()
+        source_dir = root / "sources" / "src_example-123456789abc"
+        source_dir.mkdir(parents=True)
+        state_path = source_dir / "state.json"
+        original = {
+            "schema_version": "local-rag-source-state-v1",
+            "revision": 1,
+            "operation": "update",
+            "phase": "indexing",
+            "can_resume": False,
+        }
+        state_path.write_text(json.dumps(original), encoding="utf-8")
+        manager = self.manager([""])
+        manager._load_source_inventory = lambda _name: None
+        manager._read_database_metadata = lambda _name: {
+            "title": "Example Database",
+            "query_hint": "",
+        }
+
+        self.assertFalse(manager._delete_database_interactive("example-rag"))
+
+        self.assertTrue(root.exists())
+        self.assertEqual(
+            json.loads(state_path.read_text(encoding="utf-8")),
+            original,
+        )
+        self.assertIn(
+            "中断状態へ変更せず、DB削除をキャンセルしました",
+            "\n".join(self.output),
+        )
+        self.assertEqual(self.runner.calls, [])
+
+    def test_in_progress_detection_accepts_current_status_field(self) -> None:
+        manager = self.manager()
+        self.assertTrue(
+            manager._source_state_is_in_progress({"status": "running"})
+        )
+        self.assertFalse(
+            manager._source_state_is_in_progress({"status": "complete"})
+        )
+        self.assertFalse(
+            manager._source_state_is_in_progress(
+                {"status": "interrupted", "can_resume": True}
+            )
+        )
+
+    def test_partial_interruption_is_reported_and_database_is_not_deleted(
+        self,
+    ) -> None:
+        root = self.make_db()
+        state_paths: list[Path] = []
+        for suffix in ("aaaaaaaaaaaa", "bbbbbbbbbbbb"):
+            source_dir = root / "sources" / f"src_example-{suffix}"
+            source_dir.mkdir(parents=True)
+            state_path = source_dir / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "local-rag-source-state-v1",
+                        "revision": 1,
+                        "operation": "update",
+                        "phase": "running",
+                        "can_resume": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_paths.append(state_path)
+        manager = self.manager(["y"])
+        manager._load_source_inventory = lambda _name: None
+        manager._read_database_metadata = lambda _name: {
+            "title": "Example Database",
+            "query_hint": "",
+        }
+        original_write = manager._write_interrupted_source_state
+        write_count = 0
+
+        def fail_second(
+            db_root: Path,
+            state_path: Path,
+            payload: dict[str, Any],
+        ) -> None:
+            nonlocal write_count
+            write_count += 1
+            if write_count == 2:
+                raise OSError("synthetic interruption failure")
+            original_write(db_root, state_path, payload)
+
+        manager._write_interrupted_source_state = fail_second
+        deleted: list[str] = []
+        manager._delete_database = (
+            lambda name, _typed: deleted.append(name)
+        )
+
+        self.assertFalse(manager._delete_database_interactive("example-rag"))
+
+        first = json.loads(state_paths[0].read_text(encoding="utf-8"))
+        second = json.loads(state_paths[1].read_text(encoding="utf-8"))
+        self.assertEqual(first["phase"], "interrupted")
+        self.assertEqual(second["phase"], "running")
+        self.assertEqual(deleted, [])
+        rendered = "\n".join(self.output)
+        self.assertIn("中断状態を保存済み: 1件 / 未保存: 1件", rendered)
+        self.assertIn("DBは削除されませんでした", rendered)
+
     def test_safe_delete_removes_only_selected_database(self) -> None:
         root = self.make_db()
         (root / "catalog.sqlite").write_bytes(b"synthetic")
@@ -857,6 +995,39 @@ class ManagerContractTests(unittest.TestCase):
         manager = self.manager()
         manager._delete_database("example-rag", "example-rag")
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_partial_delete_failure_is_not_reported_as_success(self) -> None:
+        root = self.make_db()
+        removed = root / "removed.txt"
+        retained = root / "retained.txt"
+        removed.write_text("removed", encoding="utf-8")
+        retained.write_text("retained", encoding="utf-8")
+        manager = self.manager(["example-rag"])
+        manager._load_source_inventory = lambda _name: None
+        manager._read_database_metadata = lambda _name: {
+            "title": "Example Database",
+            "query_hint": "",
+        }
+        original_rmtree = manage.shutil.rmtree
+
+        def partial_failure(target: Path) -> None:
+            (Path(target) / "removed.txt").unlink()
+            raise OSError("synthetic partial failure")
+
+        manage.shutil.rmtree = partial_failure
+        try:
+            self.assertFalse(
+                manager._delete_database_interactive("example-rag")
+            )
+        finally:
+            manage.shutil.rmtree = original_rmtree
+
+        self.assertTrue(root.exists())
+        self.assertFalse(removed.exists())
+        self.assertTrue(retained.exists())
+        rendered = "\n".join(self.output)
+        self.assertIn("DB削除は完了していません", rendered)
+        self.assertNotIn("DB「example-rag」を削除しました", rendered)
 
 if __name__ == "__main__":
     unittest.main()

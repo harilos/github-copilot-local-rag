@@ -172,7 +172,7 @@ class ResultBundleContractTests(unittest.TestCase):
         payload["answerability"] = "none"
         payload["evidence"] = []
         payload["document_results"] = [payload["document_results"][1]]
-        payload["document_results"][0]["source_url"] = (
+        payload["document_results"][0]["uri"] = (
             "https://example.invalid/related/document"
         )
         summary = self.read_summary(self.publish(payload))
@@ -180,30 +180,19 @@ class ResultBundleContractTests(unittest.TestCase):
         draft = summary["initial_response"]["answer_draft_markdown"]
         self.assertEqual(["related"], [point["support"] for point in points])
         self.assertIn("関連資料から組み立てた暫定回答", draft)
-        self.assertIn(
-            "[D1](https://example.invalid/related/document)",
-            draft,
-        )
+        self.assertIn("[D1]", draft)
+        self.assertNotIn("https://", draft)
 
-    def test_answer_draft_prefers_clickable_permalink(self) -> None:
+    def test_answer_draft_keeps_body_citation_unlinked(self) -> None:
         payload = synthetic_payload()
-        payload["evidence"][0]["source_url"] = (
-            "https://example.invalid/current/document"
-        )
-        payload["evidence"][0]["source_permalink"] = (
+        payload["evidence"][0]["uri"] = (
             "https://example.invalid/fixed/document"
         )
         draft = self.read_summary(
             self.publish(payload)
         )["initial_response"]["answer_draft_markdown"]
-        self.assertIn(
-            "[E1](https://example.invalid/fixed/document)",
-            draft,
-        )
-        self.assertNotIn(
-            "[E1](https://example.invalid/current/document)",
-            draft,
-        )
+        self.assertIn("[E1]", draft)
+        self.assertNotIn("https://", draft)
 
     def test_explicitly_non_authoritative_evidence_is_not_a_factual_unit(
         self,
@@ -250,7 +239,7 @@ class ResultBundleContractTests(unittest.TestCase):
     ) -> None:
         payload = synthetic_payload()
         payload["evidence"] = []
-        expected_evidence_links: list[tuple[str, str]] = []
+        expected_evidence_uris: list[str] = []
         for index in range(4):
             evidence = json.loads(
                 json.dumps(synthetic_payload()["evidence"][0])
@@ -263,16 +252,10 @@ class ResultBundleContractTests(unittest.TestCase):
                 f"Authoritative evidence statement {index} is retained."
             )
             evidence["matched_excerpt"] = evidence["text"]
-            source_url = (
-                f"https://example.invalid/current/{index}/" + "a" * 2_500
-            )
-            source_permalink = (
-                f"https://example.invalid/fixed/{index}/" + "b" * 2_500
-            )
-            evidence["source_url"] = source_url
-            evidence["source_permalink"] = source_permalink
+            uri = f"https://example.invalid/fixed/{index}/" + "b" * 5_000
+            evidence["uri"] = uri
             payload["evidence"].append(evidence)
-            expected_evidence_links.append((source_url, source_permalink))
+            expected_evidence_uris.append(uri)
 
         payload["document_results"] = [
             {
@@ -283,22 +266,15 @@ class ResultBundleContractTests(unittest.TestCase):
                 "support_level": "weak",
                 "authoritative": False,
                 "relationship": "Related research material.",
-                "source_url": (
-                    f"https://example.invalid/document/{index}/"
-                    + "c" * 500
-                ),
-                "source_permalink": (
+                "uri": (
                     f"https://example.invalid/permalink/{index}/"
-                    + "d" * 500
+                    + "d" * 1_000
                 ),
             }
             for index in range(10)
         ]
-        expected_document_links: list[tuple[str, str]] = [
-            (
-                str(item["source_url"]),
-                str(item["source_permalink"]),
-            )
+        expected_document_uris: list[str] = [
+            str(item["uri"])
             for item in payload["document_results"]
         ]
         pointer = self.publish(payload)
@@ -310,24 +286,12 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertEqual(4, len(summary["evidence"]))
         self.assertEqual(10, len(summary["document_results"]))
         self.assertEqual(
-            expected_evidence_links,
-            [
-                (
-                    str(item["source_url"]),
-                    str(item["source_permalink"]),
-                )
-                for item in summary["evidence"]
-            ],
+            expected_evidence_uris,
+            [str(item["uri"]) for item in summary["evidence"]],
         )
         self.assertEqual(
-            expected_document_links,
-            [
-                (
-                    str(item["source_url"]),
-                    str(item["source_permalink"]),
-                )
-                for item in summary["document_results"]
-            ],
+            expected_document_uris,
+            [str(item["uri"]) for item in summary["document_results"]],
         )
 
     def test_detail_bundle_preserves_structural_context(self) -> None:
@@ -349,30 +313,16 @@ class ResultBundleContractTests(unittest.TestCase):
     def test_resolved_links_are_frozen_into_summary_and_detail(self) -> None:
         payload = synthetic_payload()
         fixed_url = "https://example.invalid/blob/revision/document.pdf"
-        payload["evidence"][0].update(
-            {
-                "source_provider": "github",
-                "source_url": "https://example.invalid/blob/current/document.pdf",
-                "source_permalink": fixed_url,
-            }
-        )
-        payload["document_results"][0].update(
-            {
-                "source_provider": "github",
-                "source_permalink": fixed_url,
-            }
-        )
+        payload["evidence"][0]["uri"] = fixed_url
+        payload["document_results"][0]["uri"] = fixed_url
         pointer = self.publish(payload)
         summary = self.read_summary(pointer)
-        self.assertEqual(fixed_url, summary["evidence"][0]["source_permalink"])
-        self.assertEqual(
-            fixed_url,
-            summary["document_results"][0]["source_permalink"],
-        )
+        self.assertEqual(fixed_url, summary["evidence"][0]["uri"])
+        self.assertEqual(fixed_url, summary["document_results"][0]["uri"])
 
         # A later configuration or in-memory payload change cannot alter the
         # already-published result set.
-        payload["evidence"][0]["source_permalink"] = (
+        payload["evidence"][0]["uri"] = (
             "https://example.invalid/blob/later/document.pdf"
         )
         packet, _expires = result_bundle.load_expanded_result(
@@ -384,12 +334,10 @@ class ResultBundleContractTests(unittest.TestCase):
         )
         self.assertEqual(
             fixed_url,
-            packet["expanded_items"][0]["source_permalink"],
+            packet["expanded_items"][0]["uri"],
         )
-        self.assertIn(
-            f"[E1]({fixed_url})",
-            packet["answer_draft_markdown"],
-        )
+        self.assertIn("[E1]", packet["answer_draft_markdown"])
+        self.assertNotIn(fixed_url, packet["answer_draft_markdown"])
 
     def test_new_provider_links_survive_summary_and_detail(self) -> None:
         providers = (
@@ -423,25 +371,13 @@ class ResultBundleContractTests(unittest.TestCase):
         for provider, source_url, source_permalink in providers:
             with self.subTest(provider=provider):
                 payload = synthetic_payload()
-                payload["evidence"][0].update(
-                    {
-                        "source_provider": provider,
-                        "source_url": source_url,
-                    }
-                )
-                if source_permalink:
-                    payload["evidence"][0]["source_permalink"] = (
-                        source_permalink
-                    )
+                expected_uri = source_permalink or source_url
+                payload["evidence"][0]["uri"] = expected_uri
                 pointer = self.publish(payload)
                 summary = self.read_summary(pointer)
                 self.assertEqual(
-                    provider,
-                    summary["evidence"][0]["source_provider"],
-                )
-                self.assertEqual(
-                    source_url,
-                    summary["evidence"][0]["source_url"],
+                    expected_uri,
+                    summary["evidence"][0]["uri"],
                 )
                 packet, _expires = result_bundle.load_expanded_result(
                     pointer["result_set_id"],
@@ -451,25 +387,16 @@ class ResultBundleContractTests(unittest.TestCase):
                     now=self.now + timedelta(minutes=1),
                 )
                 self.assertEqual(
-                    source_url,
-                    packet["expanded_items"][0]["source_url"],
+                    expected_uri,
+                    packet["expanded_items"][0]["uri"],
                 )
-                if source_permalink:
-                    self.assertEqual(
-                        source_permalink,
-                        summary["evidence"][0]["source_permalink"],
-                    )
-                    self.assertEqual(
-                        source_permalink,
-                        packet["expanded_items"][0]["source_permalink"],
-                    )
 
-    def test_summary_never_truncates_a_valid_source_url(self) -> None:
+    def test_summary_never_truncates_a_valid_uri(self) -> None:
         payload = synthetic_payload()
-        source_url = "https://example.invalid/" + ("a" * 2_500)
-        payload["evidence"][0]["source_url"] = source_url
+        uri = "https://example.invalid/" + ("a" * 2_500)
+        payload["evidence"][0]["uri"] = uri
         summary = self.read_summary(self.publish(payload))
-        self.assertEqual(source_url, summary["evidence"][0]["source_url"])
+        self.assertEqual(uri, summary["evidence"][0]["uri"])
 
     def test_detail_retrieval_reads_only_requested_cached_items(self) -> None:
         pointer = self.publish()
@@ -780,11 +707,13 @@ class ResultBundleContractTests(unittest.TestCase):
             "sensitive-terms.local",
             (REPO_ROOT / "install.ps1").read_text(encoding="utf-8"),
         )
-        self.assertIn(
-            "sensitive-terms.local",
+        self.assertTrue(
             (
-                REPO_ROOT / ".copilot" / "rag" / "export_migration.sh"
-            ).read_text(encoding="utf-8"),
+                REPO_ROOT
+                / ".copilot"
+                / "rag"
+                / "make_distribution_package.py"
+            ).is_file()
         )
 
 

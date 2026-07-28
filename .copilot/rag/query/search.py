@@ -1031,7 +1031,8 @@ def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
         )
         return
     payload = dict(payload)
-    payload.pop("_result_detail_items", None)
+    if os.getenv("LOCAL_RAG_WRAPPER_INTERNAL") != "1":
+        payload.pop("_result_detail_items", None)
     if args.format == "json":
         if (
             getattr(args, "compact_json", False)

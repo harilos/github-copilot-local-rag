@@ -300,7 +300,7 @@ class SourceInventoryContractTests(unittest.TestCase):
         )
 
         self.assertEqual("ready", inventory.catalog_status)
-        self.assertEqual("invalid", inventory.source_links_status)
+        self.assertEqual("manual_required", inventory.source_links_status)
         self.assertEqual(["alpha"], inventory.source_ids())
 
     def test_supplemental_logs_are_non_authoritative_and_diagnostic(self) -> None:

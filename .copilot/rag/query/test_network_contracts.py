@@ -276,7 +276,7 @@ class NetworkResolutionContractTests(unittest.TestCase):
             raised.exception.kind,
         )
 
-    def test_proxy_credentials_are_redacted(self) -> None:
+    def test_proxy_credentials_are_redacted_and_rejected(self) -> None:
         raw = "http://user:secret@proxy.example:8080"
         self.assertEqual(
             "http://***:***@proxy.example:8080",
@@ -289,18 +289,11 @@ class NetworkResolutionContractTests(unittest.TestCase):
         self.assertNotIn("secret", rendered)
         self.assertNotIn("abcd", rendered)
 
-        resolution = self._resolve(cli_proxy=raw)
-        serialized = json.dumps(
-            {
-                "network": resolution.details,
-                "warnings": resolution.warnings,
-                "representation": repr(resolution),
-            },
-            sort_keys=True,
-        )
-        self.assertNotIn("user", serialized)
-        self.assertNotIn("secret", serialized)
-        self.assertIn("***:***", serialized)
+        with self.assertRaises(NetworkConfigError) as raised:
+            self._resolve(cli_proxy=raw)
+        self.assertEqual("invalid_proxy_config", raised.exception.kind)
+        self.assertNotIn("user", str(raised.exception))
+        self.assertNotIn("secret", str(raised.exception))
 
     def test_invalid_proxy_scheme_is_rejected_without_echoing_credentials(
         self,

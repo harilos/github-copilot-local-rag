@@ -1,13 +1,22 @@
 # Local RAG Manager 日本語操作ガイド
 
-## 1. Local RAG Managerとは
+## 1. Managerの役割
 
-Local RAG Managerは、ローカルRAGの初期設定、DB作成、文書の取り込み、
-検索確認、Source Link設定、状態確認、索引修復、DB削除を対話形式で行う
-人間向けツールです。既存CLIへ処理を委譲するため、検索順位、文書ID、
-DB schemaは変わりません。
+Local RAG Managerは、人間がDBとSourceを管理する対話画面です。
 
-## 2. 起動方法
+- DB作成、表示名・検索ヒント変更、削除
+- Source追加、更新、再開、状態確認
+- Source MetadataとSource Link設定
+- 検索確認
+- 検索索引の診断・修復
+- 利用者向け配布package作成
+- 管理PC引っ越しpackage作成・再開・取り込み
+- runtime、proxy/CA、daemonの確認
+
+Copilotの通常検索は読み取り専用です。管理依頼をした場合、CopilotはManagerの
+利用を案内するだけで、Managerを自動起動しません。
+
+## 2. 起動
 
 macOS/Linux:
 
@@ -22,395 +31,269 @@ Windows PowerShell:
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
-Git Bash:
+Windows Git Bash:
 
 ```bash
 "$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
   "$HOME/.copilot/rag/manage.py"
 ```
 
-### 入力とキャンセルの共通ルール
+共通入力:
 
-- `【必須】` は入力が必要です。空欄の場合は理由と例を表示して再入力します。
-- `【任意】` は空欄にすると未設定になります。
-- 複数項目の設定中は `:q` で、保存せずに前の画面へ戻ります。
-- 既存の任意値を消すときは `-` を入力します。Enterだけなら現在値を維持します。
-- `Ctrl+C` または入力終端（EOF）では、未保存の変更を破棄して安全に終了します。
+- `【必須】`: 空欄では進みません。
+- `【任意】`: 空欄で未設定です。
+- `:q`: 保存せず前の画面へ戻ります。
+- Enter: 編集中の既存値を維持します。
+- `-`: 編集中の任意値を消します。
+- `Ctrl+C`またはEOF: 未保存変更を破棄して終了します。
 
-## 3. 初期設定
+## 3. 最終メニュー
 
-「初期設定・動作確認」では、仮想環境、必要ライブラリ、検索モデル、
-検索可能なDBを確認できます。
-
-- `初期設定: 完了`はLocal RAGの実行環境が利用できる状態です。
-- `検索準備: 利用可能`は健康なDBが1つ以上ある状態です。
-- 初期設定が完了していてもDBがない場合、検索準備は利用不可になります。
-
-## 4. DBの作成
-
-DB名は半角英数字で始まり、末尾を`-rag`にします。使用可能な文字は
-半角英数字、`_`、`.`、`-`です。
+トップメニュー:
 
 ```text
-project-rag
-incident-rag
-product-manual-rag
+1. 新しいDBを作る
+2. DBを選んで管理する
+3. 全DBの全Sourceを更新・再開する
+4. 配布・管理PCの引っ越し
+5. この端末の設定・動作確認
+0. 終了
 ```
 
-表示名と検索ヒントは任意です。検索ヒントはCopilotがDBを選ぶ際に使う
-短い説明で、文書本文には追加されません。
-
-作成後も、DBを選択して
-「DBの表示名・検索ヒントを変更する」から両方を変更できます。DB名、
-取り込んだ文書、索引、検索順位は変更されません。
-
-## 5. buildとaddの違い
-
-- build: 取り込み元からDBを構築します。中断処理は同じ条件で再開できます。
-- add: 既存DBへ新規・変更文書を追加し、選択範囲内の削除も反映します。
-
-Managerは既存のcontent hashによる更新判定を使います。
-
-## 6. Sourceとは
-
-Sourceは、同じ取り込み元と同じURL生成設定を共有する文書のまとまりです。
-build/addで文書が正常に索引登録された後に現れます。Source一覧から作成、
-削除、Source ID変更はできません。
-
-## 7. Source IDの決め方
-
-Source IDは取り込み元を識別する、後から変更しないIDです。同じ取り込み元を
-更新するときは同じIDを使います。
+選択DBメニュー:
 
 ```text
-github-repository
-sharepoint-docs
-redmine-issues
-filesystem-docs
+1. Sourceを見る・更新する
+2. 新しいSourceを追加する
+3. このDBの全Sourceを更新・再開する
+4. DBの名前・説明を変更する
+5. 問題があるとき
+6. このDBを削除する【危険】
+0. 戻る
 ```
 
-`source_type`はSourceの任意の補助情報です。未設定をfolderとは推測せず、
-画面では「未設定」と表示します。Linkなしで種別だけ設定することもできます。
-Linkを設定する場合は1 Sourceを1 Provider、1 URL生成単位とし、異なるProviderを
-同じSource IDへ混在させないでください。
+Source一覧では、検索へ反映済みの資料と、登録後まだ取得途中のSourceを1つの
+一覧にまとめます。種類と「最新」「更新途中・再開可能」「既存データ」などの
+状態を見て番号を選びます。
 
-build/addはSource IDだけを索引へ記録し、`source_type`やLinkを質問・推測・
-保存しません。新しいSourceは未設定のままで問題ありません。
-
-## 8. 論理ルートとscan subdirectory
-
-論理ルートは取り込むファイル群の基準ディレクトリです。論理ルート名は
-RAG保存パスの先頭へ必ず含まれます。`scan subdirectory`は論理ルートの
-一部だけを処理するときに使う任意値です。
+Source詳細:
 
 ```text
-論理ルート: /path/to/source-root
-scan subdirectory: manuals/ja
+1. 更新・再開する
+2. 取得設定を確認・変更する
+3. 検索結果リンクを確認・変更する
+4. 進捗・ログを見る
+5. 技術情報
+0. 戻る
 ```
 
-空欄の場合は論理ルート全体が対象です。
+Otherの取り込み完了後は、1番が「ファイル／フォルダを選び直して再取り込み」
+になります。macOSのSharePointでは更新できないことを明示します。
 
-## 9. Source Linkとは
+「問題があるとき」では診断結果を見て、全文・識別子索引、vector索引、または
+全検索索引を再作成します。元文書の再取得を伴う操作とは分離されています。
 
-検索結果に元のGitHub、GitLab、Azure DevOps、SharePoint、Redmine等を
-開くURLを付ける設定です。
-検索順位、検索内容、回答可能性、DB内容には影響しません。URL生成に失敗した
-場合もRAG保存パスは表示されます。
+## 4. DB作成
 
-Sourceの表示名、任意の`source_type`、任意のLinkは、DB直下の
-`source-links.json`へ`rag-source-metadata-v1`として保存されます。ファイル名は
-旧版との二重管理を避けるため維持しています。新しい設定ではLinkだけを保存
-できず、Linkを選ぶと対応する`source_type`も一緒に保存されます。
-
-### 旧Source設定の移行
-
-Source一覧・Source情報設定画面の
-「旧Source設定を移行する【通常は選択不要】」は、選択中DBだけを対象にします。
-新規DBと移行済みDBでは不要です。旧v2のProviderは同じ`source_type`へ移され、
-Linkの有効・無効、方式、Provider固有設定は保持されます。旧v1に複数mappingや
-保存root不一致がある場合は、自動で1件を選ばず、ファイルを変更しません。
-移行は文書、索引、Source ID、検索順位を変更せず、再実行はno-opです。
-
-## 10. observed stored rootとは
-
-「検出された保存ルート」は、現在有効な文書パスから自動検出した先頭
-ディレクトリです。URL生成時に1回だけ取り除きます。利用者が入力する値では
-ありません。
-
-- `ready`: 1つ検出。ファイル単位URLを設定できます。
-- `no_observed_root`: 未検出。トップページのみ設定できます。
-- `multiple_observed_roots`: 複数検出。ProviderごとにSource IDを分けます。
-
-## 11. Gitリポジトリ設定
-
-Managerでは「Gitリポジトリ」からGitHub、GitLab、Azure DevOpsを選択します。
-`.git`の調査、clone、Gitコマンド、APIアクセス、認証処理は行いません。
-非公開リポジトリは、生成URLを開いたブラウザでログインしてください。
-
-### GitHub／GitHub Enterprise
+DB名は半角英数字で始め、`-rag`で終わらせます。
 
 ```text
-Repository URL:
-https://github.com/<owner>/<repository>
-
-Ref:
-main
-
-GitHubリポジトリ内の追加パス:
-空欄
-
-Commit:
-0123456789abcdef0123456789abcdef01234567
+<db-name>-rag
 ```
 
-保存パス:
+titleとquery hintはCopilotが一覧からDBを選ぶための公開情報です。機密情報を
+書かず、収録分野を短く示してください。DB作成直後にはSourceはありません。
+
+## 5. Sourceの管理
+
+Sourceは、同じ取得元、同じ更新方法、同じURL生成設定を共有する単位です。
+Source追加画面では次から選びます。
+
+1. GitHub repository
+2. SVN
+3. Redmine project
+4. SharePoint同期folder
+5. 手元の資料を一度だけ取り込むOther
+
+Sourceの安定IDは索引と更新stateを結びます。後から変更しません。新しいSourceは
+登録だけでは検索対象にならず、取得・索引登録が成功した後にSource inventoryへ
+現れます。
+
+Source取得は固定のwork pathへ行い、providerごとのcheckpointを保存します。
+中断後は同じ設定とcheckpointから再開します。credentialやlocal absolute pathを
+Source設定へ永続化せず、必要な値は環境変数またはmachine-local設定から解決します。
+
+### GitHub
+
+初回登録で入力するのはrepository URLとSourceの名前です。リポジトリ全体を
+DB内の固定作業場所へ取得し、remoteが示す既定branchを実際の取得結果から確認
+します。`main`や`master`を推測しません。
+
+検索結果リンクは取得設定と別に確認します。安全に導出できるGitHub browser URLと
+実際に取得したbranchを候補にし、commit permalinkやrepository内追加pathを使う
+場合だけリンク画面で設定します。tokenやGit credentialはDBへ保存しません。
+
+### SVN
+
+SVN URL、Source名、再帰または直下ファイルだけの範囲を選びます。checkout/update
+はDB内の専用領域で行い、credentialはURLへ埋め込みません。検索結果リンクは
+Apache HTTP(S)のファイル直リンク、または製品固有Web画面のトップページから
+明示的に選びます。製品固有URLは推測しません。
+
+### Redmine
+
+projectのIssueを直列に取得し、各Issueを`issues/<issue-id>.md`へ保存します。
+取得対象と各Issueの完了位置をcheckpointへ保存し、5件保存するごとに検索へ
+反映します。中断時にやり直すのは最後に反映確認できていない最大5件です。
+一時的なHTTP失敗だけを上限付きでretryし、`Retry-After`があれば従います。
+
+### SharePoint
+
+追加・更新はWindowsだけです。SharePoint同期clientが作ったlocal folderを、
+machine-local環境変数で指定したrootから直接検索へ反映します。同期実体をDB内へ
+copyしません。
 
 ```text
-<root-name>/docs/manual.md
+root環境変数: LOCAL_RAG_SHAREPOINT_ROOT
+相対folder: <relative-subdirectory>
 ```
 
-自動検出保存ルート:
+Source設定にWindowsのabsolute pathは保存しません。作成済みDBは利用者向け
+packageまたは管理PC引っ越しpackageでmacOSへ移せます。macOSではそのDBを検索
+できますが、SharePoint Sourceの追加・更新はできません。
+
+### Other
+
+人間が選択したlocal file/folderを一度だけcopyして索引化します。継続同期を
+意味しません。
+
+## 6. root、scan subdirectory、stored path
+
+logical rootはSource work treeの基準です。scan subdirectoryを指定すると一部だけ
+処理しますが、stored pathは常にlogical root基準です。
 
 ```text
-<root-name>
+logical root: <source-root>
+scan subdirectory: <relative-subdirectory>
+stored path: <root-name>/<relative-subdirectory>/<document>
 ```
 
-Source相対パス:
+root名は必ずstored pathへ含まれ、separatorは`/`です。別scopeから同じ物理fileへ
+到達しても、同じstored pathとdocument identityになります。
+
+## 7. Source MetadataとSource Link
+
+Source inventoryはcatalogの現在有効なdocumentから読み取ります。sidecarだけで
+架空Sourceは作りません。Source IDがないdocumentは診断件数としてだけ表示します。
+
+任意のmetadata:
+
+- display name
+- `source_type`
+- enabled/disabled Link 1件
+
+保存先:
 
 ```text
-docs/manual.md
+<db-root>/source-links.json
 ```
 
-通常URL:
+canonical schemaは`rag-source-metadata-v1`です。1 Sourceは最大1 Provider、
+最大1 URL設定です。path prefixやlongest-prefix選択はありません。
 
-```text
-https://github.com/<owner>/<repository>/blob/main/docs/manual.md
-```
+初版のSource Metadata編集はsingle-editorです。同じDBを2つのManager processから
+同時に編集しないでください。一時file、revision／etag再確認、atomic replaceで
+保存しますが、永続lock fileは作らず、厳密なmulti-process CASは保証しません。
 
-固定URL:
+現在有効なdocumentからtop-level stored rootを自動導出します。
 
-```text
-https://github.com/<owner>/<repository>/blob/0123456789abcdef0123456789abcdef01234567/docs/manual.md
-```
+- `ready`: rootが1つ。per-file URLを設定できます。
+- `no_observed_root`: rootなし。SVN Web画面やOtherのトップページ方式
+  以外ではファイル単位URLを生成できません。
+- `multiple_observed_roots`: 複数。Provider単位でSource IDを分けて追加します。
 
-### GitLab.com／セルフホストGitLab
+URL解決は検索順位とevidence分類が終わった後に行われます。成功時は公開結果へ
+`uri`だけを追加します。permalinkがある場合は通常URLより優先します。設定なし、
+破損、path不正、生成失敗時はstored pathだけを返し、検索statusは変わりません。
 
-グループやサブグループを含むプロジェクトトップURLを入力します。
+## 8. DBの更新と再開
 
-```text
-Repository URL:
-https://gitlab.com/<group>/<subgroup>/<repository>
+「このDBの全Sourceを更新・再開する」は各Sourceのprovider設定とcheckpointを
+使います。Manager独自のmtime判定は行わず、既存のcontent hashとchunker設定へ
+委譲します。
 
-通常URL:
-https://gitlab.com/<group>/<subgroup>/<repository>/-/blob/main/docs/manual.md
+処理中または中断時は、対象DB、Source、現在の段階、資料件数、最近のエラー、
+再開可否を確認できます。検索修復の内部対象は診断結果からManagerが決めます。
 
-固定URL:
-https://gitlab.com/<group>/<subgroup>/<repository>/-/blob/<commit>/docs/manual.md
-```
+## 9. Package
 
-`/-/blob/`や`/-/tree/`以下の表示URLではなく、プロジェクトトップURLを
-入力します。セルフホストの場合もhostと既存base pathをそのまま維持します。
+「配布・管理PCの引っ越し」には2種類あります。
 
-### Azure DevOps Repos
+### 利用者向け検索package
 
-リポジトリルートURLを入力します。通常refはブランチ名として扱います。
+- ZIP
+- 選択した検索可能DB
+- 公開wrapperと検索runtime
+- 必要なmodel
+- 現行schemaとして検証済みのSource Metadata全体
+- 管理用取得stateは含めない
 
-```text
-Repository URL:
-https://dev.azure.com/<organization>/<project>/_git/<repository>
+### 管理PC引っ越しpackage
 
-通常URL:
-https://dev.azure.com/<organization>/<project>/_git/<repository>?path=/docs/manual.md&version=GBmain
+- resumable folder
+- DBと管理用code
+- Source設定とcheckpoint
+- 途中中断後に同じ出力先で再開可能
 
-固定URL:
-https://dev.azure.com/<organization>/<project>/_git/<repository>?path=/docs/manual.md&version=GC<commit>
-```
+package作成はdaemonやDB全体へglobal lockを取りません。copy元を2回確認し、
+途中変更を検出したら失敗として終了します。出力はrelative pathだけのmanifestと
+SHA-256で検証します。
 
-`https://<organization>.visualstudio.com/<project>/_git/<repository>`形式も
-利用できます。queryやfragment付きのファイル表示URLは入力できません。
+除外対象:
 
-### Subversion（SVN）
+- `.venv`
+- daemon/run state
+- `*.lock`、SQLite WAL/journal、temporary file
+- credential、secret、private key
+- `source-links.json.bak`
 
-SubversionはGitリポジトリとは別のProviderです。設定時にリンク形式を明示的に
-選び、自動判定は行いません。
+activeな`source-links.json`には内部URLが含まれ得ます。packageを機密資料として
+安全に保管してください。
 
-`Apache HTTP(S)互換（各ファイルを直接開く）`では、取り込んだローカルルートに
-対応するmod_dav_svnのURLを入力します。
+## 10. この端末の設定・動作確認
 
-```text
-SVNリポジトリURL:
-https://svn.example.com/repos/<project>/trunk
+通常画面には、Local RAGを利用できるか、検索を試す、Sourceへの接続が
+「利用可能」か「設定が必要」かだけを表示します。runtime Python、model、
+proxy/CA、credential参照、環境変数名などは「技術情報」だけに表示します。
 
-SVNリポジトリ内の追加パス:
-docs
+setup completeとlookup readyは別です。runtimeが正常でも健康なDBがなければ
+lookup readyはfalseです。
 
-通常URL:
-https://svn.example.com/repos/<project>/trunk/docs/manual.md
+## 11. 安全な削除
 
-固定URL:
-https://svn.example.com/repos/<project>/trunk/docs/manual.md?p=1234&r=1234
-```
+DB削除では、対象がDB root直下の通常directoryであることを検証します。Source処理
+の中断状態を安全に保存してからもう一度確認し、DB名、表示名、資料数、sizeを表示
+します。人間がDB名を完全一致で入力した場合だけdirectory全体を削除します。
+削除用lock、trash、quarantineは作りません。Windowsでfile handleが残る場合は
+成功を偽装しません。
 
-固定リンクには1以上のrevision番号を使用します。checkout、update、API、
-認証、revision自動取得は行いません。混在revisionの作業コピーでは、1つの
-revisionで生成した固定リンクが各ファイルの実際の版と一致しない場合があります。
+## 12. よくある質問
 
-`その他のSVN Web画面（トップページを開く）`では、VisualSVN、ViewVC、
-WebSVN、Trac等のトップURLだけを入力します。query、fragment、末尾の`/`を
-含めてそのまま保持し、すべての検索結果へ同じトップURLを付けます。製品固有の
-ファイルURL形式は推測せず、ファイル単位のリンクは保証しません。
+### Source Linkを変更すると再索引が必要ですか？
 
-## 12. SharePoint設定
+不要です。Source Linkは検索結果の表示段階だけに適用されます。
 
-Microsoft Graphは使用しません。
+### package作成中に検索できますか？
 
-通常設定で入力するURLは、次の1項目だけです。
+package作成はDB管理lockやmaintenance状態を作りません。ただしcopy開始前後で
+対象が変わった場合や、現在のManagerが実writerを直接保持している場合はpublish
+せず中断します。検索daemonが読んでいるだけでは中断しません。
 
-`SharePoint上の基準フォルダURL【必須】`
+### macOSでSharePoint DBを検索できますか？
 
-検索結果から個別ファイルを開くための、文書ライブラリまたはフォルダの
-URLです。Managerが自動検出した保存ルートを文書パスから1回だけ除去し、
-残ったSource相対パスをこのURLの末尾へ追加します。
+できます。Windowsで更新・索引化したDBを移してください。macOSではSharePoint
+同期folderからの更新はできません。
 
-```text
-https://contoso.sharepoint.com/sites/project/Shared%20Documents/manuals
-```
+### CopilotへDB追加を依頼できますか？
 
-リンク方式はファイル直接リンクに自動設定されるため、選択する必要は
-ありません。保存ルートも読み取り専用の自動検出値であり、入力しません。
-基準URLまたは保存ルートを確認できない場合は、曖昧なトップページURLへ
-フォールバックせず、リンクを生成しません。credential入りURLや個別
-ファイルURLは入力しません。
-
-以前のsidecarにあるSourceトップURLは読み込み可能ですが、新しく設定する
-項目ではありません。基準フォルダURLを設定して保存し直すと、旧Homeキーは
-新しい設定から除去されます。
-
-## 13. Redmine設定
-
-Issue:
-
-```text
-保存パス: issues/12345.md
-正規表現: ^issues/(?P<issue_id>[0-9]+)\.md$
-テンプレート: https://redmine.example.com/issues/{issue_id}
-生成URL: https://redmine.example.com/issues/12345
-```
-
-Wiki:
-
-```text
-保存パス: wiki/Installation_Guide.md
-正規表現: ^wiki/(?P<page>.+)\.md$
-テンプレート: https://redmine.example.com/projects/project/wiki/{page}
-```
-
-named groupとtemplate placeholderは同じ名前にします。
-
-## 14. その他URL設定
-
-通常は「相対パスをURL末尾へ追加」を使います。正規表現テンプレートは
-上級者向けです。一致しない文書はURLなしで安全に表示されます。
-
-## 15. Refとは
-
-RefはGitHubまたはGitLab上で通常表示する版です。Azure DevOpsでは通常refを
-ブランチ名として扱います。
-
-- ブランチ: `main`、`develop`、`release/v2`
-- タグ: `v1.2.3`
-- コミット: 完全なcommit SHA
-
-ブランチが更新されるとリンク先の表示内容も更新されます。
-
-## 16. Gitリポジトリ内の追加パスとは
-
-RAGのSource相対パスよりGitサービス上の実ファイルが深い場合だけ指定します。
-
-```text
-RAG上: manuals/setup.md
-GitHub上: product-a/manuals/setup.md
-設定値: product-a
-生成URL: https://github.com/owner/repo/blob/main/product-a/manuals/setup.md
-```
-
-これはstored path prefixではありません。保存ルートの除去はManagerが
-自動で行います。
-
-## 17. Commit permalinkとは
-
-完全なcommit SHAを指定すると、通常のref URLに加えて内容が将来変わらない
-固定リンクを生成します。回答では固定リンクが優先されます。
-
-## 18. 設定previewの読み方
-
-previewにはRAG保存パス、自動除去された保存ルート、Source相対パス、
-Provider固有の追加パス、生成URL、成功・失敗理由が表示されます。
-
-## 19. 無効化と削除の違い
-
-- 無効化: 設定を残し、検索結果へのURL付与だけを停止します。
-- 削除: Source Link設定をsidecarから削除します。
-
-どちらも索引済み文書、Source、DBを削除しません。
-
-## 20. build/addと検索の同時実行
-
-Local RAGは独自のDBメンテナンス状態を永続管理しません。build、add、
-repair、searchを過去の実行状態だけで拒否することもありません。処理に
-失敗した場合は、その実行がエラーで終了します。原因を修正した後、そのまま
-再実行してください。SQLite、Chroma、OSのファイル操作が同時実行の競合を
-検出した場合は、その処理の通常エラーとして表示されます。
-
-## 21. エラー別対処
-
-- 初期設定が必要: 初期設定を実行します。
-- 保存ルート未検出: 文書とSource IDを確認します。
-- 複数ルート: ProviderごとにSource IDを分けます。
-- URL設定不正: 表示された入力例と許容値を確認します。
-- revision conflict: 設定を読み直して再編集します。
-
-## 22. Windows PowerShellでの起動
-
-PATH上の`python`ではなく、インストール済みvenvの`python.exe`を直接
-起動します。`cmd.exe /c`や`Start-Process`は不要です。
-
-## 23. Git Bashでの起動
-
-PowerShellの`&`や`$env:`を使わず、`$HOME`からvenvの`python.exe`を
-直接指定します。
-
-## 24. macOS/Linuxでの起動
-
-`~/.copilot/rag/query/.venv/bin/python`を直接使用します。
-
-## 25. FAQ
-
-### Source Linkを変更すると再構築が必要ですか？
-
-不要です。sidecarだけが更新されます。
-
-### URLが生成できないと検索精度が下がりますか？
-
-下がりません。URLは検索処理の後に付与されます。
-
-### SourceをManagerから作れますか？
-
-作れません。新しいSource IDでbuild/addが成功した後に現れます。
-
-### Source種別を設定しないと検索できませんか？
-
-検索できます。Local RAGではSource種別もLinkも任意です。未設定は
-「未設定」と表示され、folderとして推測されません。
-
-### 詳細JSONはどこで見られますか？
-
-状態画面で選択できます。通常画面は人間向け要約です。
-
-## 26. セキュリティ上の注意
-
-- URLへユーザー名、パスワード、token、cookieを埋め込まないでください。
-- DBの`source-links.json`はSource Metadataと内部URLを含む可能性があります。
-- DBを外部へ渡す前にsidecarを確認してください。
-- 通常検索は外部URLへHTTPアクセスしません。
-- DB削除は復元機能のない危険操作です。
+通常RAG Skillは読み取り専用です。Managerを人間が起動してください。

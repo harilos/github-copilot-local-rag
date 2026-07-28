@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import json
 import os
 import shutil
@@ -786,145 +785,63 @@ class SourceLinksContractTests(unittest.TestCase):
         self.assertEqual(identity, lock.stat().st_ino)
         self.assertEqual(b"opaque legacy bytes", lock.read_bytes())
 
-    def test_active_kernel_lock_is_not_removed_or_bypassed(
-        self,
-    ) -> None:
-        lock = self.db_root / ".source-links.lock"
-        holder = source_links._acquire_lock(lock)
-        identity = lock.stat().st_ino
-        try:
-            with mock.patch.object(source_links, "LOCK_WAIT_SECONDS", 0.05):
-                with self.assertRaisesRegex(
-                    source_links.SourceLinkError,
-                    "busy",
-                ):
-                    self.save(sidecar())
-            self.assertEqual(identity, lock.stat().st_ino)
-        finally:
-            source_links._release_lock(holder)
+    def test_save_never_creates_a_source_link_lock(self) -> None:
+        self.save(sidecar())
+        self.assertFalse((self.db_root / ".source-links.lock").exists())
 
-    def test_lock_release_is_idempotent_and_never_unlinks(self) -> None:
-        lock = self.db_root / ".source-links.lock"
-        holder = source_links._acquire_lock(lock)
-        identity = lock.stat().st_ino
-        source_links._release_lock(holder)
-        source_links._release_lock(holder)
-        self.assertEqual(identity, lock.stat().st_ino)
-        replacement = source_links._acquire_lock(lock)
-        source_links._release_lock(replacement)
+    @unittest.skipIf(
+        os.name == "nt",
+        "creating symlinks is not generally available to Windows test users",
+    )
+    def test_sidecar_symlink_is_never_read_or_written(self) -> None:
+        outside = Path(self.temporary.name) / "outside.json"
+        original = json.dumps(sidecar()).encode("utf-8")
+        outside.write_bytes(original)
+        current = self.db_root / source_links.SIDECAR_NAME
+        current.symlink_to(outside)
 
-    def test_malformed_lock_contents_do_not_block_without_kernel_owner(
-        self,
-    ) -> None:
-        lock = self.db_root / ".source-links.lock"
-        lock.write_bytes(b"{malformed")
-        identity = lock.stat().st_ino
-        holder = source_links._acquire_lock(lock)
-        try:
-            self.assertEqual(identity, lock.stat().st_ino)
-        finally:
-            source_links._release_lock(holder)
-        # Windows may correctly deny a second handle while the byte-range
-        # lock is active. Verify content preservation after releasing it.
-        self.assertEqual(b"{malformed", lock.read_bytes())
-
-    def test_active_lock_with_malformed_contents_remains_busy(self) -> None:
-        lock = self.db_root / ".source-links.lock"
-        lock.write_bytes(b"{malformed")
-        holder = source_links._acquire_lock(lock)
-        try:
-            with mock.patch.object(source_links, "LOCK_WAIT_SECONDS", 0.05):
-                with self.assertRaisesRegex(
-                    source_links.SourceLinkError,
-                    "busy",
-                ):
-                    source_links._acquire_lock(lock)
-        finally:
-            source_links._release_lock(holder)
-        self.assertTrue(lock.exists())
-
-    def test_lock_symlink_is_rejected(self) -> None:
-        target = self.db_root / "lock-target"
-        target.write_bytes(b"")
-        lock = self.db_root / ".source-links.lock"
-        try:
-            lock.symlink_to(target)
-        except (OSError, NotImplementedError):
-            self.skipTest("symlinks are unavailable")
-        with self.assertRaises(source_links.SourceLinkError):
-            source_links._acquire_lock(lock)
-
-    def test_lock_directory_is_rejected(self) -> None:
-        lock = self.db_root / ".source-links.lock"
-        lock.mkdir()
-        with self.assertRaises(source_links.SourceLinkError):
-            source_links._acquire_lock(lock)
-
-    def test_second_kernel_lock_wait_is_bounded(self) -> None:
-        lock = self.db_root / ".source-links.lock"
-        holder = source_links._acquire_lock(lock)
-        started = time.monotonic()
-        try:
-            with mock.patch.object(source_links, "LOCK_WAIT_SECONDS", 0.05):
-                with self.assertRaisesRegex(
-                    source_links.SourceLinkError,
-                    "busy",
-                ):
-                    source_links._acquire_lock(lock)
-        finally:
-            source_links._release_lock(holder)
-        self.assertLess(time.monotonic() - started, 0.5)
-
-    def test_open_permission_failure_is_not_reported_as_busy(self) -> None:
-        lock = self.db_root / ".source-links.lock"
-        for error in (
-            PermissionError(errno.EACCES, "synthetic permission failure"),
-            OSError(errno.EIO, "synthetic I/O failure"),
-        ):
-            with self.subTest(error=type(error).__name__):
-                started = time.monotonic()
-                with mock.patch.object(
-                    source_links.os,
-                    "open",
-                    side_effect=error,
-                ):
-                    with self.assertRaisesRegex(
-                        source_links.SourceLinkError,
-                        "unavailable",
-                    ):
-                        source_links._acquire_lock(lock)
-                self.assertLess(time.monotonic() - started, 0.2)
-
-    @unittest.skipIf(os.name == "nt", "POSIX inode regression")
-    def test_dead_owner_reclaim_never_unlinks_a_replacement_kernel_lock(
-        self,
-    ) -> None:
-        import fcntl
-
-        lock = self.db_root / ".source-links.lock"
-        live_descriptor = os.open(
-            lock,
-            os.O_RDWR | os.O_CREAT | os.O_EXCL,
-            0o600,
+        loaded = source_links.load_source_links(
+            self.db_root,
+            "example-rag",
         )
-        os.write(live_descriptor, b"2147483647")
-        fcntl.flock(
-            live_descriptor,
-            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        self.assertEqual("invalid", loaded.status)
+        self.assertIsNone(loaded.payload)
+        with self.assertRaises(source_links.SourceLinkError):
+            source_links.save_source_links(
+                self.db_root,
+                sidecar(revision=2),
+                db_name="example-rag",
+                existing_sources={"source-a", "source-b"},
+                expected_revision=1,
+                expected_etag=source_links._current_etag(outside),
+            )
+        self.assertEqual(original, outside.read_bytes())
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "creating symlinks is not generally available to Windows test users",
+    )
+    def test_database_root_symlink_fails_open(self) -> None:
+        outside = Path(self.temporary.name) / "outside-db"
+        outside.mkdir()
+        (outside / source_links.SIDECAR_NAME).write_text(
+            json.dumps(sidecar()),
+            encoding="utf-8",
         )
-        live_identity = os.fstat(live_descriptor).st_ino
-        try:
-            with mock.patch.object(source_links, "LOCK_WAIT_SECONDS", 0.05):
-                with self.assertRaisesRegex(
-                    source_links.SourceLinkError,
-                    "busy",
-                ):
-                    source_links._acquire_lock(lock)
-            self.assertEqual(live_identity, lock.stat().st_ino)
-        finally:
-            fcntl.flock(live_descriptor, fcntl.LOCK_UN)
-            os.close(live_descriptor)
-            lock.unlink(missing_ok=True)
+        alias = Path(self.temporary.name) / "alias-rag"
+        alias.symlink_to(outside, target_is_directory=True)
+        loaded = source_links.load_source_links(alias, "alias-rag")
+        self.assertEqual("invalid", loaded.status)
+        self.assertIsNone(loaded.payload)
+        with self.assertRaises(source_links.SourceLinkError):
+            source_links.save_source_links(
+                alias,
+                sidecar(),
+                db_name="alias-rag",
+                existing_sources={"source-a"},
+                expected_revision=0,
+                expected_etag="missing",
+            )
 
     def test_sharepoint_browser_url_is_normalized(self) -> None:
         payload = sidecar(
@@ -1113,7 +1030,7 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertIn("/blob/" + "a" * 40 + "/", item["source_permalink"])
 
-    def test_github_legacy_strategy_is_read_only_and_saves_canonical(
+    def test_non_sharepoint_legacy_settings_fail_open(
         self,
     ) -> None:
         legacy_value = {
@@ -1138,27 +1055,14 @@ class SourceLinksContractTests(unittest.TestCase):
             self.db_root,
             "example-rag",
         )
-        self.assertEqual("configured", loaded.status)
+        self.assertEqual("manual_required", loaded.status)
+        self.assertEqual(
+            "legacy_non_sharepoint_manual_required",
+            loaded.error_kind,
+        )
+        self.assertTrue(loaded.migration_required)
         self.assertEqual(original, current.read_bytes())
-        assert loaded.payload is not None
-        self.assertEqual(
-            "github-blob",
-            loaded.payload["sources"][0]["link"]["strategy"],
-        )
-        with self.assertRaisesRegex(
-            source_links.SourceLinkError,
-            "unsupported GitHub strategy",
-        ):
-            source_links.validate_source_links(
-                legacy_value,
-                expected_database="example-rag",
-                existing_sources={"source-a", "source-b"},
-            )
-        normalized = self.save(loaded.payload)
-        self.assertEqual(
-            "github-blob",
-            normalized["sources"][0]["link"]["strategy"],
-        )
+        self.assertIsNone(loaded.payload)
 
     def test_github_repository_root_rejects_browse_query_and_fragment(
         self,

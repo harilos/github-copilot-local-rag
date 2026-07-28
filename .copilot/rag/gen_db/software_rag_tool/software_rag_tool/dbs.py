@@ -38,7 +38,11 @@ def require_db_name(value: str) -> str:
 def list_db_names(dbs_root: Path) -> list[str]:
     if not dbs_root.exists():
         return []
-    return sorted(p.name for p in dbs_root.iterdir() if p.is_dir() and is_db_name(p.name))
+    return sorted(
+        p.name
+        for p in dbs_root.iterdir()
+        if p.is_dir() and not p.is_symlink() and is_db_name(p.name)
+    )
 
 
 def extract_db_name(text: str) -> str | None:

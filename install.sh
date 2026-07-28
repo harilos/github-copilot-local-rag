@@ -44,6 +44,17 @@ fi
   tar -xf -
 )
 
+# Remove only retired files that older overlay installs may have left behind.
+# Keep this explicit allowlist narrow; the installer must not prune unrelated
+# user files or database contents.
+rm -f -- \
+  "$TARGET_DIR/rag/export_migration.sh" \
+  "$TARGET_DIR/rag/migration_archive.py" \
+  "$TARGET_DIR/rag/gen_db/migrate_source_metadata.py" \
+  "$TARGET_DIR/rag/gen_db/software_rag_tool/software_rag_tool/source_metadata_migration.py" \
+  "$TARGET_DIR/skills/local-rag-admin/SKILL.md"
+rmdir -- "$TARGET_DIR/skills/local-rag-admin" 2>/dev/null || true
+
 if [ -x "$RUNTIME_PYTHON" ]; then
   if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
       --refresh-completion-marker --format json >/dev/null; then

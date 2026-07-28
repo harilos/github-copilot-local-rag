@@ -110,6 +110,18 @@ class InstallerExclusionContractTests(unittest.TestCase):
             "[System.IO.File]::Move($CompletionMarker, $PreUpdateMarker)",
             powershell,
         )
+        for retired in (
+            "rag/export_migration.sh",
+            "rag/migration_archive.py",
+            "rag/gen_db/migrate_source_metadata.py",
+            (
+                "rag/gen_db/software_rag_tool/software_rag_tool/"
+                "source_metadata_migration.py"
+            ),
+            "skills/local-rag-admin/SKILL.md",
+        ):
+            self.assertIn(retired, shell)
+            self.assertIn(retired.replace("/", "\\"), powershell)
 
     @unittest.skipIf(
         os.name == "nt",
@@ -168,6 +180,23 @@ class InstallerExclusionContractTests(unittest.TestCase):
             target_marker = (
                 target_query / ".venv" / ".rag-deps-installed"
             )
+            retired_files = (
+                target / "rag" / "export_migration.sh",
+                target / "rag" / "migration_archive.py",
+                target / "rag" / "gen_db" / "migrate_source_metadata.py",
+                (
+                    target
+                    / "rag"
+                    / "gen_db"
+                    / "software_rag_tool"
+                    / "software_rag_tool"
+                    / "source_metadata_migration.py"
+                ),
+                target / "skills" / "local-rag-admin" / "SKILL.md",
+            )
+            for retired in retired_files:
+                retired.parent.mkdir(parents=True, exist_ok=True)
+                retired.write_text("retired\n", encoding="utf-8")
             refresh_log = root / "refresh-arguments.txt"
             target_network.write_text(
                 '{"target":"preserve"}\n',
@@ -251,6 +280,11 @@ class InstallerExclusionContractTests(unittest.TestCase):
                     (target_query / relative).exists(),
                     msg=relative,
                 )
+            for retired in retired_files:
+                self.assertFalse(retired.exists(), msg=str(retired))
+            self.assertFalse(
+                (target / "skills" / "local-rag-admin").exists()
+            )
 
     @unittest.skipIf(
         os.name == "nt",

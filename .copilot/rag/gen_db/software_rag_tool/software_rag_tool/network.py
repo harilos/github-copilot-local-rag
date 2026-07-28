@@ -440,13 +440,16 @@ def _validate_proxy_url(value: str) -> None:
     if (
         parsed.scheme.lower() not in {"http", "https"}
         or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}
     ):
         raise NetworkConfigError(
             "invalid_proxy_config",
-            "Proxy URL must be an http:// or https:// host URL without query or fragment",
+            "Proxy URL must be an http:// or https:// host URL without "
+            "credentials, query, or fragment",
         )
     if port is not None and not 1 <= port <= 65535:
         raise NetworkConfigError("invalid_proxy_config", "Proxy port is out of range")

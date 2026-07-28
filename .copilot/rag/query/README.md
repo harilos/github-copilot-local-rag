@@ -1,112 +1,86 @@
-# Query Runtime
+# Local RAG query runtime
 
-This is the folder Copilot should call for searches.
+This directory contains the lower retrieval runtime. It is not the public
+Copilot command surface.
 
-Install dependencies and prepare the default ONNX INT8 embedding model:
+Public ordinary lookup uses:
 
-```bash
-python setup.py
+```text
+~/.copilot/rag/list_dbs.py
+~/.copilot/rag/search.py
 ```
 
-Copilot should run this when the user asks `RAGの初期設定をして` or `RAGをセットアップして`.
-If `.venv/.rag-deps-installed` is missing, invalid, or stale, `search.py` and
-`build_db.py` return `setup_required` instead of running setup automatically.
-Copilot-facing wording is handled by the instruction file, not by these CLI
-scripts.
+The root wrappers validate the public arguments before starting a child,
+invoke the appropriate lower operation exactly once, enrich presentation
+read-only, and preserve child stderr and exit status. Help or invalid public
+arguments start no lower process.
 
-To skip model preparation when a valid local model is already installed:
+## Runtime environment
 
-```bash
-python setup.py --no-prepare-model
+Use the installed virtual-environment interpreter:
+
+```text
+macOS/Linux: ~/.copilot/rag/query/.venv/bin/python
+Windows:     %USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe
 ```
 
-Verification still checks the model and returns an incomplete setup when the
-model is missing or invalid.
+Ordinary lookup never probes PATH-based Python launchers. A missing or invalid
+completion marker returns `setup_required`. It does not trigger an implicit
+download.
 
-Installers automatically perform an offline deep verification when upgrading
-an old runtime whose completion marker contains only `ok`. A successful check
-atomically migrates that marker to the machine-verifiable contract without
-installing packages, downloading a model, or changing databases.
+## Lower search responsibilities
 
-Proxy/certificate environments:
+The lower runtime owns:
 
-```bash
-python setup.py --proxy http://proxy.example:8080
+- database resolution compatibility;
+- structured request validation;
+- daemon transport and deadline;
+- Exact, lexical, Dense, metadata, and facet candidate generation;
+- fusion, document diversity, evidence/discovery separation;
+- primary-first packing and structural context;
+- deterministic initial-answer data and cached detail items.
+
+It does not own public Source URI projection or database freshness notices.
+Those belong to the root wrapper after retrieval and packing.
+
+When `LOCAL_RAG_WRAPPER_INTERNAL=1`, the lower JSON result may retain private
+detail material required to publish one final enriched bundle. Private
+Source IDs are never a public result field.
+
+## Persistent daemon
+
+On Windows, short-lived direct Python clients use one lightweight manager and
+one spawned search worker. The manager does not initialize native retrieval
+libraries. The worker owns ONNX, tokenizer, Chroma, read-only SQLite
+connections, and a bounded per-DB cache.
+
+Normal busy/starting behavior stays on the daemon route. Requests are
+correlated by request and client IDs. CPU-heavy work is serial, while the
+manager remains responsive to status, cancel, shutdown, and DB release.
+
+Local RAG does not create a persistent DB maintenance state or writer lease.
+Search and DB mutation are not rejected by a previous `active`, `failed`, or
+`requires_repair` record. Concurrent-access failures reported by SQLite,
+Chroma, or the OS remain ordinary errors for the current invocation.
+
+## Result delivery
+
+The lower runtime can produce one in-memory result plus detail items. The root
+wrapper resolves optional URIs first, then publishes the final bundle once.
+It never edits an already-published summary.
+
+Temporary result location:
+
+```text
+<OS temp>/GitHubCopilotLocalRAG/results/<uuid>/
 ```
 
-If pip or model download fails with SSL/certificate errors, set the company CA certificate path before retrying:
+The pointer is ASCII-safe JSON; bundle files are UTF-8 JSON. Follow-up detail
+reads only the cached result set and does not query a database.
 
-```bash
-export REQUESTS_CA_BUNDLE=/path/to/company-ca.pem
-export SSL_CERT_FILE=/path/to/company-ca.pem
-export PIP_CERT=/path/to/company-ca.pem
-```
+## Development and diagnostics
 
-On Windows PowerShell:
-
-```powershell
-$env:REQUESTS_CA_BUNDLE="C:\path\company-ca.pem"
-$env:SSL_CERT_FILE="C:\path\company-ca.pem"
-$env:PIP_CERT="C:\path\company-ca.pem"
-py -3 setup.py --proxy http://proxy.example:8080
-```
-
-Search with an explicit DB:
-
-```bash
-python search.py --db project-rag "このAPIの設計意図は？"
-```
-
-The search command hides retrieval strategy. It runs dense search, BM25, exact identifier lookup, metadata/path lookup, RRF fusion, deduplication, and context packing internally.
-
-Dense search uses `cl-nagoya/ruri-v3-30m` via ONNX Runtime INT8. `search.py` auto-starts `ragd` when needed and the daemon exits after 3 idle hours.
-
-Or include the DB name in the question:
-
-```bash
-python search.py "project-ragでこのAPIの設計意図を調べて"
-```
-
-When the user explicitly asks for RAG but does not name a DB, list DBs and choose one from the hints:
-
-```bash
-python list_dbs.py
-python search.py --db project-rag "過去の運用手順から調べて"
-```
-
-`--auto` remains available for compatibility, but Copilot-facing instructions should prefer explicit DB selection after `list_dbs.py`.
-
-Do not run RAG for ordinary general questions. A topic merely matching a DB hint is not enough.
-If a non-general proper noun or local-looking identifier appears, Copilot should run `list_dbs.py` to check whether a clearly relevant DB exists. Use RAG only when the DB name or hint clearly matches; otherwise answer normally.
-
-Use stdin for multiline questions or code:
-
-```bash
-python search.py --db project-rag --stdin
-```
-
-Useful options:
-
-```bash
-python search.py --db project-rag --budget-tokens 3000 --timeout 60 "質問"
-python search.py --db project-rag --explain --format json "A2W"
-python search.py --db project-rag --no-daemon "同期実行したい質問"
-```
-
-Evaluation-only retrieval modes:
-
-```bash
-python search.py --db project-rag --retrieval-mode lexical "質問"
-python search.py --db project-rag --retrieval-mode dense "質問"
-python search.py --db project-rag --retrieval-mode hybrid "質問"
-```
-
-The default remains `hybrid`.
-
-List DBs:
-
-```bash
-python list_dbs.py
-```
-
-If local Python is unavailable, use `proxy_client.py` to call a RAG service running on another machine.
+Direct lower-runtime execution is reserved for tests and explicit diagnostics.
+Do not document it in Copilot instructions or Skills. Manual users should
+prefer the root public wrappers, and human changes should use Local RAG
+Manager.

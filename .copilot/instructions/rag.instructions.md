@@ -1,40 +1,67 @@
 # Local RAG Routing
 
-Treat ordinary local RAG lookup as a simple, read-only task suitable for a
-lightweight and fast model selected by Auto.
+Use the `local-rag` Skill only when the human explicitly asks to answer from
+Local RAG, local documents, internal/company information, or information
+installed for Copilot.
 
-Do not require or assume any particular model. Do not create a multi-step
-execution plan, inspect implementation code, edit files, or delegate ordinary
-lookup to Codex, a coding agent, or a subagent. The single bounded structured
-request defined by the `local-rag` skill is allowed and is not a separate
-lookup or delegated planning step.
+Equivalent explicit requests include “internal or company information” and
+“information installed in or provided to Copilot”. Do not activate lookup
+merely because the topic sounds internal, technical, or organization-specific.
 
-For an executed lookup, pass the full latest human-authored semantic question
-as the final `search.py` argument. Exclude only lookup-routing wording such as
-"search the RAG", equivalent system-facing wording in another language, or an
-instruction to use the already selected database. Preserve the remaining
-wording and never replace it with only keywords.
+Ordinary Local RAG access is read-only and has exactly two public operations:
 
-When the user explicitly asks to answer from RAG, local documents, internal
-or company information, or information installed in or provided to Copilot:
+1. list available databases and the kinds of material they contain;
+2. search one selected database, or read cached detail through the same search
+   entry point.
 
-- Use the `local-rag` skill for ordinary lookup.
-- When the user asks to show or print an exact ordinary Local RAG lookup
-  command without executing it, load the `local-rag` skill exactly once and
-  follow its static command-only contract.
-- Use the `local-rag-admin` skill only for setup, database creation, build,
-  add, resume, rebuild, status, or maintenance requests.
-- Do not load administrative instructions during ordinary lookup.
+Do not inspect implementation files, delegate lookup to another agent, create
+a plan, or run a management command. If the human asks to create or change a
+database, Source, retrieval setting, repair, distribution package, or
+management-PC transfer, say:
 
-A request to create, edit, inspect, or explain Source-Link settings is not an
-ordinary lookup. Treat it as a human-only Local RAG Manager boundary: do not
-list databases, search, inspect configuration, run an admin command, or open
-the Manager. State only that a human can manage those settings through the
-Local RAG Manager and stop.
+`Please use Local RAG Manager for that operation.`
 
-Treat equivalent source-based wording in any language as an explicit lookup
-request, even when the user does not say "RAG". Do not activate lookup merely
-because a question mentions a company or an internal-sounding term.
+Do not open the Manager automatically.
 
-Do not create or use a custom agent for local RAG. Do not set or require a
-model name. GitHub Copilot model selection remains Auto.
+If the latest prompt names a database ending in `-rag`, search that database
+once and do not list databases. Otherwise list databases once. Choose a
+database only when one candidate clearly matches the title, query hint,
+content summary, or Source display names/types. If multiple candidates are
+reasonable, ask the human to choose and do not search.
+
+Pass the latest human-authored semantic question as the final positional
+argument. Remove only system-facing lookup routing such as “search Local RAG”
+and an instruction to use the already selected database. Preserve all
+remaining characters, identifiers, punctuation, and constraints. Never
+rewrite the question as keywords and never search a second database or retry
+automatically.
+
+When a contextual reference such as “it”, “that design”, or “the previous
+issue” appears, earlier human-authored messages from the same conversation
+may be represented only as the minimum necessary structured retrieval hints:
+
+- `--literal-identifier`
+- `--entity`
+- `--facet`
+- `--semantic-hypothesis`
+- `--answer-goal`
+
+Never append earlier messages to the positional question. Previous assistant
+answers and previous RAG results are not verified facts. If multiple
+antecedents would materially change database selection or search meaning, ask
+the human to clarify before listing or searching.
+
+When `database_freshness.chat_notice.code` is
+`local_rag_snapshot_older_than_30_days`, show its Japanese message at most
+once in the current chat. Check only prior assistant messages in this chat.
+Do not persist notification state. A new chat may show it once again.
+
+Answer with body citations such as `[E1]` that are never links. End every RAG
+answer with exactly one `## References` section containing only cited IDs.
+When an item has `uri`, format the entry as `[E1] [filename.ext](URI)` and
+attach the link only to the filename. Never show a raw URI. With no `uri`,
+show the filename as plain text and optionally the stored relative path.
+
+Do not require a particular Copilot model. Ordinary lookup must not use a
+subagent. Shell selection changes command syntax only; the final answer is
+always Markdown.
