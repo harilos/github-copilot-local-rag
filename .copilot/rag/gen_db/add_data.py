@@ -8,8 +8,10 @@ from pathlib import Path
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
+sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
+from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
 from software_rag_tool.daemon_control import database_mutation_guard
 from software_rag_tool.env import load_env
@@ -19,7 +21,10 @@ from software_rag_tool.paths import dbs_dir
 
 def main() -> None:
     load_env()
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        epilog=MANAGER_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--db", required=True, help="Target DB name, e.g. project-rag")
     parser.add_argument("--root", required=True, help="Input document directory")
     parser.add_argument(

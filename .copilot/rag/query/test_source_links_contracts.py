@@ -536,6 +536,15 @@ class SourceLinksContractTests(unittest.TestCase):
         second["sources"][0]["settings"]["source_web_root"] = (
             "https://two.example.invalid/root"
         )
+        second = source_links.validate_source_links(
+            second,
+            expected_database="example-rag",
+            existing_sources={"source-a", "source-b"},
+            observed_paths={
+                "source-a": ["Root/a.txt"],
+                "source-b": ["Root/a.txt"],
+            },
+        )
         first_bytes = current.read_bytes()
         second_bytes = (
             json.dumps(
@@ -779,10 +788,12 @@ class SourceLinksContractTests(unittest.TestCase):
         identity = lock.stat().st_ino
         holder = source_links._acquire_lock(lock)
         try:
-            self.assertEqual(b"{malformed", lock.read_bytes())
             self.assertEqual(identity, lock.stat().st_ino)
         finally:
             source_links._release_lock(holder)
+        # Windows may correctly deny a second handle while the byte-range
+        # lock is active. Verify content preservation after releasing it.
+        self.assertEqual(b"{malformed", lock.read_bytes())
 
     def test_active_lock_with_malformed_contents_remains_busy(self) -> None:
         lock = self.db_root / ".source-links.lock"
@@ -900,6 +911,109 @@ class SourceLinksContractTests(unittest.TestCase):
             normalized["sources"][0]["settings"]["source_web_root"],
         )
 
+    def test_sharepoint_home_key_is_read_but_removed_on_canonical_save(
+        self,
+    ) -> None:
+        legacy_value = sidecar(
+            link(
+                settings={
+                    "source_home_url": (
+                        "https://tenant.example.invalid/sites/example"
+                    ),
+                    "source_web_root": (
+                        "https://tenant.example.invalid/sites/example/Library"
+                    ),
+                }
+            )
+        )
+        current = self.db_root / source_links.SIDECAR_NAME
+        current.write_text(
+            json.dumps(legacy_value),
+            encoding="utf-8",
+        )
+        loaded = source_links.load_source_links(
+            self.db_root,
+            "example-rag",
+        )
+        self.assertEqual("configured", loaded.status)
+        assert loaded.payload is not None
+        settings = loaded.payload["sources"][0]["settings"]
+        self.assertNotIn("source_home_url", settings)
+        normalized = self.save(loaded.payload)
+        self.assertNotIn(
+            "source_home_url",
+            normalized["sources"][0]["settings"],
+        )
+
+    def test_retired_sharepoint_home_key_still_rejects_credentials(
+        self,
+    ) -> None:
+        for unsafe_home in (
+            "https://user:secret@tenant.example.invalid/sites/example",
+            "https://tenant.example.invalid/sites/example?token=secret",
+        ):
+            with self.subTest(unsafe_home=unsafe_home):
+                with self.assertRaises(source_links.SourceLinkError):
+                    source_links.validate_source_links(
+                        sidecar(
+                            link(
+                                settings={
+                                    "source_home_url": unsafe_home,
+                                    "source_web_root": (
+                                        "https://tenant.example.invalid/"
+                                        "sites/example/Library"
+                                    ),
+                                }
+                            )
+                        ),
+                        expected_database="example-rag",
+                        existing_sources={"source-a", "source-b"},
+                    )
+
+    def test_sharepoint_home_only_is_legacy_read_only(self) -> None:
+        legacy_value = sidecar(
+            link(
+                strategy="home-only",
+                settings={
+                    "source_home_url": (
+                        "https://tenant.example.invalid/sites/example"
+                    )
+                },
+            )
+        )
+        current = self.db_root / source_links.SIDECAR_NAME
+        current.write_text(json.dumps(legacy_value), encoding="utf-8")
+        loaded = source_links.load_source_links(
+            self.db_root,
+            "example-rag",
+        )
+        self.assertEqual("configured", loaded.status)
+        assert loaded.payload is not None
+        with self.assertRaisesRegex(
+            source_links.SourceLinkError,
+            "unsupported SharePoint strategy",
+        ):
+            self.save(loaded.payload)
+
+    def test_sharepoint_without_web_root_does_not_save_a_fallback_link(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            source_links.SourceLinkError,
+            "source_web_root",
+        ):
+            self.save(
+                sidecar(
+                    link(
+                        settings={
+                            "source_home_url": (
+                                "https://tenant.example.invalid/sites/example"
+                            )
+                        }
+                    )
+                )
+            )
+
     def test_sharepoint_source_relative_segments_are_encoded_once(self) -> None:
         self.set_paths(
             {
@@ -952,6 +1066,49 @@ class SourceLinksContractTests(unittest.TestCase):
             item["source_url"],
         )
         self.assertIn("/blob/" + "a" * 40 + "/", item["source_permalink"])
+
+    def test_github_legacy_strategy_is_read_only_and_saves_canonical(
+        self,
+    ) -> None:
+        legacy_value = sidecar(
+            link(
+                provider="github",
+                strategy="append-relative-path",
+                settings={
+                    "repository_url": "https://git.example.invalid/o/r",
+                    "ref": "main",
+                    "permalink_enabled": False,
+                },
+            )
+        )
+        current = self.db_root / source_links.SIDECAR_NAME
+        original = json.dumps(legacy_value).encode("utf-8")
+        current.write_bytes(original)
+        loaded = source_links.load_source_links(
+            self.db_root,
+            "example-rag",
+        )
+        self.assertEqual("configured", loaded.status)
+        self.assertEqual(original, current.read_bytes())
+        assert loaded.payload is not None
+        self.assertEqual(
+            "github-blob",
+            loaded.payload["sources"][0]["strategy"],
+        )
+        with self.assertRaisesRegex(
+            source_links.SourceLinkError,
+            "unsupported GitHub strategy",
+        ):
+            source_links.validate_source_links(
+                legacy_value,
+                expected_database="example-rag",
+                existing_sources={"source-a", "source-b"},
+            )
+        normalized = self.save(loaded.payload)
+        self.assertEqual(
+            "github-blob",
+            normalized["sources"][0]["strategy"],
+        )
 
     def test_github_repository_root_rejects_browse_query_and_fragment(
         self,

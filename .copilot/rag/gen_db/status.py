@@ -11,8 +11,10 @@ from typing import Any
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
+sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
+from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
@@ -26,7 +28,10 @@ from software_rag_tool.db_maintenance import (
 
 def main() -> None:
     load_env()
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        epilog=MANAGER_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--db", required=True, help="Target DB name, e.g. project-rag")
     parser.add_argument("--json", action="store_true", help="Print machine-readable status")
     parser.add_argument("--stale-minutes", type=int, default=30)

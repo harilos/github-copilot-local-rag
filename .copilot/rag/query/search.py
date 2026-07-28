@@ -19,8 +19,10 @@ from pathlib import Path
 RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 DBS_ROOT = Path(os.getenv("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))).expanduser().resolve()
+sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
+from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
 from software_rag_tool.db_maintenance import (
     MaintenanceError,
@@ -63,7 +65,10 @@ _LOCAL_HTTP_OPENER = urllib.request.build_opener(
 def main() -> None:
     _configure_standard_streams()
     cleanup_result_spool()
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        epilog=MANAGER_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("question", nargs="*")
     parser.add_argument("--db", help="Target DB name, e.g. project-rag")
     parser.add_argument("--auto", action="store_true", help="Allow natural-language RAG trigger when DB name is omitted")

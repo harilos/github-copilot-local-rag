@@ -120,6 +120,9 @@ RAG setup to recreate the virtual environment.
 Run the interactive manager when a person wants to inspect or maintain Local
 RAG without assembling command-line arguments:
 
+- [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja.md)
+- [Local RAG Manager 設定項目レビュー](docs/local-rag-manager-settings-review-ja.md)
+
 macOS/Linux:
 
 ```bash
@@ -133,8 +136,15 @@ Windows PowerShell:
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
+Git Bash:
+
+```bash
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
+  "$HOME/.copilot/rag/manage.py"
+```
+
 The top-level menu contains setup/verification, database selection, database
-creation, and exit. After a database is selected, the manager exposes search,
+creation, the Japanese help guide, and exit. After a database is selected, the manager exposes search,
 the read-only Source inventory, build/resume, add/update, detailed status,
 search-index repair, and guarded database deletion. The manager delegates to
 the existing scripts with argument arrays; it does not implement a second
@@ -173,14 +183,14 @@ manager performs an explicit save to publish the single-configuration
 Per-file Source Links require exactly one observed stored root. If one Source
 contains documents from several top-level roots, add those provider roots
 again under separate stable Source IDs; the manager does not split or reindex
-the database automatically. A home-only setting may still be used without a
-single observed root.
+the database automatically.
 
 GitHub repository URLs and refs are entered manually; the manager does not
-inspect `.git` or run Git. SharePoint file links require a manually supplied
-document-library or folder root; Microsoft Graph is not required. Site-only
-and home-only settings remain visible only in the human manager and do not
-become per-document search links.
+inspect `.git` or run Git. SharePoint has one normal input: the document-library
+or folder root used for direct file links. Its strategy is fixed to
+`append-relative-path`; Microsoft Graph and a separate home URL are not used.
+Older home-only settings remain readable for compatibility but are not offered
+or newly saved by the manager.
 
 Copying the complete database directory preserves the active sidecar and its
 local rollback backup. The migration exporter validates and includes only the

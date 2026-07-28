@@ -210,34 +210,36 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual(
             [label for _, label in manage.TOP_MENU],
             [
-                "Initial setup and setup verification",
-                "List and select a database",
-                "Create a new database",
-                "Exit",
+                "初期設定・動作確認",
+                "DB一覧・DBを選択",
+                "新しいDBを作成",
+                "ヘルプを開く",
+                "終了",
             ],
         )
         self.assertEqual(
             [label for _, label in manage.DATABASE_MENU],
             [
-                "Search or run a search test",
-                "List Sources",
-                "Build / resume",
-                "Add or update documents",
-                "Show detailed status",
-                "Repair or recreate search indexes",
-                "Delete this database",
-                "Back",
+                "検索を試す",
+                "Source一覧・Source Link設定",
+                "DBを構築・再開する",
+                "文書を追加・更新する",
+                "詳細状態を確認する",
+                "検索索引を修復する",
+                "このDBを削除する【危険】",
+                "戻る",
             ],
         )
         self.assertEqual(
             [label for _, label in manage.SOURCE_LINK_MENU],
             [
-                "Show configuration",
-                "Configure or replace",
-                "Enable / disable",
-                "Remove configuration",
-                "Preview generated URLs",
-                "Back",
+                "現在の設定を確認",
+                "新規設定・設定変更",
+                "有効・無効を切り替える",
+                "設定を削除する",
+                "生成URLを確認する",
+                "Source Linkヘルプを開く",
+                "戻る",
             ],
         )
 
@@ -250,6 +252,8 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual(argv[2:], ["--format", "json"])
         self.assertIs(kwargs["shell"], False)
         self.assertNotIsInstance(argv, str)
+        self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
+        self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
 
     def test_non_allowlisted_script_is_rejected(self) -> None:
         with self.assertRaises(manage.ManagerError):
@@ -271,8 +275,8 @@ class ManagerContractTests(unittest.TestCase):
         argv = self.runner.calls[0][0]
         self.assertIn("--verify-only", argv)
         self.assertIn("json", argv)
-        self.assertIn("Setup complete: yes", self.output)
-        self.assertIn("Lookup ready: yes", self.output)
+        self.assertIn("初期設定: 完了", self.output)
+        self.assertIn("検索準備: 利用可能", self.output)
 
     def test_search_normal_is_one_direct_compact_call(self) -> None:
         self.manager(["1", "synthetic question"])._search("example-rag")
@@ -293,6 +297,31 @@ class ManagerContractTests(unittest.TestCase):
         self.manager(["2", "synthetic question"])._search("example-rag")
         self.assertEqual(len(self.runner.calls), 1)
         self.assertIn("--explain", self.runner.calls[0][0])
+
+    def test_nonzero_maintenance_search_explains_target_without_retry(
+        self,
+    ) -> None:
+        self.runner.respond(
+            "search.py",
+            returncode=3,
+            stdout=json.dumps(
+                {
+                    "schema": "local-rag.search.v1",
+                    "status": "busy",
+                    "error": "db_maintenance_in_progress",
+                    "db": "example-rag",
+                    "operation": "add",
+                }
+            ),
+        )
+        self.manager(["1", "synthetic question"])._search("example-rag")
+        self.assertEqual(len(self.runner.calls), 1)
+        text = "\n".join(self.output)
+        self.assertIn("現在検索できません", text)
+        self.assertIn("対象DB: example-rag", text)
+        self.assertIn("実行中の操作: add", text)
+        self.assertIn("別DBは通常どおり検索できます", text)
+        self.assertNotIn("DB構築を実行中", text)
 
     def test_search_rendering_prefers_permalink_then_url_then_path(self) -> None:
         manager = self.manager()
@@ -356,13 +385,44 @@ class ManagerContractTests(unittest.TestCase):
         manager._load_source_inventory = lambda _name: FakeInventory()
         self.assertIsNone(manager._select_database())
         text = "\n".join(self.output)
-        self.assertIn("documents=2, chunks=5", text)
-        self.assertIn("ready", text)
+        self.assertIn("文書数: 2", text)
+        self.assertIn("チャンク数: 5", text)
+        self.assertIn("利用可能（ready）", text)
+
+    def test_database_counts_do_not_mask_failed_maintenance_state(self) -> None:
+        self.runner.respond(
+            "list_dbs.py",
+            stdout=json.dumps(
+                {"databases": [{"name": "example-rag", "title": "Example"}]}
+            ),
+        )
+        self.runner.respond(
+            "status.py",
+            stdout=json.dumps(
+                {
+                    "status": "completed",
+                    "document_count": 2,
+                    "chunk_count": 5,
+                    "db_maintenance": {
+                        "blocks_search": True,
+                        "status": "db_requires_repair",
+                    },
+                }
+            ),
+        )
+        manager = self.manager(["0"])
+        manager._load_source_inventory = lambda _name: FakeInventory()
+        manager._select_database()
+        text = "\n".join(self.output)
+        self.assertIn("修復が必要", text)
+        self.assertNotIn("利用可能（ready）", text)
 
     def test_create_rejects_path_shaped_database_name(self) -> None:
         self.manager(["outside/example-rag"])._create_database()
         self.assertEqual(self.runner.calls, [])
-        self.assertIn("Invalid database name.", self.output)
+        self.assertTrue(
+            any("[エラー] DB名は" in value for value in self.output)
+        )
 
     def test_resume_reconstructs_allowlisted_argv(self) -> None:
         manager = self.manager()
@@ -382,6 +442,32 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("--scan-subdir", argv)
         self.assertNotIn("untrusted command", argv)
 
+    def test_resume_confirmation_shows_saved_scope_before_execution(
+        self,
+    ) -> None:
+        self.make_db()
+        status = {
+            "status": "interrupted",
+            "appears_active": False,
+            "can_resume": True,
+            "operation": "add",
+            "root": "Example Root",
+            "source_id": "source-a",
+            "scan_subdir": "docs",
+        }
+        self.runner.respond("status.py", stdout=json.dumps(status))
+        manager = self.manager(["2", "n"])
+        manager._build_or_resume("example-rag")
+        text = "\n".join(self.output)
+        self.assertIn("再開する保存済み処理", text)
+        self.assertIn("論理ルート: Example Root", text)
+        self.assertIn("Source ID: source-a", text)
+        self.assertIn("読込範囲: docs", text)
+        self.assertEqual(
+            [Path(call[0][1]).name for call in self.runner.calls],
+            ["status.py"],
+        )
+
     def test_repair_components_are_strictly_bounded(self) -> None:
         self.assertEqual(
             set(manage.REPAIR_COMPONENTS.values()),
@@ -394,9 +480,9 @@ class ManagerContractTests(unittest.TestCase):
         manager._load_source_inventory = lambda _name: FakeInventory()
         manager._sources_screen("example-rag")
         text = "\n".join(self.output)
-        self.assertIn("Read-only Source inventory", text)
-        self.assertIn("cannot create, rename, or delete", text)
-        self.assertIn("Source detail", text)
+        self.assertIn("Source一覧（読み取り専用）", text)
+        self.assertIn("追加・削除・名称変更はできません", text)
+        self.assertIn("画面: Source詳細", text)
 
     def test_source_link_add_uses_sidecar_api_only(self) -> None:
         links = FakeSourceLinks()
@@ -416,7 +502,7 @@ class ManagerContractTests(unittest.TestCase):
         self.assertNotIn("mappings", source)
         self.assertNotIn("path_prefix", source)
         self.assertIn(
-            "Representative stored paths and generated URLs",
+            "生成URLの確認",
             "\n".join(self.output),
         )
 
@@ -521,8 +607,8 @@ class ManagerContractTests(unittest.TestCase):
         )
         self.assertEqual([], links.saved)
         text = "\n".join(self.output)
-        self.assertIn("explicitly migrate", text)
-        self.assertIn("migration cancelled", text)
+        self.assertIn("新形式へ移行", text)
+        self.assertIn("移行をキャンセル", text)
 
     def test_ingestion_prompt_shows_provider_oriented_source_examples(
         self,
@@ -550,7 +636,7 @@ class ManagerContractTests(unittest.TestCase):
                 "source_web_root": "https://files.example.invalid",
             },
         }
-        manager = self.manager(["", "", "", "-", ""])
+        manager = self.manager(["", "", ""])
         value = manager._prompt_source_link(existing=existing)
         self.assertIsNotNone(value)
         assert value is not None
@@ -559,6 +645,66 @@ class ManagerContractTests(unittest.TestCase):
             value["settings"]["source_web_root"],
             "https://files.example.invalid",
         )
+        text = "\n".join(self.output)
+        self.assertNotIn("SourceトップURL", text)
+        self.assertNotIn("リンク方式を選択", text)
+        self.assertIn("SharePoint上の基準フォルダURL【必須】", text)
+
+    def test_sharepoint_form_has_one_url_and_fixed_strategy(self) -> None:
+        manager = self.manager(
+            [
+                "",
+                "1",
+                "https://tenant.example.invalid/sites/example/Library",
+            ]
+        )
+        value = manager._prompt_source_link()
+        self.assertIsNotNone(value)
+        assert value is not None
+        self.assertEqual("sharepoint", value["provider"])
+        self.assertEqual("append-relative-path", value["strategy"])
+        self.assertEqual(
+            {
+                "source_web_root": (
+                    "https://tenant.example.invalid/sites/example/Library"
+                )
+            },
+            value["settings"],
+        )
+        text = "\n".join(self.output)
+        self.assertNotIn("SourceトップURL", text)
+        self.assertNotIn("トップページのみ", text)
+        self.assertNotIn("リンク方式を選択", text)
+        self.assertIn("リンク方式を自動設定", text)
+
+    def test_sharepoint_uncertain_observed_root_has_actionable_warning(
+        self,
+    ) -> None:
+        links = FakeSourceLinks()
+        inventory = FakeInventory()
+        inventory.payload["sources"][0]["observed_root_status"] = (
+            "multiple_observed_roots"
+        )
+        manager = self.manager()
+        manager._import_source_links = lambda: links
+        manager._prompt_source_link = lambda **_: {
+            "provider": "sharepoint",
+            "enabled": True,
+            "strategy": "append-relative-path",
+            "settings": {
+                "source_web_root": "https://files.example.invalid/root"
+            },
+        }
+        manager._configure_source_link(
+            "example-rag",
+            inventory,
+            "source-a",
+        )
+        self.assertEqual([], links.saved)
+        text = "\n".join(self.output)
+        self.assertIn("SharePointのファイルURLを生成できません", text)
+        self.assertIn("自動検出された保存ルートを確認", text)
+        self.assertIn("multiple_observed_roots", text)
 
     def test_active_status_refuses_build_add_and_repair(self) -> None:
         self.make_db()
@@ -575,7 +721,8 @@ class ManagerContractTests(unittest.TestCase):
         scripts = [Path(call[0][1]).name for call in self.runner.calls]
         self.assertEqual(scripts, ["status.py", "status.py", "status.py"])
         self.assertEqual(
-            sum("Operation refused" in value for value in self.output), 3
+            sum("取り込みまたは修復処理が実行中" in value for value in self.output),
+            3,
         )
 
     def test_force_rebuild_requires_selected_database_name(self) -> None:
@@ -621,7 +768,7 @@ class ManagerContractTests(unittest.TestCase):
         scripts = [Path(call[0][1]).name for call in self.runner.calls]
         self.assertEqual(scripts, ["status.py", "status.py", "status.py"])
         self.assertEqual(
-            sum("could not be verified" in value for value in self.output),
+            sum("状態を確認できない" in value for value in self.output),
             3,
         )
 
@@ -638,7 +785,7 @@ class ManagerContractTests(unittest.TestCase):
         manager._repair_index("example-rag")
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(
-            sum("Operation refused" in value for value in self.output),
+            sum("安全な操作対象として確認できません" in value for value in self.output),
             3,
         )
 
@@ -658,7 +805,7 @@ class ManagerContractTests(unittest.TestCase):
         )
         self.assertTrue(root.exists())
         self.assertIn(
-            "could not be verified",
+            "状態を確認できない",
             "\n".join(self.output),
         )
 

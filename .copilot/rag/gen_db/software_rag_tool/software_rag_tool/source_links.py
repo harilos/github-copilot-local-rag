@@ -152,6 +152,7 @@ def load_source_links(
             decoded,
             observed_roots=roots,
             expected_database=effective_db_name,
+            allow_legacy_provider_settings=True,
         )
         roots_digest = hashlib.sha256(
             json.dumps(
@@ -222,6 +223,7 @@ def _normalize_payload(
     expected_database: str | None = None,
     existing_sources: Iterable[str] | None = None,
     allow_unmatched_sources: bool = True,
+    allow_legacy_provider_settings: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str], bool]:
     if not isinstance(payload, dict):
         raise SourceLinkError("source-links sidecar must be a JSON object")
@@ -323,7 +325,14 @@ def _normalize_payload(
                 "Source Link requires provider, enabled, strategy, and settings"
             )
         if all(present):
-            normalized_source.update(validate_source_link(source))
+            normalized_source.update(
+                validate_source_link(
+                    source,
+                    allow_legacy_provider_settings=(
+                        allow_legacy_provider_settings
+                    ),
+                )
+            )
             source_statuses.setdefault(source_id, "configured")
         else:
             source_statuses.setdefault(source_id, "not_configured")
@@ -335,7 +344,11 @@ def _normalize_payload(
     }, source_statuses, schema_version == LEGACY_SCHEMA_VERSION)
 
 
-def validate_source_link(link: Any) -> dict[str, Any]:
+def validate_source_link(
+    link: Any,
+    *,
+    allow_legacy_provider_settings: bool = False,
+) -> dict[str, Any]:
     if not isinstance(link, dict):
         raise SourceLinkError("Source Link must be an object")
     enabled = link.get("enabled", True)
@@ -351,10 +364,17 @@ def validate_source_link(link: Any) -> dict[str, Any]:
     strategy = str(link.get("strategy") or "").strip().lower()
     if not strategy:
         raise SourceLinkError("Source Link strategy is required")
+    if (
+        allow_legacy_provider_settings
+        and provider == "github"
+        and strategy == "append-relative-path"
+    ):
+        strategy = "github-blob"
     normalized_settings = _validate_provider_settings(
         provider,
         strategy,
         settings,
+        allow_legacy_provider_settings=allow_legacy_provider_settings,
     )
     return {
         "enabled": enabled,
@@ -725,29 +745,35 @@ def _validate_provider_settings(
     provider: str,
     strategy: str,
     settings: dict[str, Any],
+    *,
+    allow_legacy_provider_settings: bool = False,
 ) -> dict[str, Any]:
     if provider == "sharepoint":
-        if strategy not in {"home-only", "append-relative-path"}:
+        if strategy == "home-only" and allow_legacy_provider_settings:
+            return {
+                "source_home_url": _required_url(
+                    settings.get("source_home_url")
+                )
+            }
+        if strategy != "append-relative-path":
             raise SourceLinkError("unsupported SharePoint strategy")
-        home = _optional_url(settings.get("source_home_url"))
+        # Legacy append settings may still contain a retired home URL. Validate
+        # it for credential/security rules before deliberately omitting it.
+        if str(settings.get("source_home_url") or "").strip():
+            _optional_url(settings.get("source_home_url"))
         web_root = _optional_url(settings.get("source_web_root"))
         if web_root:
             web_root = _normalize_sharepoint_root(web_root)
             _required_root_url(web_root)
-        if strategy == "home-only" and not home:
-            raise SourceLinkError("SharePoint home-only requires source_home_url")
-        if strategy == "append-relative-path" and not web_root:
+        if not web_root:
             raise SourceLinkError(
                 "SharePoint file links require source_web_root"
             )
-        output: dict[str, Any] = {}
-        if home:
-            output["source_home_url"] = home
-        if web_root:
-            output["source_web_root"] = web_root
-        return output
+        # source_home_url was accepted by older sidecars. File links do not
+        # use it, so canonical v2 saves deliberately omit it.
+        return {"source_web_root": web_root}
     if provider == "github":
-        if strategy not in {"github-blob", "append-relative-path"}:
+        if strategy != "github-blob":
             raise SourceLinkError("unsupported GitHub strategy")
         repository_url = _required_url(settings.get("repository_url"))
         split = urlsplit(repository_url)

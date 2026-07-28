@@ -175,6 +175,9 @@ DBがまだない場合:
 Copilotを介さず、人がDBを選択して検索・構築・追加・状態確認・索引修復・
 削除を行う場合は、対話型managerを起動します。
 
+- [Local RAG Manager 日本語操作ガイド](.copilot/rag/docs/local-rag-manager-guide-ja.md)
+- [Local RAG Manager 設定項目レビュー](.copilot/rag/docs/local-rag-manager-settings-review-ja.md)
+
 macOS/Linux:
 
 ```bash
@@ -188,7 +191,14 @@ Windows PowerShell:
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
-トップ画面は初期設定・DB一覧選択・DB作成・終了だけです。DBを選ぶと、検索、
+Git Bash:
+
+```bash
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
+  "$HOME/.copilot/rag/manage.py"
+```
+
+トップ画面は初期設定・DB一覧選択・DB作成・ヘルプ・終了です。DBを選ぶと、検索、
 Source一覧、構築・再開、文書追加・更新、詳細状態、検索索引修復、DB削除を
 操作できます。既存のPythonコマンドへ委譲するため、manager独自の検索処理や
 更新判定はありません。
@@ -214,8 +224,10 @@ Source-relative pathからURLを生成します。Source Link用の人間入力p
 一致する場合だけread互換を提供します。0件は未設定、複数mapping・root不一致・
 rootなし・複数rootはpath-onlyへfail-openします。明示保存時だけv2へ移行し、
 以前のprimaryをbackupへ残します。
-GitHubのrepository/refやSharePointの文書library/folder URLは人が入力し、
-`.git`の検査、Gitコマンド、Microsoft Graphによる自動検出は行いません。
+GitHubのrepository/refは人が入力します。SharePointは文書library/folderの
+基準URLだけを入力し、ファイル直接リンク方式を自動適用します。別のHome URLや
+方式選択はありません。`.git`の検査、Gitコマンド、Microsoft Graphによる
+自動検出は行いません。
 sidecarがないDBは従来どおりpath-onlyで動作します。設定不備も検索失敗には
 せずpath-onlyへ戻り、検索順位・根拠性・`doc_id`・`chunk_uid`は変わりません。
 リンク設定だけでDBや索引を再構築する必要はありません。
