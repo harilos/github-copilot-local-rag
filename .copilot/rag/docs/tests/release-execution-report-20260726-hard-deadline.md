@@ -1,7 +1,7 @@
 # Hard-deadline implementation and release-test report
 
 Date: 2026-07-26  
-Workspace: `/Users/haruki/Documents/rag`  
+Workspace: `<TEST_ROOT>`
 Development commit: `9ec0213cc48eb5ca63dfbce46623f8b63dfd7dfa`
 
 ## Outcome

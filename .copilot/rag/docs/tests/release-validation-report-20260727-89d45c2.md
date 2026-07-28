@@ -40,9 +40,9 @@ tagおよびGitHub stable releaseは作成しない。
 - 対象commit: `89d45c2`
 - Windows 11
 - installed Python:
-  `C:\Users\harilos\.copilot\rag\query\.venv\Scripts\python.exe`
+  `<HOME>\.copilot\rag\query\.venv\Scripts\python.exe`
 - installed RAG:
-  `C:\Users\harilos\.copilot\rag`
+  `<HOME>\.copilot\rag`
 - 3 DB:
   `ac-rag`, `incident-rag`, `rfc-full-20k-rag`
 - 合計: 525 rows
@@ -50,7 +50,7 @@ tagおよびGitHub stable releaseは作成しない。
 ### macOS短縮確認
 
 - 対象commit: `89d45c2`
-- installed RAG: `/Users/haruki/.copilot/rag`
+- installed RAG: `<HOME>/.copilot/rag`
 - 合計: 20 rows
 
 ### Semantic regression

@@ -155,33 +155,64 @@ retriever or update detector.
 
 A Source appears only after indexed catalog documents contain its
 `source_id`. The Source screens cannot create, delete, or rename Sources.
-They may attach one optional Source Link to an existing Source.
+They may edit optional Source Metadata for an existing Source. The metadata
+contains an optional display name, an optional `source_type`, and an optional
+Source Link.
 
-Source-Link configuration is stored with its database:
+Source Metadata is stored with its database. The physical filename remains
+`source-links.json` so older Manager versions do not create a second,
+competing sidecar:
 
 ```text
 <db-root>/source-links.json
 <db-root>/source-links.json.bak
 ```
 
-Each existing `source_id` has at most one enabled or disabled Provider
-configuration. The manager derives one observed top-level stored root from the
-Source's current visible catalog documents. URL generation removes that root
-component exactly once, then passes the remaining Source-relative path to the
-Provider. There is no user-entered Source-Link path prefix, longest-prefix
-selection, or mixed Provider configuration inside one Source.
+The canonical schema is `rag-source-metadata-v1`. `source_type` and `link` are
+both optional. A Source with neither value is shown as unspecified; it is
+never guessed to be a folder. A type-only Source is also valid. A newly saved
+Link requires a matching `source_type`, and its nested `link` object does not
+repeat the Provider. Supported types are `folder`, `git`, `github`, `gitlab`,
+`azure_devops`, `svn`, `sharepoint`, `redmine`, and `other`.
+
+Each existing `source_id` has at most one enabled or disabled Link
+configuration. The manager derives one observed top-level stored root from
+the Source's current visible catalog documents. URL generation removes that
+root component exactly once, then passes the remaining Source-relative path
+to the Provider. There is no user-entered Source-Link path prefix,
+longest-prefix selection, or mixed Provider configuration inside one Source.
 Search resolves links only after retrieval, ranking, packing, and evidence
 classification. It adds `source_url` or `source_permalink` without changing
 document IDs, chunk IDs, scores, ordering, authority, answerability, or search
 status. Missing or invalid settings fail open to the stored path. No database
 or index rebuild is required.
 
-An unreleased `rag-source-links-v1` file with exactly one mapping is read only
-when its legacy path prefix matches the one observed stored root. A Source
-with no mapping remains unconfigured. Multiple mappings, a root mismatch, no
-observed root, or multiple observed roots fail open to path-only results. The
-manager performs an explicit save to publish the single-configuration
-`rag-source-links-v2` schema while retaining the prior primary as a backup.
+Existing `rag-source-links-v2` entries are read without writing and map
+`provider` to `source_type`; `enabled`, `strategy`, and `settings` move into
+`link`. An older `rag-source-links-v1` file is auto-migratable only when every
+configured Source has one mapping whose legacy prefix matches its one
+observed stored root. If any Source has multiple mappings, a root mismatch,
+no root, or multiple roots, the whole DB is reported as `manual_required` and
+remains unchanged and path-only.
+
+Preview or explicitly apply the migration with:
+
+```bash
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py --apply
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py --db <db-name>
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py \
+  --db <db-name> --apply
+```
+
+The Manager exposes the selected-DB-only form under Source settings. Successful
+migration publishes `rag-source-metadata-v1`, increments the revision once,
+and retains the raw former primary as `source-links.json.bak`. Re-running it
+is a no-op.
+
+`build_db.py` and `add_data.py` do not accept or infer `source_type` and never
+modify this sidecar. New Sources therefore start as unspecified unless a
+person later configures Source Metadata in `manage.py`.
 
 Per-file Source Links require exactly one observed stored root. If one Source
 contains documents from several top-level roots, add those provider roots
@@ -223,15 +254,16 @@ Local RAG does not checkout/update SVN, inspect `.svn`, call an SVN API or
 command, authenticate, or discover revisions. A single fixed revision may be
 inaccurate for a mixed-revision working copy.
 
-Older home-only settings remain readable for compatibility but are not offered
-or newly saved by the manager.
+Older SharePoint home-only settings remain persistable during explicit
+migration so no legacy metadata is discarded. They remain path-only and are
+not offered or newly created by the manager.
 
 Copying the complete database directory preserves the active sidecar and its
-local rollback backup. The migration exporter validates and includes only the
-active v2 sidecar; it excludes `source-links.json.bak` because that rollback
-file may contain an older internal URL. Treat either form of transfer as
-sensitive. Real sidecars are not part of public source archives or tracked
-fixtures.
+local rollback backup. The migration exporter validates and includes only
+active `rag-source-metadata-v1`; it excludes `source-links.json.bak` because
+that rollback file may contain an older internal URL. Treat either form of
+transfer as sensitive. Real sidecars are not part of public source archives
+or tracked fixtures.
 
 ## Search
 

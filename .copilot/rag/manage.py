@@ -31,7 +31,7 @@ TOP_MENU = (
 )
 DATABASE_MENU = (
     ("1", "検索を試す"),
-    ("2", "Source一覧・Source Link設定"),
+    ("2", "Source一覧・Source情報設定"),
     ("3", "DBを構築・再開する"),
     ("4", "文書を追加・更新する"),
     ("5", "詳細状態を確認する"),
@@ -43,13 +43,15 @@ DATABASE_MENU = (
 SOURCE_MENU = (
     ("1", "Source一覧から選択"),
     ("2", "対応するSourceがない設定を確認"),
+    ("3", "旧Source設定を移行する【通常は選択不要】"),
     ("0", "戻る"),
 )
 SOURCE_DETAIL_MENU = (
     ("1", "文書と保存パスの例を表示"),
     ("2", "取り込み範囲と状態を表示"),
-    ("3", "Source Linkを設定"),
-    ("4", "生成URLを確認"),
+    ("3", "Source種別・表示名を設定"),
+    ("4", "Source Linkを設定"),
+    ("5", "生成URLを確認"),
     ("0", "戻る"),
 )
 SOURCE_LINK_MENU = (
@@ -76,6 +78,7 @@ ALLOWED_SCRIPTS = frozenset(
         "gen_db/add_data.py",
         "gen_db/status.py",
         "gen_db/rebuild_component.py",
+        "gen_db/migrate_source_metadata.py",
     }
 )
 DATABASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
@@ -102,11 +105,16 @@ _STATUS_JA = {
     "disabled": "無効",
     "configured": "設定済み",
     "not_configured": "未設定",
+    "type_only": "種別のみ設定",
+    "manual_required": "手動対応が必要",
     "unconfigured": "未設定",
     "invalid": "不正",
 }
 _PROVIDER_JA = {
     "git_repository": "Gitリポジトリ",
+    "unspecified": "未設定",
+    "folder": "フォルダ",
+    "git": "Gitリポジトリ（サービス未指定）",
     "github": "GitHub",
     "gitlab": "GitLab",
     "azure_devops": "Azure DevOps",
@@ -534,7 +542,7 @@ class LocalRagManager:
                     for source in (loaded.payload or {}).get("sources") or []
                     if isinstance(source, dict)
                     and source.get("source_id") in indexed_source_ids
-                    and bool(source.get("provider"))
+                    and isinstance(source.get("link"), dict)
                 }
             )
         except Exception:
@@ -1289,12 +1297,12 @@ class LocalRagManager:
 
     def _sources_screen(self, db_name: str) -> None:
         while self._database_root(db_name).is_dir():
-            self._print_screen_header("Source一覧・Source Link設定", db_name=db_name)
+            self._print_screen_header("Source一覧・Source情報設定", db_name=db_name)
             self.output(
                 "Sourceとは:\n"
                 "同じ取り込み元・同じURL生成設定を共有する文書のまとまりです。\n"
-                "Source自体は索引作成時に作られ、この画面では作成・"
-                "名称変更・削除できません。"
+                "Source IDは索引作成時に作られ、この画面では作成・変更・"
+                "削除できません。表示名と任意の種別は設定できます。"
             )
             self._print_menu("操作", SOURCE_MENU)
             choice = self._ask("番号を入力してください: ")
@@ -1309,8 +1317,10 @@ class LocalRagManager:
                     self._source_detail_screen(db_name, inventory, source)
             elif choice == "2":
                 self._unmatched_source_settings(db_name)
+            elif choice == "3":
+                self._migrate_source_metadata(db_name)
             else:
-                self._invalid_selection("0～2")
+                self._invalid_selection("0～3")
 
     def _load_source_inventory(self, db_name: str) -> Any | None:
         try:
@@ -1325,6 +1335,98 @@ class LocalRagManager:
                 f"{type(exc).__name__}: {exc}"
             )
             return None
+
+    def _migrate_source_metadata(self, db_name: str) -> None:
+        self._print_screen_header(
+            "旧Source設定の移行",
+            db_name=db_name,
+        )
+        self.output(
+            "新規DBと移行済みDBでは、この操作は必要ありません。\n"
+            "旧形式のSource設定が残っている場合だけ使用します。\n"
+            f"対象は選択中のDB「{db_name}」だけです。\n"
+            "文書、検索索引、Source ID、リンク内容は変更しません。"
+        )
+        preview = self._invoke(
+            "gen_db/migrate_source_metadata.py",
+            ["--db", db_name, "--format", "json"],
+            capture_output=True,
+        )
+        result = self._migration_result(preview, db_name)
+        if result is None:
+            return
+        status = str(result.get("status") or "failed")
+        if status in {"already_current", "unconfigured"}:
+            self._print_info("移行対象はありません。")
+            return
+        if status == "manual_required":
+            self._print_error(
+                "旧設定は自動移行できません。設定ファイルは変更していません。"
+            )
+            source_ids = result.get("source_ids") or []
+            if source_ids:
+                self.output(
+                    "確認が必要なSource ID: "
+                    + ", ".join(str(value) for value in source_ids)
+                )
+            return
+        if status != "migration_available":
+            self._print_error(
+                f"移行内容を確認できませんでした: {status}"
+            )
+            return
+        self.output(
+            f"移行対象Source数: {int(result.get('source_count') or 0):,}"
+        )
+        if not self._confirm(
+            f"選択中のDB「{db_name}」だけを移行しますか？"
+        ):
+            self._print_info("移行をキャンセルしました。")
+            return
+        applied = self._invoke(
+            "gen_db/migrate_source_metadata.py",
+            ["--db", db_name, "--apply", "--format", "json"],
+            capture_output=True,
+        )
+        applied_result = self._migration_result(applied, db_name)
+        if applied_result is None:
+            return
+        applied_status = str(applied_result.get("status") or "failed")
+        if applied_status == "migrated":
+            self._print_success("Source設定を新しい形式へ移行しました。")
+        elif applied_status == "conflict":
+            self._print_error(
+                "確認後に設定が変更されたため、移行を中止しました。"
+            )
+        else:
+            self._print_error(
+                f"Source設定を移行できませんでした: {applied_status}"
+            )
+
+    def _migration_result(
+        self,
+        process: Any | None,
+        db_name: str,
+    ) -> dict[str, Any] | None:
+        if process is None:
+            return None
+        try:
+            payload = json.loads(str(process.stdout or ""))
+        except json.JSONDecodeError:
+            self._print_error("移行結果のJSONを読み取れませんでした。")
+            return None
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list) or len(results) != 1:
+            self._print_error("選択DBの移行結果を確認できませんでした。")
+            return None
+        result = results[0]
+        if (
+            not isinstance(result, dict)
+            or str(result.get("db") or "") != db_name
+        ):
+            self._print_error("別DBの移行結果を拒否しました。")
+            return None
+        return result
 
     @staticmethod
     def _inventory_sources(inventory: Any) -> list[dict[str, Any]]:
@@ -1354,10 +1456,7 @@ class LocalRagManager:
         for index, source in enumerate(sources, start=1):
             source_id = str(source["source_id"])
             label = str(source.get("display_name") or source_id)
-            providers = ", ".join(
-                self._provider_label(value)
-                for value in (source.get("link_providers") or [])
-            ) or "未設定"
+            source_type = str(source.get("source_type") or "")
             link_setting = source.get("source_link_setting") or {}
             roots = source.get("observed_stored_roots") or []
             self.output(f"\n{index}. {label}")
@@ -1368,7 +1467,9 @@ class LocalRagManager:
             self.output(
                 f"   チャンク数: {int(source.get('chunk_count') or 0):,}"
             )
-            self.output(f"   Provider: {providers}")
+            self.output(
+                f"   Source種別: {self._provider_label(source_type)}"
+            )
             self.output(
                 f"   Source Link: "
                 f"{self._status_label(source.get('link_status') or 'not_configured')}"
@@ -1421,7 +1522,10 @@ class LocalRagManager:
                 f"検出された保存ルート: "
                 f"{', '.join(str(v) for v in roots) or '未検出'}\n"
                 f"保存ルートの状態: {root_status}\n"
-                f"Provider: {self._provider_label(link_setting.get('provider'))}\n"
+                f"Source種別: "
+                f"{self._provider_label(source.get('source_type'))}\n"
+                f"Provider: "
+                f"{self._provider_label(link_setting.get('provider'))}\n"
                 f"Source Link設定: "
                 f"{self._status_label(link_setting.get('configuration') or 'not_configured')}\n"
                 f"Source Link状態: "
@@ -1469,11 +1573,17 @@ class LocalRagManager:
                 )
                 self._print_values("取り込み範囲", values)
             elif choice == "3":
-                self._source_link_screen(db_name, inventory, source_id)
+                self._configure_source_metadata(
+                    db_name,
+                    inventory,
+                    source_id,
+                )
             elif choice == "4":
+                self._source_link_screen(db_name, inventory, source_id)
+            elif choice == "5":
                 self._preview_source_link(db_name, inventory, source_id)
             else:
-                self._invalid_selection("0～4")
+                self._invalid_selection("0～5")
 
     def _source_link_screen(
         self,
@@ -1516,6 +1626,114 @@ class LocalRagManager:
             else:
                 self._invalid_selection("0～6")
 
+    def _configure_source_metadata(
+        self,
+        db_name: str,
+        inventory: Any,
+        source_id: str,
+    ) -> None:
+        loaded = self._source_link(db_name, source_id)
+        if loaded is None:
+            return
+        source_links, payload, source = loaded
+        if self._sidecar_migrations.get(db_name, False):
+            self._print_error(
+                "旧形式のSource設定が残っています。Source一覧画面の"
+                "「旧Source設定を移行する」を先に実行してください。"
+            )
+            return
+        current = source or {}
+        display_name = self._prompt_preserving_value(
+            "Source表示名",
+            str(current.get("display_name") or ""),
+            required=False,
+            description=(
+                "Manager上でSourceを識別しやすくする表示専用の名前です。"
+                "Source IDは変更されません。"
+            ),
+            examples=("設計資料", "障害管理", "ソースコード"),
+            empty_help="Source IDを表示",
+        )
+        if display_name is None:
+            return
+        source_types = [
+            "unspecified",
+            "folder",
+            "git",
+            "github",
+            "gitlab",
+            "azure_devops",
+            "svn",
+            "sharepoint",
+            "redmine",
+            "other",
+        ]
+        current_type = str(current.get("source_type") or "unspecified")
+        source_type = self._prompt_choice_preserving(
+            "Source種別",
+            source_types,
+            current_type,
+            required=False,
+        )
+        if source_type is None:
+            return
+        source_type = "" if source_type == "unspecified" else source_type
+        if isinstance(current.get("link"), dict):
+            current_link_type = str(current.get("source_type") or "")
+            if not source_type or source_type != current_link_type:
+                self._print_error(
+                    "Source Linkが設定されているため、種別だけを変更できません。"
+                    "先にSource Linkを削除するか、Source Link設定から"
+                    "Providerを変更してください。"
+                )
+                return
+        self.output("\n変更内容")
+        self.output(
+            f"  Source表示名: {display_name or '未設定'}"
+        )
+        self.output(
+            f"  Source種別: {self._provider_label(source_type)}"
+        )
+        if not self._confirm(
+            f"DB「{db_name}」のSource「{source_id}」へ保存しますか？"
+        ):
+            self._print_info("Source情報は変更されていません。")
+            return
+        if (
+            not current
+            and not display_name
+            and not source_type
+        ):
+            self._print_info("保存するSource情報はありません。")
+            return
+        target = self._source_entry(payload, source_id, create=True)
+        assert target is not None
+        if display_name:
+            target["display_name"] = display_name
+        else:
+            target.pop("display_name", None)
+        if source_type:
+            target["source_type"] = source_type
+        else:
+            target.pop("source_type", None)
+        if (
+            not target.get("display_name")
+            and not target.get("source_type")
+            and not target.get("link")
+        ):
+            payload["sources"] = [
+                value
+                for value in payload.get("sources") or []
+                if value.get("source_id") != source_id
+            ]
+        if self._save_sidecar(
+            db_name,
+            inventory,
+            source_links,
+            payload,
+        ):
+            self._print_success("Source情報を保存しました。")
+
     def _load_sidecar_payload(
         self,
         db_name: str,
@@ -1527,6 +1745,12 @@ class LocalRagManager:
         if loaded.status == "invalid":
             self._print_error(
                 "Source Link設定ファイルが不正です。変更は保存していません。"
+            )
+            return None
+        if loaded.status == "manual_required":
+            self._print_error(
+                "旧Source設定に自動移行できない内容があります。"
+                "Source一覧画面の移行メニューで詳細を確認してください。"
             )
             return None
         self._sidecar_etags[db_name] = str(
@@ -1621,25 +1845,12 @@ class LocalRagManager:
             "expected_etag": self._sidecar_etags.get(db_name, "missing"),
         }
         if self._sidecar_migrations.get(db_name, False):
-            statuses = self._sidecar_source_statuses.get(db_name, {})
-            self._print_warning(
-                "次の保存で旧形式をrag-source-links-v2へ移行します。"
-                "現在の設定はsource-links.json.bakへ保持します。"
+            payload["revision"] = previous_revision
+            self._print_error(
+                "旧形式のSource設定は、この画面から保存できません。"
+                "Source一覧画面の「旧Source設定を移行する」を使用してください。"
             )
-            if statuses:
-                self.output(
-                    "移行状態: "
-                    + ", ".join(
-                        f"{source_id}={status}"
-                        for source_id, status in sorted(statuses.items())
-                    )
-                )
-            if not self._confirm(
-                f"DB「{db_name}」のSource Link設定を移行しますか？"
-            ):
-                payload["revision"] = previous_revision
-                self._print_info("Source Link設定の移行をキャンセルしました。")
-                return False
+            return False
         try:
             source_links.save_source_links(
                 self._database_root(db_name), payload, **kwargs
@@ -1665,21 +1876,50 @@ class LocalRagManager:
         source = self._source_entry(payload, source_id, create=False)
         return source_links, payload, source
 
+    @staticmethod
+    def _flat_source_link(
+        source: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(source, dict):
+            return {}
+        nested = source.get("link")
+        if isinstance(nested, dict):
+            return {
+                "display_name": str(source.get("display_name") or ""),
+                "provider": str(source.get("source_type") or ""),
+                "enabled": bool(nested.get("enabled")),
+                "strategy": str(nested.get("strategy") or ""),
+                "settings": copy.deepcopy(nested.get("settings") or {}),
+            }
+        return {
+            key: copy.deepcopy(source[key])
+            for key in (
+                "display_name",
+                "provider",
+                "enabled",
+                "strategy",
+                "settings",
+            )
+            if key in source
+        }
+
     def _show_source_link(self, db_name: str, source_id: str) -> None:
         loaded = self._source_link(db_name, source_id)
         if loaded is None:
             return
         source = loaded[2]
-        if source is None or not source.get("provider"):
+        flat = self._flat_source_link(source)
+        if not flat.get("provider"):
             self._print_info("このSourceにはSource Linkが設定されていません。")
             return
-        self._print_source_link_summary(source_id, source)
+        self._print_source_link_summary(source_id, flat)
 
     def _print_source_link_summary(
         self,
         source_id: str,
         source: dict[str, Any],
     ) -> None:
+        source = self._flat_source_link(source)
         settings = source.get("settings") or {}
         provider = str(source.get("provider") or "")
         self.output("\nSource Link設定")
@@ -1755,21 +1995,13 @@ class LocalRagManager:
         if loaded is None:
             return
         source_links, payload, source = loaded
-        current = (
-            {
-                key: copy.deepcopy(source[key])
-                for key in (
-                    "display_name",
-                    "provider",
-                    "enabled",
-                    "strategy",
-                    "settings",
-                )
-                if source is not None and key in source
-            }
-            if source is not None
-            else {}
-        )
+        if self._sidecar_migrations.get(db_name, False):
+            self._print_error(
+                "旧形式のSource設定が残っています。Source一覧画面の"
+                "「旧Source設定を移行する」を先に実行してください。"
+            )
+            return
+        current = self._flat_source_link(source)
         link = self._prompt_source_link(existing=current or None)
         if link is None:
             self._print_info("設定を保存せずに戻ります。")
@@ -1842,8 +2074,11 @@ class LocalRagManager:
             target["display_name"] = display_name
         else:
             target.pop("display_name", None)
-        for key in ("provider", "enabled", "strategy", "settings"):
-            target[key] = copy.deepcopy(link[key])
+        target["source_type"] = str(link["provider"])
+        target["link"] = {
+            key: copy.deepcopy(link[key])
+            for key in ("enabled", "strategy", "settings")
+        }
         if self._save_sidecar(
             db_name,
             inventory,
@@ -1862,10 +2097,10 @@ class LocalRagManager:
         if loaded is None:
             return
         source_links, payload, source = loaded
-        if source is None or not source.get("provider"):
+        if source is None or not isinstance(source.get("link"), dict):
             self._print_info("このSourceにはSource Linkが設定されていません。")
             return
-        new_state = not bool(source.get("enabled"))
+        new_state = not bool(source["link"].get("enabled"))
         label = "有効化" if new_state else "無効化"
         if new_state:
             self.output("有効化すると、検索結果へURLを再び付与します。")
@@ -1877,7 +2112,7 @@ class LocalRagManager:
             f"DB「{db_name}」のSource「{source_id}」を{label}しますか？"
         ):
             return
-        source["enabled"] = new_state
+        source["link"]["enabled"] = new_state
         if self._save_sidecar(
             db_name,
             inventory,
@@ -1896,7 +2131,7 @@ class LocalRagManager:
         if loaded is None:
             return
         source_links, payload, source = loaded
-        if source is None or not source.get("provider"):
+        if source is None or not isinstance(source.get("link"), dict):
             self._print_info("このSourceにはSource Linkが設定されていません。")
             return
         self._print_warning(
@@ -1906,14 +2141,15 @@ class LocalRagManager:
         self.output("削除対象")
         self.output(f"  DB: {db_name}")
         self.output(f"  Source: {source_id}")
-        self.output(f"  Provider: {self._provider_label(source.get('provider'))}")
+        self.output(
+            f"  Provider: {self._provider_label(source.get('source_type'))}"
+        )
         if not self._confirm(
             "このSource Link設定を削除しますか？"
         ):
             return
-        for key in ("provider", "enabled", "strategy", "settings"):
-            source.pop(key, None)
-        if not source.get("display_name"):
+        source.pop("link", None)
+        if not source.get("display_name") and not source.get("source_type"):
             payload["sources"] = [
                 value
                 for value in payload.get("sources") or []
@@ -1937,7 +2173,7 @@ class LocalRagManager:
         if loaded is None:
             return
         source_links, _payload, source = loaded
-        if source is None or not source.get("provider"):
+        if source is None or not isinstance(source.get("link"), dict):
             self._print_info("このSourceにはSource Linkが設定されていません。")
             return
         _, observed = self._inventory_ids_paths(inventory)
@@ -1948,7 +2184,7 @@ class LocalRagManager:
         _, observed = self._inventory_ids_paths(inventory)
         self._print_source_link_preview(
             source_links,
-            source,
+            self._flat_source_link(source),
             observed.get(source_id, []),
             preview=preview,
         )
@@ -2069,10 +2305,17 @@ class LocalRagManager:
         for index, source in enumerate(unmatched, start=1):
             self.output(f"\n{index}. Source ID: {source.get('source_id')}")
             self.output(
-                f"   Provider: {self._provider_label(source.get('provider'))}"
+                f"   Source種別: "
+                f"{self._provider_label(source.get('source_type'))}"
             )
+            link = source.get("link")
             self.output(
-                f"   状態: {'有効' if source.get('enabled') else '無効'}"
+                "   Source Link: "
+                + (
+                    ("有効" if link.get("enabled") else "無効")
+                    if isinstance(link, dict)
+                    else "未設定"
+                )
             )
         choice = self._ask("確認する番号を入力してください（0: 戻る）: ")
         if choice in (None, "0"):
@@ -2615,9 +2858,13 @@ class LocalRagManager:
         label: str,
         choices: list[str],
         current: str,
+        *,
+        required: bool = True,
     ) -> str | None:
         while True:
-            self.output(f"\n{label}【必須】")
+            self.output(
+                f"\n{label}{'【必須】' if required else '【任意】'}"
+            )
             for index, choice in enumerate(choices, start=1):
                 self.output(
                     f"{index}. {self._choice_label(choice)}"
@@ -2934,6 +3181,7 @@ class LocalRagManager:
                 **os.environ,
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
+                "RAG_DBS_ROOT": str(self.dbs_root),
             },
         }
         if capture_output:

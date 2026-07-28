@@ -45,7 +45,7 @@ list_dbs latency is shown per source/run and is never pooled.
 - daemon_attempt_timeout_seconds: 5.0
 - daemon_fallback_policy: off
 - case_spec_fingerprint: ac48d7c5223df09580adae8ef8b00ab629d95a86e5ac113894392757569cf1fc
-- case_file_path: C:\Users\harilos\.copilot\rag\docs\tests\data\semantic-gold-v2.jsonl
+- case_file_path: <HOME>\.copilot\rag\docs\tests\data\semantic-gold-v2.jsonl
 - case_file_sha256: fdcf70a137d091d6b453495d7ce1d20b44d28f691177d3b8aaf9a9e27c56eafd
 - mixed_total/seed/time_buckets: 500/20260726/10
 - warmup_runs: 1

@@ -1,37 +1,40 @@
-# Source Link v2 Windows Reliability Specification
+# Source Metadata v1 Windows Reliability Specification
 
 This specification defines the Windows release gate for the optional
 `source-links.json` sidecar. The automated runner creates only synthetic
 temporary databases and does not modify an installed database.
 
-## Final v2 contract
+## Current Source Metadata contract
 
-The sidecar is DB-local, but v2 does not persist a database name. Each Source
-contains at most one URL configuration:
+The sidecar is DB-local and does not persist a database name. Each Source has
+an optional type and at most one optional URL configuration:
 
 ```json
 {
-  "schema_version": "rag-source-links-v2",
+  "schema_version": "rag-source-metadata-v1",
   "revision": 1,
   "sources": [
     {
       "source_id": "source-a",
-      "provider": "other",
-      "enabled": true,
-      "strategy": "append-relative-path",
-      "settings": {
-        "source_web_root": "https://fixture.example.invalid/root"
+      "source_type": "other",
+      "link": {
+        "enabled": true,
+        "strategy": "append-relative-path",
+        "settings": {
+          "source_web_root": "https://fixture.example.invalid/root"
+        }
       }
     }
   ]
 }
 ```
 
-`provider`, `enabled`, `strategy`, and `settings` are an all-or-none group.
-`strategy` is required for a configured Source Link. A display-name-only
-Source is valid and has no link.
+`source_type` and `link` are independently optional unless a Link is present;
+then `source_type` is required. `link` never stores a duplicate Provider.
+`strategy` is required for a configured Source Link. Display-name-only and
+type-only Sources are valid.
 
-The following fields are forbidden in persisted v2:
+The following fields are forbidden in persisted Source Metadata:
 
 - `database`
 - `mappings`
@@ -88,7 +91,8 @@ Compatibility is intentionally narrow:
 
 Only then may the mapping's `provider`, `enabled`, `strategy`, and `settings`
 be normalized in memory. A mismatch remains unconfigured and reports
-`legacy_root_mismatch`. Saving a compatible legacy load publishes v2 and
+`legacy_root_mismatch`. Explicitly migrating a compatible legacy load publishes
+Source Metadata and
 keeps the raw legacy file as the immediate backup.
 
 Multiple legacy mappings are not selected, merged, or prioritized.
@@ -140,7 +144,7 @@ fixture.
 | `MGR-001` | 100 manager start/exit cycles with strict UTF-8 output. |
 | `MGR-002` | Nested EOF and two simultaneous manager processes exit without a traceback. |
 | `MGR-003` | A targeted Windows console interrupt terminates the manager without a traceback. |
-| `MGR-004` | Legacy migration requires a separate confirmation; cancel preserves v1 and approval publishes v2 with a v1 backup. |
+| `MGR-004` | Legacy migration requires a separate confirmation; cancel preserves v1 and approval publishes Source Metadata with a v1 backup. |
 | `WIN-001` | `CreateFileW` denies delete sharing; save fails without changing current and succeeds after release. |
 | `WIN-002` | Sidecar round trips with absolute paths near 248 and 259 characters. |
 | `WIN-003` | The same fixture round trips through a temporary `subst` drive. |

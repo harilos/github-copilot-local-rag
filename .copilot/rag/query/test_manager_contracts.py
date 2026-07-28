@@ -81,7 +81,7 @@ class FakeInventory:
 
 
 class FakeSourceLinks:
-    SCHEMA_VERSION = "rag-source-links-v2"
+    SCHEMA_VERSION = "rag-source-metadata-v1"
 
     def __init__(self) -> None:
         self.saved: list[dict[str, Any]] = []
@@ -173,7 +173,7 @@ class ManagerContractTests(unittest.TestCase):
             [label for _, label in manage.DATABASE_MENU],
             [
                 "検索を試す",
-                "Source一覧・Source Link設定",
+                "Source一覧・Source情報設定",
                 "DBを構築・再開する",
                 "文書を追加・更新する",
                 "詳細状態を確認する",
@@ -207,6 +207,10 @@ class ManagerContractTests(unittest.TestCase):
         self.assertNotIsInstance(argv, str)
         self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
         self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
+        self.assertEqual(
+            Path(kwargs["env"]["RAG_DBS_ROOT"]),
+            self.dbs_root.resolve(),
+        )
 
     def test_non_allowlisted_script_is_rejected(self) -> None:
         with self.assertRaises(manage.ManagerError):
@@ -461,8 +465,9 @@ class ManagerContractTests(unittest.TestCase):
         source = links.saved[0]["sources"][0]
         self.assertEqual(1, links.saved[0]["revision"])
         self.assertEqual(source["source_id"], "source-a")
-        self.assertEqual(source["provider"], "other")
-        self.assertEqual(source["strategy"], "home-only")
+        self.assertEqual(source["source_type"], "other")
+        self.assertEqual(source["link"]["strategy"], "home-only")
+        self.assertNotIn("provider", source["link"])
         self.assertNotIn("mappings", source)
         self.assertNotIn("path_prefix", source)
         self.assertIn(
@@ -572,7 +577,88 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual([], links.saved)
         text = "\n".join(self.output)
         self.assertIn("新形式へ移行", text)
-        self.assertIn("移行をキャンセル", text)
+        self.assertIn("移行する」を先に実行", text)
+
+    def test_source_metadata_migration_always_targets_selected_db(self) -> None:
+        preview = {
+            "schema": "local-rag.source-metadata-migration.v1",
+            "apply": False,
+            "results": [
+                {
+                    "db": "example-rag",
+                    "status": "migration_available",
+                    "source_count": 2,
+                }
+            ],
+        }
+        applied = {
+            "schema": "local-rag.source-metadata-migration.v1",
+            "apply": True,
+            "results": [
+                {
+                    "db": "example-rag",
+                    "status": "migrated",
+                    "source_count": 2,
+                }
+            ],
+        }
+        responses = iter(
+            [
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(preview),
+                    stderr="",
+                ),
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(applied),
+                    stderr="",
+                ),
+            ]
+        )
+
+        def runner(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+            self.runner.calls.append((list(argv), dict(kwargs)))
+            return next(responses)
+
+        manager = self.manager(["y"])
+        manager.runner = runner
+        manager._migrate_source_metadata("example-rag")
+        self.assertEqual(2, len(self.runner.calls))
+        for argv, kwargs in self.runner.calls:
+            self.assertEqual("migrate_source_metadata.py", Path(argv[1]).name)
+            self.assertEqual(1, argv.count("--db"))
+            db_index = argv.index("--db")
+            self.assertEqual("example-rag", argv[db_index + 1])
+            self.assertFalse(kwargs["shell"])
+        self.assertIn("--apply", self.runner.calls[1][0])
+        self.assertIn(
+            "Source設定を新しい形式へ移行しました",
+            "\n".join(self.output),
+        )
+
+    def test_unset_source_type_is_displayed_as_unconfigured(self) -> None:
+        manager = self.manager(["0"])
+        inventory = FakeInventory()
+        manager._select_source(inventory)
+        text = "\n".join(self.output)
+        self.assertIn("Source種別: 未設定", text)
+        self.assertNotIn("Source種別: フォルダー", text)
+
+    def test_source_type_can_be_saved_without_a_link(self) -> None:
+        links = FakeSourceLinks()
+        manager = self.manager(["", "2", "y"])
+        manager._import_source_links = lambda: links
+        manager._configure_source_metadata(
+            "example-rag",
+            FakeInventory(),
+            "source-a",
+        )
+        self.assertEqual(1, len(links.saved))
+        source = links.saved[0]["sources"][0]
+        self.assertEqual("folder", source["source_type"])
+        self.assertNotIn("link", source)
+        self.assertIn("Source種別【任意】", "\n".join(self.output))
 
     def test_ingestion_prompt_shows_provider_oriented_source_examples(
         self,

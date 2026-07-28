@@ -174,21 +174,25 @@ class SourceInventoryContractTests(unittest.TestCase):
                     "sources": [
                         {
                             "source_id": "alpha",
-                            "enabled": True,
-                            "provider": "other",
-                            "strategy": "home-only",
                             "display_name": "Alpha Source",
-                            "settings": {
-                                "source_home_url": "https://example.invalid/alpha"
+                            "source_type": "other",
+                            "link": {
+                                "enabled": True,
+                                "strategy": "home-only",
+                                "settings": {
+                                    "source_home_url": "https://example.invalid/alpha"
+                                },
                             },
                         },
                         {
                             "source_id": "not-indexed",
-                            "enabled": False,
-                            "provider": "other",
-                            "strategy": "home-only",
-                            "settings": {
-                                "source_home_url": "https://example.invalid/unused"
+                            "source_type": "other",
+                            "link": {
+                                "enabled": False,
+                                "strategy": "home-only",
+                                "settings": {
+                                    "source_home_url": "https://example.invalid/unused"
+                                },
                             },
                         },
                     ],

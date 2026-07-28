@@ -10,7 +10,7 @@
     }
   },
   "identity_mismatches": 0,
-  "installed_rag": "/Users/haruki/.copilot/rag",
+  "installed_rag": "<HOME>/.copilot/rag",
   "json_parse_errors": 0,
   "max_elapsed_seconds": 4.850324,
   "max_stdout_bytes": 11588,

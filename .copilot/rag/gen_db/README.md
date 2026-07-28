@@ -30,6 +30,27 @@ Add or update another input folder:
 python ~/.copilot/rag/gen_db/add_data.py --db project-rag --root /path/to/source --source-id project-extra
 ```
 
+`source_type` and Source Link are optional DB-local presentation metadata.
+Build and add do not ask for, infer, or save either value, and there is no
+`--source-type` ingestion option. A newly indexed Source starts unspecified.
+Use the human Manager later if its type or browser link should be configured.
+
+The physical `source-links.json` sidecar may contain older Source-Link schemas.
+Preview or apply the explicit Source Metadata migration with:
+
+```bash
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py --apply
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py --db project-rag
+python ~/.copilot/rag/gen_db/migrate_source_metadata.py \
+  --db project-rag --apply --format json
+```
+
+The no-DB form scans all DBs independently. The Manager always passes its
+selected DB through `--db`. Migration changes only the DB-local sidecar; it
+does not call add, rebuild indexes, or alter catalog, Chroma, clean records,
+document IDs, or indexed content.
+
 To ingest only one part of a larger, stable source tree, keep the larger
 directory as `--root` and select a relative directory with `--scan-subdir`:
 

@@ -371,7 +371,7 @@ def validate_network_config(path: Path) -> None:
 
 
 def validate_source_links_tree(root: Path) -> None:
-    """Validate only active portable v2 sidecars without disclosing values."""
+    """Validate only active portable Source Metadata without disclosing values."""
     root = root.resolve()
     if not root.is_dir():
         return
@@ -410,7 +410,7 @@ def validate_source_links_tree(root: Path) -> None:
                 ):
                     raise MigrationArchiveError(
                         "active Source-Link configuration must be migrated "
-                        "to v2 before export"
+                        "to Source Metadata before export"
                     )
                 source_links.validate_source_links(
                     payload,

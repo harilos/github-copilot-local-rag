@@ -638,6 +638,51 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertGreater(replace.call_count, 3)
         result_dir = Path(pointer["summary_file"]).parent
         self.assertEqual([], list(result_dir.rglob("*.tmp")))
+        meta_publishes = [
+            call
+            for call in replace.call_args_list
+            if Path(call.args[1]).name == "meta.json"
+        ]
+        self.assertEqual(1, len(meta_publishes))
+
+    def test_windows_atomic_publish_retries_transient_sharing_error(
+        self,
+    ) -> None:
+        original = result_bundle.os.replace
+        calls = 0
+        failures = 0
+
+        def transient(source: Path, target: Path) -> None:
+            nonlocal calls, failures
+            calls += 1
+            if calls < 3:
+                failures += 1
+                error = PermissionError("synthetic sharing violation")
+                error.winerror = 5
+                raise error
+            original(source, target)
+
+        with (
+            mock.patch.object(
+                result_bundle,
+                "_is_windows",
+                return_value=True,
+            ),
+            mock.patch.object(
+                result_bundle.os,
+                "replace",
+                side_effect=transient,
+            ),
+            mock.patch.object(
+                result_bundle,
+                "WINDOWS_REPLACE_RETRY_SECONDS",
+                0.5,
+            ),
+        ):
+            pointer = self.publish()
+        self.assertEqual(2, failures)
+        self.assertGreaterEqual(calls, 3)
+        self.assertTrue(Path(pointer["summary_file"]).is_file())
 
     def test_stale_tmp_is_cleaned_without_deleting_ready_result(self) -> None:
         pointer = self.publish()

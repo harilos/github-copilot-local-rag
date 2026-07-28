@@ -89,8 +89,13 @@ redmine-issues
 filesystem-docs
 ```
 
-1 Sourceは1 Provider、1 URL生成単位です。異なるProviderを同じSource IDへ
-混在させないでください。
+`source_type`はSourceの任意の補助情報です。未設定をfolderとは推測せず、
+画面では「未設定」と表示します。Linkなしで種別だけ設定することもできます。
+Linkを設定する場合は1 Sourceを1 Provider、1 URL生成単位とし、異なるProviderを
+同じSource IDへ混在させないでください。
+
+build/addはSource IDだけを索引へ記録し、`source_type`やLinkを質問・推測・
+保存しません。新しいSourceは未設定のままで問題ありません。
 
 ## 8. 論理ルートとscan subdirectory
 
@@ -111,6 +116,20 @@ scan subdirectory: manuals/ja
 開くURLを付ける設定です。
 検索順位、検索内容、回答可能性、DB内容には影響しません。URL生成に失敗した
 場合もRAG保存パスは表示されます。
+
+Sourceの表示名、任意の`source_type`、任意のLinkは、DB直下の
+`source-links.json`へ`rag-source-metadata-v1`として保存されます。ファイル名は
+旧版との二重管理を避けるため維持しています。新しい設定ではLinkだけを保存
+できず、Linkを選ぶと対応する`source_type`も一緒に保存されます。
+
+### 旧Source設定の移行
+
+Source一覧・Source情報設定画面の
+「旧Source設定を移行する【通常は選択不要】」は、選択中DBだけを対象にします。
+新規DBと移行済みDBでは不要です。旧v2のProviderは同じ`source_type`へ移され、
+Linkの有効・無効、方式、Provider固有設定は保持されます。旧v1に複数mappingや
+保存root不一致がある場合は、自動で1件を選ばず、ファイルを変更しません。
+移行は文書、索引、Source ID、検索順位を変更せず、再実行はno-opです。
 
 ## 10. observed stored rootとは
 
@@ -379,6 +398,11 @@ PowerShellの`&`や`$env:`を使わず、`$HOME`からvenvの`python.exe`を
 
 作れません。新しいSource IDでbuild/addが成功した後に現れます。
 
+### Source種別を設定しないと検索できませんか？
+
+検索できます。Local RAGではSource種別もLinkも任意です。未設定は
+「未設定」と表示され、folderとして推測されません。
+
 ### 詳細JSONはどこで見られますか？
 
 状態画面で選択できます。通常画面は人間向け要約です。
@@ -386,7 +410,7 @@ PowerShellの`&`や`$env:`を使わず、`$HOME`からvenvの`python.exe`を
 ## 26. セキュリティ上の注意
 
 - URLへユーザー名、パスワード、token、cookieを埋め込まないでください。
-- DBの`source-links.json`は内部URLを含む可能性があります。
+- DBの`source-links.json`はSource Metadataと内部URLを含む可能性があります。
 - DBを外部へ渡す前にsidecarを確認してください。
 - 通常検索は外部URLへHTTPアクセスしません。
 - DB削除は復元機能のない危険操作です。

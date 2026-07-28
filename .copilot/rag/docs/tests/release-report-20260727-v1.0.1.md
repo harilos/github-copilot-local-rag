@@ -4,7 +4,7 @@ Date: 2026-07-27
 
 Tested code commit: `f12ff3fd7b5f7103f404678f6ab2683db1b0dbcb`
 
-Target: `/Users/haruki/Documents/rag/.copilot/rag`
+Target: `<TEST_ROOT>/.copilot/rag`
 
 ## Outcome
 
@@ -188,7 +188,7 @@ Formal artifact hashes:
 
 The remote artifacts remain under:
 
-`C:\Users\harilos\Desktop\rag-release-results\f12ff3fd7b5f7103f404678f6ab2683db1b0dbcb`
+`<HOME>\Desktop\rag-release-results\f12ff3fd7b5f7103f404678f6ab2683db1b0dbcb`
 
 ## 5. Exact and no-hit
 
@@ -235,7 +235,7 @@ All three remained within the 15-second user-visible deadline.
 ## 7. macOS final short smoke
 
 The clean AC database and code were synchronized to
-`/Users/haruki/.copilot/rag` before this run.
+`<HOME>/.copilot/rag` before this run.
 
 | Channel | Result | Maximum sec |
 |---|---:|---:|
@@ -317,8 +317,8 @@ test corpus by a recoverable move. `ac-rag` was rebuilt on Windows:
 
 The clean database and implementation were synchronized to both:
 
-- `/Users/haruki/Documents/rag/.copilot/rag`
-- `/Users/haruki/.copilot/rag`
+- `<TEST_ROOT>/.copilot/rag`
+- `<HOME>/.copilot/rag`
 
 The repository and installed AC snapshots match. The installed runtime files
 and `VERSION=1.0.1` also match.
@@ -326,7 +326,7 @@ and `VERSION=1.0.1` also match.
 Recoverable pre-clean macOS AC backups:
 
 - `/tmp/ac-rag-mac-repo-backup-20260727-025332-preclean`
-- `/Users/haruki/.copilot/rag/dbs/ac-rag.backup-20260727-025332-preclean`
+- `<HOME>/.copilot/rag/dbs/ac-rag.backup-20260727-025332-preclean`
 
 The retrieval/runtime code changes do not otherwise require users to rebuild an
 uncontaminated existing database or index. The AC rebuild was required for this

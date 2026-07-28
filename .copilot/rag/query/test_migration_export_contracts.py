@@ -40,7 +40,7 @@ class MigrationExportContractTests(unittest.TestCase):
             "dbs/example-rag/db.json": "{}\n",
             "dbs/example-rag/catalog.sqlite": "catalog\n",
             "dbs/example-rag/source-links.json": (
-                '{"schema_version":"rag-source-links-v2",'
+                '{"schema_version":"rag-source-metadata-v1",'
                 '"revision":1,"sources":[]}\n'
             ),
             "dbs/example-rag/source-links.json.bak": (
@@ -313,19 +313,21 @@ class MigrationExportContractTests(unittest.TestCase):
         active.write_text(
             json.dumps(
                 {
-                    "schema_version": "rag-source-links-v2",
+                    "schema_version": "rag-source-metadata-v1",
                     "revision": 1,
                     "sources": [
                         {
                             "source_id": "fixture-source",
-                            "enabled": True,
-                            "provider": "sharepoint",
-                            "strategy": "append-relative-path",
-                            "settings": {
-                                "source_web_root": (
-                                    "https://fixture.example.invalid/"
-                                    f"refresh_token={marker}"
-                                )
+                            "source_type": "sharepoint",
+                            "link": {
+                                "enabled": True,
+                                "strategy": "append-relative-path",
+                                "settings": {
+                                    "source_web_root": (
+                                        "https://fixture.example.invalid/"
+                                        f"refresh_token={marker}"
+                                    )
+                                },
                             },
                         }
                     ],
@@ -347,20 +349,22 @@ class MigrationExportContractTests(unittest.TestCase):
         active.write_text(
             json.dumps(
                 {
-                    "schema_version": "rag-source-links-v2",
+                    "schema_version": "rag-source-metadata-v1",
                     "revision": 1,
                     "sources": [
                         {
                             "source_id": "fixture-source",
-                            "enabled": True,
-                            "provider": "other",
-                            "strategy": "home-only",
-                            "settings": {
-                                "source_home_url": (
-                                    "https://fixture.example.invalid/"
-                                    "?next=refresh_token%253D"
-                                    f"{marker}"
-                                )
+                            "source_type": "other",
+                            "link": {
+                                "enabled": True,
+                                "strategy": "home-only",
+                                "settings": {
+                                    "source_home_url": (
+                                        "https://fixture.example.invalid/"
+                                        "?next=refresh_token%253D"
+                                        f"{marker}"
+                                    )
+                                },
                             },
                         }
                     ],
@@ -496,17 +500,19 @@ class MigrationExportContractTests(unittest.TestCase):
             "    if root.name == 'dbs' and not marker.exists():\n"
             "        target = pathlib.Path(os.environ['RAG_SWAP_SIDECAR'])\n"
             "        payload = {\n"
-            "          'schema_version': 'rag-source-links-v2',\n"
+            "          'schema_version': 'rag-source-metadata-v1',\n"
             "          'revision': 1,\n"
             "          'sources': [{\n"
             "            'source_id': 'fixture-source',\n"
-            "            'enabled': True,\n"
-            "            'provider': 'sharepoint',\n"
-            "            'strategy': 'append-relative-path',\n"
-            "            'settings': {'source_web_root':\n"
-            "              'https://fixture.example.invalid/' +\n"
-            "              'refresh_token=' +\n"
-            "              os.environ['RAG_SWAP_SECRET']},\n"
+            "            'source_type': 'sharepoint',\n"
+            "            'link': {\n"
+            "              'enabled': True,\n"
+            "              'strategy': 'append-relative-path',\n"
+            "              'settings': {'source_web_root':\n"
+            "                'https://fixture.example.invalid/' +\n"
+            "                'refresh_token=' +\n"
+            "                os.environ['RAG_SWAP_SECRET']},\n"
+            "            },\n"
             "          }],\n"
             "        }\n"
             "        target.write_text(json.dumps(payload), encoding='utf-8')\n"

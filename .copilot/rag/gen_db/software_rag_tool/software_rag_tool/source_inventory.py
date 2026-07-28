@@ -37,6 +37,7 @@ class DocumentSample:
 @dataclass(frozen=True)
 class SourceLinkSetting:
     display_name: str
+    source_type: str
     provider: str
     strategy: str
     enabled: bool
@@ -136,6 +137,11 @@ class SourceSummary:
         return {
             "source_id": self.source_id,
             "display_name": self.display_name,
+            "source_type": (
+                self.link_setting.source_type
+                if self.link_setting is not None
+                else ""
+            ),
             "document_count": self.document_count,
             "chunk_count": self.chunk_count,
             "observed_stored_roots": list(self.observed_stored_roots),
@@ -156,6 +162,7 @@ class SourceSummary:
             "source_link_setting": (
                 {
                     "display_name": self.link_setting.display_name,
+                    "source_type": self.link_setting.source_type,
                     "provider": self.link_setting.provider,
                     "strategy": self.link_setting.strategy,
                     "enabled": self.link_setting.enabled,
@@ -178,6 +185,7 @@ class SourceSummary:
 @dataclass(frozen=True)
 class UnmatchedSourceLinkSetting:
     source_id: str
+    source_type: str
     provider: str
     enabled: bool
 
@@ -611,11 +619,15 @@ def _link_setting(
     if source is None and status == "not_configured":
         return None
     value = source or {}
+    link = value.get("link")
+    link_value = link if isinstance(link, dict) else {}
+    source_type = str(value.get("source_type") or "")
     return SourceLinkSetting(
         display_name=str(value.get("display_name") or ""),
-        provider=str(value.get("provider") or ""),
-        strategy=str(value.get("strategy") or ""),
-        enabled=bool(value.get("enabled")),
+        source_type=source_type,
+        provider=(source_type if link_value else ""),
+        strategy=str(link_value.get("strategy") or ""),
+        enabled=bool(link_value.get("enabled")),
         status=status,
     )
 
@@ -628,8 +640,17 @@ def _unmatched_link_settings(
     return tuple(
         UnmatchedSourceLinkSetting(
             source_id=source_id,
-            provider=str(source.get("provider") or ""),
-            enabled=bool(source.get("enabled")),
+            source_type=str(source.get("source_type") or ""),
+            provider=(
+                str(source.get("source_type") or "")
+                if isinstance(source.get("link"), dict)
+                else ""
+            ),
+            enabled=bool(
+                (source.get("link") or {}).get("enabled")
+                if isinstance(source.get("link"), dict)
+                else False
+            ),
         )
         for source_id, source in sorted(configured.items())
         if source_id not in catalog_source_ids

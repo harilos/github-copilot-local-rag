@@ -310,7 +310,15 @@ def _search_contract_unchanged(
                 "sources": [
                     {
                         "source_id": "fixture-source",
-                        **mapping,
+                        "source_type": mapping["provider"],
+                        "link": {
+                            key: mapping[key]
+                            for key in (
+                                "enabled",
+                                "strategy",
+                                "settings",
+                            )
+                        },
                     }
                 ],
             },

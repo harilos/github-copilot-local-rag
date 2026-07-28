@@ -204,16 +204,24 @@ Source一覧、構築・再開、文書追加・更新、詳細状態、検索�
 manager独自の検索処理や更新判定はありません。
 
 Source一覧は`catalog.sqlite`の索引済み文書から読み取り専用で生成されます。
-Source画面からSourceを作成・削除・改名することはできません。新しい
+Source画面からSource IDを作成・削除・変更することはできません。表示用の
+名前と任意の種別は設定できます。新しい
 `source_id`は、buildまたはaddが文書を正常に索引した後にだけ表示されます。
 
-既存Sourceには任意でSource Linkを1つ設定できます。設定はDB直下の次のsidecarへ
-保存され、DBと一緒に持ち運べます。
+既存Sourceには、表示名、`source_type`、Source Linkを任意で設定できます。
+物理ファイル名は旧Managerとの二重管理を避けるため`source-links.json`のまま
+ですが、schemaは`rag-source-metadata-v1`です。DBと一緒に持ち運べます。
 
 ```text
 <db-root>/source-links.json
 <db-root>/source-links.json.bak
 ```
+
+`source_type`もLinkもないSource、種別だけのSource、種別とLinkの両方がある
+Sourceはいずれも有効です。未設定をfolderとは推測せず、Managerでは「未設定」
+と表示します。新規保存でLinkだけを持つ状態は許可しません。対応する種別は
+`folder`、`git`、`github`、`gitlab`、`azure_devops`、`svn`、
+`sharepoint`、`redmine`、`other`です。
 
 SharePoint、GitHub／GitHub Enterprise、GitLab.com／セルフホストGitLab、
 Azure DevOps Repos、Subversion、Redmine、一般WebのHTTP(S)リンクに対応します。
@@ -221,10 +229,14 @@ Azure DevOps Repos、Subversion、Redmine、一般WebのHTTP(S)リンクに対�
 先頭stored rootを自動導出し、そのroot componentを1回だけ除いた
 Source-relative pathからURLを生成します。Source Link用の人間入力prefix、
 最長prefix選択、Source内の複数Provider混在はありません。
-未公開のv1 sidecarはmappingが1件だけで、旧prefixが唯一のobserved rootと
-一致する場合だけread互換を提供します。0件は未設定、複数mapping・root不一致・
-rootなし・複数rootはpath-onlyへfail-openします。明示保存時だけv2へ移行し、
-以前のprimaryをbackupへ残します。
+旧`rag-source-links-v2`は読取時に`provider`を`source_type`へ移し、
+Link設定をnested `link`へ変換します。旧v1は全Sourceが安全に変換できる場合
+だけ移行可能です。複数mapping・root不一致・rootなし・複数rootが1件でも
+あればDB全体を`manual_required`として無変更・path-onlyにします。Managerの
+「旧Source設定を移行する」または`migrate_source_metadata.py`を明示実行した
+場合だけ新schemaへ保存し、以前のprimaryをbackupへ残します。
+build/addは`source_type`を質問・推測・保存せず、新しいSourceは未設定から
+始まります。
 GitリポジトリはManagerでGitHub、GitLab、Azure DevOpsからサービスを選び、
 repository URLとrefを人が入力します。GitHub EnterpriseとセルフホストGitLabも
 同じ選択肢で扱います。Source LinkはWeb上のファイルURLを生成するだけで、
@@ -242,7 +254,8 @@ sidecarがないDBは従来どおりpath-onlyで動作します。設定不備�
 リンク設定だけでDBや索引を再構築する必要はありません。
 
 完全なDB directoryを手動copyするとactive sidecarとローカルrollback用`.bak`
-が保持されます。migration exporterはactiveなv2 sidecarだけを検証して含め、
+が保持されます。migration exporterはactiveな`rag-source-metadata-v1`だけを
+検証して含め、
 以前の内部URLを含み得る`source-links.json.bak`は除外します。どちらの移送も
 機密データとして扱い、実sidecarは公開sourceやfixtureへ含めません。
 

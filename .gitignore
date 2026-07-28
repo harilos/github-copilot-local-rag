@@ -29,3 +29,6 @@ windows_ac_rag_job/
 
 # Optional machine-local source hygiene denylist
 .copilot/rag/config/sensitive-terms.local
+
+# Machine-local Windows test connection
+.copilot/rag/config/windows-test-connection.local.json

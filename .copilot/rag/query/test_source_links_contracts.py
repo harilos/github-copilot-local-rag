@@ -49,11 +49,34 @@ def sidecar(
     revision: int = 1,
     schema_version: str = source_links.SCHEMA_VERSION,
 ) -> dict:
+    value = metadata_source(source or link())
     return {
         "schema_version": schema_version,
         "revision": revision,
-        "sources": [source or link()],
+        "sources": [value],
     }
+
+
+def metadata_source(source: dict) -> dict:
+    value = dict(source)
+    if "provider" in value:
+        provider = value.pop("provider")
+        value = {
+            "source_id": value.pop("source_id"),
+            **(
+                {"display_name": value.pop("display_name")}
+                if "display_name" in value
+                else {}
+            ),
+            "source_type": provider,
+            "link": {
+                "enabled": value.pop("enabled"),
+                "strategy": value.pop("strategy"),
+                "settings": value.pop("settings"),
+            },
+            **value,
+        }
+    return value
 
 
 def legacy_sidecar(
@@ -141,7 +164,7 @@ def forbidden_keys(value: object) -> set[str]:
 class SourceLinksContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="rag-source-links-v2-"
+            prefix="rag-source-metadata-"
         )
         self.db_root = Path(self.temporary.name) / "example-rag"
         self.db_root.mkdir()
@@ -213,12 +236,16 @@ class SourceLinksContractTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_v2_is_exactly_one_link_per_source(self) -> None:
+    def test_source_metadata_is_exactly_one_link_per_source(self) -> None:
         saved = self.save(sidecar())
         self.assertEqual(source_links.SCHEMA_VERSION, saved["schema_version"])
         self.assertEqual(
-            {"source_id", "provider", "enabled", "strategy", "settings"},
+            {"source_id", "source_type", "link"},
             set(saved["sources"][0]),
+        )
+        self.assertEqual(
+            {"enabled", "strategy", "settings"},
+            set(saved["sources"][0]["link"]),
         )
         self.assertNotIn("database", saved)
 
@@ -231,7 +258,7 @@ class SourceLinksContractTests(unittest.TestCase):
             },
         )
         orphan["source_id"] = "orphan-source"
-        payload["sources"].append(orphan)
+        payload["sources"].append(metadata_source(orphan))
         saved = self.save(payload, allow_unmatched_sources=True)
         self.assertEqual(
             ["source-a", "orphan-source"],
@@ -290,7 +317,10 @@ class SourceLinksContractTests(unittest.TestCase):
             dict(matched.source_statuses)["source-a"],
         )
         assert matched.payload is not None
-        self.assertEqual("sharepoint", matched.payload["sources"][0]["provider"])
+        self.assertEqual(
+            "sharepoint",
+            matched.payload["sources"][0]["source_type"],
+        )
         mismatched = source_links.load_source_links(
             self.db_root,
             observed_roots={"source-a": ["Different Root/"]},
@@ -421,11 +451,13 @@ class SourceLinksContractTests(unittest.TestCase):
         payload["sources"].append(
             {
                 "source_id": "source-b",
-                "provider": "other",
-                "enabled": True,
-                "strategy": "append-relative-path",
-                "settings": {
-                    "source_web_root": "https://other.example.invalid/base"
+                "source_type": "other",
+                "link": {
+                    "enabled": True,
+                    "strategy": "append-relative-path",
+                    "settings": {
+                        "source_web_root": "https://other.example.invalid/base"
+                    },
                 },
             }
         )
@@ -523,7 +555,7 @@ class SourceLinksContractTests(unittest.TestCase):
         self,
     ) -> None:
         first = sidecar()
-        first["sources"][0]["settings"]["source_web_root"] = (
+        first["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://one.example.invalid/root"
         )
         self.save(first)
@@ -534,7 +566,7 @@ class SourceLinksContractTests(unittest.TestCase):
             "example-rag",
         )
         second = sidecar()
-        second["sources"][0]["settings"]["source_web_root"] = (
+        second["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://two.example.invalid/root"
         )
         second = source_links.validate_source_links(
@@ -569,7 +601,7 @@ class SourceLinksContractTests(unittest.TestCase):
         assert loaded_second.payload is not None
         self.assertIn(
             "two.example.invalid",
-            loaded_second.payload["sources"][0]["settings"][
+            loaded_second.payload["sources"][0]["link"]["settings"][
                 "source_web_root"
             ],
         )
@@ -577,12 +609,12 @@ class SourceLinksContractTests(unittest.TestCase):
     def test_revision_prevents_lost_update(self) -> None:
         self.save(sidecar(revision=1))
         winner = sidecar(revision=2)
-        winner["sources"][0]["settings"]["source_web_root"] = (
+        winner["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://winner.example.invalid/root"
         )
         self.save(winner, expected_revision=1)
         loser = sidecar(revision=2)
-        loser["sources"][0]["settings"]["source_web_root"] = (
+        loser["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://loser.example.invalid/root"
         )
         with self.assertRaises(source_links.SourceLinkError):
@@ -591,7 +623,7 @@ class SourceLinksContractTests(unittest.TestCase):
         assert loaded.payload is not None
         self.assertIn(
             "winner.example.invalid",
-            loaded.payload["sources"][0]["settings"]["source_web_root"],
+            loaded.payload["sources"][0]["link"]["settings"]["source_web_root"],
         )
 
     def test_same_revision_external_change_is_rejected_by_etag(self) -> None:
@@ -599,7 +631,7 @@ class SourceLinksContractTests(unittest.TestCase):
         loaded = source_links.load_source_links(self.db_root, "example-rag")
         current = self.db_root / source_links.SIDECAR_NAME
         external = sidecar(revision=1)
-        external["sources"][0]["settings"]["source_web_root"] = (
+        external["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://external.example.invalid/root"
         )
         current.write_text(
@@ -607,7 +639,7 @@ class SourceLinksContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         proposed = sidecar(revision=2)
-        proposed["sources"][0]["settings"]["source_web_root"] = (
+        proposed["sources"][0]["link"]["settings"]["source_web_root"] = (
             "https://proposed.example.invalid/root"
         )
         with self.assertRaisesRegex(
@@ -909,7 +941,7 @@ class SourceLinksContractTests(unittest.TestCase):
         normalized = self.save(payload)
         self.assertEqual(
             "https://tenant.example.invalid/sites/example/Library/Folder",
-            normalized["sources"][0]["settings"]["source_web_root"],
+            normalized["sources"][0]["link"]["settings"]["source_web_root"],
         )
 
     def test_sharepoint_home_key_is_read_but_removed_on_canonical_save(
@@ -938,12 +970,12 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertEqual("configured", loaded.status)
         assert loaded.payload is not None
-        settings = loaded.payload["sources"][0]["settings"]
+        settings = loaded.payload["sources"][0]["link"]["settings"]
         self.assertNotIn("source_home_url", settings)
         normalized = self.save(loaded.payload)
         self.assertNotIn(
             "source_home_url",
-            normalized["sources"][0]["settings"],
+            normalized["sources"][0]["link"]["settings"],
         )
 
     def test_retired_sharepoint_home_key_still_rejects_credentials(
@@ -971,17 +1003,23 @@ class SourceLinksContractTests(unittest.TestCase):
                         existing_sources={"source-a", "source-b"},
                     )
 
-    def test_sharepoint_home_only_is_legacy_read_only(self) -> None:
-        legacy_value = sidecar(
-            link(
-                strategy="home-only",
-                settings={
-                    "source_home_url": (
-                        "https://tenant.example.invalid/sites/example"
-                    )
-                },
-            )
-        )
+    def test_sharepoint_home_only_is_preserved_but_remains_path_only(
+        self,
+    ) -> None:
+        legacy_value = {
+            "schema_version": source_links.LEGACY_V2_SCHEMA_VERSION,
+            "revision": 1,
+            "sources": [
+                link(
+                    strategy="home-only",
+                    settings={
+                        "source_home_url": (
+                            "https://tenant.example.invalid/sites/example"
+                        )
+                    },
+                )
+            ],
+        }
         current = self.db_root / source_links.SIDECAR_NAME
         current.write_text(json.dumps(legacy_value), encoding="utf-8")
         loaded = source_links.load_source_links(
@@ -990,11 +1028,18 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertEqual("configured", loaded.status)
         assert loaded.payload is not None
-        with self.assertRaisesRegex(
-            source_links.SourceLinkError,
-            "unsupported SharePoint strategy",
-        ):
-            self.save(loaded.payload)
+        normalized = self.save(loaded.payload)
+        self.assertEqual(
+            "home-only",
+            normalized["sources"][0]["link"]["strategy"],
+        )
+        enriched = source_links.enrich_search_payload(
+            search_payload("Root/a.txt"),
+            self.db_root,
+            "example-rag",
+        )
+        self.assertNotIn("source_url", enriched["evidence"][0])
+        self.assertEqual("ok", enriched["status"])
 
     def test_sharepoint_without_web_root_does_not_save_a_fallback_link(
         self,
@@ -1071,17 +1116,21 @@ class SourceLinksContractTests(unittest.TestCase):
     def test_github_legacy_strategy_is_read_only_and_saves_canonical(
         self,
     ) -> None:
-        legacy_value = sidecar(
-            link(
-                provider="github",
-                strategy="append-relative-path",
-                settings={
-                    "repository_url": "https://git.example.invalid/o/r",
-                    "ref": "main",
-                    "permalink_enabled": False,
-                },
-            )
-        )
+        legacy_value = {
+            "schema_version": source_links.LEGACY_V2_SCHEMA_VERSION,
+            "revision": 1,
+            "sources": [
+                link(
+                    provider="github",
+                    strategy="append-relative-path",
+                    settings={
+                        "repository_url": "https://git.example.invalid/o/r",
+                        "ref": "main",
+                        "permalink_enabled": False,
+                    },
+                )
+            ],
+        }
         current = self.db_root / source_links.SIDECAR_NAME
         original = json.dumps(legacy_value).encode("utf-8")
         current.write_bytes(original)
@@ -1094,7 +1143,7 @@ class SourceLinksContractTests(unittest.TestCase):
         assert loaded.payload is not None
         self.assertEqual(
             "github-blob",
-            loaded.payload["sources"][0]["strategy"],
+            loaded.payload["sources"][0]["link"]["strategy"],
         )
         with self.assertRaisesRegex(
             source_links.SourceLinkError,
@@ -1108,7 +1157,7 @@ class SourceLinksContractTests(unittest.TestCase):
         normalized = self.save(loaded.payload)
         self.assertEqual(
             "github-blob",
-            normalized["sources"][0]["strategy"],
+            normalized["sources"][0]["link"]["strategy"],
         )
 
     def test_github_repository_root_rejects_browse_query_and_fragment(
@@ -1420,7 +1469,7 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertEqual(
             1234,
-            saved["sources"][0]["settings"]["revision"],
+            saved["sources"][0]["link"]["settings"]["revision"],
         )
         item = source_links.enrich_search_payload(
             search_payload("Root/日本語 空白 @ # % + (final).md"),
@@ -1480,7 +1529,7 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertEqual(
             1234,
-            saved["sources"][0]["settings"]["revision"],
+            saved["sources"][0]["link"]["settings"]["revision"],
         )
         item = source_links.enrich_search_payload(
             search_payload("Root/a.txt"),
@@ -1573,7 +1622,7 @@ class SourceLinksContractTests(unittest.TestCase):
         assert loaded.payload is not None
         self.assertEqual(
             "svn-web-root",
-            loaded.payload["sources"][0]["strategy"],
+            loaded.payload["sources"][0]["link"]["strategy"],
         )
         for stored_path in ("Root-A/one.md", "Root-B/two.md"):
             with self.subTest(stored_path=stored_path):
@@ -1619,7 +1668,7 @@ class SourceLinksContractTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     repository_url,
-                    saved["sources"][0]["settings"]["repository_url"],
+                    saved["sources"][0]["link"]["settings"]["repository_url"],
                 )
                 item = source_links.enrich_search_payload(
                     search_payload("Root/a.txt"),
@@ -1947,7 +1996,7 @@ class SourceLinksContractTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     f"https://fixture.example.invalid/?topic={benign}",
-                    normalized["sources"][0]["settings"][
+                    normalized["sources"][0]["link"]["settings"][
                         "source_home_url"
                     ],
                 )

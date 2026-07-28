@@ -79,15 +79,17 @@ def _link(
     enabled: bool = True,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "rag-source-links-v2",
+        "schema_version": "rag-source-metadata-v1",
         "revision": revision,
         "sources": [
             {
                 "source_id": source_id,
-                "provider": "other",
-                "enabled": enabled,
-                "strategy": "append-relative-path",
-                "settings": {"source_web_root": source_web_root},
+                "source_type": "other",
+                "link": {
+                    "enabled": enabled,
+                    "strategy": "append-relative-path",
+                    "settings": {"source_web_root": source_web_root},
+                },
             }
         ],
     }
@@ -331,7 +333,7 @@ def _concurrent_save_worker(
         payload = loaded.payload
         revision = int(payload["revision"])
         payload["revision"] = revision + 1
-        payload["sources"][0]["settings"]["source_web_root"] = (
+        payload["sources"][0]["link"]["settings"]["source_web_root"] = (
             f"https://writer-{index}.example.invalid/root"
         )
         barrier.wait(timeout=10)
@@ -573,12 +575,18 @@ def run(args: argparse.Namespace) -> int:
         )
         if set(normalized["sources"][0]) != {
             "source_id",
-            "provider",
+            "source_type",
+            "link",
+        }:
+            raise AssertionError(
+                "Source Metadata shape is not one complete link"
+            )
+        if set(normalized["sources"][0]["link"]) != {
             "enabled",
             "strategy",
             "settings",
         }:
-            raise AssertionError("v2 Source shape is not one complete link")
+            raise AssertionError("Source Metadata link shape is invalid")
         if "database" in normalized or _find_forbidden(normalized):
             raise AssertionError("v2 normalization retained a legacy field")
         for field, value in (
@@ -603,7 +611,7 @@ def run(args: argparse.Namespace) -> int:
         else:
             raise AssertionError("v2 accepted database")
         missing_strategy = _link("https://fixture.example.invalid/root")
-        del missing_strategy["sources"][0]["strategy"]
+        del missing_strategy["sources"][0]["link"]["strategy"]
         try:
             module.validate_source_links(missing_strategy)
         except module.SourceLinkError:
@@ -680,7 +688,7 @@ def run(args: argparse.Namespace) -> int:
         ):
             raise AssertionError("legacy root mismatch was not reported")
         if any(
-            source.get("provider")
+            source.get("link")
             for source in (mismatched.payload or {}).get("sources", [])
         ):
             raise AssertionError("mismatched legacy root remained configured")
@@ -720,7 +728,7 @@ def run(args: argparse.Namespace) -> int:
         if _find_forbidden(saved) or "database" in saved:
             raise AssertionError("forbidden v2 keys were persisted")
         if saved.get("schema_version") != module.SCHEMA_VERSION:
-            raise AssertionError("legacy save did not publish v2")
+            raise AssertionError("legacy save did not publish Source Metadata")
         if backup.get("schema_version") != module.LEGACY_SCHEMA_VERSION:
             raise AssertionError("raw legacy sidecar was not retained in backup")
         return {
@@ -740,7 +748,7 @@ def run(args: argparse.Namespace) -> int:
         ]
         loaded = module.load_source_links(fixture, FIXTURE_DB_NAME)
         if loaded.payload is None:
-            raise AssertionError("v2 sidecar missing")
+            raise AssertionError("Source Metadata sidecar missing")
         source = loaded.payload["sources"][0]
         previews = module.resolve_mapping_preview(source, paths)
         if len(previews) != len(paths):
@@ -785,20 +793,22 @@ def run(args: argparse.Namespace) -> int:
     def source_identity_and_fail_open() -> dict[str, Any]:
         loaded = module.load_source_links(fixture, FIXTURE_DB_NAME)
         if loaded.payload is None:
-            raise AssertionError("v2 sidecar missing")
+            raise AssertionError("Source Metadata sidecar missing")
         payload = loaded.payload
         payload["revision"] = loaded.revision + 1
         payload["sources"].extend(
             [
                 {
                     "source_id": SOURCE_B,
-                    "provider": "other",
-                    "enabled": True,
-                    "strategy": "append-relative-path",
-                    "settings": {
-                        "source_web_root": (
-                            "https://second.example.invalid/base"
-                        )
+                    "source_type": "other",
+                    "link": {
+                        "enabled": True,
+                        "strategy": "append-relative-path",
+                        "settings": {
+                            "source_web_root": (
+                                "https://second.example.invalid/base"
+                            )
+                        },
                     },
                 },
             ]
@@ -836,13 +846,15 @@ def run(args: argparse.Namespace) -> int:
         attempted["sources"].append(
             {
                 "source_id": SOURCE_MULTI,
-                "provider": "other",
-                "enabled": True,
-                "strategy": "append-relative-path",
-                "settings": {
-                    "source_web_root": (
-                        "https://multiple.example.invalid/base"
-                    )
+                "source_type": "other",
+                "link": {
+                    "enabled": True,
+                    "strategy": "append-relative-path",
+                    "settings": {
+                        "source_web_root": (
+                            "https://multiple.example.invalid/base"
+                        )
+                    },
                 },
             }
         )
@@ -868,13 +880,15 @@ def run(args: argparse.Namespace) -> int:
         hand_edited["sources"].append(
             {
                 "source_id": SOURCE_MULTI,
-                "provider": "other",
-                "enabled": True,
-                "strategy": "append-relative-path",
-                "settings": {
-                    "source_web_root": (
-                        "https://multiple.example.invalid/base"
-                    )
+                "source_type": "other",
+                "link": {
+                    "enabled": True,
+                    "strategy": "append-relative-path",
+                    "settings": {
+                        "source_web_root": (
+                            "https://multiple.example.invalid/base"
+                        )
+                    },
                 },
             }
         )
@@ -907,7 +921,7 @@ def run(args: argparse.Namespace) -> int:
         loaded = module.load_source_links(fixture, FIXTURE_DB_NAME)
         assert loaded.payload is not None
         loaded.payload["revision"] = loaded.revision + 1
-        loaded.payload["sources"][0]["enabled"] = False
+        loaded.payload["sources"][0]["link"]["enabled"] = False
         module.save_source_links(
             fixture,
             loaded.payload,
@@ -926,7 +940,7 @@ def run(args: argparse.Namespace) -> int:
         loaded = module.load_source_links(fixture, FIXTURE_DB_NAME)
         assert loaded.payload is not None
         loaded.payload["revision"] = loaded.revision + 1
-        loaded.payload["sources"][0]["enabled"] = True
+        loaded.payload["sources"][0]["link"]["enabled"] = True
         module.save_source_links(
             fixture,
             loaded.payload,
@@ -956,7 +970,7 @@ def run(args: argparse.Namespace) -> int:
         for index in range(iterations):
             payload = current.payload
             payload["revision"] = revision + 1
-            payload["sources"][0]["settings"]["source_web_root"] = (
+            payload["sources"][0]["link"]["settings"]["source_web_root"] = (
                 "https://a.example.invalid/root"
                 if index % 2
                 else "https://b.example.invalid/root"
@@ -976,7 +990,8 @@ def run(args: argparse.Namespace) -> int:
             if "database" in current.payload or _find_forbidden(current.payload):
                 raise AssertionError("save emitted a legacy v1 field")
             if any(
-                source.get("provider") and not source.get("strategy")
+                isinstance(source.get("link"), dict)
+                and not source["link"].get("strategy")
                 for source in current.payload["sources"]
             ):
                 raise AssertionError("save removed a required strategy")
@@ -1235,7 +1250,7 @@ def run(args: argparse.Namespace) -> int:
         sensitive_setting = _link(
             "https://fixture.example.invalid/root"
         )
-        sensitive_setting["sources"][0]["settings"][
+        sensitive_setting["sources"][0]["link"]["settings"][
             "session_token"
         ] = "value"
         try:
@@ -1308,14 +1323,16 @@ def run(args: argparse.Namespace) -> int:
                 "sources": [
                     {
                         "source_id": SOURCE_A,
-                        "enabled": True,
-                        "provider": "other",
-                        "strategy": "home-only",
-                        "settings": {
-                            "source_home_url": (
-                                "https://fixture.example.invalid/"
-                                f"?next={value}"
-                            )
+                        "source_type": "other",
+                        "link": {
+                            "enabled": True,
+                            "strategy": "home-only",
+                            "settings": {
+                                "source_home_url": (
+                                    "https://fixture.example.invalid/"
+                                    f"?next={value}"
+                                )
+                            },
                         },
                     }
                 ],
@@ -1342,14 +1359,16 @@ def run(args: argparse.Namespace) -> int:
                 "sources": [
                     {
                         "source_id": SOURCE_A,
-                        "enabled": True,
-                        "provider": "other",
-                        "strategy": "home-only",
-                        "settings": {
-                            "source_home_url": (
-                                "https://fixture.example.invalid/"
-                                f"?{query_key}=value"
-                            )
+                        "source_type": "other",
+                        "link": {
+                            "enabled": True,
+                            "strategy": "home-only",
+                            "settings": {
+                                "source_home_url": (
+                                    "https://fixture.example.invalid/"
+                                    f"?{query_key}=value"
+                                )
+                            },
                         },
                     }
                 ],
@@ -1558,17 +1577,6 @@ def run(args: argparse.Namespace) -> int:
         _atomic_json(current, legacy)
         original = current.read_bytes()
 
-        class Inventory:
-            @staticmethod
-            def to_dict() -> dict[str, Any]:
-                return {
-                    "sources": [
-                        {"source_id": SOURCE_A},
-                        {"source_id": SOURCE_B},
-                        {"source_id": SOURCE_MULTI},
-                    ]
-                }
-
         denied_prompts: list[str] = []
         denied = manager_code.LocalRagManager(
             rag_root=rag_root,
@@ -1579,23 +1587,12 @@ def run(args: argparse.Namespace) -> int:
             ),
             output_fn=lambda _text: None,
         )
-        loaded = denied._load_sidecar_payload(db_name)
-        if loaded is None:
-            raise AssertionError("manager could not load legacy sidecar")
-        if denied._save_sidecar(
-            db_name,
-            Inventory(),
-            loaded[0],
-            loaded[1],
-        ):
-            raise AssertionError(
-                "manager migrated legacy sidecar after rejection"
-            )
+        denied._migrate_source_metadata(db_name)
         if current.read_bytes() != original:
             raise AssertionError(
                 "cancelled manager migration changed the sidecar"
             )
-        if not any("Migrate Source-Link" in value for value in denied_prompts):
+        if not any("移行" in value for value in denied_prompts):
             raise AssertionError(
                 "manager did not ask a separate migration confirmation"
             )
@@ -1610,22 +1607,19 @@ def run(args: argparse.Namespace) -> int:
             ),
             output_fn=lambda _text: None,
         )
-        loaded = accepted._load_sidecar_payload(db_name)
-        if loaded is None or not accepted._save_sidecar(
-            db_name,
-            Inventory(),
-            loaded[0],
-            loaded[1],
-        ):
+        accepted._migrate_source_metadata(db_name)
+        if current.read_bytes() == original:
             raise AssertionError(
-                "confirmed manager migration did not publish v2"
+                "confirmed manager migration did not publish Source Metadata"
             )
         saved = json.loads(current.read_text(encoding="utf-8"))
         backup = json.loads(
             (db_root / module.BACKUP_NAME).read_text(encoding="utf-8")
         )
         if saved.get("schema_version") != module.SCHEMA_VERSION:
-            raise AssertionError("manager migration did not publish v2")
+            raise AssertionError(
+                "manager migration did not publish Source Metadata"
+            )
         if backup.get("schema_version") != module.LEGACY_SCHEMA_VERSION:
             raise AssertionError("manager migration did not retain v1 backup")
         return {
@@ -1633,7 +1627,7 @@ def run(args: argparse.Namespace) -> int:
             "confirmation_prompts": len(
                 denied_prompts + accepted_prompts
             ),
-            "explicit_migration_published_v2": True,
+            "explicit_migration_published_source_metadata": True,
         }
 
     results.case(
@@ -1867,7 +1861,9 @@ def run(args: argparse.Namespace) -> int:
                 if loaded.payload is None:
                     raise AssertionError("sidecar disappeared during SQLite read")
                 loaded.payload["revision"] = loaded.revision + 1
-                loaded.payload["sources"][0]["enabled"] = bool(index % 2)
+                loaded.payload["sources"][0]["link"]["enabled"] = bool(
+                    index % 2
+                )
                 module.save_source_links(
                     fixture,
                     loaded.payload,
@@ -1900,7 +1896,7 @@ def run(args: argparse.Namespace) -> int:
         for index in range(iterations):
             payload = loaded.payload
             payload["revision"] = revision + 1
-            payload["sources"][0]["enabled"] = bool(index % 2)
+            payload["sources"][0]["link"]["enabled"] = bool(index % 2)
             module.save_source_links(
                 fixture,
                 payload,
@@ -1967,7 +1963,7 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Windows reliability checks for the Source Link v2 sidecar."
+            "Windows reliability checks for the Source Metadata sidecar."
         )
     )
     parser.add_argument(

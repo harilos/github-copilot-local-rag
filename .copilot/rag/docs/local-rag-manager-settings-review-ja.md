@@ -9,10 +9,11 @@ E: 通常設定として維持、を表します。
 | Source詳細 | 共通 | `source_id` | Source ID（読み取り専用） | C | catalog由来の値を表示のみ | Source inventory、検索結果 | 文書identityと取り込み状態に関係するため変更しない |
 | Source詳細 | 共通 | `display_name` | Source表示名 | E | 任意の表示用値として維持 | Managerの一覧・詳細 | identityや検索には影響しない |
 | Source詳細 | 共通 | `observed_root` | 自動検出された保存ルート | B/C | 現在有効なcatalog文書から自動導出し、入力不可 | `source_inventory.py`、`source_links.py` | URL生成時にpath component単位で1回だけ除去する内部状態 |
-| Source Link | 共通 | Provider | Provider | E | SharePoint、Gitリポジトリ、Subversion、Redmine、その他から選択。GitリポジトリはGitHub、GitLab、Azure DevOpsを選択 | `validate_source_link()`、URL resolver | URL形式がProviderごとに異なるため必要。`git_repository`はUI分類だけで保存しない |
+| Source情報 | 共通 | — | Source種別 | E（任意） | 未設定、folder、git、GitHub、GitLab、Azure DevOps、SVN、SharePoint、Redmine、その他から選択 | `source-links.json`の`source_type` | Linkなしでも設定でき、未設定をfolderへ推測しない |
+| Source Link | 共通 | Provider | Source種別から自動 | B | Link設定時に選んだProviderを`source_type`へ保存し、nested `link`には重複保存しない | `validate_source_link()`、URL resolver | Provider二重管理を避ける。Linkなしなら種別も任意 |
 | Source Link | 共通 | `enabled` | 有効・無効 | E | 専用の切替操作を維持 | URL resolver | 設定を消さず一時停止できる |
 | Source Link | SharePoint | `source_home_url` / Home Root | — | A | UI・通常保存・summaryから削除 | legacy sidecar readerのみ | ファイル直接リンクで未使用。旧値は読めるが、基準URLを保存し直すと除去する |
-| Source Link | SharePoint | `home-only` | — | A | 新規保存不可 | legacy sidecar readerのみ | 曖昧なトップページへフォールバックしない |
+| Source Link | SharePoint | `home-only` | — | A | Managerで新規作成不可。明示migrationでは旧設定を保持 | legacy sidecar reader／migration | 曖昧なトップページへフォールバックせずpath-only。移行で既存metadataを捨てない |
 | Source Link | SharePoint | strategy選択 | ファイル直接リンク（自動） | B | `append-relative-path`へ固定し、選択画面を出さない | `manage.py`、`source_links.py` | 通常利用者の判断が不要 |
 | Source Link | SharePoint | `source_web_root` | SharePoint上の基準フォルダURL | E | 唯一のURL入力として必須 | SharePoint URL generator | Source相対パスを追加する基準として必要 |
 | Source Link | SharePoint | Forms URL正規化・path encode | — | B | 内部で自動処理 | SharePoint URL normalizer | 利用者が判断する項目ではない |
@@ -41,9 +42,11 @@ E: 通常設定として維持、を表します。
 
 ## 互換性
 
-- DB schema、Source Link sidecar schema、検索・build・addのCLI引数は変更しません。
-- 旧SharePoint `home-only` は読み取り時だけ許容し、検索では従来どおり
-  path-onlyへfail-openします。新規保存はできません。
+- DB schema、検索・build・addのCLI引数は変更しません。物理ファイル名は
+  `source-links.json`のまま、schemaは`rag-source-metadata-v1`です。
+- 旧SharePoint `home-only` は明示migrationで既存metadataを保持できますが、
+  検索では従来どおりpath-onlyへfail-openします。Managerからの新規作成は
+  できません。
 - `append-relative-path`の旧SharePoint設定に`source_home_url`が含まれていても
   読み込めます。canonicalな再保存では`source_web_root`だけを残します。
 - GitHubの旧`append-relative-path`表記は読み取り時に`github-blob`へ正規化し、

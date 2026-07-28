@@ -31,6 +31,7 @@ MAX_ITEMS_PER_RESULT = 20
 MAX_EXPANDED_RESPONSES_PER_RESULT = 20
 LOCK_STALE_SECONDS = 10
 LOCK_WAIT_SECONDS = 0.1
+WINDOWS_REPLACE_RETRY_SECONDS = 2.0
 _ITEM_ID_RE = re.compile(r"^[ED]\d{1,2}$")
 
 
@@ -115,9 +116,23 @@ def publish_result_bundle(
             ),
             "item_count": len(entries),
         }
-        _atomic_write_json(result_dir / "meta.json", meta)
-        bundle_bytes = _tree_size(result_dir)
-        meta["bundle_bytes"] = bundle_bytes
+        content_bytes = _tree_size(result_dir)
+        bundle_bytes = content_bytes
+        while True:
+            meta["bundle_bytes"] = bundle_bytes
+            total = content_bytes + len(
+                json.dumps(
+                    meta,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if total == bundle_bytes:
+                break
+            bundle_bytes = total
+        # meta.json is the ready marker. Publish it exactly once, after every
+        # other bundle file is complete, so concurrent cleanup never observes
+        # and opens a marker that this publisher still needs to replace.
         _atomic_write_json(result_dir / "meta.json", meta)
         summary_path = result_dir / "summary.json"
         pointer = {
@@ -1230,7 +1245,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         os.chmod(temporary, 0o600)
     except OSError:
         pass
-    os.replace(temporary, path)
+    _atomic_replace(temporary, path)
     try:
         directory_descriptor = os.open(path.parent, os.O_RDONLY)
     except OSError:
@@ -1241,6 +1256,26 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         pass
     finally:
         os.close(directory_descriptor)
+
+
+def _atomic_replace(source: Path, target: Path) -> None:
+    deadline = time.monotonic() + WINDOWS_REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as exc:
+            if (
+                not _is_windows()
+                or getattr(exc, "winerror", None) not in {5, 32, 33}
+                or time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(0.01)
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

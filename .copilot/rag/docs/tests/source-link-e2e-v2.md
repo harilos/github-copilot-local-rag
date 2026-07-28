@@ -21,9 +21,10 @@ Only `run_source_link_e2e.py` performs Live Target E2E network access. Search,
 the daemon, the manager's normal search operation, and result-detail lookup do
 not validate URLs over HTTP.
 
-The runner uses `rag-source-links-v2`: one Source contains one Provider,
-enabled state, strategy, and settings object. The current visible catalog
-documents define exactly one observed top-level stored root. That root
+The runner uses `rag-source-metadata-v1`: one Source contains an optional
+`source_type` and one optional nested `link`. The Link contains enabled state,
+strategy, and settings without repeating the Provider. The current visible
+catalog documents define exactly one observed top-level stored root. That root
 component is removed exactly once and the Source-relative path is passed to
 the Provider. No user-entered Source-Link path prefix or longest-prefix
 selection is involved.

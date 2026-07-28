@@ -32,7 +32,8 @@ from .source_paths import (
 )
 
 
-SCHEMA_VERSION = "rag-source-links-v2"
+SCHEMA_VERSION = "rag-source-metadata-v1"
+LEGACY_V2_SCHEMA_VERSION = "rag-source-links-v2"
 LEGACY_SCHEMA_VERSION = "rag-source-links-v1"
 SIDECAR_NAME = "source-links.json"
 BACKUP_NAME = "source-links.json.bak"
@@ -56,6 +57,13 @@ _ALLOWED_PROVIDERS = {
     "redmine",
     "other",
 }
+ALLOWED_SOURCE_TYPES = frozenset(
+    {
+        "folder",
+        "git",
+        *_ALLOWED_PROVIDERS,
+    }
+)
 _SENSITIVE_KEY_PARTS = (
     "access_token",
     "bearer",
@@ -93,6 +101,14 @@ _CACHE: dict[
     tuple[Path, str],
     tuple[tuple[int, int, str], "SourceLinksLoad"],
 ] = {}
+_LEGACY_MANUAL_STATUSES = frozenset(
+    {
+        "legacy_multiple_mappings",
+        "legacy_root_mismatch",
+        "multiple_observed_roots",
+        "no_observed_root",
+    }
+)
 
 
 class SourceLinkError(ValueError):
@@ -108,6 +124,7 @@ class SourceLinksLoad:
     etag: str = "missing"
     migration_required: bool = False
     source_statuses: tuple[tuple[str, str], ...] = ()
+    loaded_schema_version: str = ""
 
 
 @dataclass
@@ -165,6 +182,14 @@ def load_source_links(
             expected_database=effective_db_name,
             allow_legacy_provider_settings=True,
         )
+        loaded_schema_version = str(decoded.get("schema_version") or "")
+        manual_required = (
+            loaded_schema_version == LEGACY_SCHEMA_VERSION
+            and any(
+                status in _LEGACY_MANUAL_STATUSES
+                for status in source_statuses.values()
+            )
+        )
         roots_digest = hashlib.sha256(
             json.dumps(
                 roots,
@@ -194,14 +219,26 @@ def load_source_links(
             etag=digest,
         )
     else:
-        loaded = SourceLinksLoad(
-            "configured",
-            payload,
-            revision=int(payload["revision"]),
-            etag=digest,
-            migration_required=migration_required,
-            source_statuses=tuple(sorted(source_statuses.items())),
-        )
+        if manual_required:
+            loaded = SourceLinksLoad(
+                "manual_required",
+                None,
+                revision=int(decoded["revision"]),
+                etag=digest,
+                migration_required=True,
+                source_statuses=tuple(sorted(source_statuses.items())),
+                loaded_schema_version=loaded_schema_version,
+            )
+        else:
+            loaded = SourceLinksLoad(
+                "configured",
+                payload,
+                revision=int(payload["revision"]),
+                etag=digest,
+                migration_required=migration_required,
+                source_statuses=tuple(sorted(source_statuses.items())),
+                loaded_schema_version=loaded_schema_version,
+            )
     with _CACHE_LOCK:
         # Invalid or removed settings replace any previously valid cache entry.
         _CACHE[cache_key] = (fingerprint, _clone_load(loaded))
@@ -237,10 +274,14 @@ def _normalize_payload(
     allow_legacy_provider_settings: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str], bool]:
     if not isinstance(payload, dict):
-        raise SourceLinkError("source-links sidecar must be a JSON object")
+        raise SourceLinkError("Source Metadata sidecar must be a JSON object")
     schema_version = payload.get("schema_version")
-    if schema_version not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}:
-        raise SourceLinkError("unsupported source-links schema")
+    if schema_version not in {
+        SCHEMA_VERSION,
+        LEGACY_V2_SCHEMA_VERSION,
+        LEGACY_SCHEMA_VERSION,
+    }:
+        raise SourceLinkError("unsupported Source Metadata schema")
     if schema_version == LEGACY_SCHEMA_VERSION:
         declared_database = _bounded_text(
             payload.get("database"),
@@ -254,7 +295,7 @@ def _normalize_payload(
             raise SourceLinkError(
                 "legacy source-links database does not match its directory"
             )
-    if schema_version == SCHEMA_VERSION:
+    if schema_version in {SCHEMA_VERSION, LEGACY_V2_SCHEMA_VERSION}:
         unexpected = set(payload) - {
             "schema_version",
             "revision",
@@ -262,7 +303,7 @@ def _normalize_payload(
         }
         if unexpected:
             raise SourceLinkError(
-                "v2 source-links contains unsupported top-level fields"
+                "Source Metadata contains unsupported top-level fields"
             )
     revision = payload.get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
@@ -289,6 +330,7 @@ def _normalize_payload(
         if source_id in seen_sources:
             raise SourceLinkError("duplicate source_id in source-links")
         seen_sources.add(source_id)
+        legacy_status = ""
         if schema_version == LEGACY_SCHEMA_VERSION:
             original_source_id = source_id
             source, legacy_status = _upgrade_legacy_source(
@@ -302,16 +344,18 @@ def _normalize_payload(
                 source_statuses[original_source_id] = legacy_status
             if source is None:
                 continue
+        elif schema_version == LEGACY_V2_SCHEMA_VERSION:
+            source = _upgrade_v2_source(source)
+            legacy_status = "legacy_v2_migration_available"
+            source_statuses[source_id] = legacy_status
         elif set(source) - {
             "source_id",
             "display_name",
-            "enabled",
-            "provider",
-            "strategy",
-            "settings",
+            "source_type",
+            "link",
         }:
             raise SourceLinkError(
-                "v2 Source settings contain unsupported fields"
+                "Source Metadata contains unsupported Source fields"
             )
         if (
             known_sources is not None
@@ -329,22 +373,57 @@ def _normalize_payload(
                 "display_name",
                 300,
             )
-        link_fields = ("provider", "enabled", "strategy", "settings")
-        present = [field in source for field in link_fields]
-        if any(present) and not all(present):
-            raise SourceLinkError(
-                "Source Link requires provider, enabled, strategy, and settings"
-            )
-        if all(present):
-            normalized_source.update(
-                validate_source_link(
-                    source,
-                    allow_legacy_provider_settings=(
-                        allow_legacy_provider_settings
-                    ),
+        source_type = str(source.get("source_type") or "").strip().lower()
+        if source_type:
+            if source_type not in ALLOWED_SOURCE_TYPES:
+                raise SourceLinkError("unsupported source_type")
+            normalized_source["source_type"] = source_type
+        link_value = source.get("link")
+        if link_value is not None and not isinstance(link_value, dict):
+            raise SourceLinkError("Source link must be an object")
+        if isinstance(link_value, dict):
+            unexpected_link_fields = set(link_value) - {
+                "enabled",
+                "strategy",
+                "settings",
+            }
+            if unexpected_link_fields:
+                raise SourceLinkError(
+                    "Source link contains unsupported fields"
                 )
+            if not source_type:
+                raise SourceLinkError(
+                    "Source link requires source_type"
+                )
+            if source_type not in _ALLOWED_PROVIDERS:
+                raise SourceLinkError(
+                    "source_type does not support a Source Link"
+                )
+            normalized_link = validate_source_link(
+                {
+                    "provider": source_type,
+                    **link_value,
+                },
+                allow_legacy_provider_settings=(
+                    allow_legacy_provider_settings
+                    and schema_version != SCHEMA_VERSION
+                ),
             )
+            normalized_source["link"] = {
+                "enabled": normalized_link["enabled"],
+                "strategy": normalized_link["strategy"],
+                "settings": normalized_link["settings"],
+            }
             source_statuses.setdefault(source_id, "configured")
+        elif any(
+            field in source
+            for field in ("provider", "enabled", "strategy", "settings")
+        ):
+            raise SourceLinkError(
+                "legacy Source Link fields are not valid Source Metadata"
+            )
+        elif source_type:
+            source_statuses.setdefault(source_id, "type_only")
         else:
             source_statuses.setdefault(source_id, "not_configured")
         normalized_sources.append(normalized_source)
@@ -352,7 +431,42 @@ def _normalize_payload(
         "schema_version": SCHEMA_VERSION,
         "revision": revision,
         "sources": normalized_sources,
-    }, source_statuses, schema_version == LEGACY_SCHEMA_VERSION)
+    }, source_statuses, schema_version != SCHEMA_VERSION)
+
+
+def _upgrade_v2_source(source: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "source_id",
+        "display_name",
+        "enabled",
+        "provider",
+        "strategy",
+        "settings",
+    }
+    if set(source) - allowed:
+        raise SourceLinkError(
+            "legacy v2 Source settings contain unsupported fields"
+        )
+    upgraded: dict[str, Any] = {
+        "source_id": source.get("source_id"),
+    }
+    display_name = str(source.get("display_name") or "").strip()
+    if display_name:
+        upgraded["display_name"] = display_name
+    link_fields = ("provider", "enabled", "strategy", "settings")
+    present = [field in source for field in link_fields]
+    if any(present) and not all(present):
+        raise SourceLinkError(
+            "legacy v2 Source Link is incomplete"
+        )
+    if all(present):
+        upgraded["source_type"] = source.get("provider")
+        upgraded["link"] = {
+            "enabled": source.get("enabled"),
+            "strategy": source.get("strategy"),
+            "settings": source.get("settings"),
+        }
+    return upgraded
 
 
 def validate_source_link(
@@ -362,6 +476,22 @@ def validate_source_link(
 ) -> dict[str, Any]:
     if not isinstance(link, dict):
         raise SourceLinkError("Source Link must be an object")
+    if isinstance(link.get("link"), dict):
+        nested = link["link"]
+        if set(nested) - {"enabled", "strategy", "settings"}:
+            raise SourceLinkError(
+                "Source link contains unsupported fields"
+            )
+        source_type = str(link.get("source_type") or "").strip().lower()
+        if not source_type:
+            raise SourceLinkError("Source link requires source_type")
+        return validate_source_link(
+            {
+                "provider": source_type,
+                **nested,
+            },
+            allow_legacy_provider_settings=allow_legacy_provider_settings,
+        )
     enabled = link.get("enabled", True)
     if not isinstance(enabled, bool):
         raise SourceLinkError("Source Link enabled must be boolean")
@@ -396,7 +526,7 @@ def validate_source_link(
 
 
 def validate_mapping(mapping: Any) -> dict[str, Any]:
-    """Compatibility alias that normalizes an old mapping into a v2 link."""
+    """Compatibility alias that normalizes an old flat mapping."""
     return validate_source_link(mapping)
 
 
@@ -411,11 +541,11 @@ def _upgrade_legacy_source(
         upgraded["display_name"] = display_name
     mappings = source.get("mappings")
     if mappings is None:
-        return (upgraded if display_name else None), "not_configured"
+        return upgraded, "not_configured"
     if not isinstance(mappings, list):
         raise SourceLinkError("legacy Source mappings must be an array")
     if not mappings:
-        return (upgraded if display_name else None), "not_configured"
+        return upgraded, "not_configured"
     if len(mappings) != 1:
         return (upgraded if display_name else None), "legacy_multiple_mappings"
     first = mappings[0]
@@ -434,9 +564,13 @@ def _upgrade_legacy_source(
         return (upgraded if display_name else None), "legacy_root_mismatch"
     if former_prefix != observed:
         return (upgraded if display_name else None), "legacy_root_mismatch"
-    for key in ("provider", "enabled", "settings", "strategy"):
-        if key in first:
-            upgraded[key] = first[key]
+    provider = str(first.get("provider") or "").strip().lower()
+    upgraded["source_type"] = provider
+    upgraded["link"] = {
+        key: first[key]
+        for key in ("enabled", "settings", "strategy")
+        if key in first
+    }
     return upgraded, "legacy_migration_available"
 
 
@@ -456,7 +590,7 @@ def save_source_links(
         raise SourceLinkError("database directory does not exist")
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise SourceLinkError(
-            "legacy source-links require explicit in-memory migration"
+            "legacy Source settings require explicit migration"
         )
     if expected_revision is None or expected_etag is None:
         raise SourceLinkError(
@@ -506,10 +640,21 @@ def save_source_links(
             raise SourceLinkError(
                 "Source roots could not be verified from the catalog"
             ) from exc
+        current_load = load_source_links(
+            root,
+            db_name,
+            observed_roots=authoritative_roots,
+        )
+        current_payload = (
+            current_load.payload
+            if current_load.status not in {"invalid", "unconfigured"}
+            else None
+        )
         _validate_observed_root_contract(
             normalized,
             authoritative_roots,
             existing_sources=existing_sources,
+            current_payload=current_payload,
         )
         _write_bytes(temporary, encoded)
         if current.exists():
@@ -549,18 +694,27 @@ def _validate_observed_root_contract(
     observed_roots: dict[str, Iterable[str]],
     *,
     existing_sources: Iterable[str] | None,
+    current_payload: dict[str, Any] | None = None,
 ) -> None:
     known_sources = (
         {str(value) for value in existing_sources}
         if existing_sources is not None
         else None
     )
+    current_sources = {
+        str(source.get("source_id") or ""): source
+        for source in (
+            (current_payload or {}).get("sources") or []
+        )
+        if isinstance(source, dict)
+    }
     for source in payload.get("sources") or []:
         source_id = str(source.get("source_id") or "")
         if (
             not isinstance(source, dict)
-            or not source.get("provider")
-            or source.get("strategy") in {"home-only", "svn-web-root"}
+            or not isinstance(source.get("link"), dict)
+            or source["link"].get("strategy")
+            in {"home-only", "svn-web-root"}
             or (
                 known_sources is not None
                 and source_id not in known_sources
@@ -574,12 +728,23 @@ def _validate_observed_root_contract(
                 (),
             )
         )
+        current_source = current_sources.get(source_id)
+        unchanged_legacy_link = (
+            isinstance(current_source, dict)
+            and source.get("source_type")
+            == current_source.get("source_type")
+            and source.get("link") == current_source.get("link")
+        )
         if not roots:
+            if unchanged_legacy_link:
+                continue
             raise SourceLinkError(
                 "per-file Source Link requires one observed root: "
                 "no_observed_root"
             )
         if len(roots) != 1:
+            if unchanged_legacy_link:
+                continue
             raise SourceLinkError(
                 "per-file Source Link requires one observed root: "
                 "multiple_observed_roots"
@@ -590,7 +755,7 @@ def resolve_mapping_preview(
     mapping: dict[str, Any],
     stored_paths: Iterable[str],
 ) -> list[dict[str, Any]]:
-    normalized = validate_source_link(mapping)
+    normalized = _validated_link_from_source(mapping)
     root_independent = normalized["strategy"] == "svn-web-root"
     values = list(stored_paths)[:5]
     try:
@@ -737,14 +902,16 @@ def _resolve_from_payload(
     if not isinstance(source, dict):
         return {}, "unconfigured"
     if (
-        source.get("enabled") is not True
-        or not source.get("provider")
-        or not isinstance(source.get("settings"), dict)
+        not isinstance(source.get("link"), dict)
+        or source["link"].get("enabled") is not True
+        or not source.get("source_type")
+        or not isinstance(source["link"].get("settings"), dict)
     ):
         return {}, "unconfigured"
-    if source.get("strategy") == "svn-web-root":
+    source_link = _validated_link_from_source(source)
+    if source_link.get("strategy") == "svn-web-root":
         try:
-            resolved = _generate_provider_urls(source, path)
+            resolved = _generate_provider_urls(source_link, path)
         except (SourcePathError, SourceLinkError, ValueError, KeyError):
             return {}, "resolution_failed"
         return (
@@ -759,12 +926,21 @@ def _resolve_from_payload(
         return {}, "multiple_observed_roots"
     try:
         relative = source_relative_path(path, roots[0])
-        resolved = _generate_provider_urls(source, relative)
+        resolved = _generate_provider_urls(source_link, relative)
     except (SourcePathError, SourceLinkError, ValueError, KeyError):
         return {}, "resolution_failed"
     if not resolved:
         return {}, "unconfigured"
     return resolved, "resolved"
+
+
+def _validated_link_from_source(
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    return validate_source_link(
+        source,
+        allow_legacy_provider_settings=True,
+    )
 
 
 def _validate_provider_settings(
@@ -775,7 +951,12 @@ def _validate_provider_settings(
     allow_legacy_provider_settings: bool = False,
 ) -> dict[str, Any]:
     if provider == "sharepoint":
-        if strategy == "home-only" and allow_legacy_provider_settings:
+        if strategy == "home-only":
+            # Compatibility-only representation. The Manager never offers
+            # this strategy for new SharePoint settings, and URL generation
+            # deliberately returns path-only for every home-only Link. It
+            # remains persistable so explicit v1/v2 metadata migration does
+            # not discard an existing setting.
             return {
                 "source_home_url": _required_url(
                     settings.get("source_home_url")
@@ -1560,6 +1741,7 @@ def _clone_load(value: SourceLinksLoad) -> SourceLinksLoad:
         value.etag,
         value.migration_required,
         tuple(value.source_statuses),
+        value.loaded_schema_version,
     )
 
 
@@ -1588,6 +1770,7 @@ def _read_current_revision(
             raise SourceLinkError("sidecar must be an object")
         if payload.get("schema_version") not in {
             SCHEMA_VERSION,
+            LEGACY_V2_SCHEMA_VERSION,
             LEGACY_SCHEMA_VERSION,
         }:
             raise SourceLinkError("unsupported source-links schema")
