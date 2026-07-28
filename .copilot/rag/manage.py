@@ -78,7 +78,6 @@ ALLOWED_SCRIPTS = frozenset(
     }
 )
 DATABASE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
-_STATUS_UNSET = object()
 _ANSI = {
     "success": "\033[32m",
     "info": "\033[36m",
@@ -94,9 +93,6 @@ _STATUS_JA = {
     "failed": "失敗",
     "unknown": "状態不明",
     "setup_required": "初期設定が必要",
-    "db_maintenance_in_progress": "DB更新中",
-    "db_maintenance_failed": "DB更新失敗",
-    "db_requires_repair": "修復が必要",
     "stale_running": "処理停止・再開確認が必要",
     "full": "十分",
     "partial": "一部のみ",
@@ -410,23 +406,9 @@ class LocalRagManager:
                     for value in sources
                 )
             state = str(status.get("status") or "unknown")
-            maintenance = (
-                status.get("db_maintenance")
-                if isinstance(status.get("db_maintenance"), dict)
-                else {}
-            )
-            if maintenance.get("blocks_search"):
-                state = str(
-                    maintenance.get("error")
-                    or maintenance.get("status")
-                    or "db_maintenance_failed"
-                )
             unsafe_states = {
                 "failed",
                 "stale_running",
-                "db_maintenance_failed",
-                "db_requires_repair",
-                "db_maintenance_in_progress",
                 "invalid",
             }
             readiness = (
@@ -536,16 +518,6 @@ class LocalRagManager:
         except Exception:
             sidecar_status = "invalid"
         overview_state = status.get("status")
-        maintenance = (
-            status.get("db_maintenance")
-            if isinstance(status.get("db_maintenance"), dict)
-            else {}
-        )
-        if maintenance.get("blocks_search"):
-            overview_state = (
-                maintenance.get("error")
-                or maintenance.get("status")
-            )
         self.output(f"状態: {self._status_label(overview_state)}")
         self.output(f"文書数: {int(documents or 0):,}")
         self.output(f"チャンク数: {int(chunks or 0):,}")
@@ -635,20 +607,7 @@ class LocalRagManager:
         status = str(payload.get("status") or "")
         if status in {"busy", "error"}:
             error_kind = str(payload.get("error") or "unknown")
-            if error_kind in {
-                "db_maintenance_in_progress",
-                "db_maintenance_started",
-            }:
-                self._print_error(
-                    "このDBはbuild/add/修復中のため、現在検索できません。"
-                )
-                self.output(f"対象DB: {payload.get('db') or '不明'}")
-                self.output(f"実行中の操作: {payload.get('operation') or '不明'}")
-                self.output(
-                    "処理完了後に再実行してください。別DBは通常どおり検索できます。"
-                )
-            else:
-                self._print_error(f"検索に失敗しました: {error_kind}")
+            self._print_error(f"検索に失敗しました: {error_kind}")
         initial = (
             payload.get("initial_response")
             if isinstance(payload.get("initial_response"), dict)
@@ -830,8 +789,6 @@ class LocalRagManager:
         if not self._guard_valid_database_target(db_name):
             return
         status = self._status_json(db_name)
-        if not self._guard_inactive(db_name, status):
-            return
         self._print_screen_header("DBを構築・再開", db_name=db_name)
         self.output(
             "buildは取り込み元からDBを初めて構築します。"
@@ -953,9 +910,6 @@ class LocalRagManager:
 
     def _add_or_update(self, db_name: str) -> None:
         if not self._guard_valid_database_target(db_name):
-            return
-        status = self._status_json(db_name)
-        if not self._guard_inactive(db_name, status):
             return
         source_id = self._select_ingestion_source_id(db_name)
         if source_id is None:
@@ -1134,8 +1088,6 @@ class LocalRagManager:
 
     def _repair_index(self, db_name: str) -> None:
         if not self._guard_valid_database_target(db_name):
-            return
-        if not self._guard_inactive(db_name):
             return
         self._print_screen_header("検索索引を修復", db_name=db_name)
         self._print_warning(
@@ -2357,11 +2309,8 @@ class LocalRagManager:
     def _delete_database_interactive(self, db_name: str) -> bool:
         if not self._guard_valid_database_target(db_name):
             return False
-        if not self._guard_inactive(db_name):
-            return False
         try:
             root = self._validated_database_root(db_name)
-            self._ensure_no_active_mutation(root)
         except Exception as exc:
             self._print_error(
                 f"DBを削除できません: {type(exc).__name__}: {exc}"
@@ -2430,22 +2379,9 @@ class LocalRagManager:
         if typed_name != db_name:
             raise ManagerError("typed confirmation did not match")
         root = self._validated_database_root(db_name)
-        self._ensure_no_active_mutation(root)
-        daemon = self._import_daemon_control()
         try:
-            with daemon.database_mutation_guard(
-                db_name,
-                operation="delete",
-                timeout_seconds=10.0,
-                rag_root=self.rag_root,
-                dbs_root=self.dbs_root,
-            ):
-                # Revalidate after daemon coordination, immediately before
-                # the destructive operation.
-                root = self._validated_database_root(db_name)
-                self._ensure_no_active_mutation(root)
-                shutil.rmtree(root)
-        except RuntimeError as exc:
+            shutil.rmtree(root)
+        except OSError as exc:
             raise ManagerError(str(exc)) from exc
 
     def _validated_database_root(self, db_name: str) -> Path:
@@ -2468,22 +2404,6 @@ class LocalRagManager:
     def _valid_database_name(db_name: str) -> bool:
         return bool(DATABASE_NAME_PATTERN.fullmatch(str(db_name)))
 
-    @staticmethod
-    def _ensure_no_active_mutation(db_root: Path) -> None:
-        progress = db_root / "logs" / "progress.json"
-        if progress.is_symlink():
-            raise ManagerError("database progress state cannot be a symlink")
-        try:
-            payload = json.loads(
-                progress.read_text(encoding="utf-8", errors="replace")
-            )
-        except FileNotFoundError:
-            return
-        except json.JSONDecodeError as exc:
-            raise ManagerError("database progress state is invalid") from exc
-        if str(payload.get("status") or "").casefold() == "running":
-            raise ManagerError("a database mutation is active")
-
     def _status_json(self, db_name: str) -> dict[str, Any] | None:
         result = self._invoke(
             "gen_db/status.py",
@@ -2498,29 +2418,6 @@ class LocalRagManager:
             self._print_error("DB状態を読み取れませんでした。")
             return None
         return payload if isinstance(payload, dict) else None
-
-    def _guard_inactive(
-        self,
-        db_name: str,
-        status: dict[str, Any] | None | object = _STATUS_UNSET,
-    ) -> bool:
-        current = (
-            self._status_json(db_name)
-            if status is _STATUS_UNSET
-            else status
-        )
-        if current is None:
-            self._print_error(
-                f"DB「{db_name}」の状態を確認できないため、操作を開始しません。"
-            )
-            return False
-        if current and bool(current.get("appears_active")):
-            self._print_error(
-                f"DB「{db_name}」では取り込みまたは修復処理が実行中です。"
-            )
-            self.output("処理完了後にもう一度実行してください。")
-            return False
-        return True
 
     def _guard_valid_database_target(self, db_name: str) -> bool:
         try:
@@ -2609,15 +2506,6 @@ class LocalRagManager:
             f"抽出エラー: {int(status.get('error_count_total') or 0):,}"
         )
         self.output(f"最後のエラー: {status.get('last_error') or 'なし'}")
-        maintenance = (
-            status.get("db_maintenance")
-            if isinstance(status.get("db_maintenance"), dict)
-            else {}
-        )
-        self.output(
-            "DB更新状態: "
-            f"{self._status_label(maintenance.get('status') or 'available')}"
-        )
         events = status.get("events") or []
         if events:
             self.output("最近のイベント:")
@@ -2759,14 +2647,6 @@ class LocalRagManager:
         from software_rag_tool import source_links
 
         return source_links
-
-    def _import_daemon_control(self) -> Any:
-        tool_root = self.rag_root / "gen_db" / "software_rag_tool"
-        if str(tool_root) not in sys.path:
-            sys.path.insert(0, str(tool_root))
-        from software_rag_tool import daemon_control
-
-        return daemon_control
 
     def _select_value(
         self,

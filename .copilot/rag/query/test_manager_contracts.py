@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-from contextlib import contextmanager
 import json
 import os
 import sys
@@ -123,53 +122,6 @@ class FakeSourceLinks:
         self.saved.append(self.payload)
         return self.payload
 
-
-class FakeDaemonControl:
-    def __init__(self, status: str = "no_daemon") -> None:
-        self.status = status
-        self.release_calls: list[str] = []
-        self.resume_calls: list[str] = []
-
-    def release_db_before_mutation(
-        self,
-        db_name: str,
-        **_: Any,
-    ) -> dict[str, str]:
-        self.release_calls.append(db_name)
-        if self.status == "db_released":
-            return {
-                "status": self.status,
-                "db": db_name,
-                "lease_id": "synthetic-lease",
-            }
-        return {"status": self.status, "db": db_name}
-
-    def resume_db_after_mutation(
-        self,
-        db_name: str,
-        **_: Any,
-    ) -> dict[str, str]:
-        self.resume_calls.append(db_name)
-        return {"status": "resumed"}
-
-    @contextmanager
-    def database_mutation_guard(
-        self,
-        db_name: str,
-        **kwargs: Any,
-    ):
-        release = self.release_db_before_mutation(db_name, **kwargs)
-        if release.get("status") not in {"no_daemon", "db_released"}:
-            raise RuntimeError("daemon did not release the database")
-        try:
-            yield release
-        finally:
-            lease_id = str(release.get("lease_id") or "")
-            if release.get("status") == "db_released" and lease_id:
-                self.resume_db_after_mutation(
-                    db_name,
-                    lease_id=lease_id,
-                )
 
 
 class ManagerContractTests(unittest.TestCase):
@@ -298,31 +250,6 @@ class ManagerContractTests(unittest.TestCase):
         self.assertEqual(len(self.runner.calls), 1)
         self.assertIn("--explain", self.runner.calls[0][0])
 
-    def test_nonzero_maintenance_search_explains_target_without_retry(
-        self,
-    ) -> None:
-        self.runner.respond(
-            "search.py",
-            returncode=3,
-            stdout=json.dumps(
-                {
-                    "schema": "local-rag.search.v1",
-                    "status": "busy",
-                    "error": "db_maintenance_in_progress",
-                    "db": "example-rag",
-                    "operation": "add",
-                }
-            ),
-        )
-        self.manager(["1", "synthetic question"])._search("example-rag")
-        self.assertEqual(len(self.runner.calls), 1)
-        text = "\n".join(self.output)
-        self.assertIn("現在検索できません", text)
-        self.assertIn("対象DB: example-rag", text)
-        self.assertIn("実行中の操作: add", text)
-        self.assertIn("別DBは通常どおり検索できます", text)
-        self.assertNotIn("DB構築を実行中", text)
-
     def test_search_rendering_prefers_permalink_then_url_then_path(self) -> None:
         manager = self.manager()
         manager._show_search_result(
@@ -388,34 +315,6 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("文書数: 2", text)
         self.assertIn("チャンク数: 5", text)
         self.assertIn("利用可能（ready）", text)
-
-    def test_database_counts_do_not_mask_failed_maintenance_state(self) -> None:
-        self.runner.respond(
-            "list_dbs.py",
-            stdout=json.dumps(
-                {"databases": [{"name": "example-rag", "title": "Example"}]}
-            ),
-        )
-        self.runner.respond(
-            "status.py",
-            stdout=json.dumps(
-                {
-                    "status": "completed",
-                    "document_count": 2,
-                    "chunk_count": 5,
-                    "db_maintenance": {
-                        "blocks_search": True,
-                        "status": "db_requires_repair",
-                    },
-                }
-            ),
-        )
-        manager = self.manager(["0"])
-        manager._load_source_inventory = lambda _name: FakeInventory()
-        manager._select_database()
-        text = "\n".join(self.output)
-        self.assertIn("修復が必要", text)
-        self.assertNotIn("利用可能（ready）", text)
 
     def test_create_rejects_path_shaped_database_name(self) -> None:
         self.manager(["outside/example-rag"])._create_database()
@@ -706,25 +605,6 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("自動検出された保存ルートを確認", text)
         self.assertIn("multiple_observed_roots", text)
 
-    def test_active_status_refuses_build_add_and_repair(self) -> None:
-        self.make_db()
-        self.runner.respond(
-            "status.py",
-            stdout=json.dumps(
-                {"status": "running", "appears_active": True}
-            ),
-        )
-        manager = self.manager()
-        manager._build_or_resume("example-rag")
-        manager._add_or_update("example-rag")
-        manager._repair_index("example-rag")
-        scripts = [Path(call[0][1]).name for call in self.runner.calls]
-        self.assertEqual(scripts, ["status.py", "status.py", "status.py"])
-        self.assertEqual(
-            sum("取り込みまたは修復処理が実行中" in value for value in self.output),
-            3,
-        )
-
     def test_force_rebuild_requires_selected_database_name(self) -> None:
         self.make_db()
         self.runner.respond(
@@ -759,19 +639,6 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("source-a", argv)
         self.assertIn("--retry-errors", argv)
 
-    def test_mutation_refuses_when_status_cannot_be_verified(self) -> None:
-        self.make_db()
-        manager = self.manager()
-        manager._build_or_resume("example-rag")
-        manager._add_or_update("example-rag")
-        manager._repair_index("example-rag")
-        scripts = [Path(call[0][1]).name for call in self.runner.calls]
-        self.assertEqual(scripts, ["status.py", "status.py", "status.py"])
-        self.assertEqual(
-            sum("状態を確認できない" in value for value in self.output),
-            3,
-        )
-
     def test_mutation_rejects_symlink_database_root(self) -> None:
         outside = self.base / "outside-rag"
         outside.mkdir()
@@ -792,48 +659,18 @@ class ManagerContractTests(unittest.TestCase):
     def test_delete_requires_exact_typed_name(self) -> None:
         root = self.make_db()
         manager = self.manager()
-        manager._import_daemon_control = lambda: FakeDaemonControl()
         with self.assertRaises(manage.ManagerError):
             manager._delete_database("example-rag", "wrong-rag")
         self.assertTrue(root.exists())
 
-    def test_interactive_delete_refuses_unverified_status(self) -> None:
-        root = self.make_db()
-        manager = self.manager()
-        self.assertFalse(
-            manager._delete_database_interactive("example-rag")
-        )
-        self.assertTrue(root.exists())
-        self.assertIn(
-            "状態を確認できない",
-            "\n".join(self.output),
-        )
-
-    def test_safe_delete_coordinates_daemon_and_removes_only_database(self) -> None:
+    def test_safe_delete_removes_only_selected_database(self) -> None:
         root = self.make_db()
         (root / "catalog.sqlite").write_bytes(b"synthetic")
         sibling = self.make_db("sibling-rag")
-        daemon = FakeDaemonControl("db_released")
         manager = self.manager()
-        manager._import_daemon_control = lambda: daemon
         manager._delete_database("example-rag", "example-rag")
         self.assertFalse(root.exists())
         self.assertTrue(sibling.exists())
-        self.assertEqual(daemon.release_calls, ["example-rag"])
-        self.assertEqual(daemon.resume_calls, ["example-rag"])
-
-    def test_delete_rejects_active_mutation(self) -> None:
-        root = self.make_db()
-        logs = root / "logs"
-        logs.mkdir()
-        (logs / "progress.json").write_text(
-            json.dumps({"status": "running"}), encoding="utf-8"
-        )
-        manager = self.manager()
-        manager._import_daemon_control = lambda: FakeDaemonControl()
-        with self.assertRaises(manage.ManagerError):
-            manager._delete_database("example-rag", "example-rag")
-        self.assertTrue(root.exists())
 
     def test_delete_rejects_symlink_database_root(self) -> None:
         if not hasattr(os, "symlink"):
@@ -864,18 +701,8 @@ class ManagerContractTests(unittest.TestCase):
         except OSError:
             self.skipTest("symlink creation is unavailable")
         manager = self.manager()
-        manager._import_daemon_control = lambda: FakeDaemonControl()
         manager._delete_database("example-rag", "example-rag")
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-
-    def test_delete_stops_when_daemon_release_fails(self) -> None:
-        root = self.make_db()
-        manager = self.manager()
-        manager._import_daemon_control = lambda: FakeDaemonControl("busy")
-        with self.assertRaises(manage.ManagerError):
-            manager._delete_database("example-rag", "example-rag")
-        self.assertTrue(root.exists())
-
 
 if __name__ == "__main__":
     unittest.main()

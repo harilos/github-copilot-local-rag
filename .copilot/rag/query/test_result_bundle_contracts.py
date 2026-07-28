@@ -138,10 +138,6 @@ class ResultBundleContractTests(unittest.TestCase):
                 "use_only_this_summary"
             ]
         )
-        self.assertLessEqual(
-            Path(pointer["summary_file"]).stat().st_size,
-            result_bundle.SUMMARY_HARD_BYTES,
-        )
 
     def test_trivial_renderer_reads_only_summary(self) -> None:
         pointer = self.publish()
@@ -190,27 +186,90 @@ class ResultBundleContractTests(unittest.TestCase):
         summary = self.read_summary(self.publish(payload))
         self.assertEqual([], summary["initial_response"]["key_points"])
 
-    def test_large_summary_is_fitted_below_the_hard_limit(self) -> None:
+    def test_large_summary_preserves_links_evidence_and_documents(
+        self,
+    ) -> None:
         payload = synthetic_payload()
+        payload["evidence"] = []
+        expected_evidence_links: list[tuple[str, str]] = []
+        for index in range(4):
+            evidence = json.loads(
+                json.dumps(synthetic_payload()["evidence"][0])
+            )
+            evidence["source"]["path"] = (
+                f"<root-name>/<relative-subdirectory>/evidence-{index}.txt"
+            )
+            evidence["source"]["title"] = f"evidence-{index}.txt"
+            evidence["text"] = (
+                f"Authoritative evidence statement {index} is retained."
+            )
+            evidence["matched_excerpt"] = evidence["text"]
+            source_url = (
+                f"https://example.invalid/current/{index}/" + "a" * 2_500
+            )
+            source_permalink = (
+                f"https://example.invalid/fixed/{index}/" + "b" * 2_500
+            )
+            evidence["source_url"] = source_url
+            evidence["source_permalink"] = source_permalink
+            payload["evidence"].append(evidence)
+            expected_evidence_links.append((source_url, source_permalink))
+
         payload["document_results"] = [
             {
                 "path": f"<root-name>/<relative-subdirectory>/file-{index}.txt",
                 "title": f"file-{index}.txt",
                 "section": "Section",
-                "preview": "x" * 2_000,
+                "preview": f"Useful document preview {index}.",
                 "support_level": "weak",
                 "authoritative": False,
-                "relationship": "y" * 1_000,
+                "relationship": "Related research material.",
+                "source_url": (
+                    f"https://example.invalid/document/{index}/"
+                    + "c" * 500
+                ),
+                "source_permalink": (
+                    f"https://example.invalid/permalink/{index}/"
+                    + "d" * 500
+                ),
             }
             for index in range(10)
         ]
+        expected_document_links: list[tuple[str, str]] = [
+            (
+                str(item["source_url"]),
+                str(item["source_permalink"]),
+            )
+            for item in payload["document_results"]
+        ]
         pointer = self.publish(payload)
         summary = self.read_summary(pointer)
-        self.assertLessEqual(
+        self.assertGreater(
             Path(pointer["summary_file"]).stat().st_size,
-            result_bundle.SUMMARY_HARD_BYTES,
+            16_384,
         )
-        self.assertGreaterEqual(len(summary["document_results"]), 8)
+        self.assertEqual(4, len(summary["evidence"]))
+        self.assertEqual(10, len(summary["document_results"]))
+        self.assertEqual(
+            expected_evidence_links,
+            [
+                (
+                    str(item["source_url"]),
+                    str(item["source_permalink"]),
+                )
+                for item in summary["evidence"]
+            ],
+        )
+        self.assertEqual(
+            expected_document_links,
+            [
+                (
+                    str(item["source_url"]),
+                    str(item["source_permalink"]),
+                )
+                for item in summary["document_results"]
+            ],
+        )
 
     def test_detail_bundle_preserves_structural_context(self) -> None:
         pointer = self.publish()
@@ -364,9 +423,8 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertNotIn("immutable result", rendered)
         self.assertNotIn("<document.pdf>", rendered)
 
-    def test_result_set_remains_inside_total_size_limit(self) -> None:
+    def test_large_expanded_packet_is_published_without_pruning(self) -> None:
         pointer = self.publish()
-        result_dir = Path(pointer["summary_file"]).parent
         packet, expires_at = result_bundle.load_expanded_result(
             pointer["result_set_id"],
             ["E1", "D2"],
@@ -375,19 +433,64 @@ class ResultBundleContractTests(unittest.TestCase):
             now=self.now + timedelta(minutes=1),
         )
         assert expires_at is not None
-        for _index in range(40):
-            result_bundle.publish_expanded_packet(
+        large_draft = "expanded result remains intact " * 100_000
+        packet["answer_draft_markdown"] = large_draft
+        packet["expanded_items"][0]["source_url"] = (
+            "https://example.invalid/current/" + "u" * 10_000
+        )
+        packet["expanded_items"][0]["source_permalink"] = (
+            "https://example.invalid/fixed/" + "p" * 10_000
+        )
+        detail_pointer = result_bundle.publish_expanded_packet(
+            packet,
+            result_set_id=pointer["result_set_id"],
+            expires_at=expires_at,
+            spool_root=self.spool,
+        )
+        response_file = Path(detail_pointer["detail_file"])
+        self.assertGreater(response_file.stat().st_size, 2 * 1024 * 1024)
+        stored = json.loads(response_file.read_text(encoding="utf-8"))
+        self.assertEqual(large_draft, stored["answer_draft_markdown"])
+        self.assertEqual(
+            packet["expanded_items"][0]["source_url"],
+            stored["expanded_items"][0]["source_url"],
+        )
+        self.assertEqual(
+            packet["expanded_items"][0]["source_permalink"],
+            stored["expanded_items"][0]["source_permalink"],
+        )
+
+    def test_expanded_response_history_is_storage_bounded(self) -> None:
+        pointer = self.publish()
+        packet, expires_at = result_bundle.load_expanded_result(
+            pointer["result_set_id"],
+            ["E1"],
+            detail_level="expanded",
+            spool_root=self.spool,
+            now=self.now + timedelta(minutes=1),
+        )
+        assert expires_at is not None
+        latest = None
+        for index in range(
+            result_bundle.MAX_EXPANDED_RESPONSES_PER_RESULT + 5
+        ):
+            packet["answer_draft_markdown"] = f"response {index}"
+            latest = result_bundle.publish_expanded_packet(
                 packet,
                 result_set_id=pointer["result_set_id"],
                 expires_at=expires_at,
                 spool_root=self.spool,
             )
-        total = sum(
-            path.stat().st_size
-            for path in result_dir.rglob("*")
-            if path.is_file()
+        response_dir = (
+            self.spool / pointer["result_set_id"] / "responses"
         )
-        self.assertLessEqual(total, result_bundle.MAX_RESULT_SET_BYTES)
+        files = list(response_dir.glob("*.json"))
+        self.assertEqual(
+            result_bundle.MAX_EXPANDED_RESPONSES_PER_RESULT,
+            len(files),
+        )
+        assert latest is not None
+        self.assertTrue(Path(latest["detail_file"]).is_file())
 
     def test_atomic_publish_uses_replace_and_leaves_no_tmp_file(self) -> None:
         with mock.patch.object(

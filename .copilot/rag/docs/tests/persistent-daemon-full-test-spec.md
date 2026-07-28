@@ -14,17 +14,12 @@ one clean, immutable commit for:
 - the manager process;
 - the worker process.
 
-The test does not rebuild a database or index. The DB release tests use
-recoverable temporary renames and must restore every path in a `finally`
-operation.
-
 The full Windows gate covers:
 
 - unit and import-isolation contracts;
 - manager and worker lifecycle;
 - 100 short-lived direct clients;
 - cold and warm concurrency 4;
-- DB release for every installed test DB;
 - client, worker, and manager crash recovery;
 - a 200-request concurrency-4 soak;
 - concurrency-8 overload behavior;
@@ -107,14 +102,14 @@ Rules:
   rfc-full-20k-rag
   ```
 
-- Enough free disk space to create logs and temporarily rename DB paths.
+- Enough free disk space to create logs.
 - Permission to query process information and terminate test-owned manager and
   worker processes.
 - No unrelated Local RAG client or administrative operation during the formal
   run.
 
 If fewer than three databases are installed, unit and lifecycle phases may
-run, but the mixed-DB, all-DB release, and release gate are `NOT_RUN`.
+run, but the mixed-DB gates are `NOT_RUN`.
 
 ### macOS
 
@@ -220,7 +215,6 @@ lifecycle-20
 clients-100
 cold-c4
 warm-c4
-db-release
 client-crash
 worker-crash
 manager-crash
@@ -242,7 +236,6 @@ mapping when invoking
 | `lifecycle-20` | `lifecycle-20` |
 | `clients-100` | `clients-100` |
 | `cold-c4` and `warm-c4` | `concurrency` |
-| `db-release` | `db-release` |
 | `client-crash`, `worker-crash`, and `manager-crash` | `crash` |
 | `soak-200-c4` | `soak-200-c4` |
 | `overload-c8` | `overload-c8` |
@@ -459,7 +452,6 @@ retrieval behavior mismatch          0
 original-question mutation           0
 semantic hypothesis used as Exact    0
 stdout JSON failure                  0
-compact JSON over 16,384 bytes       0
 ```
 
 ## 10. Phase B18: 18-case broad-search evaluation
@@ -572,13 +564,12 @@ Across all 18 cases:
 search completion                 18/18
 pure stdout JSON                  18/18
 timeout                           0
-compact JSON hard limit           <= 16,384 bytes each
 duplicate paths                   0
 false authoritative discovery     0
 ```
 
-The expected compact size of 12 KiB or less is reported as an optimization
-target. The hard gate is 16,384 bytes.
+Compact and file-delivered results retain their projected evidence, document
+cards, and resolved source links without a byte-size fitting gate.
 
 ### Support-level calibration
 
@@ -647,7 +638,6 @@ lossy alias Exact                  0
 neighbor Exact inheritance        0
 raw occurrence failures           0
 JSON purity failures              0
-compact JSON over 16,384 bytes     0
 ```
 
 ## 12. Phase SF: frozen Semantic accuracy
@@ -887,57 +877,6 @@ Baseline-relative reporting:
 - do not fail solely because queued end-to-end latency is approximately the
   sum of serialized worker times, provided all declared deadlines and support
   gates pass.
-
-## 18. Phase R: DB release and management coexistence
-
-```powershell
-& $Py "$Repo\.copilot\rag\docs\tests\run_persistent_daemon_windows.py" `
-  --phase db-release --installed-rag "$Rag" --output-dir "$Out" `
-  --run-id "$RunId" --db ac-rag --db incident-rag `
-  --db rfc-full-20k-rag
-```
-
-For every DB:
-
-1. search it so the worker opens its runtime;
-2. issue `release_db` and record the lease;
-3. wait for `db_released`;
-4. verify the old worker is fully reaped;
-5. temporarily rename `catalog.sqlite`;
-6. temporarily rename the Chroma directory;
-7. restore both paths in `finally`;
-8. resume the lease;
-9. confirm the retired manager exits on Windows;
-10. run one new search and verify the new snapshot and generation.
-
-The driver must refuse to rename:
-
-- a path outside the selected DB root;
-- a missing path;
-- a path already carrying the test suffix;
-- a path without a recorded restoration plan.
-
-Management coexistence:
-
-- queue requests for DB A and DB B;
-- release DB A;
-- DB A requests are cancelled or blocked with the documented release error;
-- DB B must never receive DB A data;
-- after resume, DB A reloads correctly.
-
-Absolute gate:
-
-```text
-PermissionError/sharing violation  0
-stale SQLite transaction           0
-stale Chroma handle                0
-wrong-DB response                  0
-restore failures                   0
-old worker alive after ACK         0
-next search success                1 per DB
-```
-
-A restore failure is an immediate safety stop.
 
 ## 19. Phase X: crash and termination recovery
 

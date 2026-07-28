@@ -392,10 +392,6 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_phase_gate_map_uses_canonical_gate_names(self) -> None:
-        self.assertEqual(
-            ("db_release_all",),
-            MODULE.PHASE_GATE_NAMES["db-release"],
-        )
         self.assertIn(
             "manager_job_recovery",
             MODULE.PHASE_GATE_NAMES["crash"],

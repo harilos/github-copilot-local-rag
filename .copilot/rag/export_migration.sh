@@ -229,7 +229,7 @@ if [ -d "$RAG_SOURCE/dbs" ]; then
   find "$RAG_SOURCE/dbs" -type f -path '*/logs/progress.json' 2>/dev/null |
   while IFS= read -r progress_file; do
     if grep -Eq '"status"[[:space:]]*:[[:space:]]*"running"' "$progress_file"; then
-      printf 'error: database maintenance is running: %s\n' \
+      printf 'error: database ingestion is running: %s\n' \
         "$progress_file" >&2
       exit 1
     fi
@@ -242,7 +242,7 @@ if [ -d "$RAG_SOURCE/dbs" ]; then
   )
 fi
 [ -z "$busy_sqlite" ] ||
-  fail "uncheckpointed SQLite state exists; stop maintenance and checkpoint: $busy_sqlite"
+  fail "uncheckpointed SQLite state exists; stop writes and checkpoint: $busy_sqlite"
 
 included_symlink=$(
   find "$RAG_SOURCE" \

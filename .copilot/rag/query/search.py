@@ -24,11 +24,6 @@ sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
-from software_rag_tool.db_maintenance import (
-    MaintenanceError,
-    database_search_guard,
-    maintenance_search_payload,
-)
 from software_rag_tool.dbs import resolve_db_name
 from software_rag_tool.search_request import (
     SearchRequestError,
@@ -190,15 +185,6 @@ def main() -> None:
             )
         )
         return
-
-    maintenance_payload = maintenance_search_payload(
-        resolution.db_name,
-        rag_root=RAG_ROOT,
-        dbs_root=DBS_ROOT,
-    )
-    if maintenance_payload:
-        _print_search_payload(maintenance_payload, args=args)
-        raise SystemExit(1)
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
@@ -465,37 +451,15 @@ def main() -> None:
             restart=None,
         )
         raise SystemExit(124)
-    try:
-        with database_search_guard(
-            resolution.db_name,
-            rag_root=RAG_ROOT,
-            dbs_root=DBS_ROOT,
-        ):
-            _run_sync_script(
-                python=python,
-                env=env,
-                args=args,
-                question=question,
-                db_name=resolution.db_name,
-                timeout_override=remaining_timeout,
-                request_started=request_started,
-            )
-    except MaintenanceError as exc:
-        payload = exc.search_payload or maintenance_search_payload(
-            resolution.db_name,
-            rag_root=RAG_ROOT,
-            dbs_root=DBS_ROOT,
-        )
-        if payload is None:
-            payload = {
-                "schema": "local-rag.search.v1",
-                "status": "busy",
-                "error": exc.error_kind,
-                "db": resolution.db_name,
-                "operation": exc.operation or "maintenance",
-            }
-        _print_search_payload(payload, args=args)
-        raise SystemExit(1)
+    _run_sync_script(
+        python=python,
+        env=env,
+        args=args,
+        question=question,
+        db_name=resolution.db_name,
+        timeout_override=remaining_timeout,
+        request_started=request_started,
+    )
 
 
 def _run_sync_script(

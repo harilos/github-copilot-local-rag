@@ -16,11 +16,6 @@ QUERY_ROOT = Path(__file__).resolve().parent
 RAG_ROOT = QUERY_ROOT.parent
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(QUERY_ROOT))
-sys.path.insert(0, str(TOOL_ROOT))
-
-from software_rag_tool.daemon_control import (  # noqa: E402
-    release_db_before_mutation,
-)
 from rag_worker import (  # noqa: E402
     _execute_search_payload,
     _final_dense_loaded,
@@ -114,15 +109,6 @@ for name in ('search', 'ragd'):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_absent_daemon_is_already_released(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result = release_db_before_mutation(
-                "ac-rag",
-                rag_root=root,
-            )
-        self.assertEqual("no_daemon", result["status"])
-
     def test_runtime_fingerprint_includes_manager_and_worker(self) -> None:
         search_source = (QUERY_ROOT / "search.py").read_text(
             encoding="utf-8"
@@ -145,15 +131,6 @@ for name in ('search', 'ragd'):
         self.assertIn("context.Pipe(duplex=False)", manager_source)
         self.assertIn('"op": "worker_status"', worker_source)
 
-    def test_admin_mutations_request_db_release(self) -> None:
-        for relative in (
-            "gen_db/add_data.py",
-            "gen_db/rebuild_component.py",
-            "gen_db/software_rag_tool/scripts/index_build.py",
-        ):
-            text = (RAG_ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("database_mutation_guard", text)
-
     def test_health_stays_responsive_while_worker_is_reaped(self) -> None:
         manager = object.__new__(PersistentWorkerManager)
         manager._worker_lifecycle_lock = threading.RLock()
@@ -168,7 +145,6 @@ for name in ('search', 'ragd'):
         manager._active = None
         manager._pending_total = 0
         manager._closed = False
-        manager._maintenance_restart_pending = False
         manager._handled_request_count = 0
         manager.manager_generation = "manager-generation"
         manager.started_monotonic = time.monotonic()
@@ -214,7 +190,6 @@ for name in ('search', 'ragd'):
         manager._active = None
         manager._pending_total = 0
         manager._closed = False
-        manager._maintenance_restart_pending = False
         manager._handled_request_count = 0
         manager.manager_generation = "manager-generation"
         manager.started_monotonic = time.monotonic()

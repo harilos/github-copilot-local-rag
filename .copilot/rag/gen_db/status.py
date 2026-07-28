@@ -19,11 +19,6 @@ from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
 from software_rag_tool.catalog import counts as catalog_counts
-from software_rag_tool.db_maintenance import (
-    MaintenanceError,
-    maintenance_status,
-    recover_maintenance_state,
-)
 
 
 def main() -> None:
@@ -36,14 +31,6 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Print machine-readable status")
     parser.add_argument("--stale-minutes", type=int, default=30)
     parser.add_argument("--tail-events", type=int, default=5)
-    parser.add_argument(
-        "--recover-maintenance",
-        action="store_true",
-        help=(
-            "Clear stale or failed maintenance state only after a read-only "
-            "database integrity check passes."
-        ),
-    )
     args = parser.parse_args()
 
     db_name = require_db_name(args.db)
@@ -52,29 +39,6 @@ def main() -> None:
     os.environ["RAG_DB_NAME"] = db_name
     os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
     logs_root = db_root / "logs"
-    recovery: dict[str, Any] | None = None
-    if args.recover_maintenance:
-        try:
-            recovery = recover_maintenance_state(
-                db_name,
-                rag_root=RAG_ROOT,
-                dbs_root=dbs_dir(),
-            )
-        except MaintenanceError as exc:
-            payload = exc.to_dict()
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-            else:
-                print(
-                    f"Maintenance recovery failed: {exc.error_kind}",
-                    file=sys.stderr,
-                )
-            raise SystemExit(1)
-    db_maintenance = maintenance_status(
-        db_name,
-        rag_root=RAG_ROOT,
-        dbs_root=dbs_dir(),
-    )
 
     progress = _load_json(logs_root / "progress.json")
     state = _load_json(logs_root / "index_state.json")
@@ -169,8 +133,6 @@ def main() -> None:
             source_id,
             scan_subdir,
         ),
-        "db_maintenance": db_maintenance,
-        "maintenance_recovery": recovery,
     }
 
     if args.json:
@@ -311,16 +273,6 @@ def _print_human(output: dict[str, Any]) -> None:
     if version:
         print(f"Version: created_at={version.get('created_at')} db_hash={version.get('db_hash')}")
     print(f"Status: {output['status']} phase={output['phase']} updated_at={output['updated_at']}")
-    maintenance = output.get("db_maintenance") or {}
-    print(
-        "DB maintenance:      "
-        f"{maintenance.get('status') or 'unknown'}"
-        + (
-            f" ({maintenance.get('operation')})"
-            if maintenance.get("operation")
-            else ""
-        )
-    )
     print(f"Root:                {output['root']}")
     print(f"Root display name:   {output['root_display_name']}")
     print(f"Scan subdirectory:   {output['scan_subdir']}")

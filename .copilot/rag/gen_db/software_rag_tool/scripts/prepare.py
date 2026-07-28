@@ -39,15 +39,25 @@ def main() -> None:
     db_root = ensure_db_layout(dbs_dir(), db_name)
     os.environ["RAG_DB_NAME"] = db_name
     os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
-    os.environ.setdefault("CHROMA_COLLECTION", collection_name_for_db(db_name))
+    os.environ.setdefault(
+        "CHROMA_COLLECTION",
+        collection_name_for_db(db_name),
+    )
 
-    records, errors = build_records(Path(args.root), source_id=args.source_id)
+    records, errors = build_records(
+        Path(args.root),
+        source_id=args.source_id,
+    )
     out_path = clean_dir() / args.out
     count = write_jsonl(out_path, records)
-    print(f"Wrote {count} records: {out_path}")
     if errors:
         error_path = clean_dir() / "prepare_errors.json"
-        error_path.write_text(json.dumps(errors, ensure_ascii=False, indent=2), encoding="utf-8")
+        error_path.write_text(
+            json.dumps(errors, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    print(f"Wrote {count} records: {out_path}")
+    if errors:
         print(f"Skipped {len(errors)} file(s): {error_path}")
 
 

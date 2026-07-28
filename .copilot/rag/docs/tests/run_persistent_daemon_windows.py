@@ -37,7 +37,6 @@ PHASE_GATE_NAMES = {
     "lifecycle-20": ("lifecycle_20",),
     "clients-100": ("clients_100",),
     "concurrency": ("cold_concurrency_4", "warm_concurrency_2_4"),
-    "db-release": ("db_release_all",),
     "crash": (
         "client_crash_recovery",
         "worker_exit_recovery",
@@ -1701,141 +1700,6 @@ class PersistentDaemonWindowsRunner:
             f"stable_identity={stable_identity(cold + all_rows)}",
         )
 
-    def phase_db_release(self) -> None:
-        failures: list[str] = []
-        for index, db_name in enumerate(self.databases):
-            self.shutdown_and_verify(f"db-release-{db_name}-pre")
-            warm = self.warm_generation(
-                f"db-release-{db_name}-warm",
-                db_name=db_name,
-            )
-            state = self.read_state()
-            health = self.health(state=state)
-            old_worker = int((health or {}).get("worker_pid") or 0)
-            lease_id = uuid.uuid4().hex
-            release = self.control(
-                "release-db",
-                {"db": db_name, "lease_id": lease_id},
-                timeout=25.0,
-                state=state,
-            )
-            worker_gone = wait_process_gone(old_worker, 5.0)
-            release_ready = bool(
-                warm["row"]["result"] == "PASS"
-                and release
-                and release.get("status") == "db_released"
-                and worker_gone
-            )
-            dbs_root = self.dbs_root.resolve(strict=True)
-            db_candidate = self.dbs_root / db_name
-            if Path(db_name).name != db_name or db_candidate.is_symlink():
-                failures.append(f"{db_name}:unsafe_db_name_or_symlink")
-                self.safety_stop = True
-                break
-            db_root = db_candidate.resolve(strict=True)
-            if db_root.parent != dbs_root or db_root.name != db_name:
-                failures.append(f"{db_name}:unsafe_db_root:{db_root}")
-                self.safety_stop = True
-                break
-            catalog = db_root / "catalog.sqlite"
-            index_dir = db_root / "index"
-            suffix = f".codex-fulltest-{uuid.uuid4().hex}-{index}"
-            moved: list[tuple[Path, Path]] = []
-            rename_ok = release_ready
-            try:
-                if not release_ready:
-                    raise RuntimeError(
-                        "release_db was not acknowledged or worker is alive"
-                    )
-                for original in (catalog, index_dir):
-                    if (
-                        db_root not in original.parents
-                        or not original.exists()
-                        or ".codex-fulltest-" in original.name
-                    ):
-                        raise RuntimeError(f"unsafe DB test path: {original}")
-                    temporary = original.with_name(original.name + suffix)
-                    if temporary.exists():
-                        raise RuntimeError(f"temporary path exists: {temporary}")
-                    original.replace(temporary)
-                    moved.append((original, temporary))
-            except Exception as exc:
-                rename_ok = False
-                failures.append(f"{db_name}:rename:{type(exc).__name__}:{exc}")
-            finally:
-                for original, temporary in reversed(moved):
-                    try:
-                        temporary.replace(original)
-                    except Exception as exc:
-                        failures.append(
-                            f"{db_name}:restore:{type(exc).__name__}:{exc}"
-                        )
-                        self.safety_stop = True
-            restored = catalog.exists() and index_dir.exists()
-            resume = (
-                self.control(
-                    "resume-db",
-                    {"db": db_name, "lease_id": lease_id},
-                    timeout=10.0,
-                    state=state,
-                )
-                if restored
-                else None
-            )
-            old_manager = int((health or {}).get("manager_pid") or 0)
-            manager_gone = (
-                wait_process_gone(old_manager, 12.0) if restored else False
-            )
-            next_row = (
-                self.run_client(
-                    make_case("db-release-next", db_name, "H", index),
-                    phase="db-release",
-                )
-                if restored
-                else {"result": "NOT_RUN"}
-            )
-            case_pass = bool(
-                warm["row"]["result"] == "PASS"
-                and release
-                and release.get("status") == "db_released"
-                and worker_gone
-                and rename_ok
-                and restored
-                and resume
-                and resume.get("status") == "db_resumed"
-                and manager_gone
-                and next_row["result"] == "PASS"
-            )
-            if not case_pass:
-                failures.append(
-                    f"{db_name}:release={release},worker_gone={worker_gone},"
-                    f"rename={rename_ok},restored={restored},resume={resume},"
-                    f"manager_gone={manager_gone},next={next_row['result']}"
-                )
-            self.artifacts.append(
-                "event",
-                {
-                    "phase": "db-release",
-                    "event": "release_rename_restore",
-                    "db": db_name,
-                    "release_status": (release or {}).get("status"),
-                    "worker_gone_after_ack": worker_gone,
-                    "rename_ok": rename_ok,
-                    "restored": restored,
-                    "resume_status": (resume or {}).get("status"),
-                    "manager_gone": manager_gone,
-                    "next_search": next_row["result"],
-                    "result": "PASS" if case_pass else "FAIL",
-                },
-            )
-            if self.safety_stop:
-                break
-        self.gate(
-            "db_release_all",
-            "PASS" if not failures and not self.safety_stop else "FAIL",
-            "; ".join(failures)[:2000],
-        )
-
     def phase_crash_recovery(self) -> None:
         failures: list[str] = []
         self.shutdown_and_verify("crash-pre")
@@ -3336,7 +3200,6 @@ def build_parser() -> argparse.ArgumentParser:
             "lifecycle-20",
             "clients-100",
             "concurrency",
-            "db-release",
             "crash",
             "soak-200-c4",
             "overload-c8",
@@ -3376,7 +3239,6 @@ def main() -> int:
             "lifecycle-20",
             "clients-100",
             "concurrency",
-            "db-release",
             "crash",
             "soak-200-c4",
             "overload-c8",
@@ -3411,8 +3273,6 @@ def main() -> int:
             runner.phase_clients(args.client_count)
         elif phase == "concurrency":
             runner.phase_concurrency(args.per_client)
-        elif phase == "db-release":
-            runner.phase_db_release()
         elif phase == "crash":
             runner.phase_crash_recovery()
         elif phase == "soak-200-c4":

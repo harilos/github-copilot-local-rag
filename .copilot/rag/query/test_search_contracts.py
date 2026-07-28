@@ -10,6 +10,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -30,7 +31,7 @@ QUERY_SCRIPT = importlib.util.module_from_spec(QUERY_SCRIPT_SPEC)
 QUERY_SCRIPT_SPEC.loader.exec_module(QUERY_SCRIPT)
 from software_rag_tool.search_api import (
     _add_identifier_diagnostics,
-    _conservative_token_count,
+    _finalize_search_payload,
     _raw_identifier_occurs,
     compact_search_contract,
     payload_to_prompt,
@@ -115,9 +116,8 @@ class ResultDeliveryContractTests(unittest.TestCase):
         payload = {
             "schema": "local-rag.search.v1",
             "status": "busy",
-            "error": "db_maintenance_in_progress",
+            "error": "daemon_overloaded",
             "db": "example-rag",
-            "operation": "add",
         }
         stream = io.StringIO()
         with mock.patch.object(
@@ -128,6 +128,43 @@ class ResultDeliveryContractTests(unittest.TestCase):
                 SEARCH._print_search_payload(payload, args=args)
         publish.assert_not_called()
         self.assertEqual(payload, json.loads(stream.getvalue()))
+
+
+class SourceLinkDiagnosticsContracts(unittest.TestCase):
+    def test_enrichment_failure_warns_without_failing_search(self) -> None:
+        payload = {
+            "schema": "local-rag.search.v1",
+            "status": "ok",
+            "answerability": "full",
+            "warnings": [],
+            "evidence": [],
+            "background_context": [],
+            "related_context": [],
+            "document_results": [],
+        }
+        store = SimpleNamespace(
+            context=SimpleNamespace(root=Path("/synthetic/db"))
+        )
+        with mock.patch(
+            "software_rag_tool.source_links.enrich_search_payload",
+            side_effect=RuntimeError("synthetic"),
+        ):
+            finalized = _finalize_search_payload(
+                payload,
+                store=store,
+                db_name="example-rag",
+                explain=True,
+            )
+        self.assertEqual("ok", finalized["status"])
+        self.assertIn(
+            "source_link_enrichment_failed",
+            finalized["warnings"],
+        )
+        self.assertEqual(
+            "resolution_failed",
+            finalized["source_link_status"],
+        )
+        self.assertEqual("RuntimeError", finalized["source_link_error"])
 
 
 class BrokenStore:
@@ -443,7 +480,9 @@ class NoHitContractTests(unittest.TestCase):
         self.assertNotIn("contexts", parsed)
         self.assertNotIn("results", parsed)
 
-    def test_compact_contract_has_absolute_utf8_cap_and_debug_is_opt_in(self) -> None:
+    def test_compact_contract_does_not_fit_projected_content_to_a_byte_cap(self) -> None:
+        source_url = "https://example.invalid/current/" + ("a" * 8_000)
+        source_permalink = "https://example.invalid/fixed/" + ("b" * 8_000)
         context = {
             "id": "R1",
             "source": {"path": "資料/" + "長" * 500, "title": "題" * 500},
@@ -451,6 +490,9 @@ class NoHitContractTests(unittest.TestCase):
             "text": "日本語の根拠" * 2_000,
             "signals": ["exact"],
             "debug": {"huge": "x" * 20_000},
+            "source_provider": "github",
+            "source_url": source_url,
+            "source_permalink": source_permalink,
         }
         payload = {
             "schema": "local-rag.search.v1",
@@ -465,15 +507,14 @@ class NoHitContractTests(unittest.TestCase):
         }
         compact = compact_search_contract(payload, explain=False)
         rendered = json.dumps(compact, ensure_ascii=False, indent=2).encode("utf-8")
-        self.assertLessEqual(len(rendered), 10_240)
+        self.assertGreater(len(rendered), 10_240)
         self.assertEqual("R1", compact["evidence"][0]["id"])
         self.assertIn("path", compact["evidence"][0]["source"])
         self.assertNotIn("debug", compact["evidence"][0])
-        self.assertLessEqual(
-            _conservative_token_count(
-                json.dumps(compact["evidence"], ensure_ascii=False, separators=(",", ":"))
-            ),
-            1_200,
+        self.assertEqual(source_url, compact["evidence"][0]["source_url"])
+        self.assertEqual(
+            source_permalink,
+            compact["evidence"][0]["source_permalink"],
         )
         self.assertIn("compact_output_truncated", compact["warnings"])
 

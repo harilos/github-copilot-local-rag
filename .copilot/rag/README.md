@@ -65,7 +65,7 @@ by default when present. Export fails without displaying the URL if that file
 contains a proxy username, password, token, secret, or other persisted
 credential. Use `--exclude-network-config` when the destination should receive
 new proxy/CA settings instead. The script refuses to export while the daemon
-or a DB maintenance operation is active, or while an uncheckpointed SQLite
+or an ingestion progress record is active, or while an uncheckpointed SQLite
 WAL or journal exists.
 
 Verify an archive after copying it:
@@ -269,7 +269,10 @@ under the operating system temporary directory. The pointer printed to stdout
 contains only a result-set UUID, the summary path, expiry, and byte count. The
 summary contains a deterministic extractive answer draft, concise evidence,
 limitations, broad document cards, and default follow-up item IDs. Initial
-answers read only this summary.
+answers read only this summary. `summary.json` and expanded packets are not
+trimmed to a byte cap: resolved source links and projected search content are
+preserved. Expiry, result-set count, response-history retention, and the
+overall spool budget control temporary storage growth instead.
 
 A follow-up that asks for more detail reads the same cached result without
 running retrieval again:
@@ -338,13 +341,12 @@ Each DB gets `VERSION.json` at creation time. It contains `created_at`, `db_hash
 
 `build_db.py` and `add_data.py` process files in small resumable batches. Use `status.py` before starting another long run. Use `build_db.py --force-rebuild` only when you intentionally want to discard prior clean records and recreate the Chroma collection.
 
-Build, add, resume, and index-repair operations place only their target
-database in maintenance. Searches for that database return immediately with
-`status: "busy"` and `error: "db_maintenance_in_progress"`; they are not
-queued, retried, or routed through no-daemon fallback. Other databases remain
-searchable after the short worker-handle release/restart interval. The
-maintenance lease is persisted per database, prevents a second writer, and is
-not an immutable-generation or blue-green database mechanism.
+Local RAG does not persist a custom database maintenance state or block later
+search, build, add, or repair commands based on a previous run. A failed
+command reports the error for that invocation; fix the cause and run the
+command again directly. Move or delete a database as one directory below
+`rag/dbs/`. SQLite, Chroma, and operating-system file operations may still
+report their own normal concurrency errors.
 
 Evaluation-only chunk variants can be built without changing defaults:
 

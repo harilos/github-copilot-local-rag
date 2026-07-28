@@ -23,9 +23,6 @@ RETRIEVAL_MODES = {"hybrid", "lexical", "dense"}
 COMPACT_BACKGROUND_LIMIT = 2
 COMPACT_RELATED_LIMIT = 2
 COMPACT_DOCUMENT_RESULT_LIMIT = 10
-# Keep the established 10 KiB envelope. It is stricter than the 16 KiB hard
-# product contract and leaves room for command-provider framing.
-COMPACT_MAX_UTF8_BYTES = 10_240
 COMPACT_EVIDENCE_TOKEN_LIMIT = 1_200
 COMPACT_AUXILIARY_TOKEN_LIMIT = 160
 COMPACT_TRUNCATION_WARNING = "compact_output_truncated"
@@ -337,11 +334,18 @@ def _finalize_search_payload(
         )
         payload.clear()
         payload.update(enriched)
-    except Exception:
+    except Exception as exc:
         # Source links are optional presentation metadata. A missing, stale,
         # or malformed sidecar must never turn a successful local lookup into
-        # an error or alter its status/warnings.
-        pass
+        # an error. Keep the lookup usable while making enrichment failures
+        # diagnosable without exposing configuration values or a traceback.
+        warnings = list(payload.get("warnings") or [])
+        if "source_link_enrichment_failed" not in warnings:
+            warnings.append("source_link_enrichment_failed")
+        payload["warnings"] = warnings
+        if explain:
+            payload["source_link_status"] = "resolution_failed"
+            payload["source_link_error"] = type(exc).__name__
     finally:
         _strip_private_source_ids(payload)
     return normalize_search_contract(payload)
@@ -1824,7 +1828,7 @@ def compact_search_contract(
     if len(str(compact.get("query") or "")) > 2_000:
         compact["query"] = str(compact["query"])[:1_980] + "...[truncated]"
         projection_truncated = True
-    fitted = _fit_compact_utf8_limit(
+    fitted = _finalize_compact_projection(
         compact,
         projection_truncated=projection_truncated,
     )
@@ -1921,6 +1925,10 @@ def _project_contexts(
             "matched_excerpt",
             "context_before",
             "context_after",
+            "source_provider",
+            "source_url",
+            "source_permalink",
+            "source_link_status",
         ):
             overhead[key] = ""
         overhead_tokens = _conservative_token_count(
@@ -1959,8 +1967,20 @@ def _project_contexts(
                 item["matched_excerpt"] = text
             item["truncated"] = True
             truncated = True
+        budgeted_item = dict(item)
+        for key in (
+            "source_provider",
+            "source_url",
+            "source_permalink",
+            "source_link_status",
+        ):
+            budgeted_item.pop(key, None)
         used = _conservative_token_count(
-            json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            json.dumps(
+                budgeted_item,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
         if used > remaining:
             truncated = True
@@ -2051,14 +2071,13 @@ def _copy_projected_source_links(
     *,
     explain: bool,
 ) -> None:
-    limits = {
-        "source_provider": 64,
-        "source_url": 4_096,
-        "source_permalink": 4_096,
-    }
-    for key, limit in limits.items():
+    for key in (
+        "source_provider",
+        "source_url",
+        "source_permalink",
+    ):
         value = str(source.get(key) or "")
-        if value and len(value) <= limit:
+        if value:
             target[key] = value
     if explain and source.get("source_link_status"):
         target["source_link_status"] = str(
@@ -2074,160 +2093,21 @@ def _truncate_to_token_limit(text: str, limit: int) -> str:
     return truncate_to_token_limit(text, limit)
 
 
-def _compact_utf8_size(payload: dict[str, Any]) -> int:
-    # CLI print() appends one newline; include it in the stdout purity cap.
-    return len(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")) + 1
-
-
-def _fit_compact_utf8_limit(
+def _finalize_compact_projection(
     compact: dict[str, Any],
     *,
     projection_truncated: bool,
 ) -> dict[str, Any]:
+    """Return the complete compact projection without content fitting.
+
+    Compact output remains structurally concise, but byte size must not cause
+    evidence, discovery cards, or resolved source links to disappear.
+    """
     if projection_truncated:
         compact["warnings"] = sorted(
             set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
         )
-    if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-        return compact
-
-    compact["warnings"] = sorted(
-        set([*compact.get("warnings", []), COMPACT_TRUNCATION_WARNING])
-    )
-    # Source links are optional navigation metadata. Preserve the retrieved
-    # evidence and document breadth before retaining links when the compact
-    # stdout envelope is under pressure.
-    _drop_optional_source_link_fields(compact)
-    if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-        return compact
-    # Optional surrounding context is reduced before primary excerpts or
-    # distinct discovery documents.
-    for context_limit in (200, 120, 0):
-        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-            return compact
-        for item in compact.get("evidence") or []:
-            for key in ("context_before", "context_after"):
-                value = str(item.get(key) or "")
-                if context_limit <= 0:
-                    item.pop(key, None)
-                elif len(value) > context_limit:
-                    item[key] = (
-                        value[: context_limit - 1].rstrip() + "…"
-                    )
-            if context_limit <= 0:
-                item.pop("context_reason", None)
-                item["source_ranges"] = [
-                    value
-                    for value in item.get("source_ranges") or []
-                    if value.get("kind") == "matched"
-                ]
-    # Preserve document breadth first. Shorten cards before removing a
-    # distinct document from the discovery lane.
-    for preview_limit in (160, 120, 80):
-        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-            return compact
-        for item in compact.get("document_results") or []:
-            preview = str(item.get("preview") or "")
-            if len(preview) > preview_limit:
-                item["preview"] = preview[: preview_limit - 1].rstrip() + "…"
-            relationship = str(item.get("relationship") or "")
-            if len(relationship) > 120:
-                item["relationship"] = relationship[:119].rstrip() + "…"
-    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        for item in compact.get("document_results") or []:
-            item.pop("section", None)
-            item["matched_facets"] = list(
-                item.get("matched_facets") or []
-            )[:2]
-    for key in ("related_context", "background_context"):
-        while compact.get(key) and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-            compact[key].pop()
-    for key in ("query", "error", "message"):
-        if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-            return compact
-        if key in compact:
-            compact[key] = str(compact[key])[:500] + "...[truncated]"
-    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        compact["warnings"] = [
-            COMPACT_TRUNCATION_WARNING,
-            *[
-                str(value)[:120]
-                for value in compact.get("warnings", [])
-                if value != COMPACT_TRUNCATION_WARNING
-            ][:3],
-        ]
-    while len(compact.get("evidence") or []) > 1 and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        compact["evidence"].pop()
-    for contexts_key in ("evidence", "background_context", "related_context"):
-        for item in compact.get(contexts_key) or []:
-            if _compact_utf8_size(compact) <= COMPACT_MAX_UTF8_BYTES:
-                return compact
-            item.pop("debug", None)
-            item.pop("signals", None)
-            item.pop("location", None)
-            text = str(item.get("text") or "")
-            item["text"] = _truncate_to_token_limit(
-                text,
-                max(32, _conservative_token_count(text) // 2),
-            )
-    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        compact["warnings"] = [COMPACT_TRUNCATION_WARNING]
-        compact.pop("execution_metadata", None)
-        compact["background_context"] = []
-        compact["related_context"] = []
-    while compact.get("evidence") and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        item = compact["evidence"][-1]
-        text = str(item.get("text") or "")
-        if len(text) <= 64:
-            compact["evidence"].pop()
-        else:
-            item["text"] = text[: max(32, len(text) // 2)] + "...[truncated]"
-    while (
-        len(compact.get("document_results") or []) > 1
-        and _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES
-    ):
-        compact["document_results"].pop()
-    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        compact = {
-            "schema": str(compact.get("schema") or "local-rag.search.v1"),
-            "selected_db": str(compact.get("selected_db") or compact.get("db") or ""),
-            "status": str(compact.get("status") or "error"),
-            "answerability": str(compact.get("answerability") or "none"),
-            "evidence": [],
-            "background_context": [],
-            "related_context": [],
-            "document_results": list(
-                compact.get("document_results") or []
-            )[:1],
-            "coverage": dict(compact.get("coverage") or {}),
-            "warnings": [COMPACT_TRUNCATION_WARNING],
-        }
-    if _compact_utf8_size(compact) > COMPACT_MAX_UTF8_BYTES:
-        for item in compact.get("document_results") or []:
-            item["preview"] = str(item.get("preview") or "")[:80]
-            item.pop("matched_facets", None)
-            item.pop("retrieval_signals", None)
-            item.pop("relationship", None)
     return compact
-
-
-def _drop_optional_source_link_fields(payload: dict[str, Any]) -> None:
-    for key in (
-        "evidence",
-        "background_context",
-        "related_context",
-        "document_results",
-    ):
-        for item in payload.get(key) or []:
-            if not isinstance(item, dict):
-                continue
-            for field in (
-                "source_link_status",
-                "source_provider",
-                "source_url",
-                "source_permalink",
-            ):
-                item.pop(field, None)
 
 
 def _dedupe_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -74,8 +74,8 @@
 | retriever単体障害 | 縮退を許す場合は `degraded` とcomponentを機械可読で返す。silent fallbackは禁止 |
 | query上限 | 最大文字数/token数、拒否または切捨て規則を固定。切捨てはexplainに記録 |
 | stdout/stderr | stdoutはpromptまたは単一JSONだけ。log、model load、warningはstderr |
-| build中検索 | 初回build中はBUSY。旧世代がある更新中は旧世代を読むかBUSY |
-| writer競合 | 1 DBにつきwriterは1つ |
+| build中検索 | Local RAG独自のBUSY判定は行わない。読込み競合はSQLite、Chroma、OSの通常エラーとして扱う |
+| writer競合 | Local RAG独自のwriter leaseは設けず、各保存先の原子的書込みとnative lockへ委ねる |
 | `add_data` identity | `(source_id, 正規化相対path)` |
 | 同一文書の再追加 | no-op |
 | 同一pathの内容更新 | 旧chunk/vector/FTS/postingを全削除し、新世代へ原子的に置換 |
@@ -519,7 +519,7 @@ building
 
 ready
   -> adding/rebuilding
-  -> 旧readyを維持 または BUSY
+  -> Local RAG独自の検索blockなし
   -> 新readyをatomic publish
 ```
 
@@ -553,7 +553,8 @@ create/build/resume:
 - RES-002: FI-01..10でhard killし、1回のresumeでINV回復。
 - RES-005: SQLite先行/Chroma先行をidempotentに補正。
 - RES-007: 中断中に入力内容変更で `INPUT_CHANGED`、旧新混在なし。
-- RES-012: resume二重起動でもwriterは1つ。
+- RES-012: resume二重起動を独自writer leaseで拒否せず、競合時は
+  SQLite、Chroma、OSの通常エラーを返す。
 
 add/update:
 
@@ -1299,7 +1300,7 @@ generated_aliases: false
 | ID | 試験 | 合格条件 |
 |---|---|---|
 | `XID-MIG-001` | 旧DB + 新runtime | lossy aliasをlookupしない、またはraw verifyでdrop |
-| `XID-MIG-002` | exact component side-by-side rebuild | query中は旧完全世代かBUSY |
+| `XID-MIG-002` | exact component side-by-side rebuild | 独自BUSY判定なし。完了後のExact契約が一致 |
 | `XID-MIG-003` | alias dictionary/posting/index削除 | Exact positiveを維持、negative FPR 0 |
 | `XID-MIG-004` | rebuild中kill | 旧/新の完全世代。混在なし |
 | `XID-MIG-005` | publish直前/直後kill | resume後policy/generation一致 |
@@ -1574,8 +1575,8 @@ EXK-12 success event直前
 | `XID-EXR-004` | EXK-11-12でkill | postingを再生成せずfinalize、重複なし |
 | `XID-EXR-005` | 5回連続kill/resume | temp/旧generationが増殖しない |
 | `XID-EXR-006` | disk full | 旧generationを維持 |
-| `XID-EXR-007` | Windowsでdaemon open中 | BUSYまたは協調close/reopen |
-| `XID-EXR-008` | rebuild二重起動 | writer 1つ |
+| `XID-EXR-007` | Windowsでdaemon open中 | 独自BUSY判定なし。native競合は明示エラー |
+| `XID-EXR-008` | rebuild二重起動 | 独自writer leaseなし。native競合を隠さない |
 
 daemon cache keyは、少なくとも次を含む。
 

@@ -27,12 +27,8 @@ STALE_TMP_SECONDS = 2 * 60
 ORPHAN_GRACE_SECONDS = 2 * 60
 MAX_RESULT_SETS = 100
 MAX_SPOOL_BYTES = 128 * 1024 * 1024
-MAX_RESULT_SET_BYTES = 2 * 1024 * 1024
 MAX_ITEMS_PER_RESULT = 20
-MAX_DETAIL_ITEM_BYTES = 32 * 1024
-SUMMARY_TARGET_BYTES = 12 * 1024
-SUMMARY_HARD_BYTES = 16_384
-DETAIL_RESPONSE_HARD_BYTES = 128 * 1024
+MAX_EXPANDED_RESPONSES_PER_RESULT = 20
 LOCK_STALE_SECONDS = 10
 LOCK_WAIT_SECONDS = 0.1
 _ITEM_ID_RE = re.compile(r"^[ED]\d{1,2}$")
@@ -76,8 +72,7 @@ def publish_result_bundle(
             storage_id = str(uuid.uuid4())
             relative_file = f"items/{storage_id}.json"
             detail_path = result_dir / relative_file
-            fitted = _fit_detail_item(detail)
-            _atomic_write_json(detail_path, fitted)
+            _atomic_write_json(detail_path, detail)
             entries[logical_id] = {
                 "kind": kind,
                 "storage_id": storage_id,
@@ -97,7 +92,6 @@ def publish_result_bundle(
         summary["follow_up"]["available_item_ids"] = available
         summary["follow_up"]["default_item_ids"] = defaults
         summary["follow_up"]["detail_available"] = bool(available)
-        summary = _fit_initial_summary(summary)
 
         manifest = {
             "schema_version": MANIFEST_SCHEMA,
@@ -123,8 +117,6 @@ def publish_result_bundle(
         }
         _atomic_write_json(result_dir / "meta.json", meta)
         bundle_bytes = _tree_size(result_dir)
-        if bundle_bytes > MAX_RESULT_SET_BYTES:
-            raise ValueError("result bundle exceeds the hard size limit")
         meta["bundle_bytes"] = bundle_bytes
         _atomic_write_json(result_dir / "meta.json", meta)
         summary_path = result_dir / "summary.json"
@@ -139,7 +131,6 @@ def publish_result_bundle(
     except Exception:
         _remove_result_dir(result_dir, root)
         raise
-    cleanup_result_spool(spool_root=root, now=now)
     return pointer
 
 
@@ -220,7 +211,6 @@ def build_initial_summary(
         },
         "coverage": dict(payload.get("coverage") or {}),
     }
-    summary = _fit_initial_summary(summary)
     details = [*evidence_details, *document_details]
     return summary, details[:MAX_ITEMS_PER_RESULT]
 
@@ -305,7 +295,6 @@ def load_expanded_result(
         "answer_draft_markdown": _expanded_answer_draft(expanded),
         "warnings": warnings,
     }
-    packet = _fit_expanded_packet(packet)
     return packet, new_expires
 
 
@@ -325,10 +314,7 @@ def publish_expanded_packet(
     storage_id = str(uuid.uuid4())
     output_path = responses / f"{storage_id}.json"
     _atomic_write_json(output_path, packet)
-    _prune_response_files(result_dir, keep=output_path)
-    if _tree_size(result_dir) > MAX_RESULT_SET_BYTES:
-        output_path.unlink(missing_ok=True)
-        raise ValueError("result set exceeds the hard size limit")
+    _prune_expanded_responses(responses, keep=output_path)
     return {
         "status": "written",
         "schema_version": DETAIL_POINTER_SCHEMA,
@@ -339,18 +325,35 @@ def publish_expanded_packet(
     }
 
 
-def _prune_response_files(result_dir: Path, *, keep: Path) -> None:
-    responses = result_dir / "responses"
-    candidates = sorted(
-        (
-            path
-            for path in responses.glob("*.json")
-            if path != keep and path.is_file()
-        ),
-        key=lambda path: path.stat().st_mtime,
-    )
-    while candidates and _tree_size(result_dir) > MAX_RESULT_SET_BYTES:
-        candidates.pop(0).unlink(missing_ok=True)
+def _prune_expanded_responses(
+    responses: Path,
+    *,
+    keep: Path,
+) -> None:
+    """Bound cached response packets without modifying packet contents."""
+    try:
+        candidates = sorted(
+            (
+                path
+                for path in responses.glob("*.json")
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+    except OSError:
+        return
+    retained_other = 0
+    for path in candidates:
+        if path == keep:
+            continue
+        if retained_other < MAX_EXPANDED_RESPONSES_PER_RESULT - 1:
+            retained_other += 1
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
 
 
 def cleanup_result_spool(
@@ -474,7 +477,10 @@ def _cleanup_locked(root: Path, current: datetime) -> None:
     ready_sets.sort(key=lambda item: item[0])
     while (
         len(ready_sets) > MAX_RESULT_SETS
-        or total > MAX_SPOOL_BYTES
+        or (
+            total > MAX_SPOOL_BYTES
+            and len(ready_sets) > 1
+        )
     ):
         _last_access, candidate, size = ready_sets.pop(0)
         _remove_result_dir(candidate, root)
@@ -730,32 +736,15 @@ def _copy_source_link_fields(
     source: dict[str, Any],
     target: dict[str, Any],
 ) -> None:
-    limits = {
-        "source_provider": 64,
-        "source_url": 4_096,
-        "source_permalink": 4_096,
-        "source_link_status": 120,
-    }
-    for key, limit in limits.items():
+    for key in (
+        "source_provider",
+        "source_url",
+        "source_permalink",
+        "source_link_status",
+    ):
         value = str(source.get(key) or "")
-        if value and len(value) <= limit:
+        if value:
             target[key] = value
-
-
-def _strip_source_link_fields(value: Any) -> None:
-    if isinstance(value, dict):
-        for key in (
-            "source_link_status",
-            "source_provider",
-            "source_url",
-            "source_permalink",
-        ):
-            value.pop(key, None)
-        for nested in value.values():
-            _strip_source_link_fields(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            _strip_source_link_fields(nested)
 
 
 def _extractive_answer_units(
@@ -911,172 +900,6 @@ def _default_detail_ids(
     return defaults[:3]
 
 
-def _fit_initial_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    fitted = json.loads(json.dumps(summary, ensure_ascii=False))
-    query_language_is_japanese = any(
-        _contains_japanese(str(value))
-        for value in (
-            fitted.get("initial_response", {}).get(
-                "answer_draft_markdown",
-                "",
-            ),
-            *[
-                point.get("text", "")
-                for point in fitted.get("initial_response", {}).get(
-                    "key_points",
-                    [],
-                )
-            ],
-        )
-    )
-
-    def rebuild() -> None:
-        fitted["initial_response"]["answer_draft_markdown"] = (
-            _initial_answer_draft(
-                status=str(fitted.get("status") or "error"),
-                key_points=fitted["initial_response"]["key_points"],
-                limitations=fitted["initial_response"]["limitations"],
-                documents=fitted["document_results"],
-                japanese=query_language_is_japanese,
-            )
-        )
-
-    if _json_size(fitted) <= SUMMARY_TARGET_BYTES:
-        return fitted
-    # Navigation links are optional. Drop them before reducing any evidence,
-    # background item, or distinct discovery document.
-    _strip_source_link_fields(fitted)
-    if _json_size(fitted) <= SUMMARY_TARGET_BYTES:
-        return fitted
-    for preview_limit, relationship_limit in (
-        (160, 160),
-        (120, 120),
-        (80, 80),
-    ):
-        for item in fitted["document_results"]:
-            item["preview"] = _shorten(
-                str(item.get("preview") or ""),
-                preview_limit,
-            )
-            item["relationship"] = _shorten(
-                str(item.get("relationship") or ""),
-                relationship_limit,
-            )
-        rebuild()
-        if _json_size(fitted) <= SUMMARY_TARGET_BYTES:
-            return fitted
-    for point_limit in (180, 140, 120):
-        for item in fitted["initial_response"]["key_points"]:
-            item["text"] = _shorten(
-                str(item.get("text") or ""),
-                point_limit,
-            )
-        rebuild()
-        if _json_size(fitted) <= SUMMARY_TARGET_BYTES:
-            return fitted
-    while (
-        fitted["background_context"]
-        and _json_size(fitted) > SUMMARY_TARGET_BYTES
-    ):
-        fitted["background_context"].pop()
-    for excerpt_limit in (350, 250):
-        for item in fitted["evidence"]:
-            item["excerpt"] = _shorten(
-                str(item.get("excerpt") or ""),
-                excerpt_limit,
-            )
-        if _json_size(fitted) <= SUMMARY_HARD_BYTES:
-            return fitted
-    for item in [
-        *fitted["evidence"],
-        *fitted["document_results"],
-        *fitted["background_context"],
-    ]:
-        if "path" in item:
-            item["path"] = _shorten(str(item["path"]), 240)
-        if "title" in item:
-            item["title"] = _shorten(str(item["title"]), 100)
-        if "section" in item:
-            item["section"] = _shorten(str(item["section"]), 100)
-    rebuild()
-    while (
-        len(fitted["document_results"]) > 6
-        and _json_size(fitted) > SUMMARY_HARD_BYTES
-    ):
-        removed = fitted["document_results"].pop()
-        removed_id = removed.get("id")
-        follow_up = fitted["follow_up"]
-        follow_up["available_item_ids"] = [
-            value
-            for value in follow_up["available_item_ids"]
-            if value != removed_id
-        ]
-        follow_up["default_item_ids"] = [
-            value
-            for value in follow_up["default_item_ids"]
-            if value != removed_id
-        ]
-        rebuild()
-    if _json_size(fitted) > SUMMARY_HARD_BYTES:
-        fitted["background_context"] = []
-        fitted["warnings"] = [
-            _shorten(str(value), 120)
-            for value in fitted["warnings"][:8]
-        ]
-        fitted["initial_response"]["limitations"] = list(
-            fitted["warnings"]
-        )
-        rebuild()
-    if _json_size(fitted) > SUMMARY_HARD_BYTES:
-        raise ValueError("initial summary exceeds the hard size limit")
-    return fitted
-
-
-def _fit_detail_item(item: dict[str, Any]) -> dict[str, Any]:
-    fitted = json.loads(json.dumps(item, ensure_ascii=False))
-    fitted["matched_excerpt"] = _shorten(
-        str(fitted.get("matched_excerpt") or ""),
-        8_000,
-    )
-    fitted["context_before"] = _shorten(
-        str(fitted.get("context_before") or ""),
-        4_000,
-    )
-    fitted["context_after"] = _shorten(
-        str(fitted.get("context_after") or ""),
-        4_000,
-    )
-    for section in fitted.get("additional_sections") or []:
-        if isinstance(section, dict):
-            section["text"] = _shorten(
-                str(section.get("text") or ""),
-                4_000,
-            )
-    if _json_size(fitted) <= MAX_DETAIL_ITEM_BYTES:
-        return fitted
-    _strip_source_link_fields(fitted)
-    if _json_size(fitted) <= MAX_DETAIL_ITEM_BYTES:
-        return fitted
-    fitted["additional_sections"] = []
-    fitted["context_before"] = _shorten(fitted["context_before"], 2_000)
-    fitted["context_after"] = _shorten(fitted["context_after"], 2_000)
-    fitted["matched_excerpt"] = _shorten(
-        fitted["matched_excerpt"],
-        5_000,
-    )
-    if _json_size(fitted) > MAX_DETAIL_ITEM_BYTES:
-        fitted["source_ranges"] = list(
-            fitted.get("source_ranges") or []
-        )[:4]
-        fitted["matched_excerpt"] = _shorten(
-            fitted["matched_excerpt"],
-            2_000,
-        )
-    if _json_size(fitted) > MAX_DETAIL_ITEM_BYTES:
-        raise ValueError("detail item exceeds the hard size limit")
-    return fitted
-
-
 def _expanded_item(
     detail: dict[str, Any],
     *,
@@ -1174,35 +997,6 @@ def _expanded_answer_draft(
             )
         lines.append("")
     return "\n".join(lines).strip()
-
-
-def _fit_expanded_packet(packet: dict[str, Any]) -> dict[str, Any]:
-    fitted = json.loads(json.dumps(packet, ensure_ascii=False))
-    if _json_size(fitted) <= DETAIL_RESPONSE_HARD_BYTES:
-        return fitted
-    _strip_source_link_fields(fitted)
-    if _json_size(fitted) <= DETAIL_RESPONSE_HARD_BYTES:
-        return fitted
-    for item in fitted.get("expanded_items") or []:
-        item["additional_sections"] = []
-        item["context_before"] = _shorten(
-            str(item.get("context_before") or ""),
-            800,
-        )
-        item["context_after"] = _shorten(
-            str(item.get("context_after") or ""),
-            800,
-        )
-        item["matched_excerpt"] = _shorten(
-            str(item.get("matched_excerpt") or ""),
-            2_000,
-        )
-    fitted["answer_draft_markdown"] = _expanded_answer_draft(
-        fitted.get("expanded_items") or []
-    )
-    if _json_size(fitted) > DETAIL_RESPONSE_HARD_BYTES:
-        raise ValueError("expanded result exceeds the hard size limit")
-    return fitted
 
 
 def _complete_extract(text: str, *, heading: str) -> str:
@@ -1389,16 +1183,6 @@ def _tree_size(path: Path) -> int:
 
 def _stable_document_id(path: str) -> str:
     return hashlib.sha256(path.encode("utf-8")).hexdigest()
-
-
-def _json_size(payload: dict[str, Any]) -> int:
-    return len(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    )
 
 
 def _shorten(value: str, limit: int) -> str:

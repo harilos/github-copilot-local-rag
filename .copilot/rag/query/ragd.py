@@ -157,58 +157,6 @@ class RagDaemonHandler(BaseHTTPRequestHandler):
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
             _request_graceful_shutdown(self.server)
             return
-        if self.path == "/release-db":
-            if not self._authorized():
-                self._send_json({"status": "forbidden"}, status=403)
-                return
-            try:
-                length = int(self.headers.get("Content-Length") or "0")
-                body = json.loads(
-                    self.rfile.read(length).decode("utf-8")
-                )
-                db_name = str(body["db"])
-                lease_id = str(body.get("lease_id") or "")
-                operation = str(body.get("operation") or "maintenance")
-            except Exception as exc:
-                self._send_json(
-                    {
-                        "status": "error",
-                        "error": f"invalid release request: {exc}",
-                    },
-                    status=400,
-                )
-                return
-            self._send_json(
-                self.server.worker_manager.release_db(
-                    db_name,
-                    lease_id=lease_id or None,
-                    operation=operation,
-                )
-            )
-            return
-        if self.path == "/resume-db":
-            if not self._authorized():
-                self._send_json({"status": "forbidden"}, status=403)
-                return
-            try:
-                length = int(self.headers.get("Content-Length") or "0")
-                body = json.loads(self.rfile.read(length).decode("utf-8"))
-                db_name = str(body["db"])
-                lease_id = str(body["lease_id"])
-            except Exception as exc:
-                self._send_json(
-                    {"status": "error", "error": f"invalid resume request: {exc}"},
-                    status=400,
-                )
-                return
-            result = self.server.worker_manager.resume_db(
-                db_name,
-                lease_id=lease_id,
-            )
-            self._send_json(result)
-            if result.get("manager_restart_required"):
-                _request_graceful_shutdown(self.server)
-            return
         if self.path == "/cancel":
             if not self._authorized():
                 self._send_json({"status": "forbidden"}, status=403)
@@ -284,23 +232,6 @@ class RagUnixDaemonHandler(socketserver.StreamRequestHandler):
         if op == "shutdown":
             self._send_json({"schema": "local-rag.ragd.shutdown.v1", "status": "ok"})
             _request_graceful_shutdown(self.server)
-            return
-        if op == "release_db":
-            result = self.server.worker_manager.release_db(
-                str(request.get("db") or ""),
-                lease_id=str(request.get("lease_id") or "") or None,
-                operation=str(request.get("operation") or "maintenance"),
-            )
-            self._send_json(result)
-            return
-        if op == "resume_db":
-            result = self.server.worker_manager.resume_db(
-                str(request.get("db") or ""),
-                lease_id=str(request.get("lease_id") or ""),
-            )
-            self._send_json(result)
-            if result.get("manager_restart_required"):
-                _request_graceful_shutdown(self.server)
             return
         if op == "cancel":
             result = self.server.worker_manager.cancel_request(
@@ -488,21 +419,6 @@ def _run_file_daemon(*, file_dir: Path, token: str, generation: str, idle_timeou
                     runtime_ready = result.get("status") != "error"
                     dense_ready = (
                         worker_manager.health()["model_load_count"] > 0
-                    )
-                elif request.get("op") == "release_db":
-                    result = worker_manager.release_db(
-                        str(request.get("db") or ""),
-                        lease_id=(
-                            str(request.get("lease_id") or "") or None
-                        ),
-                        operation=str(
-                            request.get("operation") or "maintenance"
-                        ),
-                    )
-                elif request.get("op") == "resume_db":
-                    result = worker_manager.resume_db(
-                        str(request.get("db") or ""),
-                        lease_id=str(request.get("lease_id") or ""),
                     )
                 elif request.get("op") == "cancel":
                     result = worker_manager.cancel_request(
