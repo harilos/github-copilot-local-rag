@@ -47,7 +47,36 @@ class AddProgressRenderingTests(unittest.TestCase):
         self.assertIn("残り約2分", rendered)
         self.assertIn("経過30秒", rendered)
 
-    def test_before_first_file_eta_is_a_one_to_five_minute_range(self) -> None:
+    def test_preparation_shows_approximate_total_and_time_range(self) -> None:
+        lines: list[str] = []
+        renderer = ProgressRenderer(
+            lines.append,
+            operation="Source追加",
+            provider="sharepoint",
+            is_tty=False,
+            clock=_Clock(),
+        )
+
+        renderer(
+            {
+                "event": "add.file_progress",
+                "phase": "reflect",
+                "label_ja": "ADD検索反映",
+                "status": "running",
+                "completed": 0,
+                "total": 10,
+                "total_kind": "estimated",
+                "current_index": 0,
+                "remaining_seconds_min": 600,
+                "remaining_seconds_max": 3000,
+            }
+        )
+
+        rendered = lines[-1]
+        self.assertIn("準備中（約10件）", rendered)
+        self.assertIn("残り目安約10分～50分", rendered)
+
+    def test_before_first_exact_file_keeps_one_to_five_minute_range(self) -> None:
         lines: list[str] = []
         renderer = ProgressRenderer(
             lines.append,
