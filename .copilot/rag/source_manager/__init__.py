@@ -66,6 +66,16 @@ from .subprocess_stream import (
 )
 from .redmine_incremental import install_redmine_incremental_refresh
 
+
+def _remove_default_source_operation_timeout() -> None:
+    """Allow Source operations to run until completion by default."""
+
+    keyword_defaults = dict(run_streaming_process.__kwdefaults__ or {})
+    keyword_defaults["timeout"] = None
+    run_streaming_process.__kwdefaults__ = keyword_defaults
+
+
+_remove_default_source_operation_timeout()
 install_redmine_incremental_refresh()
 
 __all__ = [
