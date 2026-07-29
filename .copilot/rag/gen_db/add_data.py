@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import json
 import os
+import re
 import sys
 import threading
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -19,44 +21,14 @@ from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
 from software_rag_tool.env import load_env
-from software_rag_tool.incremental import add_or_update_root
+from software_rag_tool import incremental as incremental_module
 from software_rag_tool.paths import dbs_dir
 
 
 _PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
 _RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
-_SUPPORTED_EXTENSIONS = frozenset(
-    {
-        ".md",
-        ".txt",
-        ".log",
-        ".pdf",
-        ".docx",
-        ".doc",
-        ".pptx",
-        ".ppt",
-        ".xlsx",
-        ".py",
-        ".js",
-        ".jsx",
-        ".ts",
-        ".tsx",
-        ".java",
-        ".go",
-        ".rs",
-        ".cs",
-        ".rb",
-        ".php",
-        ".sh",
-        ".ps1",
-        ".sql",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".toml",
-        ".ini",
-    }
-)
+_LOCAL_SOURCE_KEY = re.compile(r"^src_[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{12}$")
+_PROGRESS_PATCH_MARKER = "_local_rag_exact_file_index_installed"
 
 
 class _ManagerProtocolWriter:
@@ -92,20 +64,61 @@ class _ManagerProtocolWriter:
         sys.stderr.flush()
 
 
-class _AddProgressWatcher:
-    """Publish current ADD file, exact total, and a continuously refreshed ETA."""
+def _install_exact_file_index_progress() -> None:
+    """Add a producer-side file ordinal to every persisted ADD progress update."""
 
-    def __init__(self, path: Path, *, enabled: bool) -> None:
+    if bool(getattr(incremental_module, _PROGRESS_PATCH_MARKER, False)):
+        return
+    original = incremental_module.write_progress
+    current_file = ""
+    current_index = 0
+
+    @functools.wraps(original)
+    def write_progress(**updates: Any) -> dict[str, Any]:
+        nonlocal current_file, current_index
+        phase = str(updates.get("phase") or "")
+        if (
+            phase == "scan"
+            and str(updates.get("status") or "") == "running"
+            and int(updates.get("files_total") or 0) == 0
+        ):
+            current_file = ""
+            current_index = 0
+        candidate = str(updates.get("current_file") or "").strip()
+        if phase == "extract" and candidate and candidate != current_file:
+            current_file = candidate
+            current_index += 1
+        if current_index > 0:
+            updates.setdefault("current_file_index", current_index)
+        return original(**updates)
+
+    incremental_module.write_progress = write_progress
+    setattr(incremental_module, _PROGRESS_PATCH_MARKER, True)
+
+
+class _AddProgressWatcher:
+    """Publish current ADD file, total count, and a continuously refreshed ETA."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        enabled: bool,
+        estimated_total: int | None = None,
+    ) -> None:
         self._path = Path(path)
         self._enabled = bool(enabled)
+        self._estimated_total = (
+            max(0, int(estimated_total))
+            if estimated_total is not None
+            else None
+        )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = time.monotonic()
         self._last_emit = float("-inf")
         self._last_signature = ""
         self._last_payload: dict[str, Any] | None = None
-        self._file_positions: dict[str, int] | None = None
-        self._file_position_scope: tuple[str, str, str] | None = None
         try:
             self._baseline_mtime_ns = self._path.stat().st_mtime_ns
         except OSError:
@@ -186,7 +199,20 @@ class _AddProgressWatcher:
         snapshot: dict[str, Any],
         now: float,
     ) -> dict[str, Any]:
-        total = _non_negative_int(snapshot.get("files_total"))
+        phase = str(snapshot.get("phase") or "reflect")
+        status = str(snapshot.get("status") or "running")
+        exact_total = _non_negative_int(snapshot.get("files_total"))
+        total = exact_total
+        total_kind = "exact"
+        if (
+            phase == "scan"
+            and status == "running"
+            and exact_total == 0
+            and self._estimated_total is not None
+        ):
+            total = self._estimated_total
+            total_kind = "estimated"
+
         done = _non_negative_int(snapshot.get("files_done"))
         if done == 0:
             done = sum(
@@ -194,8 +220,6 @@ class _AddProgressWatcher:
                 for key in ("indexed_files", "skipped_files", "error_files")
             )
         done = min(done, total) if total else done
-        phase = str(snapshot.get("phase") or "reflect")
-        status = str(snapshot.get("status") or "running")
         current = str(snapshot.get("current_file") or "").strip()
         if not current and status == "running" and phase in {
             "delete",
@@ -206,14 +230,12 @@ class _AddProgressWatcher:
             batch = snapshot.get("current_batch_files")
             if isinstance(batch, list) and batch:
                 current = str(batch[-1] or "").strip()
-        if total == 0 and phase == "scan":
+        if phase == "scan":
             current = ""
 
-        current_index = self._exact_file_position(snapshot, current)
-        if current_index is None:
-            current_index = 0
-            if total:
-                current_index = total if done >= total else min(total, done + 1)
+        current_index = _non_negative_int(snapshot.get("current_file_index"))
+        if current_index == 0 and current and total:
+            current_index = total if done >= total else min(total, done + 1)
 
         payload: dict[str, Any] = {
             "event": "add.file_progress",
@@ -222,7 +244,7 @@ class _AddProgressWatcher:
             "status": status,
             "completed": done,
             "total": total,
-            "total_kind": "exact",
+            "total_kind": total_kind,
             "unit": "件",
             "current_index": current_index,
             "current_item": current,
@@ -231,67 +253,6 @@ class _AddProgressWatcher:
         }
         self._refresh_remaining(payload)
         return payload
-
-    def _exact_file_position(
-        self,
-        snapshot: dict[str, Any],
-        current: str,
-    ) -> int | None:
-        if not current:
-            return None
-        scan_root_text = str(snapshot.get("scan_root") or "").strip()
-        resolved_root_text = str(snapshot.get("resolved_root") or "").strip()
-        root_name = str(snapshot.get("root_display_name") or "").strip()
-        if not scan_root_text or not resolved_root_text or not root_name:
-            return None
-        scope = (scan_root_text, resolved_root_text, root_name)
-        if self._file_positions is None or self._file_position_scope != scope:
-            self._file_positions = self._build_file_positions(
-                Path(scan_root_text),
-                Path(resolved_root_text),
-                root_name,
-            )
-            self._file_position_scope = scope
-        return self._file_positions.get(current)
-
-    @staticmethod
-    def _build_file_positions(
-        scan_root: Path,
-        resolved_root: Path,
-        root_name: str,
-    ) -> dict[str, int]:
-        try:
-            scan = scan_root.expanduser().resolve(strict=True)
-            root = resolved_root.expanduser().resolve(strict=True)
-            scan.relative_to(root)
-        except (OSError, ValueError):
-            return {}
-        discovered: list[Path] = []
-        try:
-            for directory, child_directories, filenames in os.walk(
-                scan,
-                topdown=True,
-                followlinks=False,
-            ):
-                child_directories.sort()
-                for filename in sorted(filenames):
-                    path = Path(directory) / filename
-                    if (
-                        path.is_file()
-                        and path.suffix.lower() in _SUPPORTED_EXTENSIONS
-                    ):
-                        discovered.append(path)
-        except OSError:
-            return {}
-        positions: dict[str, int] = {}
-        for index, path in enumerate(sorted(discovered), start=1):
-            try:
-                relative = path.resolve(strict=True).relative_to(root)
-            except (OSError, ValueError):
-                continue
-            stored = PurePosixPath(root_name, *relative.parts).as_posix()
-            positions[stored] = index
-        return positions
 
     def _refresh_remaining(self, payload: dict[str, Any]) -> None:
         total = _non_negative_int(payload.get("total"))
@@ -323,6 +284,33 @@ class _AddProgressWatcher:
             + "\n"
         )
         sys.stderr.flush()
+
+
+def _preflight_estimated_documents(db_root: Path, source_id: str) -> int | None:
+    key = str(source_id or "").strip()
+    if not _LOCAL_SOURCE_KEY.fullmatch(key):
+        return None
+    state_path = db_root / "sources" / key / "state.json"
+    try:
+        if (
+            state_path.is_symlink()
+            or not state_path.is_file()
+            or state_path.stat().st_size > 1024 * 1024
+        ):
+            return None
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("preflight_estimated_documents")
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _non_negative_int(value: Any) -> int:
@@ -405,6 +393,7 @@ def main() -> None:
         "CHROMA_COLLECTION",
         collection_name_for_db(db_name),
     )
+    _install_exact_file_index_progress()
     protocol_writer = _ManagerProtocolWriter()
     output_context = (
         contextlib.redirect_stdout(protocol_writer)
@@ -414,11 +403,15 @@ def main() -> None:
     watcher = _AddProgressWatcher(
         db_root / "logs" / "progress.json",
         enabled=args.manager_protocol_v1,
+        estimated_total=_preflight_estimated_documents(
+            db_root,
+            args.source_id,
+        ),
     )
     watcher.start()
     try:
         with output_context:
-            summary = add_or_update_root(
+            summary = incremental_module.add_or_update_root(
                 root=Path(args.root),
                 source_id=args.source_id,
                 scan_subdir=args.scan_subdir,
