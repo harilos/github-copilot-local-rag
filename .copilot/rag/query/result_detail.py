@@ -4,7 +4,12 @@ import argparse
 import json
 import sys
 
-from result_bundle import (
+from reference_contract import install_result_bundle_reference_contract
+
+
+install_result_bundle_reference_contract()
+
+from result_bundle import (  # noqa: E402
     cleanup_result_spool,
     load_expanded_result,
     publish_expanded_packet,
