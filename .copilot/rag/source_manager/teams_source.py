@@ -302,7 +302,8 @@ def normalize_update_all_result(result: Mapping[str, Any]) -> dict[str, Any]:
         if (
             str(item.get("source_type") or "").strip().lower() == "teams"
             and item.get("status") == "failed"
-            and "requires Windows" in str(item.get("error") or "")
+            and "teams source updates require windows"
+            in str(item.get("error") or "").casefold()
         ):
             item["status"] = "skipped"
             item["skip_reason"] = "teams_update_requires_windows"
