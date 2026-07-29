@@ -30,6 +30,11 @@ windows_ac_rag_job/
 # Machine-local Manager display examples (the example remains tracked)
 .copilot/rag/config/manage-custom.json
 
+# Machine-local Source connection settings and encrypted credentials
+.copilot/rag/config/source-connections.json
+.copilot/rag/config/source-connections.secrets.json
+.copilot/rag/config/.source-connections.key
+
 # Optional machine-local source hygiene denylist
 .copilot/rag/config/sensitive-terms.local
 
