@@ -242,23 +242,22 @@ def source_runtime_environment(
 
     if source_type == "sharepoint":
         name = str(settings.get("root_env") or SHAREPOINT_ROOT_ENV).strip()
-        if name and not str(result.get(name) or "").strip():
+        if name:
             root = configured_sharepoint_root(rag_root, environ=result)
             if root is not None:
                 result[name] = str(root)
     elif source_type == "redmine":
         name = str(settings.get("api_key_env") or LEGACY_REDMINE_API_KEY_ENV).strip()
-        if name and not str(result.get(name) or "").strip():
-            project_url = settings.get("project_url")
-            if project_url:
-                secret = resolve_redmine_api_key(
-                    rag_root,
-                    project_url=project_url,
-                    api_key_env=name,
-                    environ=result,
-                )
-                if secret:
-                    result[name] = secret
+        project_url = settings.get("project_url")
+        if name and project_url:
+            secret = resolve_redmine_api_key(
+                rag_root,
+                project_url=project_url,
+                api_key_env=name,
+                environ=result,
+            )
+            if secret:
+                result[name] = secret
     return result
 
 
