@@ -208,11 +208,10 @@ def resolve_redmine_api_key(
 ) -> str | None:
     environment = os.environ if environ is None else environ
     requested_env = str(api_key_env or "").strip()
-    if requested_env and requested_env != LEGACY_REDMINE_API_KEY_ENV:
-        inherited = str(environment.get(requested_env) or "").strip()
-        if inherited:
-            return inherited
 
+    # A value registered through the unified Manager screen is authoritative.
+    # Environment variables remain a compatibility fallback for existing and
+    # scripted installations that have not registered a machine-local key.
     connection_id = redmine_connection_id(project_url)
     secrets = _load_secrets(rag_root)
     entry = (secrets.get("redmine") or {}).get(connection_id)
