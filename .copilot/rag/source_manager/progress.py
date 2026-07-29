@@ -74,15 +74,26 @@ class ProgressRenderer:
             return
 
     def _render(self, event: dict[str, Any]) -> None:
+        last_add = self._last_add_file_event
         if (
             event.get("event") == "heartbeat"
-            and self._last_add_file_event is not None
+            and last_add is not None
+            and str(last_add.get("status") or "").lower()
+            not in _IMMEDIATE_STATUSES
         ):
-            replay = dict(self._last_add_file_event)
+            replay = dict(last_add)
             replay["elapsed_seconds"] = event.get("elapsed_seconds")
             event = replay
-        if event.get("event") == "add.file_progress":
-            self._last_add_file_event = dict(event)
+
+        event_kind = str(event.get("event") or "")
+        preview_status = str(event.get("status") or "").lower()
+        if event_kind == "add.file_progress":
+            if preview_status in _IMMEDIATE_STATUSES:
+                self._last_add_file_event = None
+            else:
+                self._last_add_file_event = dict(event)
+        elif event_kind != "heartbeat" and str(event.get("phase") or "") != "reflect":
+            self._last_add_file_event = None
 
         now = self._clock()
         phase = str(event.get("phase") or event.get("event") or "processing")
@@ -129,8 +140,10 @@ class ProgressRenderer:
             elapsed = max(0.0, now - self._started_at)
         current_item = str(event.get("current_item") or "").strip()
         current_index = _optional_non_negative_int(event.get("current_index"))
+        is_add_progress = event_kind == "add.file_progress"
         if (
-            current_index is None
+            is_add_progress
+            and current_index is None
             and total is not None
             and total > 0
             and completed is not None
@@ -145,7 +158,8 @@ class ProgressRenderer:
         elif total == 0 and total_kind == "exact":
             detail = "対象なし"
         elif (
-            current_index is not None
+            is_add_progress
+            and current_index is not None
             and current_index > 0
             and total is not None
             and total > 0
