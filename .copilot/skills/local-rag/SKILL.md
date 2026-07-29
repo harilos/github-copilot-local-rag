@@ -30,11 +30,10 @@ distribution, transfer, or link configuration, do not list or search. Say:
 
 Do not open the Manager automatically.
 
-If setup is missing, say:
-
-`Initial setup normally takes about 10 minutes. Please run setup from Local RAG Manager.`
-
-Do not run setup from Copilot.
+Initial runtime setup is the only exception. If the installed interpreter is
+missing or a public command returns `setup_required`, stop lookup, activate the
+`local-rag-setup` Skill, and run its public setup command directly. Do not tell
+the human to open Local RAG Manager for initial setup.
 
 ## Bounded retrieval routing
 
@@ -118,7 +117,8 @@ listing or searching.
 ## Runtime
 
 Use the installed virtual-environment interpreter directly. Do not probe
-`python`, `python3`, or `py`.
+`python`, `python3`, or `py` during ordinary lookup. The dedicated
+`local-rag-setup` Skill owns the PATH-based bootstrap exception.
 
 ### macOS/Linux
 
@@ -172,13 +172,14 @@ Use the installed virtual-environment interpreter directly. Do not probe
 ```
 
 On Windows, do not use `cmd.exe /c`, `cmd /c`, `Start-Process`, a batch wrapper,
-nested PowerShell, PATH-based Python discovery, or an stdin pipeline. Execute
-one direct process per retrieval search and read stdout/stderr directly. Do not
-combine a search invocation with a pipeline or JSON-processing command.
+nested PowerShell, PATH-based Python discovery, or an stdin pipeline for
+ordinary lookup. Execute one direct process per retrieval search and read
+stdout/stderr directly. Do not combine a search invocation with a pipeline or
+JSON-processing command.
 
 Do not add `--no-daemon` to ordinary lookup. Do not select a retrieval mode. If
-the platform-specific interpreter is missing, use the setup message above in
-the human's language and stop.
+the platform-specific interpreter is missing, activate `local-rag-setup` and
+stop the lookup attempt until setup completes.
 
 ## Per-search result handling
 
