@@ -35,6 +35,15 @@ from setup_contract import (
 )
 
 
+TEMPORARY_REPAIR_LABEL_JA = "検索利用判定を修復する（一時的）"
+TEMPORARY_REPAIR_ACTION = "repair_completion_marker_temporarily"
+TEMPORARY_REPAIR_ARGUMENTS = (
+    "--repair-completion-marker",
+    "--format",
+    "json",
+)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         epilog=MANAGER_HELP_EPILOG,
@@ -48,7 +57,10 @@ def main() -> int:
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="Verify the installed runtime and databases without modifying them",
+        help=(
+            "Verify the installed runtime, databases, and lookup completion "
+            "marker without modifying them"
+        ),
     )
     parser.add_argument(
         "--migrate-legacy-marker",
@@ -64,6 +76,15 @@ def main() -> int:
         help=(
             "Verify the existing runtime offline and atomically refresh its "
             "machine-verifiable completion marker"
+        ),
+    )
+    parser.add_argument(
+        "--repair-completion-marker",
+        action="store_true",
+        help=(
+            "Temporarily repair only the lookup completion marker after an "
+            "offline runtime verification. The previous marker is kept unless "
+            "the replacement is fully verified."
         ),
     )
     parser.add_argument(
@@ -93,21 +114,24 @@ def main() -> int:
             args.verify_only,
             args.migrate_legacy_marker,
             args.refresh_completion_marker,
+            args.repair_completion_marker,
         )
     )
     if offline_modes > 1:
         parser.error(
-            "--verify-only, --migrate-legacy-marker, and "
-            "--refresh-completion-marker are mutually exclusive"
+            "--verify-only, --migrate-legacy-marker, "
+            "--refresh-completion-marker, and --repair-completion-marker "
+            "are mutually exclusive"
         )
     if (
-        args.migrate_legacy_marker or args.refresh_completion_marker
+        args.migrate_legacy_marker
+        or args.refresh_completion_marker
+        or args.repair_completion_marker
     ) and (
         args.force_model or args.prepare_model or args.no_prepare_model
     ):
         parser.error(
-            "completion-marker maintenance cannot install or prepare "
-            "components"
+            "completion-marker maintenance cannot install or prepare components"
         )
 
     try:
@@ -121,6 +145,7 @@ def main() -> int:
                 args.verify_only
                 or args.migrate_legacy_marker
                 or args.refresh_completion_marker
+                or args.repair_completion_marker
             ),
         )
     except NetworkConfigError as exc:
@@ -133,9 +158,7 @@ def main() -> int:
         return 2
 
     here, venv, python, marker = _setup_paths()
-    if args.migrate_legacy_marker and not _is_legacy_completion_marker(
-        marker
-    ):
+    if args.migrate_legacy_marker and not _is_legacy_completion_marker(marker):
         payload = _error_payload(
             failed_check="completion_marker",
             error_kind="legacy_completion_marker_not_found",
@@ -159,6 +182,7 @@ def main() -> int:
             )
             _emit(payload, args.format)
             return 1
+
     network_child_environment = dict(network.environment)
     route_token = secrets.token_urlsafe(24)
     network_child_environment[ROUTE_TOKEN] = route_token
@@ -169,6 +193,7 @@ def main() -> int:
         args.verify_only
         or args.migrate_legacy_marker
         or args.refresh_completion_marker
+        or args.repair_completion_marker
     ):
         try:
             _invalidate_completion_marker(marker)
@@ -219,8 +244,26 @@ def main() -> int:
             _emit(payload, args.format)
             return 1
 
+    marker_maintenance = bool(
+        args.refresh_completion_marker or args.repair_completion_marker
+    )
+    repair_previous_marker: bytes | None = None
+    repair_marker_previously_existed = False
+    if args.repair_completion_marker:
+        try:
+            repair_previous_marker = _read_optional_bytes(marker)
+            repair_marker_previously_existed = marker.is_file()
+        except SetupStepError as exc:
+            payload = _error_payload(
+                failed_check=exc.phase,
+                error_kind=exc.error_kind,
+                message=str(exc),
+                network=network,
+            )
+            _emit(payload, args.format)
+            return 1
     requirements_before: str | None = None
-    if args.refresh_completion_marker:
+    if marker_maintenance:
         try:
             requirements_before = requirements_fingerprint(RAG_ROOT)
         except OSError as exc:
@@ -239,8 +282,9 @@ def main() -> int:
         *network.warnings,
         *(verification.get("warnings") or []),
     ]
+
     requirements_after: str | None = None
-    if args.refresh_completion_marker:
+    if marker_maintenance:
         try:
             requirements_after = requirements_fingerprint(RAG_ROOT)
         except OSError as exc:
@@ -263,15 +307,14 @@ def main() -> int:
                 ),
                 network=network,
             )
+
     if verification.get("setup_complete") and not args.verify_only:
         try:
             _write_completion_marker(
                 marker,
                 verification,
                 requirements_sha256=(
-                    requirements_before
-                    if args.refresh_completion_marker
-                    else None
+                    requirements_before if marker_maintenance else None
                 ),
             )
         except OSError as exc:
@@ -282,83 +325,232 @@ def main() -> int:
                 network=network,
             )
         else:
-            if args.refresh_completion_marker:
-                try:
-                    requirements_final = requirements_fingerprint(RAG_ROOT)
-                except OSError as exc:
-                    discard_error = _discard_completion_marker(marker)
-                    message = (
-                        "The requirements fingerprint could not be read after "
-                        f"the completion marker was refreshed: {exc}"
-                    )
-                    if discard_error:
-                        message += (
-                            "; the invalid marker could not be removed: "
-                            f"{discard_error}"
-                        )
-                    verification = _error_payload(
-                        failed_check="completion_marker",
-                        error_kind="requirements_fingerprint_failed",
-                        message=message,
-                        network=network,
-                    )
-                else:
-                    if not (
-                        requirements_before
-                        == requirements_after
-                        == requirements_final
-                    ):
-                        discard_error = _discard_completion_marker(marker)
-                        message = (
-                            "The requirements fingerprint changed while the "
-                            "completion marker was being refreshed."
-                        )
-                        if discard_error:
-                            message += (
-                                "; the invalid marker could not be removed: "
-                                f"{discard_error}"
-                            )
-                        verification = _error_payload(
-                            failed_check="completion_marker",
-                            error_kind=(
-                                "requirements_changed_during_verification"
-                            ),
-                            message=message,
-                            network=network,
-                        )
-                    else:
-                        valid, reason = completion_contract_valid(
-                            marker,
-                            RAG_ROOT,
-                        )
-                        if not valid:
-                            discard_error = _discard_completion_marker(marker)
-                            message = (
-                                "The refreshed completion marker failed "
-                                f"post-write validation: {reason}"
-                            )
-                            if discard_error:
-                                message += (
-                                    "; the invalid marker could not be "
-                                    f"removed: {discard_error}"
-                                )
-                            verification = _error_payload(
-                                failed_check="completion_marker",
-                                error_kind=(
-                                    "completion_marker_postvalidation_failed"
-                                ),
-                                message=message,
-                                network=network,
-                            )
-                        else:
-                            verification["completion_marker"] = {
-                                "action": "refreshed",
-                                "refreshed": True,
-                                "valid": True,
-                                "requirements_sha256": requirements_final,
-                            }
+            if marker_maintenance:
+                verification = _postvalidate_marker_maintenance(
+                    verification,
+                    marker=marker,
+                    requirements_before=requirements_before,
+                    requirements_after=requirements_after,
+                    repair_temporarily=bool(args.repair_completion_marker),
+                    previous_marker=repair_previous_marker,
+                    marker_previously_existed=repair_marker_previously_existed,
+                    network=network,
+                )
+    elif args.verify_only:
+        _attach_completion_marker_diagnostics(
+            verification,
+            marker=marker,
+            python=python,
+        )
+
     _emit(verification, args.format)
     return 0 if verification.get("setup_complete") else 1
+
+
+def _postvalidate_marker_maintenance(
+    verification: dict[str, Any],
+    *,
+    marker: Path,
+    requirements_before: str | None,
+    requirements_after: str | None,
+    repair_temporarily: bool,
+    previous_marker: bytes | None,
+    marker_previously_existed: bool,
+    network: NetworkResolution,
+) -> dict[str, Any]:
+    try:
+        requirements_final = requirements_fingerprint(RAG_ROOT)
+    except OSError as exc:
+        discard_error = _restore_previous_marker(
+            marker,
+            previous_marker=previous_marker,
+            marker_previously_existed=marker_previously_existed,
+            repair_temporarily=repair_temporarily,
+        )
+        message = (
+            "The requirements fingerprint could not be read after the "
+            f"completion marker was refreshed: {exc}"
+        )
+        if discard_error:
+            message += (
+                "; the invalid marker could not be removed: "
+                f"{discard_error}"
+            )
+        return _error_payload(
+            failed_check="completion_marker",
+            error_kind="requirements_fingerprint_failed",
+            message=message,
+            network=network,
+        )
+
+    if not (
+        requirements_before == requirements_after == requirements_final
+    ):
+        discard_error = _restore_previous_marker(
+            marker,
+            previous_marker=previous_marker,
+            marker_previously_existed=marker_previously_existed,
+            repair_temporarily=repair_temporarily,
+        )
+        message = (
+            "The requirements fingerprint changed while the completion "
+            "marker was being refreshed."
+        )
+        if discard_error:
+            message += (
+                "; the invalid marker could not be removed: "
+                f"{discard_error}"
+            )
+        return _error_payload(
+            failed_check="completion_marker",
+            error_kind="requirements_changed_during_verification",
+            message=message,
+            network=network,
+        )
+
+    valid, reason = completion_contract_valid(marker, RAG_ROOT)
+    if not valid:
+        discard_error = _restore_previous_marker(
+            marker,
+            previous_marker=previous_marker,
+            marker_previously_existed=marker_previously_existed,
+            repair_temporarily=repair_temporarily,
+        )
+        message = (
+            "The refreshed completion marker failed post-write validation: "
+            f"{reason}"
+        )
+        if discard_error:
+            message += (
+                "; the invalid marker could not be removed: "
+                f"{discard_error}"
+            )
+        return _error_payload(
+            failed_check="completion_marker",
+            error_kind="completion_marker_postvalidation_failed",
+            message=message,
+            network=network,
+        )
+
+    action = "repaired_temporarily" if repair_temporarily else "refreshed"
+    verification["completion_marker"] = {
+        "action": action,
+        "refreshed": True,
+        "valid": True,
+        "reason": None,
+        "temporary": repair_temporarily,
+        "label_ja": (
+            TEMPORARY_REPAIR_LABEL_JA
+            if repair_temporarily
+            else "検索利用判定を更新"
+        ),
+        "requirements_sha256": requirements_final,
+    }
+    if repair_temporarily:
+        verification["next_action"] = (
+            "検索利用判定の完了マーカーだけを一時的に修復しました。"
+            "Python環境、モデル、DB、検索索引は再構築していません。"
+        )
+    return verification
+
+
+def _attach_completion_marker_diagnostics(
+    verification: dict[str, Any],
+    *,
+    marker: Path,
+    python: Path,
+) -> None:
+    valid, reason = completion_contract_valid(marker, RAG_ROOT)
+    repair_available = bool(
+        python.is_file() and verification.get("setup_complete")
+    )
+    verification["completion_marker"] = {
+        "action": "verified",
+        "refreshed": False,
+        "valid": valid,
+        "reason": reason,
+        "temporary": False,
+        "repair_available": repair_available,
+        "repair_action": (
+            TEMPORARY_REPAIR_ACTION if repair_available and not valid else None
+        ),
+        "repair_label_ja": (
+            TEMPORARY_REPAIR_LABEL_JA
+            if repair_available and not valid
+            else None
+        ),
+        "repair_command": (
+            {
+                "script": "query/setup.py",
+                "arguments": list(TEMPORARY_REPAIR_ARGUMENTS),
+            }
+            if repair_available and not valid
+            else None
+        ),
+    }
+    if not valid and verification.get("setup_complete"):
+        had_healthy_database = bool(verification.get("lookup_ready"))
+        verification["runtime_lookup_ready"] = had_healthy_database
+        verification["lookup_ready"] = False
+        verification["status"] = (
+            "runtime_ready_completion_marker_repair_required"
+        )
+        verification["next_action"] = (
+            f"{TEMPORARY_REPAIR_LABEL_JA}を実行してください。"
+            "これは完了マーカーだけを再検証して置き換え、"
+            "モデルやDBを再構築しません。"
+        )
+
+
+def _read_optional_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SetupStepError(
+            "completion_marker",
+            -1,
+            str(exc),
+        ) from None
+
+
+def _restore_previous_marker(
+    marker: Path,
+    *,
+    previous_marker: bytes | None,
+    marker_previously_existed: bool,
+    repair_temporarily: bool,
+) -> str | None:
+    if not repair_temporarily:
+        return _discard_completion_marker(marker)
+    try:
+        if marker_previously_existed and previous_marker is not None:
+            _atomic_write_bytes(marker, previous_marker)
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as exc:
+        return redact_text(str(exc))
+    return None
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.restore.",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _setup_paths() -> tuple[Path, Path, Path, Path]:
@@ -415,7 +607,11 @@ def _run_child(
         if part
     )
     if output:
-        print(redact_text(output), file=sys.stderr, end="" if output.endswith("\n") else "\n")
+        print(
+            redact_text(output),
+            file=sys.stderr,
+            end="" if output.endswith("\n") else "\n",
+        )
     if completed.returncode != 0:
         raise SetupStepError(phase, completed.returncode, output)
 
@@ -481,9 +677,6 @@ def _write_completion_marker(
         verified_at=datetime.now(timezone.utc).isoformat(),
     )
     if requirements_sha256 is not None:
-        # Bind refresh output to the exact requirements that were verified.
-        # If requirements change before or after os.replace and cleanup then
-        # fails, normal lookup still rejects this marker by fingerprint.
         payload["requirements_sha256"] = requirements_sha256
     marker.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -580,11 +773,20 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
     if payload.get("setup_complete"):
-        print(
-            "Ready: runtime verification passed"
-            if payload.get("lookup_ready")
-            else "Runtime ready; no healthy database is currently available"
-        )
+        if payload.get("lookup_ready"):
+            print("Ready: runtime verification and lookup gate passed")
+        elif (
+            payload.get("status")
+            == "runtime_ready_completion_marker_repair_required"
+        ):
+            print(
+                "Runtime and database verification passed, but the lookup "
+                f"completion marker needs repair ({TEMPORARY_REPAIR_LABEL_JA})."
+            )
+        else:
+            print("Runtime ready; no healthy database is currently available")
+        if payload.get("next_action"):
+            print(str(payload["next_action"]))
         return
     print(
         f"Setup verification failed: {payload.get('failed_check')} "
