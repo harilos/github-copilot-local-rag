@@ -110,6 +110,19 @@ class MachineConnectionStoreTests(unittest.TestCase):
         self.assertEqual("manager", status.source)
         self.assertEqual(str(manager_root.resolve()), status.root)
 
+        injected = source_runtime_environment(
+            self.rag_root,
+            {
+                "source_type": "sharepoint",
+                "fetch": {"root_env": SHAREPOINT_ROOT_ENV},
+            },
+            environ={SHAREPOINT_ROOT_ENV: str(environment_root)},
+        )
+        self.assertEqual(
+            str(manager_root.resolve()),
+            injected[SHAREPOINT_ROOT_ENV],
+        )
+
         clear_sharepoint_root(self.rag_root)
         inherited = sharepoint_root_status(
             self.rag_root,
@@ -128,6 +141,19 @@ class MachineConnectionStoreTests(unittest.TestCase):
             environ={"LOCAL_RAG_REDMINE_API_KEY": "LEGACY-SHARED"},
         )
         self.assertEqual("PER-SERVER", resolved)
+
+        runtime = source_runtime_environment(
+            self.rag_root,
+            {
+                "source_type": "redmine",
+                "fetch": {
+                    "project_url": project_url,
+                    "api_key_env": "LOCAL_RAG_REDMINE_API_KEY",
+                },
+            },
+            environ={"LOCAL_RAG_REDMINE_API_KEY": "LEGACY-SHARED"},
+        )
+        self.assertEqual("PER-SERVER", runtime["LOCAL_RAG_REDMINE_API_KEY"])
 
     def test_runtime_environment_injects_machine_values(self) -> None:
         sharepoint_root = self.rag_root / "sharepoint"
