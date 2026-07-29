@@ -26,9 +26,12 @@ The following retrieval-critical files have no source diff from the baseline:
 The only accepted lower-search changes are:
 
 1. `search_api.py` removes lower-layer Source-Link enrichment, normalizes
-   public stored paths, and strips private Source identity; and
-2. `query/search.py` retains private detail items only when invoked by the
-   trusted upper wrapper.
+   public stored paths, and retains exact private Source identity only for the
+   trusted upper-wrapper subprocess handoff;
+2. `query/search.py` retains private detail items and passes the internal
+   handoff bit through the persistent-daemon request only for that wrapper;
+   and
+3. `rag_worker.py` scopes that private handoff environment to one request.
 
 Review found no change to candidate generation, Exact/identifier handling,
 Dense or lexical retrieval, RRF, result ranking, diversification, packing,
@@ -42,18 +45,18 @@ evidence authority, answerability, or search status.
   calls lower `result_detail.py` once and lower search zero times.
 - URI enrichment occurs only after lower retrieval, classification, and
   packing.
-- Source identity is conservatively joined from the selected DB's currently
-  visible catalog rows by canonical relative path, with content-hash checking
-  when available.
-- Ambiguous, missing, unsafe, or changed catalog identity produces path-only
-  output.
+- Exact Source identity is carried privately from retrieval to the upper
+  process. The upper wrapper does not infer it from a path or basename.
+- Missing private identity, unsafe path, or a changed catalog produces
+  path-only output.
 - A catalog fingerprint is checked before and after enrichment and again
   before file-bundle publication. A change removes every URI.
 - Lower or stale legacy URI fields are removed before enrichment.
-- Public output contains `uri`, not Source-Link rules or private Source IDs.
+- Public output keeps `source_provider`, `source_url`, and the optional
+  `source_permalink`, but never exposes the private Source ID or Link rules.
 - File delivery publishes one already-enriched bundle; it never patches a
   ready result directory.
-- Cached detail retains the URI observed at original-search time and does not
+- Cached detail retains the links observed at original-search time and does not
   reread the sidecar.
 - Normal lookup performs no external HTTP validation.
 
@@ -103,7 +106,9 @@ from changing ranking, status, answerability, or evidence authority.
   source fingerprints.
 - DB publication is staged. A multi-DB bootstrap publication failure removes
   every DB published by that invocation rather than leaving a partial set.
-- Existing destination DBs are rejected before writes.
+- Same-name destination DBs are fully staged and validated, then replaced
+  DB-by-DB. Any publish failure restores the previous set; undeclared DB paths
+  are rejected.
 - Portable ADD state uses DB-relative markers. SharePoint external-root state
   uses a Source-key marker and is rebound from destination `source.json` plus
   the destination environment; the old absolute root is not distributed.
@@ -129,7 +134,7 @@ but they are not claimed as a formal cross-process transaction.
 | Gate | Closure |
 |---|---|
 | Full detail payload transport | Trusted parent-wrapper environment retains detail items only for the upper process. |
-| Stable path-to-Source association | Catalog/content fingerprint checks surround URI enrichment and bundle publication. |
+| Stable path-to-Source association | Exact private identity crosses only the trusted subprocess handoff; catalog fingerprint checks surround Link enrichment and bundle publication. |
 | Installer tombstones | Exact retired-file allowlists exist in both installers. |
 | Public detail boundary | Root `search.py` dispatches cached detail internally; no third public lookup command is added. |
 | Canonical Source configuration | DB-local `source-links.json` remains search-facing truth; Source workflow metadata publishes into it and preserves the prior valid primary on failure. |
@@ -144,15 +149,15 @@ proxy credentials, and indexed SharePoint root retargeting.
 ## Automated test evidence
 
 - Final macOS regression reported by the coordinating agent:
-  - query contracts: **430/430 PASS**
+  - query contracts: **444/444 PASS**
   - Source Manager contracts: **36/36 PASS**
   - documentation/contracts: **78/78 PASS**
-  - total: **544/544 PASS**
+  - total: **558/558 PASS**
 - Independent focused review run: **249 PASS**; the only non-result was one
   local mock-socket case blocked by the review sandbox's socket permission.
   The same network suite is included in the coordinating agent's passing full
   regression, so this is not an implementation failure.
-- Package focused suite: **22/22 PASS**.
+- Package focused suite: **27/27 PASS**.
 - `py_compile`: PASS.
 - `git diff --check`: PASS.
 - Frozen-file diff gate: PASS.
@@ -161,35 +166,39 @@ proxy credentials, and indexed SharePoint root retargeting.
 
 ## Windows validation
 
-The final synchronized Windows execution passed:
+The final synchronized Windows execution passed the functional gates:
 
-- public wrapper contracts: **21/21 PASS**;
-- Manager contracts: **41/41 PASS**;
-- package contracts: **22/22 PASS**;
+- public wrapper contracts: **21 PASS, 2 environment-dependent skips**;
+- Manager contracts: **44/44 PASS**;
+- package contracts: **27/27 PASS**;
 - Source Manager contracts: **36/36 PASS**;
-- total focused Windows gate: **120/120 PASS**;
 - root database list schema v2, UTF-8 Japanese file-delivery search, and
   cached detail: PASS;
+- summary and cached detail expose neither transitional `uri` fields nor
+  local absolute paths;
 - redirected `NO_COLOR` output: valid JSON with no ANSI escape;
 - Manager Japanese help: PASS;
 - local absolute-path exposure: none;
 - persistent maintenance artifacts: 0.
 
-Windows execution found and closed two portability defects before this final
-gate: a transient-path check that examined the machine `Temp` ancestor rather
-than the allowlisted tree-relative path, and a read-only file handle that
-Windows could not `fsync`. Both fixes have direct regression coverage.
+The result-bundle contract itself passed **30/30 portable cases**. Three
+repository-layout hygiene cases are not runnable in the synchronized installed
+tree: it intentionally has no Git checkout or root `install.sh`, and its test
+root is the installed Copilot directory. The same complete 33-case file passes
+on the macOS Git checkout. These are environment preconditions, not runtime
+failures.
 
 ## Known limitations
 
 - Strict multi-process Source/Source-Link editing is unsupported.
 - Unsupported non-SharePoint legacy Link configurations require human
   reconfiguration.
-- An unavailable or changing catalog yields path-only results.
+- A missing exact Source handoff or changing catalog yields path-only results.
 - SharePoint direct ADD requires a safe, locally available synchronized tree
   and destination environment configuration after administration transfer.
 - Large JSON size is observational; the implementation does not discard
-  evidence, distinct documents, or complete URIs to meet a 12 KiB target.
+  evidence, distinct documents, or complete Source Link URLs to meet a
+  12 KiB target.
 - External Source URLs are generated but not contacted during normal search.
 
 ## Final finding summary
@@ -198,4 +207,4 @@ Windows could not `fsync`. Both fixes have direct regression coverage.
 - P1: **0**
 - P2/P3 requiring release action: **0**
 - Code-review decision: **APPROVED**
-- Windows release decision: **deferred to the final Windows execution report**
+- Windows release decision: **PASS**

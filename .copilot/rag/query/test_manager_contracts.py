@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 
 MANAGER_PATH = Path(__file__).resolve().parents[1] / "manage.py"
@@ -16,6 +17,7 @@ SPEC = importlib.util.spec_from_file_location("local_rag_manage", MANAGER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 manage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(manage)
+from source_manager import packages as source_packages  # noqa: E402
 
 
 class RecordingRunner:
@@ -181,6 +183,94 @@ class ManagerContractTests(unittest.TestCase):
                 "このDBを削除する【危険】",
                 "戻る",
             ],
+        )
+
+    def test_full_source_update_writes_content_snapshot_contract(self) -> None:
+        root = self.make_db()
+        manager = self.manager()
+        manager._write_content_snapshot(
+            "example-rag",
+            reason="all_sources_updated",
+        )
+        payload = json.loads(
+            (root / "rag-wrapper.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("local-rag.wrapper.v1", payload["schema_version"])
+        self.assertTrue(payload["content_snapshot_at"].endswith("Z"))
+        self.assertEqual("all_sources_updated", payload["reason"])
+        self.assertFalse((root / "db-snapshot.json").exists())
+
+    def test_package_import_confirms_and_replaces_same_name_database(
+        self,
+    ) -> None:
+        self.make_db("example-rag")
+        package = self.base / "package.zip"
+        package.write_bytes(b"fixture")
+        manifest = {
+            "kind": "distribution",
+            "dbs": [
+                {
+                    "name": "example-rag",
+                    "content_snapshot_at": "2026-01-01T00:00:00Z",
+                    "content_snapshot_reason": "full_update",
+                }
+            ],
+            "total": {"files": 3, "bytes": 10},
+        }
+        manager = self.manager([str(package), "y", "example-rag"])
+        with (
+            mock.patch.object(
+                source_packages,
+                "validate_distribution_zip",
+                return_value=manifest,
+            ),
+            mock.patch.object(
+                source_packages,
+                "import_package",
+                return_value={
+                    "status": "imported",
+                    "kind": "distribution",
+                    "databases": ["example-rag"],
+                },
+            ) as importer,
+        ):
+            manager._verify_or_import_package()
+        importer.assert_called_once_with(
+            package,
+            self.rag_root.parent.resolve(),
+        )
+        text = "\n".join(self.output)
+        self.assertIn("同名DBを安全に差し替えます", text)
+        self.assertIn("取り込んだDB: example-rag", text)
+
+    def test_package_import_mismatched_confirmation_does_not_write(
+        self,
+    ) -> None:
+        self.make_db("example-rag")
+        package = self.base / "package.zip"
+        package.write_bytes(b"fixture")
+        manifest = {
+            "kind": "distribution",
+            "dbs": [{"name": "example-rag"}],
+            "total": {"files": 1, "bytes": 1},
+        }
+        manager = self.manager([str(package), "y", "wrong-rag"])
+        with (
+            mock.patch.object(
+                source_packages,
+                "validate_distribution_zip",
+                return_value=manifest,
+            ),
+            mock.patch.object(
+                source_packages,
+                "import_package",
+            ) as importer,
+        ):
+            manager._verify_or_import_package()
+        importer.assert_not_called()
+        self.assertIn(
+            "取り込みを開始しませんでした",
+            "\n".join(self.output),
         )
 
     def test_source_update_groups_use_runner_result_contract(self) -> None:

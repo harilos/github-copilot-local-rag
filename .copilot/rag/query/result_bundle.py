@@ -68,16 +68,18 @@ def publish_result_bundle(
             result_set_id=result_set_id,
             expires_at=expires,
         )
-        entries: dict[str, dict[str, str]] = {}
+        entries: dict[str, dict[str, Any]] = {}
         for logical_id, kind, detail in detail_items[:MAX_ITEMS_PER_RESULT]:
             storage_id = str(uuid.uuid4())
             relative_file = f"items/{storage_id}.json"
             detail_path = result_dir / relative_file
             _atomic_write_json(detail_path, detail)
+            integrity = _file_integrity(detail_path)
             entries[logical_id] = {
                 "kind": kind,
                 "storage_id": storage_id,
                 "file": relative_file,
+                **integrity,
             }
 
         available = [
@@ -94,15 +96,29 @@ def publish_result_bundle(
         summary["follow_up"]["default_item_ids"] = defaults
         summary["follow_up"]["detail_available"] = bool(available)
 
+        summary_path = result_dir / "summary.json"
+        _atomic_write_json(summary_path, summary)
+        immutable_files = {
+            "summary.json": _file_integrity(summary_path),
+            **{
+                str(entry["file"]): {
+                    "size": int(entry["size"]),
+                    "sha256": str(entry["sha256"]),
+                }
+                for entry in entries.values()
+            },
+        }
         manifest = {
             "schema_version": MANIFEST_SCHEMA,
             "result_set_id": result_set_id,
             "created_at": _iso_z(current),
             "expires_at": _iso_z(expires),
             "items": entries,
+            # meta.json is a mutable ready/access marker and manifest.json
+            # cannot hash itself.  Every immutable payload file is recorded.
+            "files": dict(sorted(immutable_files.items())),
         }
         _atomic_write_json(result_dir / "manifest.json", manifest)
-        _atomic_write_json(result_dir / "summary.json", summary)
         meta = {
             "schema_version": "rag-result-meta-v1",
             "result_set_id": result_set_id,
@@ -134,7 +150,6 @@ def publish_result_bundle(
         # other bundle file is complete, so concurrent cleanup never observes
         # and opens a marker that this publisher still needs to replace.
         _atomic_write_json(result_dir / "meta.json", meta)
-        summary_path = result_dir / "summary.json"
         pointer = {
             "status": "written",
             "schema_version": RESULT_POINTER_SCHEMA,
@@ -254,7 +269,17 @@ def load_expanded_result(
         return _expired_packet(result_set_id), None
 
     manifest = _read_json(result_dir / "manifest.json")
-    summary = _read_json(result_dir / "summary.json")
+    summary_path = result_dir / "summary.json"
+    manifest_files = manifest.get("files")
+    if (
+        isinstance(manifest_files, dict)
+        and not _manifest_file_matches(
+            summary_path,
+            manifest_files.get("summary.json"),
+        )
+    ):
+        return _expired_packet(result_set_id), None
+    summary = _read_json(summary_path)
     manifest_items = manifest.get("items")
     if not isinstance(manifest_items, dict):
         return _expired_packet(result_set_id), None
@@ -282,6 +307,14 @@ def load_expanded_result(
         item_file = str(entry.get("file") or "")
         item_path = result_dir / item_file
         if not _safe_manifest_item_path(item_path, result_dir):
+            warnings.append(f"item_not_available:{item_id}")
+            continue
+        integrity_record = (
+            manifest_files.get(item_file)
+            if isinstance(manifest_files, dict)
+            else entry
+        )
+        if not _manifest_file_matches(item_path, integrity_record):
             warnings.append(f"item_not_available:{item_id}")
             continue
         try:
@@ -755,9 +788,16 @@ def _copy_source_link_fields(
     source: dict[str, Any],
     target: dict[str, Any],
 ) -> None:
-    value = str(source.get("uri") or "")
-    if value:
-        target["uri"] = value
+    for key in (
+        "source_provider",
+        "source_url",
+        "source_permalink",
+        "source_link_status",
+        "source_link_error",
+    ):
+        value = str(source.get(key) or "")
+        if value:
+            target[key] = value
 
 
 def _extractive_answer_units(
@@ -996,7 +1036,11 @@ def _expanded_item(
             "support_level",
             "context_reason",
             "warnings",
-            "uri",
+            "source_provider",
+            "source_url",
+            "source_permalink",
+            "source_link_status",
+            "source_link_error",
         )
     }
     if detail_level == "expanded":
@@ -1264,6 +1308,46 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("JSON payload must be an object")
     return payload
+
+
+def _file_integrity(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return {
+        "size": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _manifest_file_matches(path: Path, record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    expected_size = record.get("size")
+    expected_digest = record.get("sha256")
+    # Result sets created immediately before this additive manifest contract
+    # may still be alive in the short-lived spool.  Their item records contain
+    # neither field and remain readable until normal expiry.
+    if expected_size is None and expected_digest is None:
+        return True
+    if (
+        not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size < 0
+        or not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+    ):
+        return False
+    try:
+        actual_size = path.stat().st_size
+    except OSError:
+        return False
+    if actual_size != expected_size:
+        return False
+    return _file_integrity(path)["sha256"] == expected_digest
 
 
 def _tree_size(path: Path) -> int:

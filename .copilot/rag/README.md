@@ -48,9 +48,11 @@ Windows PowerShell:
 
 The database list returns a bounded public content summary and Source display
 metadata. It does not disclose raw Source IDs. Search delegates to the
-installed retrieval runtime once, then adds optional public `uri` values and
-database freshness metadata. A stale database may include one Japanese
-conversation notice under `database_freshness.chat_notice`.
+installed retrieval runtime once, then adds optional public `source_url` and
+`source_permalink` values plus database freshness metadata derived only from
+`rag-wrapper.json.content_snapshot_at`. A stale database may include one
+Japanese conversation notice under `database_freshness.chat_notice`.
+Packaging time is recorded separately and never advances content freshness.
 
 File delivery returns a small JSON pointer. The referenced summary is
 self-contained. Cached follow-up detail is read through the same public
@@ -141,10 +143,11 @@ temporary file, revision/etag recheck, and atomic replacement, but deliberately
 do not create a persistent lock file or claim strict multi-process CAS.
 
 Resolved links are applied only after retrieval, ranking, packing, evidence
-classification, and context expansion. Public output contains only `uri`:
-the permalink when available, otherwise the ordinary source URL. Invalid,
-missing, or ambiguous metadata fails open to the stored relative path and
-never changes ranking, answerability, or search status.
+classification, and context expansion. `source_url` keeps the ordinary
+browser link and `source_permalink` keeps the optional fixed link; consumers
+prefer the permalink without discarding the ordinary URL. Invalid or missing
+metadata fails open to the stored relative path and never changes ranking,
+answerability, or search status.
 
 ## Local runtime and network
 

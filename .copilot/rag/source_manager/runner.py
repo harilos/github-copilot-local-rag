@@ -3,7 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 import subprocess
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -678,6 +681,9 @@ def _update_redmine_source(
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)
+        initial["initial_database_reflection"] = (
+            _is_initial_database_reflection(store, source)
+        )
         current_state = store.save_state(
             source.payload["local_source_key"],
             initial,
@@ -837,6 +843,10 @@ def _update_redmine_source(
             "fetched_count": 0,
         }
 
+    if bool(
+        state_holder[0].payload.get("initial_database_reflection")
+    ):
+        _write_initial_snapshot_marker(store.db_root)
     sync_result = _synchronize_metadata(
         store,
         source_holder[0],
@@ -999,6 +1009,11 @@ def _reflect_and_sync(
 ) -> dict[str, Any]:
     work = Path(add_root)
     validate_managed_work_tree(work)
+    state, initial_database_reflection = _record_initial_snapshot_candidate(
+        store,
+        source,
+        state,
+    )
     try:
         add_result = _execute_add(
             db_root=store.db_root,
@@ -1037,6 +1052,8 @@ def _reflect_and_sync(
         source.payload["local_source_key"],
         source_id=str(add_result["source_id"]),
     )
+    if initial_database_reflection:
+        _write_initial_snapshot_marker(store.db_root)
     confirmed_source = store.read_source(source.payload["local_source_key"])
     sync_result = _synchronize_metadata(
         store,
@@ -1079,6 +1096,107 @@ def _reflect_and_sync(
         "state_revision": final_state.revision,
         "add_summary": add_result["summary"],
     }
+
+
+def _record_initial_snapshot_candidate(
+    store: SourceStore,
+    source: StoredJson,
+    state: StoredJson,
+) -> tuple[StoredJson, bool]:
+    recorded = state.payload.get("initial_database_reflection")
+    if isinstance(recorded, bool):
+        return state, recorded
+    candidate = _is_initial_database_reflection(store, source)
+    value = copy.deepcopy(state.payload)
+    value["initial_database_reflection"] = candidate
+    updated = store.save_state(
+        source.payload["local_source_key"],
+        value,
+        expected_revision=state.revision,
+        expected_etag=state.etag,
+    )
+    return updated, candidate
+
+
+def _is_initial_database_reflection(
+    store: SourceStore,
+    source: StoredJson,
+) -> bool:
+    if source.payload.get("source_id"):
+        return False
+    marker = store.db_root / "rag-wrapper.json"
+    if marker.exists() or marker.is_symlink():
+        return False
+    catalog = store.db_root / "catalog.sqlite"
+    if catalog.is_symlink():
+        return False
+    if not catalog.exists():
+        return True
+    try:
+        resolved = catalog.resolve(strict=True)
+        connection = sqlite3.connect(
+            resolved.as_uri() + "?mode=ro",
+            uri=True,
+        )
+        try:
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(document)"
+                )
+            }
+            if "doc_pk" not in columns:
+                return False
+            visibility = (
+                " WHERE visible_until IS NULL"
+                if "visible_until" in columns
+                else ""
+            )
+            return (
+                connection.execute(
+                    f"SELECT 1 FROM document{visibility} LIMIT 1"
+                ).fetchone()
+                is None
+            )
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return False
+
+
+def _write_initial_snapshot_marker(db_root: Path) -> None:
+    path = db_root / "rag-wrapper.json"
+    if path.exists() or path.is_symlink():
+        return
+    current = datetime.now(timezone.utc).replace(microsecond=0)
+    payload = {
+        "schema_version": "local-rag.wrapper.v1",
+        "content_snapshot_at": current.isoformat().replace("+00:00", "Z"),
+        "reason": "initial_database_reflection",
+    }
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def _run_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:

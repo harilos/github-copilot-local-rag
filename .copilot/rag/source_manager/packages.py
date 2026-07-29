@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -176,18 +177,23 @@ _DISTRIBUTION_TOOL_MODULES = frozenset(
     }
 )
 _DB_ADMIN_DIRECTORIES = frozenset({"data", "index", "logs", "sources"})
-_DB_SNAPSHOT_NAME = "db-snapshot.json"
+_RAG_WRAPPER_NAME = "rag-wrapper.json"
+_RAG_WRAPPER_SCHEMA = "local-rag.wrapper.v1"
 _BOOTSTRAP_TEXT = """#!/usr/bin/env python3
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path, PurePosixPath
+
+
+DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
 
 
 def safe_relative(value):
@@ -201,6 +207,13 @@ def safe_relative(value):
     ):
         raise SystemExit("invalid_package_path")
     return relative
+
+
+def safe_database_name(value):
+    relative = safe_relative(value)
+    if len(relative.parts) != 1 or not DB_NAME.fullmatch(relative.parts[0]):
+        raise SystemExit("invalid_database_name")
+    return relative.parts[0]
 
 
 def sha256(path):
@@ -242,6 +255,35 @@ def validate(package, manifest):
             or sha256(path) != item.get("sha256")
         ):
             raise SystemExit("package_checksum_mismatch")
+
+
+def validate_staged_database(stage, db_name, manifest):
+    prefix = ".copilot/rag/dbs/" + db_name + "/"
+    expected = {
+        item["path"][len(prefix):]: item
+        for item in manifest.get("files", [])
+        if str(item.get("path") or "").startswith(prefix)
+    }
+    actual = {}
+    if stage.is_symlink() or not stage.is_dir():
+        raise SystemExit("staged_database_invalid")
+    for path in stage.rglob("*"):
+        if path.is_symlink():
+            raise SystemExit("package_symlink_forbidden")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(stage).as_posix()
+        safe_relative(relative)
+        actual[relative] = path
+    if not expected or set(actual) != set(expected):
+        raise SystemExit("staged_database_manifest_mismatch")
+    for relative, path in actual.items():
+        item = expected[relative]
+        if (
+            path.stat().st_size != int(item.get("size", -1))
+            or sha256(path) != item.get("sha256")
+        ):
+            raise SystemExit("staged_database_checksum_mismatch")
 
 
 def safe_destination(target, relative):
@@ -291,6 +333,53 @@ def copy_atomic(source, destination):
             pass
 
 
+def publish_databases(database_parent, database_stages):
+    backups = {}
+    published = []
+    try:
+        for name in sorted(database_stages):
+            destination = database_parent / name
+            if destination.is_symlink():
+                raise SystemExit("install_database_symlink_forbidden")
+            if destination.exists():
+                if not destination.is_dir():
+                    raise SystemExit("install_database_path_invalid")
+                backup = database_parent / (
+                    "." + name + "." + uuid.uuid4().hex + ".previous"
+                )
+                os.replace(destination, backup)
+                backups[name] = backup
+        for name in sorted(database_stages):
+            destination = database_parent / name
+            os.replace(database_stages[name], destination)
+            published.append(name)
+    except BaseException:
+        restore_failed = False
+        for name in reversed(published):
+            destination = database_parent / name
+            try:
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                elif destination.exists() or destination.is_symlink():
+                    destination.unlink()
+            except OSError:
+                restore_failed = True
+        for name in reversed(sorted(backups)):
+            backup = backups[name]
+            destination = database_parent / name
+            try:
+                if backup.exists() and not destination.exists():
+                    os.replace(backup, destination)
+            except OSError:
+                restore_failed = True
+        if restore_failed:
+            raise SystemExit("install_database_restore_failed")
+        raise
+    else:
+        for backup in backups.values():
+            shutil.rmtree(backup, ignore_errors=True)
+
+
 def main() -> int:
     package = Path(__file__).resolve().parent
     manifest = json.loads(
@@ -299,12 +388,16 @@ def main() -> int:
     validate(package, manifest)
     arguments = list(sys.argv[1:])
     skip_dependencies = "--skip-dependencies" in arguments
+    skip_runtime_setup = "--skip-runtime-setup" in arguments
     arguments = [
-        value for value in arguments if value != "--skip-dependencies"
+        value
+        for value in arguments
+        if value not in {"--skip-dependencies", "--skip-runtime-setup"}
     ]
     if len(arguments) > 1:
         raise SystemExit(
-            "usage: bootstrap.py [COPILOT_HOME] [--skip-dependencies]"
+            "usage: bootstrap.py [COPILOT_HOME] "
+            "[--skip-dependencies|--skip-runtime-setup]"
         )
     target = (
         Path(arguments[0]).expanduser()
@@ -314,32 +407,32 @@ def main() -> int:
     if target.is_symlink():
         raise SystemExit("install_target_symlink_forbidden")
     database_names = [
-        safe_relative(item.get("name")).as_posix()
+        safe_database_name(item.get("name"))
         for item in manifest.get("dbs", [])
     ]
     database_parent = target / "rag" / "dbs"
-    for name in database_names:
-        candidate = database_parent / name
-        if candidate.exists() or candidate.is_symlink():
-            raise SystemExit("install_database_already_exists")
     database_stages = {
         name: database_parent / (
             "." + name + "." + uuid.uuid4().hex + ".incoming"
         )
         for name in database_names
     }
-    published_databases = []
     try:
         for item in manifest.get("files", []):
             relative = safe_relative(item.get("path"))
             if relative.parts[0] != ".copilot":
                 continue
             source = package.joinpath(*relative.parts)
-            if (
-                len(relative.parts) >= 5
+            is_database_path = (
+                len(relative.parts) >= 3
                 and relative.parts[1:3] == ("rag", "dbs")
-                and relative.parts[3] in database_stages
+            )
+            if is_database_path and (
+                len(relative.parts) < 5
+                or relative.parts[3] not in database_stages
             ):
+                raise SystemExit("package_database_not_declared")
+            if is_database_path:
                 stage = database_stages[relative.parts[3]]
                 destination = safe_destination(
                     stage,
@@ -351,23 +444,21 @@ def main() -> int:
                     PurePosixPath(*relative.parts[1:]),
                 )
             copy_atomic(source, destination)
+        for name, stage in database_stages.items():
+            validate_staged_database(stage, name, manifest)
         if manifest.get("kind") == "admin-transfer":
             for name, stage in database_stages.items():
                 restore_portable_database(
                     stage,
                     portable_root=database_parent / name,
                 )
-        for name, stage in database_stages.items():
-            os.replace(stage, database_parent / name)
-            published_databases.append(name)
-    except BaseException:
-        for name in reversed(published_databases):
-            shutil.rmtree(database_parent / name, ignore_errors=True)
-        raise
+        publish_databases(database_parent, database_stages)
     finally:
         for stage in database_stages.values():
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
+    if skip_runtime_setup:
+        return 0
     runtime = target / "rag" / "query" / ".venv"
     if skip_dependencies:
         subprocess.run(
@@ -529,6 +620,7 @@ class _Entry:
     destination: str
     mode: str = "copy"
     database_root: Path | None = None
+    content_snapshot_at: str | None = None
 
 
 def create_distribution_package(
@@ -727,34 +819,104 @@ def validate_distribution_zip(
         raise PackageError("package_archive_missing")
     with tempfile.TemporaryDirectory(prefix="local-rag-package-verify.") as temp:
         root = Path(temp)
-        try:
-            package = zipfile.ZipFile(archive, "r")
-        except (OSError, zipfile.BadZipFile) as exc:
-            raise PackageError("package_archive_invalid") from exc
-        with package:
-            seen: set[str] = set()
-            for info in package.infolist():
-                name = info.filename.rstrip("/")
-                if not name:
-                    continue
-                relative = _safe_relative(name)
-                normalized = relative.as_posix()
-                if normalized in seen:
-                    raise PackageError("package_archive_duplicate_path")
-                seen.add(normalized)
-                unix_mode = (info.external_attr >> 16) & 0xFFFF
-                if stat.S_ISLNK(unix_mode):
-                    raise PackageError("package_symlink_forbidden")
-                destination = root.joinpath(*relative.parts)
-                if info.is_dir():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with package.open(info, "r") as source, destination.open(
-                    "xb"
-                ) as target:
-                    shutil.copyfileobj(source, target, _BUFFER_SIZE)
-        return validate_package_tree(root, expected_kind=expected_kind)
+        return _extract_distribution_zip(
+            archive,
+            root,
+            expected_kind=expected_kind,
+        )
+
+
+def import_package(
+    package_path: Path,
+    copilot_home: Path,
+) -> dict[str, Any]:
+    """Import a validated package and safely replace same-name databases.
+
+    The generated standalone bootstrap owns publication so manager imports and
+    manual bootstrap runs share the exact same staged validation and rollback
+    behavior. Runtime setup is deliberately skipped because this entry point
+    is used by an already-running Local RAG manager.
+    """
+    package = Path(package_path).expanduser()
+    target = Path(copilot_home).expanduser()
+    if target.is_symlink():
+        raise PackageError("install_target_symlink_forbidden")
+    target.mkdir(parents=True, exist_ok=True)
+    target = target.resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="local-rag-package-import.") as temp:
+        if package.is_file() and not package.is_symlink():
+            package_root = Path(temp) / "package"
+            package_root.mkdir()
+            manifest = _extract_distribution_zip(
+                package,
+                package_root,
+                expected_kind=_DISTRIBUTION_KIND,
+            )
+        else:
+            package_root = _real_directory(package, "package")
+            manifest = validate_package_tree(package_root)
+        bootstrap = package_root / "bootstrap.py"
+        if bootstrap.is_symlink() or not bootstrap.is_file():
+            raise PackageError("package_bootstrap_missing")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(bootstrap),
+                str(target),
+                "--skip-runtime-setup",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+        )
+        if completed.returncode != 0:
+            raise PackageError("package_import_failed")
+    return {
+        "status": "imported",
+        "kind": manifest["kind"],
+        "databases": [
+            str(item["name"]) for item in manifest.get("dbs", [])
+        ],
+    }
+
+
+def _extract_distribution_zip(
+    archive: Path,
+    root: Path,
+    *,
+    expected_kind: str | None,
+) -> dict[str, Any]:
+    try:
+        package = zipfile.ZipFile(archive, "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise PackageError("package_archive_invalid") from exc
+    with package:
+        seen: set[str] = set()
+        for info in package.infolist():
+            name = info.filename.rstrip("/")
+            if not name:
+                continue
+            relative = _safe_relative(name)
+            normalized = relative.as_posix()
+            if normalized in seen:
+                raise PackageError("package_archive_duplicate_path")
+            seen.add(normalized)
+            unix_mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(unix_mode):
+                raise PackageError("package_symlink_forbidden")
+            destination = root.joinpath(*relative.parts)
+            if info.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with package.open(info, "r") as source, destination.open(
+                "xb"
+            ) as target:
+                shutil.copyfileobj(source, target, _BUFFER_SIZE)
+    return validate_package_tree(root, expected_kind=expected_kind)
 
 
 def _distribution_entries(
@@ -914,25 +1076,16 @@ def _database_entries(
     databases: list[dict[str, Any]] = []
     for name in names:
         db_root = _safe_database_root(root, name)
-        version = _read_optional_json(db_root / "VERSION.json")
-        snapshot = _read_optional_json(db_root / _DB_SNAPSHOT_NAME)
+        content_snapshot_at, content_snapshot_reason = (
+            _database_content_snapshot(db_root)
+        )
         databases.append(
             {
                 "name": name,
-                "snapshot_at": str(
-                    snapshot.get("snapshot_at")
-                    or version.get("created_at")
-                    or ""
+                "content_snapshot_at": (
+                    content_snapshot_at or None
                 ),
-                "snapshot_reason": (
-                    _DISTRIBUTION_KIND
-                    if distribution
-                    else str(
-                        snapshot.get("reason")
-                        or version.get("snapshot_reason")
-                        or ""
-                    )
-                ),
+                "content_snapshot_reason": content_snapshot_reason,
             }
         )
         prefix = f".copilot/rag/dbs/{name}"
@@ -940,8 +1093,6 @@ def _database_entries(
             source = db_root / filename
             if filename == "catalog.sqlite":
                 mode = "sqlite"
-            elif filename == "VERSION.json" and distribution:
-                mode = "distribution_version"
             elif filename == "source-links.json":
                 mode = "source_links"
             else:
@@ -962,16 +1113,17 @@ def _database_entries(
             entries.append(
                 _Entry(
                     None,
-                    f"{prefix}/{_DB_SNAPSHOT_NAME}",
-                    mode="distribution_snapshot",
+                    f"{prefix}/{_RAG_WRAPPER_NAME}",
+                    mode="distribution_wrapper",
                     database_root=db_root,
+                    content_snapshot_at=content_snapshot_at or None,
                 )
             )
         else:
             _add_file(
                 entries,
-                db_root / _DB_SNAPSHOT_NAME,
-                f"{prefix}/{_DB_SNAPSHOT_NAME}",
+                db_root / _RAG_WRAPPER_NAME,
+                f"{prefix}/{_RAG_WRAPPER_NAME}",
                 required=False,
                 database_root=db_root,
             )
@@ -1002,6 +1154,38 @@ def _database_entries(
     return _dedupe_entries(entries), databases
 
 
+def _database_content_snapshot(db_root: Path) -> tuple[str, str]:
+    path = db_root / _RAG_WRAPPER_NAME
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size > 65_536
+        ):
+            return "", "unknown"
+    except OSError:
+        return "", "unknown"
+    wrapper = _read_optional_json(path)
+    if wrapper.get("schema_version") == _RAG_WRAPPER_SCHEMA:
+        value = _normalized_timestamp(wrapper.get("content_snapshot_at"))
+        if value is not None:
+            return value, "rag_wrapper"
+    return "", "unknown"
+
+
+def _normalized_timestamp(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _stage_package(
     stage: Path,
     entries: Sequence[_Entry],
@@ -1020,10 +1204,15 @@ def _stage_package(
         if entry.mode == "bootstrap":
             _atomic_bytes(destination, _BOOTSTRAP_TEXT.encode("utf-8"))
             source_fingerprint = "generated"
-        elif entry.mode == "distribution_snapshot":
+        elif entry.mode == "distribution_wrapper":
+            if entry.database_root is None:
+                raise PackageError("package_database_root_missing")
             _atomic_bytes(
                 destination,
-                _distribution_snapshot_bytes(created),
+                _distribution_wrapper_bytes(
+                    entry.content_snapshot_at,
+                    packaged_at=created,
+                ),
             )
             source_fingerprint = "generated"
         elif entry.source is None:
@@ -1033,9 +1222,7 @@ def _stage_package(
             source_fingerprint = _sha256(destination)
         else:
             source_fingerprint, raw = _stable_read(entry.source)
-            if entry.mode == "distribution_version":
-                raw = _distribution_version_bytes(raw, created)
-            elif entry.mode == "admin_json":
+            if entry.mode == "admin_json":
                 raw = _portable_admin_json(
                     raw,
                     source=entry.source,
@@ -1063,10 +1250,6 @@ def _stage_package(
     _verify_source_fingerprints(observations)
     records.sort(key=lambda item: str(item["path"]))
     database_records = [dict(value) for value in databases]
-    if kind == _DISTRIBUTION_KIND:
-        for value in database_records:
-            value["snapshot_at"] = created
-            value["snapshot_reason"] = _DISTRIBUTION_KIND
     manifest = {
         "schema": PACKAGE_SCHEMA,
         "kind": kind,
@@ -1101,7 +1284,7 @@ def _verify_source_fingerprints(
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="local-rag-sqlite-check.") as temp:
         for index, (entry, before) in enumerate(observations):
-            if entry.mode in {"bootstrap", "distribution_snapshot"}:
+            if entry.mode in {"bootstrap", "distribution_wrapper"}:
                 continue
             if entry.source is None:
                 raise PackageError("package_source_missing")
@@ -1391,32 +1574,17 @@ def _redact_temporary_paths(value: Any) -> Any:
     return "<TEMP_ROOT>" + (f"/{suffix}" if suffix != "." else "")
 
 
-def _distribution_version_bytes(raw: bytes, created: str) -> bytes:
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PackageError("database_version_invalid") from exc
-    if not isinstance(payload, dict):
-        raise PackageError("database_version_invalid")
-    payload["created_at"] = created
-    payload["snapshot_reason"] = _DISTRIBUTION_KIND
-    return (
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n"
-    ).encode("utf-8")
-
-
-def _distribution_snapshot_bytes(created: str) -> bytes:
+def _distribution_wrapper_bytes(
+    content_snapshot_at: str | None,
+    *,
+    packaged_at: str,
+) -> bytes:
     return (
         json.dumps(
             {
-                "schema_version": "local-rag-db-snapshot-v1",
-                "snapshot_at": created,
-                "reason": _DISTRIBUTION_KIND,
+                "schema_version": _RAG_WRAPPER_SCHEMA,
+                "content_snapshot_at": content_snapshot_at or None,
+                "packaged_at": packaged_at,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -1583,10 +1751,27 @@ def _validate_manifest_shape(
         if (
             not isinstance(database, dict)
             or set(database)
-            != {"name", "snapshot_at", "snapshot_reason"}
+            != {
+                "name",
+                "content_snapshot_at",
+                "content_snapshot_reason",
+            }
             or not _DB_NAME.fullmatch(str(database.get("name") or ""))
-            or not isinstance(database.get("snapshot_at"), str)
-            or not isinstance(database.get("snapshot_reason"), str)
+            or (
+                database.get("content_snapshot_at") is not None
+                and (
+                    not isinstance(
+                        database.get("content_snapshot_at"),
+                        str,
+                    )
+                    or _normalized_timestamp(
+                        database.get("content_snapshot_at")
+                    )
+                    is None
+                )
+            )
+            or database.get("content_snapshot_reason")
+            not in {"rag_wrapper", "unknown"}
             or database["name"] in seen_databases
         ):
             raise PackageError("package_manifest_dbs_invalid")
@@ -1594,6 +1779,7 @@ def _validate_manifest_shape(
     files = manifest.get("files")
     if not isinstance(files, list):
         raise PackageError("package_manifest_files_invalid")
+    file_databases: set[str] = set()
     for record in files:
         if (
             not isinstance(record, dict)
@@ -1603,7 +1789,19 @@ def _validate_manifest_shape(
             or not re.fullmatch(r"[0-9a-f]{64}", str(record["sha256"]))
         ):
             raise PackageError("package_manifest_file_invalid")
-        _safe_relative(str(record["path"]))
+        relative = _safe_relative(str(record["path"]))
+        if (
+            len(relative.parts) >= 3
+            and relative.parts[:3] == (".copilot", "rag", "dbs")
+        ):
+            if (
+                len(relative.parts) < 5
+                or relative.parts[3] not in seen_databases
+            ):
+                raise PackageError("package_manifest_dbs_invalid")
+            file_databases.add(relative.parts[3])
+    if file_databases != seen_databases:
+        raise PackageError("package_manifest_dbs_invalid")
     total = manifest.get("total")
     if (
         not isinstance(total, dict)

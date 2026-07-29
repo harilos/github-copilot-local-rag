@@ -362,16 +362,31 @@ def _current_source_metadata(
     sys.path.insert(0, str(tool_root))
     try:
         from software_rag_tool.source_links import (
+            LEGACY_SCHEMA_VERSION,
+            LEGACY_V2_SCHEMA_VERSION,
             SCHEMA_VERSION,
+            load_source_links,
             validate_source_links,
         )
 
-        if payload.get("schema_version") != SCHEMA_VERSION:
+        schema_version = payload.get("schema_version")
+        if schema_version == SCHEMA_VERSION:
+            payload = validate_source_links(
+                payload,
+                allow_unmatched_sources=True,
+            )
+        elif schema_version in {
+            LEGACY_SCHEMA_VERSION,
+            LEGACY_V2_SCHEMA_VERSION,
+        }:
+            loaded = load_source_links(db_root, db_name)
+            if loaded.status != "configured" or loaded.payload is None:
+                return {}, False
+            # The compatibility reader accepts only a safely normalizable
+            # legacy SharePoint link.  Other legacy providers stay anonymous.
+            payload = loaded.payload
+        else:
             return {}, False
-        payload = validate_source_links(
-            payload,
-            allow_unmatched_sources=True,
-        )
     except (ImportError, OSError, ValueError):
         return {}, False
     finally:

@@ -203,6 +203,54 @@ class SourceLinkDiagnosticsContracts(unittest.TestCase):
         self.assertNotIn("source_url", item)
         self.assertNotIn("source_permalink", item)
 
+    def test_lower_search_keeps_exact_source_id_only_for_wrapper_handoff(
+        self,
+    ) -> None:
+        payload = {
+            "schema": "local-rag.search.v1",
+            "status": "ok",
+            "answerability": "full",
+            "warnings": [],
+            "evidence": [
+                {
+                    "id": "E1",
+                    "_source_id": "private-source",
+                    "source": {"path": "Root/document.md"},
+                }
+            ],
+            "background_context": [],
+            "related_context": [],
+            "document_results": [
+                {
+                    "id": "D1",
+                    "path": "Root/document.md",
+                    "_source_id": "private-source",
+                }
+            ],
+        }
+        store = SimpleNamespace(
+            context=SimpleNamespace(root=Path("/synthetic/db"))
+        )
+        with mock.patch.dict(
+            "software_rag_tool.search_api.os.environ",
+            {"LOCAL_RAG_WRAPPER_INTERNAL": "1"},
+        ):
+            finalized = _finalize_search_payload(
+                payload,
+                store=store,
+                db_name="example-rag",
+                explain=False,
+            )
+        self.assertEqual(
+            "private-source",
+            finalized["evidence"][0]["_source_id"],
+        )
+        self.assertEqual(
+            "private-source",
+            finalized["document_results"][0]["_source_id"],
+        )
+        self.assertNotIn("source_url", finalized["evidence"][0])
+
 
 class BrokenStore:
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict]:
@@ -526,7 +574,9 @@ class NoHitContractTests(unittest.TestCase):
             "text": "日本語の根拠" * 2_000,
             "signals": ["exact"],
             "debug": {"huge": "x" * 20_000},
-            "uri": uri,
+            "source_provider": "github",
+            "source_url": "https://example.invalid/current",
+            "source_permalink": uri,
         }
         payload = {
             "schema": "local-rag.search.v1",
@@ -545,7 +595,11 @@ class NoHitContractTests(unittest.TestCase):
         self.assertEqual("R1", compact["evidence"][0]["id"])
         self.assertIn("path", compact["evidence"][0]["source"])
         self.assertNotIn("debug", compact["evidence"][0])
-        self.assertEqual(uri, compact["evidence"][0]["uri"])
+        self.assertEqual(
+            "https://example.invalid/current",
+            compact["evidence"][0]["source_url"],
+        )
+        self.assertEqual(uri, compact["evidence"][0]["source_permalink"])
         self.assertIn("compact_output_truncated", compact["warnings"])
 
         explained = compact_search_contract(
@@ -557,7 +611,7 @@ class NoHitContractTests(unittest.TestCase):
         )
         self.assertEqual({"rank": 1}, explained["evidence"][0]["debug"])
 
-    def test_compact_contract_never_truncates_a_uri(self) -> None:
+    def test_compact_contract_never_truncates_source_links(self) -> None:
         uri = "https://example.invalid/" + ("a" * 2_500)
         compact = compact_search_contract(
             {
@@ -568,13 +622,14 @@ class NoHitContractTests(unittest.TestCase):
                         "id": "R1",
                         "text": "Evidence.",
                         "source": {"path": "Root/document.txt"},
-                        "uri": uri,
+                        "source_provider": "github",
+                        "source_url": uri,
                     }
                 ],
             },
             explain=False,
         )
-        self.assertEqual(uri, compact["evidence"][0]["uri"])
+        self.assertEqual(uri, compact["evidence"][0]["source_url"])
 
     def test_no_hit_prompt_marks_related_context_as_non_evidence(self) -> None:
         prompt = payload_to_prompt(

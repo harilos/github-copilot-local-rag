@@ -7,9 +7,13 @@ from typing import Any
 
 
 STALE_AFTER_DAYS = 30
-STALE_NOTICE_CODE = "local_rag_snapshot_older_than_30_days"
+WRAPPER_METADATA_NAME = "rag-wrapper.json"
+WRAPPER_METADATA_SCHEMA = "local-rag.wrapper.v1"
+STALE_NOTICE_CODE = "local_rag_content_snapshot_older_than_30_days"
+STALE_NOTICE_SCOPE = "conversation"
+STALE_NOTICE_DEDUPE_KEY = "local_rag_content_snapshot_stale"
 STALE_NOTICE_MESSAGE_JA = (
-    "このRAGは配布または全体更新から30日以上経過しています。"
+    "このRAGの内容更新時点から30日以上経過しています。"
     "内容が古い可能性があるため、必要なら管理者から最新版を"
     "受け取ってください。"
 )
@@ -20,12 +24,12 @@ def database_freshness(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    snapshot = _catalog_snapshot_at(db_root)
+    snapshot = _content_snapshot_at(db_root)
     parsed = _parse_timestamp(snapshot)
     if parsed is None:
         return {
             "status": "unknown",
-            "snapshot_at": None,
+            "content_snapshot_at": None,
             "age_days": None,
         }
     current = now or datetime.now(timezone.utc)
@@ -37,7 +41,7 @@ def database_freshness(
     if age_seconds < 0:
         return {
             "status": "unknown",
-            "snapshot_at": None,
+            "content_snapshot_at": None,
             "age_days": None,
         }
     age_days = int(age_seconds // 86_400)
@@ -47,7 +51,7 @@ def database_freshness(
             if age_seconds >= STALE_AFTER_DAYS * 86_400
             else "current"
         ),
-        "snapshot_at": _iso_z(parsed),
+        "content_snapshot_at": _iso_z(parsed),
         "age_days": age_days,
     }
 
@@ -63,32 +67,27 @@ def add_freshness(
     if freshness["status"] == "stale":
         freshness["chat_notice"] = {
             "code": STALE_NOTICE_CODE,
-            "scope": "conversation_once",
+            "scope": STALE_NOTICE_SCOPE,
+            "dedupe_key": STALE_NOTICE_DEDUPE_KEY,
             "message_ja": STALE_NOTICE_MESSAGE_JA,
         }
     output["database_freshness"] = freshness
     return output
 
 
-def _catalog_snapshot_at(db_root: Path | None) -> str | None:
+def _content_snapshot_at(db_root: Path | None) -> str | None:
     if db_root is None:
         return None
-    snapshot_file = Path(db_root) / "db-snapshot.json"
-    snapshot_at = _validated_timestamp_field(
-        snapshot_file,
+    wrapper_file = Path(db_root) / WRAPPER_METADATA_NAME
+    content_snapshot_at = _validated_timestamp_field(
+        wrapper_file,
         schema_field="schema_version",
-        schema="local-rag-db-snapshot-v1",
-        field="snapshot_at",
+        schema=WRAPPER_METADATA_SCHEMA,
+        field="content_snapshot_at",
     )
-    if snapshot_at is not None:
-        return snapshot_at
-    version_file = Path(db_root) / "VERSION.json"
-    return _validated_timestamp_field(
-        version_file,
-        schema_field="schema",
-        schema="local-rag.db-version.v1",
-        field="created_at",
-    )
+    if content_snapshot_at is not None:
+        return content_snapshot_at
+    return None
 
 
 def _validated_timestamp_field(

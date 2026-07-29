@@ -218,6 +218,13 @@ def main() -> None:
         "compact_json": bool(
             args.compact_json and args.result_delivery == "stdout"
         ),
+        # Private Source identity is retained only for the one trusted
+        # lower-process invocation made by the root public wrapper.  A
+        # persistent worker does not inherit the short-lived client's
+        # environment, so carry this internal bit through the daemon request.
+        "_wrapper_private_handoff": (
+            os.getenv("LOCAL_RAG_WRAPPER_INTERNAL") == "1"
+        ),
     }
 
     daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}

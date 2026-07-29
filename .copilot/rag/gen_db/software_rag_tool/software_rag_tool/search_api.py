@@ -432,6 +432,12 @@ def _safe_public_stored_path(value: object) -> str | None:
 
 
 def _strip_private_source_ids(payload: dict[str, Any]) -> None:
+    # The root wrapper is the only trusted consumer that needs the exact
+    # Source identity to resolve a DB-local Source Link.  Keep the already
+    # private ``_source_id`` field only on that one subprocess handoff; direct
+    # low-level CLI output remains path-only.
+    if os.getenv("LOCAL_RAG_WRAPPER_INTERNAL") == "1":
+        return
     for key in (
         "evidence",
         "contexts",
@@ -443,6 +449,9 @@ def _strip_private_source_ids(payload: dict[str, Any]) -> None:
         for item in payload.get(key) or []:
             if isinstance(item, dict):
                 item.pop("_source_id", None)
+                source = item.get("source")
+                if isinstance(source, dict):
+                    source.pop("_source_id", None)
 
 
 def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
@@ -1787,7 +1796,12 @@ def payload_to_prompt(payload: dict[str, Any], *, explain: bool = False) -> str:
 
 
 def _preferred_source_link(item: dict[str, Any]) -> str:
-    return str(item.get("uri") or "")
+    return str(
+        item.get("source_permalink")
+        or item.get("source_url")
+        or item.get("uri")
+        or ""
+    )
 
 
 def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2002,6 +2016,8 @@ def _project_contexts(
             "context_before",
             "context_after",
             "uri",
+            "source_url",
+            "source_permalink",
         ):
             overhead[key] = ""
         overhead_tokens = _conservative_token_count(
@@ -2043,6 +2059,8 @@ def _project_contexts(
         budgeted_item = dict(item)
         for key in (
             "uri",
+            "source_url",
+            "source_permalink",
         ):
             budgeted_item.pop(key, None)
         used = _conservative_token_count(
@@ -2141,9 +2159,21 @@ def _copy_projected_uri(
     *,
     explain: bool,
 ) -> None:
-    value = str(source.get("uri") or "")
-    if value:
-        target["uri"] = value
+    # Link resolution now runs in the root wrapper before compact projection.
+    # Preserve the established Source Link fields independently so callers can
+    # prefer a permalink without losing the ordinary browser URL.
+    for key in ("source_provider", "source_url", "source_permalink"):
+        value = str(source.get(key) or "")
+        if value:
+            target[key] = value
+    legacy_uri = str(source.get("uri") or "")
+    if legacy_uri:
+        target["uri"] = legacy_uri
+    if explain:
+        for key in ("source_link_status", "source_link_error"):
+            value = str(source.get(key) or "")
+            if value:
+                target[key] = value
 
 
 def _conservative_token_count(text: str) -> int:

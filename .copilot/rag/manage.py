@@ -401,7 +401,7 @@ class LocalRagManager:
             return {"status": "failed", "error": type(exc).__name__}
         self._show_source_update_result(result)
         if bool(result.get("snapshot_marker_eligible")):
-            self._write_db_snapshot(
+            self._write_content_snapshot(
                 db_name,
                 reason="all_sources_updated",
             )
@@ -449,7 +449,7 @@ class LocalRagManager:
             failed += len(failed_items)
             skipped += len(skipped_items)
             if bool(result.get("snapshot_marker_eligible")):
-                self._write_db_snapshot(
+                self._write_content_snapshot(
                     db_name,
                     reason="all_sources_updated",
                 )
@@ -527,15 +527,15 @@ class LocalRagManager:
             for key in ("completed", "failed", "skipped")
         }
 
-    def _write_db_snapshot(self, db_name: str, *, reason: str) -> None:
+    def _write_content_snapshot(self, db_name: str, *, reason: str) -> None:
         try:
             db_root = self._validated_database_root(db_name)
         except ManagerError:
             return
-        path = db_root / "db-snapshot.json"
+        path = db_root / "rag-wrapper.json"
         payload = {
-            "schema_version": "local-rag-db-snapshot-v1",
-            "snapshot_at": datetime.now(timezone.utc)
+            "schema_version": "local-rag.wrapper.v1",
+            "content_snapshot_at": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
             "reason": reason,
@@ -668,10 +668,60 @@ class LocalRagManager:
             f"ファイル数: "
             f"{int((manifest.get('total') or {}).get('files') or 0):,}"
         )
-        self._print_info(
-            "取り込みは同梱のbootstrap.pyを実行し、"
-            "一時場所で再検証してから配置してください。"
-        )
+        database_names = [
+            str(item.get("name") or "")
+            for item in manifest.get("dbs", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+        if database_names:
+            self.output("対象DB: " + "、".join(database_names))
+        existing = [
+            name
+            for name in database_names
+            if (self.dbs_root / name).exists()
+            or (self.dbs_root / name).is_symlink()
+        ]
+        if existing:
+            self._print_warning(
+                "同名DBを安全に差し替えます。"
+                "全DBを一時場所で検証してからDB単位で公開し、"
+                "失敗時は現在の同名DBを保持します。"
+            )
+            self.output("差し替えるDB: " + "、".join(existing))
+        if not self._confirm("検証済みパッケージをこの端末へ取り込みますか？"):
+            self._print_info("検証のみ完了しました。取り込みは行っていません。")
+            return
+        for name in existing:
+            confirmation = self._ask(
+                f"差し替えを確認するためDB名「{name}」を入力してください: "
+            )
+            if confirmation != name:
+                self._print_info(
+                    f"DB「{name}」の確認が一致しないため、"
+                    "取り込みを開始しませんでした。"
+                )
+                return
+        try:
+            from source_manager.packages import import_package
+
+            result = import_package(package, self.rag_root.parent)
+        except Exception as exc:
+            self._print_error(
+                "パッケージを取り込めませんでした"
+                f"（{type(exc).__name__}）。"
+            )
+            self.output(
+                "既存の同名DBは保持されています。"
+                "対象外のDBやファイルは削除していません。"
+            )
+            return
+        imported = result.get("databases") if isinstance(result, dict) else []
+        self._print_success("パッケージを取り込みました。")
+        if isinstance(imported, list) and imported:
+            self.output(
+                "取り込んだDB: "
+                + "、".join(str(name) for name in imported)
+            )
 
     @staticmethod
     def _supports_color(stream: Any) -> bool:

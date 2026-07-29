@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -172,7 +173,7 @@ class ResultBundleContractTests(unittest.TestCase):
         payload["answerability"] = "none"
         payload["evidence"] = []
         payload["document_results"] = [payload["document_results"][1]]
-        payload["document_results"][0]["uri"] = (
+        payload["document_results"][0]["source_url"] = (
             "https://example.invalid/related/document"
         )
         summary = self.read_summary(self.publish(payload))
@@ -185,7 +186,7 @@ class ResultBundleContractTests(unittest.TestCase):
 
     def test_answer_draft_keeps_body_citation_unlinked(self) -> None:
         payload = synthetic_payload()
-        payload["evidence"][0]["uri"] = (
+        payload["evidence"][0]["source_url"] = (
             "https://example.invalid/fixed/document"
         )
         draft = self.read_summary(
@@ -239,7 +240,7 @@ class ResultBundleContractTests(unittest.TestCase):
     ) -> None:
         payload = synthetic_payload()
         payload["evidence"] = []
-        expected_evidence_uris: list[str] = []
+        expected_evidence_urls: list[str] = []
         for index in range(4):
             evidence = json.loads(
                 json.dumps(synthetic_payload()["evidence"][0])
@@ -252,10 +253,12 @@ class ResultBundleContractTests(unittest.TestCase):
                 f"Authoritative evidence statement {index} is retained."
             )
             evidence["matched_excerpt"] = evidence["text"]
-            uri = f"https://example.invalid/fixed/{index}/" + "b" * 5_000
-            evidence["uri"] = uri
+            source_url = (
+                f"https://example.invalid/fixed/{index}/" + "b" * 5_000
+            )
+            evidence["source_url"] = source_url
             payload["evidence"].append(evidence)
-            expected_evidence_uris.append(uri)
+            expected_evidence_urls.append(source_url)
 
         payload["document_results"] = [
             {
@@ -266,15 +269,15 @@ class ResultBundleContractTests(unittest.TestCase):
                 "support_level": "weak",
                 "authoritative": False,
                 "relationship": "Related research material.",
-                "uri": (
+                "source_url": (
                     f"https://example.invalid/permalink/{index}/"
                     + "d" * 1_000
                 ),
             }
             for index in range(10)
         ]
-        expected_document_uris: list[str] = [
-            str(item["uri"])
+        expected_document_urls: list[str] = [
+            str(item["source_url"])
             for item in payload["document_results"]
         ]
         pointer = self.publish(payload)
@@ -286,12 +289,15 @@ class ResultBundleContractTests(unittest.TestCase):
         self.assertEqual(4, len(summary["evidence"]))
         self.assertEqual(10, len(summary["document_results"]))
         self.assertEqual(
-            expected_evidence_uris,
-            [str(item["uri"]) for item in summary["evidence"]],
+            expected_evidence_urls,
+            [str(item["source_url"]) for item in summary["evidence"]],
         )
         self.assertEqual(
-            expected_document_uris,
-            [str(item["uri"]) for item in summary["document_results"]],
+            expected_document_urls,
+            [
+                str(item["source_url"])
+                for item in summary["document_results"]
+            ],
         )
 
     def test_detail_bundle_preserves_structural_context(self) -> None:
@@ -313,16 +319,19 @@ class ResultBundleContractTests(unittest.TestCase):
     def test_resolved_links_are_frozen_into_summary_and_detail(self) -> None:
         payload = synthetic_payload()
         fixed_url = "https://example.invalid/blob/revision/document.pdf"
-        payload["evidence"][0]["uri"] = fixed_url
-        payload["document_results"][0]["uri"] = fixed_url
+        payload["evidence"][0]["source_url"] = fixed_url
+        payload["document_results"][0]["source_url"] = fixed_url
         pointer = self.publish(payload)
         summary = self.read_summary(pointer)
-        self.assertEqual(fixed_url, summary["evidence"][0]["uri"])
-        self.assertEqual(fixed_url, summary["document_results"][0]["uri"])
+        self.assertEqual(fixed_url, summary["evidence"][0]["source_url"])
+        self.assertEqual(
+            fixed_url,
+            summary["document_results"][0]["source_url"],
+        )
 
         # A later configuration or in-memory payload change cannot alter the
         # already-published result set.
-        payload["evidence"][0]["uri"] = (
+        payload["evidence"][0]["source_url"] = (
             "https://example.invalid/blob/later/document.pdf"
         )
         packet, _expires = result_bundle.load_expanded_result(
@@ -334,8 +343,9 @@ class ResultBundleContractTests(unittest.TestCase):
         )
         self.assertEqual(
             fixed_url,
-            packet["expanded_items"][0]["uri"],
+            packet["expanded_items"][0]["source_url"],
         )
+        self.assertNotIn("uri", packet["expanded_items"][0])
         self.assertIn("[E1]", packet["answer_draft_markdown"])
         self.assertNotIn(fixed_url, packet["answer_draft_markdown"])
 
@@ -371,13 +381,21 @@ class ResultBundleContractTests(unittest.TestCase):
         for provider, source_url, source_permalink in providers:
             with self.subTest(provider=provider):
                 payload = synthetic_payload()
-                expected_uri = source_permalink or source_url
-                payload["evidence"][0]["uri"] = expected_uri
+                payload["evidence"][0]["source_provider"] = provider
+                payload["evidence"][0]["source_url"] = source_url
+                if source_permalink:
+                    payload["evidence"][0]["source_permalink"] = (
+                        source_permalink
+                    )
                 pointer = self.publish(payload)
                 summary = self.read_summary(pointer)
                 self.assertEqual(
-                    expected_uri,
-                    summary["evidence"][0]["uri"],
+                    source_url,
+                    summary["evidence"][0]["source_url"],
+                )
+                self.assertEqual(
+                    source_permalink,
+                    summary["evidence"][0].get("source_permalink"),
                 )
                 packet, _expires = result_bundle.load_expanded_result(
                     pointer["result_set_id"],
@@ -387,16 +405,26 @@ class ResultBundleContractTests(unittest.TestCase):
                     now=self.now + timedelta(minutes=1),
                 )
                 self.assertEqual(
-                    expected_uri,
-                    packet["expanded_items"][0]["uri"],
+                    source_url,
+                    packet["expanded_items"][0]["source_url"],
+                )
+                self.assertEqual(
+                    source_permalink,
+                    packet["expanded_items"][0].get(
+                        "source_permalink"
+                    ),
                 )
 
-    def test_summary_never_truncates_a_valid_uri(self) -> None:
+    def test_summary_never_truncates_a_valid_source_url(self) -> None:
         payload = synthetic_payload()
-        uri = "https://example.invalid/" + ("a" * 2_500)
-        payload["evidence"][0]["uri"] = uri
+        source_url = "https://example.invalid/" + ("a" * 2_500)
+        payload["evidence"][0]["source_url"] = source_url
         summary = self.read_summary(self.publish(payload))
-        self.assertEqual(uri, summary["evidence"][0]["uri"])
+        self.assertEqual(
+            source_url,
+            summary["evidence"][0]["source_url"],
+        )
+        self.assertNotIn("uri", summary["evidence"][0])
 
     def test_detail_retrieval_reads_only_requested_cached_items(self) -> None:
         pointer = self.publish()
@@ -467,8 +495,50 @@ class ResultBundleContractTests(unittest.TestCase):
         for entry in manifest["items"].values():
             storage_name = Path(entry["file"]).stem
             uuid.UUID(storage_name)
+        immutable_files = manifest["files"]
+        self.assertEqual(
+            {
+                "summary.json",
+                *(
+                    str(entry["file"])
+                    for entry in manifest["items"].values()
+                ),
+            },
+            set(immutable_files),
+        )
+        for relative, integrity in immutable_files.items():
+            raw = (result_dir / relative).read_bytes()
+            self.assertEqual(len(raw), integrity["size"])
+            self.assertEqual(
+                hashlib.sha256(raw).hexdigest(),
+                integrity["sha256"],
+            )
         for path in result_dir.rglob("*.json"):
             json.loads(path.read_text(encoding="utf-8"))
+
+    def test_detail_integrity_mismatch_fails_closed_for_only_that_item(
+        self,
+    ) -> None:
+        pointer = self.publish()
+        result_dir = Path(pointer["summary_file"]).parent
+        manifest = json.loads(
+            (result_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        item_id, entry = next(iter(manifest["items"].items()))
+        item_path = result_dir / entry["file"]
+        item_path.write_bytes(item_path.read_bytes() + b" ")
+
+        packet, _expires = result_bundle.load_expanded_result(
+            pointer["result_set_id"],
+            [item_id],
+            detail_level="expanded",
+            spool_root=self.spool,
+            now=self.now,
+        )
+
+        self.assertEqual("error", packet["status"])
+        self.assertEqual([], packet["expanded_items"])
+        self.assertIn(f"item_not_available:{item_id}", packet["warnings"])
 
     def test_pointer_is_ascii_safe_and_contains_no_source_content(self) -> None:
         non_ascii_spool = Path(self.temporary.name) / "一時" / "results"

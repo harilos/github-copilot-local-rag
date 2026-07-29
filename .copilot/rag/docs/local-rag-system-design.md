@@ -48,20 +48,23 @@ question + structured hints
   -> lower search
   -> retrieval/fusion/diversity/packing
   -> evidence/context/document classification
-  -> transient Source identity projection from read-only catalog
+  -> exact private Source identity subprocess handoff
   -> optional Source URL resolution
-  -> public uri projection
-  -> compact/prompt/file output
+  -> compact/prompt/file projection
+  -> public Source Link fields
 ```
 
 The public wrapper never changes retrieval candidates, scores, order,
-authority, answerability, or status. A URI is emitted only when a canonical
-relative path maps to exactly one nonempty Source ID. Evidence revision hashes
-must remain compatible with the catalog content hash when both are available.
-Catalog changes during resolution invalidate every URI for that response.
+authority, answerability, or status. The lower process keeps its exact
+`_source_id` only on the trusted wrapper subprocess handoff; direct low-level
+CLI output remains path-only. The wrapper resolves the full canonical stored
+path before compact projection and never guesses Source identity from a path
+or basename. Catalog changes during resolution invalidate every link for that
+response.
 
-Public output removes transient IDs and provider-specific URL fields. It
-contains only `uri`, preferring a fixed permalink over an ordinary URL.
+Public output removes the transient ID and keeps `source_provider`,
+`source_url`, and the optional `source_permalink`. Consumers prefer the
+permalink without discarding the ordinary browser URL.
 
 ## 4. Conversational hints
 
@@ -112,26 +115,38 @@ File delivery publishes an immutable temporary result set:
 ```
 
 Every file is UTF-8 JSON published by temporary file plus atomic replace.
-The initial pointer is ASCII-safe. The summary is self-contained and bounded
-to 16,384 bytes. Follow-up detail reads cached items through the same public
-search entry point and never reruns retrieval.
+The initial pointer is ASCII-safe. The summary is self-contained and is never
+silently shortened to meet a byte target. The manifest records each bundle
+file's relative path, size, and SHA-256. Follow-up detail reads cached items
+through the same public search entry point and never reruns retrieval.
 
-URI values are copied into summary/detail at original-search time. Later
+Source Link values are copied into summary/detail at original-search time. Later
 Source Metadata edits do not mutate an existing result set.
 
 ## 7. Freshness
 
 Database freshness is presentation metadata, not a search gate.
 
-1. Prefer a validated `db-snapshot.json` using
-   `local-rag-db-snapshot-v1` and `snapshot_at`.
-2. Fall back to a validated `VERSION.json` using
-   `local-rag.db-version.v1` and `created_at`.
-3. Missing, invalid, or future timestamps are `unknown`.
-4. Age greater than or equal to 30 days is `stale`.
+1. Read only a validated `rag-wrapper.json` using
+   `local-rag.wrapper.v1` and `content_snapshot_at`.
+2. Missing, invalid, or future timestamps are `unknown`; filesystem time,
+   `VERSION.json`, and the legacy `db-snapshot.json` are not freshness
+   substitutes.
+3. Age greater than or equal to 30 days is `stale`.
+4. Distribution, copy, and repack preserve the content snapshot timestamp.
+   Only a successful first searchable reflection or qualifying content update
+   advances it.
 
 The Japanese chat notice is nested under `database_freshness.chat_notice`.
-Copilot shows it at most once per conversation.
+Its stable contract is:
+
+```text
+code = local_rag_content_snapshot_older_than_30_days
+scope = conversation
+dedupe_key = local_rag_content_snapshot_stale
+```
+
+Copilot shows that deduplicated notice at most once per conversation.
 
 ## 8. Persistent daemon
 

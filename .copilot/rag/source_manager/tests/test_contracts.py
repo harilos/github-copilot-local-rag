@@ -1097,6 +1097,44 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             result["paths"]["logical_root_name"],
             Path(arguments[arguments.index("--root") + 1]).name,
         )
+        marker = json.loads(
+            (self.db_root / "rag-wrapper.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            "local-rag.wrapper.v1",
+            marker["schema_version"],
+        )
+        self.assertEqual(
+            "initial_database_reflection",
+            marker["reason"],
+        )
+        self.assertTrue(marker["content_snapshot_at"].endswith("Z"))
+        marker_before = (
+            self.db_root / "rag-wrapper.json"
+        ).read_bytes()
+        second_runtime = (
+            Path(self.temporary.name).resolve() / "incoming-second"
+        )
+        second_runtime.mkdir()
+        register_source(
+            self.db_root,
+            source_type="other",
+            display_name="Second import",
+            fetch={},
+            runtime_input=second_runtime,
+            start=True,
+            python_executable=Path(self.temporary.name) / "venv-python",
+            rag_root=Path(self.temporary.name) / "rag-runtime",
+            executor=lambda *_: {"status": "ok", "documents": 1},
+            command_runner=add_runner,
+            metadata_publisher=lambda *_: None,
+        )
+        self.assertEqual(
+            marker_before,
+            (self.db_root / "rag-wrapper.json").read_bytes(),
+        )
 
     def test_untrusted_add_output_does_not_assign_source_id(self) -> None:
         runtime = Path(self.temporary.name).resolve() / "incoming"
@@ -1125,6 +1163,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         listed = list_sources(self.db_root)
         self.assertEqual(1, len(listed))
         self.assertIsNone(listed[0]["source_id"])
+        self.assertFalse((self.db_root / "rag-wrapper.json").exists())
 
     def test_metadata_sync_failure_resumes_without_fetch_or_add(self) -> None:
         runtime = Path(self.temporary.name).resolve() / "incoming"

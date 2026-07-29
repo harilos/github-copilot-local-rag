@@ -79,12 +79,14 @@ Extraction is a full rebuild, not a search-index repair option. Source
 Metadata remains a DB-root sidecar and survives lexical, vector, and all
 index repair.
 
-## Mutation coordination
+## Mutation failures and retry
 
-Build, add, resume, and repair use the database mutation guard and daemon
-release protocol. Per-DB maintenance blocks search only for the target DB.
-Unrelated DBs remain searchable after the bounded worker-handle recycle.
-Partially updated target content is never published to search.
+Local RAG does not persist a DB maintenance state or writer lease. Build, add,
+resume, repair, and search are not rejected because of an earlier operation.
+If SQLite, Chroma, or an OS file operation reports a conflict, that invocation
+fails normally; correct the cause and run it again. The search daemon's own
+short-lived transport/runtime coordination remains independent of DB
+management.
 
 ## Development environment
 

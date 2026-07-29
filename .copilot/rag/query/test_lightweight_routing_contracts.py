@@ -120,16 +120,17 @@ class LightweightRoutingContractTests(unittest.TestCase):
         for path in (ROUTER, LOOKUP):
             text = path.read_text(encoding="utf-8")
             self.assertIn(
-                "local_rag_snapshot_older_than_30_days",
+                "local_rag_content_snapshot_older_than_30_days",
                 text,
             )
             self.assertRegex(
                 text,
                 r"(?:at most|exactly)\s+once in the current\s+chat",
             )
-            self.assertIn("`uri`", text)
+            self.assertIn("`source_url`", text)
+            self.assertIn("`source_permalink`", text)
             self.assertIn("## References", text)
-            self.assertIn("never show a raw uri", text.casefold())
+            self.assertRegex(text.casefold(), r"never\s+show a raw url")
 
     def test_no_skill_sets_a_model_or_creates_an_agent_contract(self) -> None:
         for path in (ROUTER, LOOKUP):

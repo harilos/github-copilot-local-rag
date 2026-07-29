@@ -213,8 +213,9 @@ canonical schemaは`rag-source-metadata-v1`です。1 Sourceは最大1 Provider�
 - `multiple_observed_roots`: 複数。Provider単位でSource IDを分けて追加します。
 
 URL解決は検索順位とevidence分類が終わった後に行われます。成功時は公開結果へ
-`uri`だけを追加します。permalinkがある場合は通常URLより優先します。設定なし、
-破損、path不正、生成失敗時はstored pathだけを返し、検索statusは変わりません。
+通常リンクを`source_url`、固定リンクを`source_permalink`として追加します。
+回答で参照する際は固定リンクを優先します。設定なし、破損、path不正、
+生成失敗時はstored pathだけを返し、検索statusは変わりません。
 
 ## 8. DBの更新と再開
 
@@ -248,6 +249,8 @@ URL解決は検索順位とevidence分類が終わった後に行われます。
 package作成はdaemonやDB全体へglobal lockを取りません。copy元を2回確認し、
 途中変更を検出したら失敗として終了します。出力はrelative pathだけのmanifestと
 SHA-256で検証します。
+package作成日時は内容更新日時と分けて記録します。配布、copy、再packageだけで
+`rag-wrapper.json`の`content_snapshot_at`を新しくしません。
 
 除外対象:
 

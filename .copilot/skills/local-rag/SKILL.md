@@ -177,11 +177,11 @@ If the search response contains:
 ```text
 database_freshness.status = stale
 database_freshness.chat_notice.code =
-  local_rag_snapshot_older_than_30_days
+  local_rag_content_snapshot_older_than_30_days
 ```
 
 show `database_freshness.chat_notice.message_ja` exactly once in the current
-chat.
+chat. Deduplicate it using `database_freshness.chat_notice.dedupe_key`.
 
 Do not show it again if a prior assistant message in this chat already did,
 even after changing databases. Do not persist notification state. Do not show
@@ -195,7 +195,7 @@ In the body:
 
 - cite only with plain IDs such as `[E1]`, `[E2]`, `[D1]`;
 - never link a citation ID;
-- never show a raw URI;
+- never show a raw URL;
 - never link a filename in the body.
 
 End with exactly one `## References` section. Include only IDs cited in the
@@ -204,9 +204,10 @@ body, in first-citation order, once each.
 For each cited item:
 
 1. derive the filename from the final component of its stored relative path;
-2. when `uri` exists, write `[E1] [filename.ext](URI)`;
-3. when `uri` is absent, write `[E1] filename.ext`, optionally followed by
-   the stored relative path as plain text;
+2. use `source_permalink` first and otherwise `source_url`, writing
+   `[E1] [filename.ext](URL)` when either exists;
+3. when neither link exists, write `[E1] filename.ext`, optionally followed
+   by the stored relative path as plain text;
 4. attach a Markdown link only to the filename.
 
 If the body cites nothing, still emit:
@@ -219,4 +220,4 @@ No sources were cited in the answer.
 
 Before sending, verify that body IDs are unlinked, exactly one References
 section is last, all and only cited IDs are listed, only filename text is
-linked, and no raw URI is visible.
+linked, and no raw URL is visible.

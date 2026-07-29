@@ -12,7 +12,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Sequence
 from urllib.parse import quote
 
@@ -63,7 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         child_arguments = _internal_search_arguments(arguments)
         explicit_root = _database_root(rag_root, str(parsed.db or ""))
         catalog_before = (
-            _catalog_path_sources(explicit_root)[1]
+            _catalog_fingerprint(explicit_root)
             if explicit_root is not None
             else None
         )
@@ -89,8 +88,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except subprocess.TimeoutExpired as exc:
         _write_bytes(sys.stderr, exc.stderr or b"")
+        timeout_payload = _wrapper_timeout_payload(
+            mode,
+            parsed,
+            public_timeout,
+        )
         _print_json(
-            _wrapper_timeout_payload(mode, parsed, public_timeout),
+            add_freshness(
+                timeout_payload,
+                _timeout_database_root(
+                    rag_root,
+                    mode=mode,
+                    parsed=parsed,
+                ),
+            ),
             ascii_safe=False,
         )
         return 124
@@ -104,8 +115,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_bytes(sys.stdout, completed.stdout)
         return int(completed.returncode)
     if deadline is not None and time.monotonic() >= deadline:
+        timeout_payload = _wrapper_timeout_payload(
+            mode,
+            parsed,
+            public_timeout,
+        )
         _print_json(
-            _wrapper_timeout_payload(mode, parsed, public_timeout),
+            add_freshness(
+                timeout_payload,
+                _timeout_database_root(
+                    rag_root,
+                    mode=mode,
+                    parsed=parsed,
+                ),
+            ),
             ascii_safe=False,
         )
         return 124
@@ -113,7 +136,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if mode == "detail":
         db_name = _detail_database_name(payload)
         output = copy.deepcopy(payload)
-        _collapse_links_to_uri(output)
         _strip_private_fields(output)
         output = add_freshness(
             output,
@@ -122,13 +144,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json(output, ascii_safe=_is_pointer(output))
         return int(completed.returncode)
 
-    resolution_payload = (
-        _compact_payload(payload, rag_root, explain=bool(parsed.explain))
-        if parsed.compact_json and parsed.result_delivery == "stdout"
-        else payload
-    )
     enriched = _resolve_source_uris(
-        resolution_payload,
+        payload,
         rag_root=rag_root,
         db_name=_payload_database_name(payload, parsed.db),
         explain=bool(parsed.explain),
@@ -142,8 +159,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _strip_private_fields(enriched)
     if deadline is not None and time.monotonic() >= deadline:
+        timeout_payload = _wrapper_timeout_payload(
+            mode,
+            parsed,
+            public_timeout,
+        )
         _print_json(
-            _wrapper_timeout_payload(mode, parsed, public_timeout),
+            add_freshness(
+                timeout_payload,
+                _timeout_database_root(
+                    rag_root,
+                    mode=mode,
+                    parsed=parsed,
+                ),
+            ),
             ascii_safe=False,
         )
         return 124
@@ -168,9 +197,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json(output, ascii_safe=True)
         return int(completed.returncode)
     if parsed.format == "prompt" and not parsed.compact_json:
-        _print_prompt(enriched, rag_root, explain=bool(parsed.explain))
+        _print_prompt(
+            add_freshness(
+                enriched,
+                _database_root(
+                    rag_root,
+                    _payload_database_name(enriched, parsed.db),
+                ),
+            ),
+            rag_root,
+            explain=bool(parsed.explain),
+        )
         return int(completed.returncode)
-    output = copy.deepcopy(enriched)
+    output = (
+        _compact_payload(enriched, rag_root, explain=bool(parsed.explain))
+        if parsed.compact_json and parsed.result_delivery == "stdout"
+        else copy.deepcopy(enriched)
+    )
     output.pop("_result_detail_items", None)
     output = add_freshness(
         output,
@@ -258,6 +301,22 @@ def _wrapper_timeout_payload(
         "db": str(parsed.db or ""),
         "query": question,
     }
+
+
+def _timeout_database_root(
+    rag_root: Path,
+    *,
+    mode: str,
+    parsed: argparse.Namespace,
+) -> Path | None:
+    if mode == "detail":
+        result_set_id = str(getattr(parsed, "result_set_id", "") or "")
+        db_name = _detail_database_name(
+            {"result_set_id": result_set_id}
+        )
+    else:
+        db_name = str(getattr(parsed, "db", "") or "")
+    return _database_root(rag_root, db_name)
 
 
 def _search_parser() -> argparse.ArgumentParser:
@@ -407,7 +466,7 @@ def _resolve_source_uris(
         return output
     output = copy.deepcopy(payload)
     _remove_uris(output)
-    source_ids, catalog_fingerprint = _catalog_path_sources(db_root)
+    catalog_fingerprint = _catalog_fingerprint(db_root)
     if expected_catalog_fingerprint is None:
         return output
     if (
@@ -415,7 +474,6 @@ def _resolve_source_uris(
         and catalog_fingerprint != expected_catalog_fingerprint
     ):
         return output
-    _inject_source_ids(output, source_ids)
     tool_root = rag_root / "gen_db" / "software_rag_tool"
     sys.path.insert(0, str(tool_root))
     try:
@@ -435,8 +493,7 @@ def _resolve_source_uris(
             sys.path.remove(str(tool_root))
         except ValueError:
             pass
-    _collapse_links_to_uri(output)
-    _current_sources, current_fingerprint = _catalog_path_sources(db_root)
+    current_fingerprint = _catalog_fingerprint(db_root)
     if catalog_fingerprint != current_fingerprint:
         _remove_uris(output)
     return output
@@ -453,26 +510,25 @@ def _discard_uris_if_catalog_changed(
     if db_root is None or expected_fingerprint is None:
         _remove_uris(payload)
         return True
-    _sources, current = _catalog_path_sources(db_root)
+    current = _catalog_fingerprint(db_root)
     if current != expected_fingerprint:
         _remove_uris(payload)
         return True
     return False
 
 
-def _catalog_path_sources(
-    db_root: Path,
-) -> tuple[dict[str, dict[str, Any]], str]:
+def _catalog_fingerprint(db_root: Path) -> str | None:
+    """Fingerprint the catalog without deriving a Source from a result path."""
     catalog = db_root / "catalog.sqlite"
     try:
         catalog_stat = catalog.lstat()
     except OSError:
-        return {}, "unavailable"
+        return None
     if (
         stat.S_ISLNK(catalog_stat.st_mode)
         or not stat.S_ISREG(catalog_stat.st_mode)
     ):
-        return {}, "unavailable"
+        return None
     for companion in (
         Path(str(catalog) + "-wal"),
         Path(str(catalog) + "-shm"),
@@ -482,12 +538,12 @@ def _catalog_path_sources(
         except FileNotFoundError:
             continue
         except OSError:
-            return {}, "unavailable"
+            return None
         if (
             stat.S_ISLNK(companion_stat.st_mode)
             or not stat.S_ISREG(companion_stat.st_mode)
         ):
-            return {}, "unavailable"
+            return None
     try:
         with _connect_readonly(catalog) as connection:
             columns = {
@@ -497,7 +553,7 @@ def _catalog_path_sources(
                 )
             }
             if not {"source_id", "path"}.issubset(columns):
-                return {}, "unavailable"
+                return None
             content_hash = (
                 "content_hash" if "content_hash" in columns else "NULL"
             )
@@ -517,8 +573,7 @@ def _catalog_path_sources(
                 """
             ).fetchall()
     except (OSError, sqlite3.Error, ValueError):
-        return {}, "unavailable"
-    values: dict[str, dict[str, set[str]]] = {}
+        return None
     fingerprint = hashlib.sha256()
     for source_id, path, content_hash_value in rows:
         fingerprint.update(
@@ -533,15 +588,6 @@ def _catalog_path_sources(
             ).encode("utf-8")
         )
         fingerprint.update(b"\n")
-        normalized = _canonical_relative_path(path)
-        if normalized:
-            entry = values.setdefault(
-                normalized,
-                {"source_ids": set(), "content_hashes": set()},
-            )
-            entry["source_ids"].add(str(source_id))
-            if content_hash_value:
-                entry["content_hashes"].add(str(content_hash_value))
     stat_parts: list[object] = []
     for candidate in (catalog, Path(str(catalog) + "-wal")):
         try:
@@ -558,81 +604,7 @@ def _catalog_path_sources(
         except OSError:
             stat_parts.append((candidate.name, "missing"))
     fingerprint.update(repr(stat_parts).encode("utf-8"))
-    public = {
-        path: {
-            "source_id": next(iter(value["source_ids"])),
-            "content_hashes": frozenset(value["content_hashes"]),
-        }
-        for path, value in values.items()
-        if len(value["source_ids"]) == 1
-    }
-    return public, fingerprint.hexdigest()
-
-
-def _inject_source_ids(
-    payload: dict[str, Any],
-    source_ids: dict[str, dict[str, Any]],
-) -> None:
-    for key in _RESULT_LISTS:
-        for item in payload.get(key) or []:
-            if not isinstance(item, dict):
-                continue
-            source = item.get("source")
-            source_value = source if isinstance(source, dict) else None
-            path = _canonical_relative_path(
-                source_value.get("path")
-                if source_value is not None
-                else item.get("path")
-            )
-            candidate = source_ids.get(path)
-            if not candidate:
-                continue
-            if source_value is not None:
-                revision = str(source_value.get("revision") or "")
-                hashes = candidate["content_hashes"]
-                if (
-                    revision.startswith("sha256:")
-                    and hashes
-                    and revision.removeprefix("sha256:") not in hashes
-                ):
-                    continue
-                source_value["_source_id"] = candidate["source_id"]
-            else:
-                item["_source_id"] = candidate["source_id"]
-
-
-def _canonical_relative_path(value: object) -> str:
-    text = str(value or "").strip().replace("\\", "/")
-    if (
-        not text
-        or PurePosixPath(text).is_absolute()
-        or PureWindowsPath(text).is_absolute()
-        or bool(PureWindowsPath(text).drive)
-    ):
-        return ""
-    parts = PurePosixPath(text.strip("/")).parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        return ""
-    return PurePosixPath(*parts).as_posix()
-
-
-def _collapse_links_to_uri(payload: dict[str, Any]) -> None:
-    for key in _RESULT_LISTS:
-        for item in payload.get(key) or []:
-            if not isinstance(item, dict):
-                continue
-            existing = str(item.pop("uri", "") or "")
-            final = str(
-                item.pop("source_permalink", "")
-                or item.pop("source_url", "")
-                or existing
-                or ""
-            )
-            item.pop("source_provider", None)
-            item.pop("source_link_status", None)
-            item.pop("source_link_error", None)
-            if final:
-                item["uri"] = final
+    return fingerprint.hexdigest()
 
 
 def _remove_uris(payload: dict[str, Any]) -> None:
@@ -717,7 +689,18 @@ def _print_prompt(
     try:
         from search_output import payload_to_text
 
-        print(payload_to_text(payload, "prompt", explain=explain))
+        rendered = payload_to_text(payload, "prompt", explain=explain)
+        freshness = payload.get("database_freshness")
+        notice = (
+            freshness.get("chat_notice")
+            if isinstance(freshness, dict)
+            else None
+        )
+        if isinstance(notice, dict):
+            message = str(notice.get("message_ja") or "").strip()
+            if message:
+                rendered = f"{rendered}\n\n# Database freshness\n\n{message}"
+        print(rendered)
     finally:
         try:
             sys.path.remove(str(query_root))

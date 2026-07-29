@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,12 +20,43 @@ sys.path.insert(0, str(QUERY_ROOT))
 from rag_worker import (  # noqa: E402
     _execute_search_payload,
     _final_dense_loaded,
+    _wrapper_handoff_environment,
 )
 from rag_manager import PersistentWorkerManager  # noqa: E402
 from ragd import _drain_worker_then_stop_listener  # noqa: E402
 
 
 class PersistentDaemonContracts(unittest.TestCase):
+    def test_private_wrapper_handoff_environment_is_request_scoped(
+        self,
+    ) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"LOCAL_RAG_WRAPPER_INTERNAL": "previous"},
+        ):
+            with _wrapper_handoff_environment(True):
+                self.assertEqual(
+                    "1",
+                    os.environ["LOCAL_RAG_WRAPPER_INTERNAL"],
+                )
+            self.assertEqual(
+                "previous",
+                os.environ["LOCAL_RAG_WRAPPER_INTERNAL"],
+            )
+        with mock.patch.dict(
+            os.environ,
+            {"LOCAL_RAG_WRAPPER_INTERNAL": "1"},
+        ):
+            with _wrapper_handoff_environment(False):
+                self.assertNotIn(
+                    "LOCAL_RAG_WRAPPER_INTERNAL",
+                    os.environ,
+                )
+            self.assertEqual(
+                "1",
+                os.environ["LOCAL_RAG_WRAPPER_INTERNAL"],
+            )
+
     def test_search_response_cannot_regress_completed_warmup(self) -> None:
         ready = threading.Event()
         self.assertFalse(_final_dense_loaded(False, ready))

@@ -15,7 +15,7 @@ Copilotが勝手に行わない契約になっています。
 - 識別子の完全一致確認とnear-collision防止
 - 一度の検索で生成する初回summaryと、再検索しないfollow-up detail
 - 文書の見出し、表ヘッダー、前後段落を使う構造的context
-- Source単位の任意Webリンクと、公開出力の単一`uri`
+- Source単位の任意Webリンク（通常URLと固定リンクを区別）
 - 複数DB、複数Source、増分更新、再開、索引修復
 - Windowsの永続daemonと直接`python.exe`起動
 - 人間向けLocal RAG Manager
@@ -110,8 +110,10 @@ Windows PowerShell:
 Windowsでは`cmd.exe /c`、nested PowerShell、batch wrapper、PATH上の
 `python`探索、JSON stdin pipelineを通常検索に使いません。
 
-検索結果の`database_freshness.status`が`stale`の場合、Copilotは同じchatで
-警告を1回だけ表示します。参照先が解決できた項目には`uri`が付きます。
+検索結果の`database_freshness.status`が`stale`の場合、Copilotは内容更新時点が
+古いことを示す警告を同じchatで1回だけ表示します。参照先が解決できた項目には
+`source_url`が付き、
+固定リンクが有効なら`source_permalink`も付きます。
 回答本文では`[E1]`のようなIDだけを引用し、末尾の`References`でfile名へ
 リンクします。URLがない場合でも根拠のauthorityや検索順位は変わりません。
 
@@ -200,6 +202,8 @@ hashを確認し、途中で変化した場合は成功を偽装せず中断し�
 relative pathとSHA-256を持ちます。venv、daemon state、lock、temporary file、
 credential、backup sidecarは含めません。activeなSource Metadataには内部URLが
 含まれ得るため、package自体を機密dataとして扱ってください。
+作成日時は`packaged_at`へ別記し、copyや再packageで
+`content_snapshot_at`（内容更新時点）を進めません。
 
 ## 保存pathとscan範囲
 
@@ -223,8 +227,10 @@ root名を含まない旧DBとはpath由来document IDが変わるため、そ�
 - `document_results`: 多様な関連文書card
 - `warnings`: table header不足などの制約
 - `coverage`: 取得範囲の要約
-- `database_freshness`: 配布・全体更新からの経過
-- `uri`: 解決済み参照先。設定ruleやcredentialは含まない
+- `database_freshness`: `rag-wrapper.json`に記録された内容更新時点からの経過
+- `source_url`: 解決済みの通常参照先
+- `source_permalink`: 設定時だけ返る固定参照先
+- `source_provider`: URLを生成したSource種別
 
 初回file deliveryはOS temporary directoryへUTF-8 JSON bundleを原子的に公開し、
 小さいpointerをstdoutへ返します。「もっと詳しく」のfollow-upは同じ

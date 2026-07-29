@@ -77,6 +77,10 @@ class PackageContractTests(unittest.TestCase):
         self.assertFalse(any("/logs/" in path for path in paths))
         self.assertFalse(any(".venv" in path for path in paths))
         self.assertIn(
+            ".copilot/rag/dbs/demo-rag/rag-wrapper.json",
+            paths,
+        )
+        self.assertNotIn(
             ".copilot/rag/dbs/demo-rag/db-snapshot.json",
             paths,
         )
@@ -85,15 +89,15 @@ class PackageContractTests(unittest.TestCase):
             [
                 {
                     "name": "demo-rag",
-                    "snapshot_at": "2026-01-02T03:04:00Z",
-                    "snapshot_reason": "distribution",
+                    "content_snapshot_at": "2025-01-02T00:00:00Z",
+                    "content_snapshot_reason": "rag_wrapper",
                 }
             ],
         )
         with zipfile.ZipFile(output) as archive:
-            snapshot = json.loads(
+            wrapper = json.loads(
                 archive.read(
-                    ".copilot/rag/dbs/demo-rag/db-snapshot.json"
+                    ".copilot/rag/dbs/demo-rag/rag-wrapper.json"
                 )
             )
             version = json.loads(
@@ -105,13 +109,19 @@ class PackageContractTests(unittest.TestCase):
             catalog_data = archive.read(
                 ".copilot/rag/dbs/demo-rag/catalog.sqlite"
             )
-        self.assertEqual(snapshot["reason"], "distribution")
         self.assertEqual(
-            snapshot["schema_version"],
-            "local-rag-db-snapshot-v1",
+            wrapper["schema_version"],
+            "local-rag.wrapper.v1",
         )
-        self.assertEqual(snapshot["snapshot_at"], "2026-01-02T03:04:00Z")
-        self.assertEqual(version["snapshot_reason"], "distribution")
+        self.assertEqual(
+            wrapper["content_snapshot_at"],
+            "2025-01-02T00:00:00Z",
+        )
+        self.assertEqual(wrapper["packaged_at"], "2026-01-02T03:04:00Z")
+        self.assertEqual(
+            version,
+            json.loads(source_version.decode("utf-8")),
+        )
         self.assertEqual(copied_links, source_links)
         catalog_copy = self.root / "catalog-copy.sqlite"
         catalog_copy.write_bytes(catalog_data)
@@ -162,6 +172,69 @@ class PackageContractTests(unittest.TestCase):
         )
         self.assertTrue(runtime.is_file())
 
+    def test_repack_preserves_content_snapshot_and_only_advances_package_time(
+        self,
+    ) -> None:
+        first = self.root / "first.zip"
+        packages.create_distribution_package(
+            self.home,
+            first,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        extracted = self.root / "repack-source"
+        with zipfile.ZipFile(first) as archive:
+            archive.extractall(extracted)
+
+        second = self.root / "second.zip"
+        packages.create_distribution_package(
+            extracted / ".copilot",
+            second,
+            created_at=datetime(2026, 2, 3, tzinfo=timezone.utc),
+        )
+        with zipfile.ZipFile(second) as archive:
+            wrapper = json.loads(
+                archive.read(
+                    ".copilot/rag/dbs/demo-rag/rag-wrapper.json"
+                )
+            )
+        self.assertEqual(
+            "2025-01-02T00:00:00Z",
+            wrapper["content_snapshot_at"],
+        )
+        self.assertEqual(
+            "2026-02-03T00:00:00Z",
+            wrapper["packaged_at"],
+        )
+
+    def test_missing_wrapper_stays_unknown_and_never_uses_legacy_dates(
+        self,
+    ) -> None:
+        (self.home / "rag/dbs/demo-rag/rag-wrapper.json").unlink()
+        output = self.root / "unknown-freshness.zip"
+        result = packages.create_distribution_package(
+            self.home,
+            output,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            [
+                {
+                    "name": "demo-rag",
+                    "content_snapshot_at": None,
+                    "content_snapshot_reason": "unknown",
+                }
+            ],
+            result["manifest"]["dbs"],
+        )
+        with zipfile.ZipFile(output) as archive:
+            wrapper = json.loads(
+                archive.read(
+                    ".copilot/rag/dbs/demo-rag/rag-wrapper.json"
+                )
+            )
+        self.assertIsNone(wrapper["content_snapshot_at"])
+        self.assertEqual("2026-01-02T00:00:00Z", wrapper["packaged_at"])
+
     @unittest.skipIf(
         not hasattr(os, "symlink"),
         "symbolic links unavailable",
@@ -195,7 +268,7 @@ class PackageContractTests(unittest.TestCase):
         self.assertNotEqual(0, completed.returncode)
         self.assertFalse(any(outside.iterdir()))
 
-    def test_bootstrap_refuses_existing_database_before_any_write(
+    def test_bootstrap_safely_replaces_existing_database_only(
         self,
     ) -> None:
         archive_path = self.root / "existing-db.zip"
@@ -208,6 +281,10 @@ class PackageContractTests(unittest.TestCase):
         existing.mkdir(parents=True)
         sentinel = existing / "sentinel.txt"
         sentinel.write_text("keep", encoding="utf-8")
+        unrelated_db = target / "rag/dbs/unrelated-rag"
+        unrelated_db.mkdir(parents=True)
+        unrelated_sentinel = unrelated_db / "sentinel.txt"
+        unrelated_sentinel.write_text("unrelated", encoding="utf-8")
         completed = subprocess.run(
             [
                 sys.executable,
@@ -220,16 +297,130 @@ class PackageContractTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
         )
-        self.assertNotEqual(0, completed.returncode)
-        self.assertEqual("keep", sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(sentinel.exists())
+        self.assertTrue((existing / "VERSION.json").is_file())
         self.assertEqual(
-            ["rag/dbs/demo-rag/sentinel.txt"],
-            sorted(
-                path.relative_to(target).as_posix()
-                for path in target.rglob("*")
-                if path.is_file()
-            ),
+            "unrelated",
+            unrelated_sentinel.read_text(encoding="utf-8"),
         )
+        self.assertEqual(
+            [],
+            list((target / "rag/dbs").glob(".*.previous")),
+        )
+
+    def test_staged_database_validation_failure_preserves_existing(
+        self,
+    ) -> None:
+        output = self.root / "invalid-staged-admin"
+        packages.create_admin_transfer_package(self.home, output)
+        spec = importlib.util.spec_from_file_location(
+            "generated_invalid_stage_bootstrap",
+            output / "bootstrap.py",
+        )
+        assert spec is not None and spec.loader is not None
+        bootstrap = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bootstrap)
+        shutil.rmtree(output / "__pycache__", ignore_errors=True)
+        target = self.root / "invalid-stage-target"
+        existing = target / "rag/dbs/demo-rag"
+        existing.mkdir(parents=True)
+        sentinel = existing / "sentinel.txt"
+        sentinel.write_text("original", encoding="utf-8")
+        original_copy = bootstrap.copy_atomic
+        corrupted = False
+
+        def corrupt_staged_copy(source: Path, destination: Path) -> None:
+            nonlocal corrupted
+            original_copy(source, destination)
+            if (
+                not corrupted
+                and any(
+                    part.endswith(".incoming")
+                    for part in Path(destination).parts
+                )
+            ):
+                Path(destination).write_bytes(b"corrupted")
+                corrupted = True
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    str(output / "bootstrap.py"),
+                    str(target),
+                    "--skip-runtime-setup",
+                ],
+            ),
+            mock.patch.object(
+                bootstrap,
+                "copy_atomic",
+                side_effect=corrupt_staged_copy,
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            bootstrap.main()
+        self.assertTrue(corrupted)
+        self.assertEqual("original", sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [],
+            list((target / "rag/dbs").glob(".*.previous")),
+        )
+
+    def test_manifest_cannot_write_an_undeclared_database(self) -> None:
+        manifest = {
+            "schema": packages.PACKAGE_SCHEMA,
+            "kind": "distribution",
+            "created": "2026-01-01T00:00:00Z",
+            "tool": {
+                "name": packages.PACKAGE_TOOL_NAME,
+                "version": "1.0.0",
+            },
+            "dbs": [
+                {
+                    "name": "declared-rag",
+                    "content_snapshot_at": (
+                        "2026-01-01T00:00:00Z"
+                    ),
+                    "content_snapshot_reason": "full_update",
+                }
+            ],
+            "files": [
+                {
+                    "path": ".copilot/rag/dbs/unrelated-rag/db.json",
+                    "size": 0,
+                    "sha256": "0" * 64,
+                }
+            ],
+            "total": {"files": 1, "bytes": 0},
+        }
+        with self.assertRaisesRegex(
+            packages.PackageError,
+            "package_manifest_dbs_invalid",
+        ):
+            packages._validate_manifest_shape(
+                manifest,
+                expected_kind="distribution",
+            )
+
+    def test_import_package_uses_safe_bootstrap_without_runtime_changes(
+        self,
+    ) -> None:
+        output = self.root / "manager-import"
+        packages.create_admin_transfer_package(self.home, output)
+        target = self.root / "manager-target"
+        existing = target / "rag/dbs/demo-rag"
+        existing.mkdir(parents=True)
+        (existing / "sentinel.txt").write_text("old", encoding="utf-8")
+
+        result = packages.import_package(output, target)
+
+        self.assertEqual("imported", result["status"])
+        self.assertEqual(["demo-rag"], result["databases"])
+        self.assertFalse((existing / "sentinel.txt").exists())
+        self.assertTrue((existing / "db.json").is_file())
+        self.assertFalse((target / "rag/query/.venv").exists())
 
     def test_bootstrap_rolls_back_all_databases_on_publish_failure(
         self,
@@ -249,6 +440,14 @@ class PackageContractTests(unittest.TestCase):
         spec.loader.exec_module(bootstrap)
         shutil.rmtree(output / "__pycache__", ignore_errors=True)
         target = self.root / "multi-db-target"
+        for name, marker in (
+            ("demo-rag", "old-demo"),
+            ("second-rag", "old-second"),
+            ("unrelated-rag", "unrelated"),
+        ):
+            root = target / "rag/dbs" / name
+            root.mkdir(parents=True)
+            (root / "sentinel.txt").write_text(marker, encoding="utf-8")
         original_replace = os.replace
         published = 0
 
@@ -284,8 +483,25 @@ class PackageContractTests(unittest.TestCase):
         ):
             bootstrap.main()
         installed_dbs = target / "rag/dbs"
-        self.assertFalse((installed_dbs / "demo-rag").exists())
-        self.assertFalse((installed_dbs / "second-rag").exists())
+        self.assertEqual(
+            "old-demo",
+            (installed_dbs / "demo-rag/sentinel.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual(
+            "old-second",
+            (installed_dbs / "second-rag/sentinel.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual(
+            "unrelated",
+            (installed_dbs / "unrelated-rag/sentinel.txt").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual([], list(installed_dbs.glob(".*.previous")))
 
     def test_admin_transfer_preserves_state_and_makes_add_paths_portable(
         self,
@@ -324,8 +540,8 @@ class PackageContractTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        original_marker = self._read_bytes(
-            self.home / "rag/dbs/demo-rag/db-snapshot.json"
+        original_wrapper = self._read_bytes(
+            self.home / "rag/dbs/demo-rag/rag-wrapper.json"
         )
         source_state = self._read_bytes(
             self.home
@@ -346,8 +562,8 @@ class PackageContractTests(unittest.TestCase):
             [
                 {
                     "name": "demo-rag",
-                    "snapshot_at": "2025-01-02T00:00:00Z",
-                    "snapshot_reason": "full_update",
+                    "content_snapshot_at": "2025-01-02T00:00:00Z",
+                    "content_snapshot_reason": "rag_wrapper",
                 }
             ],
             manifest["dbs"],
@@ -375,9 +591,9 @@ class PackageContractTests(unittest.TestCase):
         )
         self.assertEqual(
             self._read_bytes(
-                output / ".copilot/rag/dbs/demo-rag/db-snapshot.json"
+                output / ".copilot/rag/dbs/demo-rag/rag-wrapper.json"
             ),
-            original_marker,
+            original_wrapper,
         )
         progress = json.loads(
             (
@@ -1017,6 +1233,12 @@ class PackageContractTests(unittest.TestCase):
             db / "VERSION.json",
             '{"created_at":"2025-01-01T00:00:00Z",'
             '"snapshot_reason":"original"}\n',
+        )
+        self._write(
+            db / "rag-wrapper.json",
+            '{"schema_version":"local-rag.wrapper.v1",'
+            '"content_snapshot_at":"2025-01-02T00:00:00Z",'
+            '"packaged_at":"2025-01-03T00:00:00Z"}\n',
         )
         self._write(
             db / "db-snapshot.json",

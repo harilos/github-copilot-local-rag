@@ -145,4 +145,9 @@ def payload_to_prompt(
 
 
 def _preferred_source_link(item: dict[str, Any]) -> str:
-    return str(item.get("uri") or "")
+    return str(
+        item.get("source_permalink")
+        or item.get("source_url")
+        or item.get("uri")
+        or ""
+    )

@@ -21,8 +21,10 @@ No unresolved P0 design finding remains after adopting these constraints:
 
 - the lower search returns relative stored paths and never reads the
   Source-Link sidecar;
-- upper URI resolution is fail-open and never guesses a Source;
-- an ambiguous or unstable catalog path produces no URI;
+- exact Source identity crosses only the trusted lower-to-upper subprocess
+  handoff;
+- upper Link resolution is fail-open and never guesses a Source from a path;
+- a missing private identity or unstable catalog produces no Link;
 - the ready result bundle is published only after URI enrichment;
 - distribution and administrative transfer use separate allowlists.
 
@@ -60,13 +62,12 @@ status normalization remain frozen.
 
 ### Result bundle boundary
 
-The final user instruction moves all URI resolution to the upper wrapper and
-standardizes the public field as `uri`; it therefore supersedes the earlier
-assumption that the lower publisher's legacy `source_url` /
-`source_permalink` projection would remain canonical. The bounded presentation
-changes allowed here are: carry `uri` through summary and cached detail,
-prefer it in prompt rendering, and keep body citation IDs unlinked. They must
-not alter retrieval, ranking, packing, result membership, or scores.
+The final contract moves all URI resolution to the upper wrapper while
+retaining the established `source_url` / `source_permalink` distinction.
+The bounded presentation changes allowed here are: carry both fields through
+summary and cached detail, prefer the permalink in references, and keep body
+citation IDs unlinked. They must not alter retrieval, ranking, packing, result
+membership, or scores.
 
 The upper search wrapper:
 
@@ -147,19 +148,16 @@ For one valid search request:
 2. invoke lower `query/search.py` exactly once;
 3. obtain one full JSON payload through the internal parent-wrapper mode;
 4. confirm that every candidate path is a canonical relative stored path;
-5. resolve a Source only through the selected DB's current visible catalog;
+5. consume the exact private Source identity supplied by the lower process;
 6. remove any unexpected pre-existing URI fields;
 7. resolve the current Source Link at most once;
-8. attach optional URI fields in memory;
+8. attach optional Source Link fields in memory before compact projection;
 9. publish the result bundle once when file delivery is requested; and
 10. emit one JSON result or pointer.
 
 No retry, second database, secondary lower search, or HTTP request is allowed.
-The upper agent may remove only a system-facing lookup phrase such as
-“search from Local RAG” before passing the latest human-authored semantic
-question. Every semantic character, identifier, punctuation mark, and
-constraint after that routing-only removal remains verbatim; these two
-requirements are complementary rather than contradictory.
+The wrapper passes the latest human-authored semantic question verbatim. It
+does not remove routing phrases, keywordize, split, or rewrite the question.
 
 ### Follow-up details
 
@@ -172,25 +170,20 @@ If the intended public surface truly consists of only two root commands, the
 detail operation must be a subcommand or mode of the root search wrapper.
 Adding a third public lookup script would contradict that boundary.
 
-## Safe path-to-Source resolution
+## Safe Source handoff and path resolution
 
-The lower engine intentionally does not expose public or private Source IDs in
-the final result. The upper wrapper may derive Source identity from the
-catalog only under the following conservative contract:
+The lower engine does not expose Source IDs in direct public output. For the
+one trusted root-wrapper invocation it retains `_source_id` alongside the full
+canonical path, including through the persistent daemon. The upper wrapper:
 
-- consider only currently visible documents;
-- ignore null and empty `source_id` values;
-- compare canonical `/`-separated relative paths without case folding;
-- reject absolute POSIX paths, drive-qualified paths, UNC paths, traversal,
-  and truncated paths;
-- accept a path only when all current matching rows identify exactly one
-  distinct Source;
-- treat duplicate current rows for the same Source as the same identity;
-- use path plus content hash for evidence when the evidence revision provides
-  that hash;
-- return no URI when the catalog is missing, unreadable, inconsistent, or
-  ambiguous; and
-- never search another Source or database as a fallback.
+- rejects absolute POSIX paths, drive-qualified paths, UNC paths, traversal,
+  and unsafe paths;
+- resolves the exact Source and full path before compact projection;
+- never joins a result to Source Metadata by basename or path-only lookup;
+- removes the private ID before stdout, prompt, summary, manifest, or cached
+  detail publication;
+- returns no Link when the private ID is absent or invalid; and
+- never searches another Source or database as a fallback.
 
 To prevent a result from being associated with a catalog state newer than the
 retrieval, the search client must remain an active reader through upper
@@ -209,8 +202,7 @@ path-only result unchanged:
 - no Source-Link sidecar;
 - malformed or unsupported sidecar;
 - missing Source setting;
-- catalog path with no Source;
-- ambiguous path-to-Source mapping;
+- missing exact Source identity;
 - disabled or incomplete Link;
 - unsafe stored path;
 - provider validation failure;
@@ -355,13 +347,14 @@ data through the ordinary lower CLI.
 Gate: file-delivered summary and expanded details must retain the same
 structural context as the baseline bundle behavior.
 
-### P1-02 — Stable path-to-Source association
+### P1-02 — Stable private Source handoff
 
-Path uniqueness alone does not protect against a catalog mutation between
-retrieval and URI publication.
+Path uniqueness is not Source identity and cannot distinguish equal stored
+paths owned by different Sources.
 
-Gate: retain a read boundary through publication or prove the DB snapshot did
-not change. On uncertainty, publish no URI.
+Gate: retain the exact private Source ID across the trusted lower/daemon/upper
+handoff, remove it before publication, and also prove the catalog snapshot did
+not change. On uncertainty, publish no Link.
 
 ### P1-03 — Installer tombstones
 
@@ -415,7 +408,8 @@ The only lower-search exceptions are:
 
 1. removal of Source-Link/URI presentation from
    `software_rag_tool/search_api.py`; and
-2. the minimal internal full-payload handoff in `query/search.py`.
+2. the minimal internal full-payload/private-ID handoff in `query/search.py`
+   and request-scoped forwarding in `query/rag_worker.py`.
 
 Review these exceptions separately and reject any change to scores, ordering,
 selected chunks, budgets, status, or answerability.
@@ -428,8 +422,9 @@ selected chunks, budgets, status, or answerability.
 4. Implement the root list wrapper and database-list v2 projection.
 5. Implement the root search wrapper with path validation and path-only
    fail-open.
-6. Add stable catalog path-to-Source resolution.
-7. Resolve URIs in memory and publish bundles once.
+6. Add the exact request-scoped private Source handoff.
+7. Resolve Source Links from exact identity and full path, then publish
+   bundles once.
 8. Add the per-Source manager state engine.
 9. Refactor the human Manager menus and provider workflows.
 10. Replace generic migration with the bounded SharePoint legacy adapter.

@@ -52,15 +52,18 @@ antecedents would materially change database selection or search meaning, ask
 the human to clarify before listing or searching.
 
 When `database_freshness.chat_notice.code` is
-`local_rag_snapshot_older_than_30_days`, show its Japanese message at most
-once in the current chat. Check only prior assistant messages in this chat.
+`local_rag_content_snapshot_older_than_30_days`, show its Japanese message
+at most once in the current chat. Deduplicate by
+`database_freshness.chat_notice.dedupe_key`. Check only prior assistant
+messages in this chat.
 Do not persist notification state. A new chat may show it once again.
 
 Answer with body citations such as `[E1]` that are never links. End every RAG
 answer with exactly one `## References` section containing only cited IDs.
-When an item has `uri`, format the entry as `[E1] [filename.ext](URI)` and
-attach the link only to the filename. Never show a raw URI. With no `uri`,
-show the filename as plain text and optionally the stored relative path.
+Use `source_permalink` first, otherwise `source_url`, and format the entry as
+`[E1] [filename.ext](URL)`. Attach the link only to the filename and never
+show a raw URL. With neither field, show the filename as plain text and
+optionally the stored relative path.
 
 Do not require a particular Copilot model. Ordinary lookup must not use a
 subagent. Shell selection changes command syntax only; the final answer is

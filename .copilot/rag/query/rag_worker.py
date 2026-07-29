@@ -4,8 +4,26 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+
+@contextmanager
+def _wrapper_handoff_environment(enabled: bool):
+    """Expose the private handoff bit only while one worker request runs."""
+    previous = os.environ.get("LOCAL_RAG_WRAPPER_INTERNAL")
+    if enabled:
+        os.environ["LOCAL_RAG_WRAPPER_INTERNAL"] = "1"
+    else:
+        os.environ.pop("LOCAL_RAG_WRAPPER_INTERNAL", None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("LOCAL_RAG_WRAPPER_INTERNAL", None)
+        else:
+            os.environ["LOCAL_RAG_WRAPPER_INTERNAL"] = previous
 
 
 def _final_dense_loaded(
@@ -171,13 +189,16 @@ def worker_main(
             dense_loaded = True
         started = time.monotonic()
         try:
-            result = _execute_search_payload(
-                payload,
-                run_adaptive_search_payload=run_adaptive_search_payload,
-                run_search_payload=run_search_payload,
-                deadline_monotonic=deadline_monotonic,
-                dense_runtime_ready=dense_loaded,
-            )
+            with _wrapper_handoff_environment(
+                bool(payload.get("_wrapper_private_handoff"))
+            ):
+                result = _execute_search_payload(
+                    payload,
+                    run_adaptive_search_payload=run_adaptive_search_payload,
+                    run_search_payload=run_search_payload,
+                    deadline_monotonic=deadline_monotonic,
+                    dense_runtime_ready=dense_loaded,
+                )
             result = normalize_search_contract(result)
             if payload.get("compact_json"):
                 result = compact_search_contract(

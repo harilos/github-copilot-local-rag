@@ -237,6 +237,59 @@ class PublicDatabaseListWrapperTests(unittest.TestCase):
             summary["sources"][1:],
         )
 
+    def test_safe_legacy_sharepoint_is_labeled_without_management_state(
+        self,
+    ) -> None:
+        (self.db / "source-links.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-links-v1",
+                    "database": "example-rag",
+                    "revision": 1,
+                    "sources": [
+                        {
+                            "source_id": "private-1",
+                            "display_name": "設計資料",
+                            "mappings": [
+                                {
+                                    "mapping_id": (
+                                        "00000000-0000-0000-"
+                                        "0000-000000000001"
+                                    ),
+                                    "enabled": True,
+                                    "path_prefix": "Root",
+                                    "provider": "sharepoint",
+                                    "strategy": "append-relative-path",
+                                    "settings": {
+                                        "source_web_root": (
+                                            "https://example.invalid/"
+                                            "Shared%20Documents"
+                                        )
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        summary = database_list._content_summary(
+            self.db,
+            "example-rag",
+        )
+
+        configured = next(
+            source
+            for source in summary["sources"]
+            if source["name"] == "設計資料"
+        )
+        self.assertEqual("sharepoint", configured["type"])
+        self.assertEqual("SharePoint", configured["label"])
+        self.assertEqual("complete", summary["content_summary_status"])
+        self.assertNotIn("private-1", json.dumps(summary, ensure_ascii=False))
+
     def test_text_output_is_rendered_from_one_lower_json_call(self) -> None:
         lower = {
             "databases": [
@@ -387,6 +440,15 @@ class PublicSearchWrapperTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        (self.db / freshness.WRAPPER_METADATA_NAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": freshness.WRAPPER_METADATA_SCHEMA,
+                    "content_snapshot_at": old,
+                }
+            ),
+            encoding="utf-8",
+        )
         self.lower_payload = {
             "schema": "local-rag.search.v1",
             "status": "ok",
@@ -400,6 +462,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
                         "path": "Root/docs/a.md",
                         "title": "A",
                         "revision": "sha256:abc123",
+                        "_source_id": "private-source",
                     },
                     "text": "Evidence",
                 }
@@ -411,6 +474,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
                     "id": "D1",
                     "path": "Root/docs/a.md",
                     "preview": "Preview",
+                    "_source_id": "private-source",
                 }
             ],
             "_result_detail_items": [
@@ -418,6 +482,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
                     "item_id": "E1",
                     "path": "Root/docs/a.md",
                     "matched_excerpt": "Evidence",
+                    "_source_id": "private-source",
                 }
             ],
             "warnings": [],
@@ -466,7 +531,9 @@ class PublicSearchWrapperTests(unittest.TestCase):
             self.assertEqual(2, mixed_exit.exception.code)
             run.assert_not_called()
 
-    def test_search_calls_lower_once_adds_uri_and_stale_notice(self) -> None:
+    def test_search_calls_lower_once_adds_source_links_and_stale_notice(
+        self,
+    ) -> None:
         code, stdout, stderr, run = self._run(
             [
                 "--db",
@@ -499,15 +566,15 @@ class PublicSearchWrapperTests(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(
             "https://docs.example.invalid/base/docs/a.md",
-            payload["evidence"][0]["uri"],
+            payload["evidence"][0]["source_url"],
         )
         self.assertEqual(
             "https://docs.example.invalid/base/docs/a.md",
-            payload["document_results"][0]["uri"],
+            payload["document_results"][0]["source_url"],
         )
+        self.assertEqual("other", payload["evidence"][0]["source_provider"])
         self.assertNotIn("_source_id", stdout)
-        self.assertNotIn("source_url", stdout)
-        self.assertNotIn("source_permalink", stdout)
+        self.assertNotIn('"uri"', stdout)
         self.assertEqual(
             "stale",
             payload["database_freshness"]["status"],
@@ -518,7 +585,9 @@ class PublicSearchWrapperTests(unittest.TestCase):
         )
         self.assertNotIn("chat_notice", payload)
 
-    def test_ambiguous_catalog_path_and_hash_mismatch_fail_open(self) -> None:
+    def test_exact_private_source_handoff_survives_duplicate_catalog_path(
+        self,
+    ) -> None:
         connection = sqlite3.connect(self.db / "catalog.sqlite")
         try:
             connection.execute(
@@ -538,18 +607,74 @@ class PublicSearchWrapperTests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         payload = json.loads(stdout)
-        self.assertNotIn("uri", payload["evidence"][0])
-        self.assertNotIn("uri", payload["document_results"][0])
+        self.assertEqual(
+            "https://docs.example.invalid/base/docs/a.md",
+            payload["evidence"][0]["source_url"],
+        )
+        self.assertEqual(
+            "https://docs.example.invalid/base/docs/a.md",
+            payload["document_results"][0]["source_url"],
+        )
+
+    def test_link_resolution_precedes_compact_path_projection(self) -> None:
+        long_name = "a" * 450 + ".md"
+        stored_path = f"Root/docs/{long_name}"
+        connection = sqlite3.connect(self.db / "catalog.sqlite")
+        try:
+            connection.execute(
+                """
+                INSERT INTO document(
+                    doc_pk, source_id, path, content_hash, updated_at,
+                    visible_until
+                ) VALUES (2, 'private-source', ?, 'long-hash',
+                          '2026-01-01T00:00:00+00:00', NULL)
+                """,
+                (stored_path,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        payload = {
+            **self.lower_payload,
+            "evidence": [
+                {
+                    "id": "E1",
+                    "_source_id": "private-source",
+                    "source": {
+                        "path": stored_path,
+                        "title": "Long",
+                        "revision": "sha256:long-hash",
+                    },
+                    "text": "Evidence",
+                }
+            ],
+            "document_results": [],
+            "_result_detail_items": [],
+        }
+        code, stdout, _stderr, _run = self._run(
+            [
+                "--db",
+                "example-rag",
+                "--compact-json",
+                "--format",
+                "json",
+                "question",
+            ],
+            payload=payload,
+        )
+        self.assertEqual(0, code)
+        item = json.loads(stdout)["evidence"][0]
+        self.assertTrue(item["source_url"].endswith(f"docs/{long_name}"))
 
     def test_catalog_change_during_resolution_discards_every_uri(self) -> None:
-        real = search_command._catalog_path_sources(self.db)
+        real = search_command._catalog_fingerprint(self.db)
         with mock.patch.object(
             search_command,
-            "_catalog_path_sources",
+            "_catalog_fingerprint",
             side_effect=[
                 real,
-                (real[0], "changed"),
-                (real[0], "changed"),
+                "changed",
+                "changed",
             ],
         ):
             code, stdout, _stderr, _run = self._run(
@@ -557,8 +682,8 @@ class PublicSearchWrapperTests(unittest.TestCase):
             )
         self.assertEqual(0, code)
         payload = json.loads(stdout)
-        self.assertNotIn("uri", payload["evidence"][0])
-        self.assertNotIn("uri", payload["document_results"][0])
+        self.assertNotIn("source_url", payload["evidence"][0])
+        self.assertNotIn("source_url", payload["document_results"][0])
 
     def test_lower_legacy_uri_fields_are_never_promoted(self) -> None:
         self.lower_payload["evidence"][0].update(
@@ -618,8 +743,11 @@ class PublicSearchWrapperTests(unittest.TestCase):
         self.assertEqual(0, code)
         publish.assert_called_once()
         published_payload = publish.call_args.args[0]
-        self.assertIn("uri", published_payload["evidence"][0])
-        self.assertIn("uri", published_payload["_result_detail_items"][0])
+        self.assertIn("source_url", published_payload["evidence"][0])
+        self.assertIn(
+            "source_url",
+            published_payload["_result_detail_items"][0],
+        )
         self.assertNotIn("_source_id", json.dumps(published_payload))
         self.assertEqual(before, immutable.read_bytes())
         output = json.loads(stdout)
@@ -637,7 +765,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertNotIn(
-            "uri",
+            "source_url",
             json.loads(stdout)["evidence"][0],
         )
 
@@ -652,7 +780,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertNotIn(
-            "uri",
+            "source_url",
             json.loads(stdout)["evidence"][0],
         )
 
@@ -692,6 +820,14 @@ class PublicSearchWrapperTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual("error", payload["status"])
         self.assertEqual("timeout", payload["error_kind"])
+        self.assertEqual(
+            "stale",
+            payload["database_freshness"]["status"],
+        )
+        self.assertEqual(
+            freshness.STALE_NOTICE_DEDUPE_KEY,
+            payload["database_freshness"]["chat_notice"]["dedupe_key"],
+        )
         self.assertNotIn("child timeout diagnostic", stdout.getvalue())
         self.assertIn("child timeout diagnostic", stderr.getvalue())
 
@@ -756,14 +892,13 @@ class PublicSearchWrapperTests(unittest.TestCase):
         )
         self.assertIn("database_freshness", json.loads(stdout))
 
-    def test_prompt_output_has_no_freshness_notice(self) -> None:
+    def test_prompt_output_includes_stale_freshness_notice(self) -> None:
         code, stdout, _stderr, run = self._run(
             ["--db", "example-rag", "question"]
         )
         self.assertEqual(0, code)
         run.assert_called_once()
-        self.assertNotIn("database_freshness", stdout)
-        self.assertNotIn(freshness.STALE_NOTICE_CODE, stdout)
+        self.assertIn(freshness.STALE_NOTICE_MESSAGE_JA, stdout)
 
     def test_child_exit_code_and_non_json_stdout_are_preserved(self) -> None:
         code, stdout, stderr, run = self._run(
@@ -797,11 +932,11 @@ class FreshnessTests(unittest.TestCase):
                     )
                 ],
             )
-            (root / "VERSION.json").write_text(
+            (root / freshness.WRAPPER_METADATA_NAME).write_text(
                 json.dumps(
                     {
-                        "schema": "local-rag.db-version.v1",
-                        "created_at": (
+                        "schema_version": freshness.WRAPPER_METADATA_SCHEMA,
+                        "content_snapshot_at": (
                             now - timedelta(days=30)
                         ).isoformat(),
                     }
@@ -811,14 +946,25 @@ class FreshnessTests(unittest.TestCase):
             value = freshness.database_freshness(root, now=now)
             self.assertEqual("stale", value["status"])
             self.assertEqual(30, value["age_days"])
-            self.assertIn(
-                "chat_notice",
+            self.assertEqual(
+                (now - timedelta(days=30))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                value["content_snapshot_at"],
+            )
+            self.assertEqual(
+                {
+                    "code": freshness.STALE_NOTICE_CODE,
+                    "scope": freshness.STALE_NOTICE_SCOPE,
+                    "dedupe_key": freshness.STALE_NOTICE_DEDUPE_KEY,
+                    "message_ja": freshness.STALE_NOTICE_MESSAGE_JA,
+                },
                 freshness.add_freshness({}, root, now=now)[
                     "database_freshness"
-                ],
+                ]["chat_notice"],
             )
 
-    def test_snapshot_file_precedes_version_and_invalid_snapshot_falls_back(
+    def test_wrapper_metadata_is_the_only_freshness_source(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory(prefix="rag-freshness-") as directory:
@@ -846,16 +992,28 @@ class FreshnessTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.assertEqual(
-                "current",
-                freshness.database_freshness(root, now=now)["status"],
-            )
-            (root / "db-snapshot.json").write_text(
-                '{"schema_version":"wrong","snapshot_at":"not-a-date"}',
+            (root / freshness.WRAPPER_METADATA_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": freshness.WRAPPER_METADATA_SCHEMA,
+                        "content_snapshot_at": (
+                            now - timedelta(days=90)
+                        ).isoformat(),
+                    }
+                ),
                 encoding="utf-8",
             )
             self.assertEqual(
                 "stale",
+                freshness.database_freshness(root, now=now)["status"],
+            )
+            (root / freshness.WRAPPER_METADATA_NAME).write_text(
+                '{"schema_version":"wrong",'
+                '"content_snapshot_at":"not-a-date"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                "unknown",
                 freshness.database_freshness(root, now=now)["status"],
             )
 
@@ -863,11 +1021,11 @@ class FreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rag-freshness-") as directory:
             root = Path(directory)
             now = datetime(2026, 7, 29, tzinfo=timezone.utc)
-            (root / "db-snapshot.json").write_text(
+            (root / freshness.WRAPPER_METADATA_NAME).write_text(
                 json.dumps(
                     {
-                        "schema_version": "local-rag-db-snapshot-v1",
-                        "snapshot_at": (
+                        "schema_version": freshness.WRAPPER_METADATA_SCHEMA,
+                        "content_snapshot_at": (
                             now + timedelta(seconds=1)
                         ).isoformat(),
                     }
@@ -878,7 +1036,7 @@ class FreshnessTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "status": "unknown",
-                    "snapshot_at": None,
+                    "content_snapshot_at": None,
                     "age_days": None,
                 },
                 value,

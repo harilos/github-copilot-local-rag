@@ -40,8 +40,10 @@ The lower runtime owns:
 - primary-first packing and structural context;
 - deterministic initial-answer data and cached detail items.
 
-It does not own public Source URI projection or database freshness notices.
-Those belong to the root wrapper after retrieval and packing.
+It does not own public Source Link projection or database freshness notices.
+Those belong to the root wrapper after retrieval and packing. The public Link
+contract uses `source_provider`, `source_url`, and optional
+`source_permalink`; it does not introduce a replacement single `uri` field.
 
 When `LOCAL_RAG_WRAPPER_INTERNAL=1`, the lower JSON result may retain private
 detail material required to publish one final enriched bundle. Private
@@ -66,8 +68,14 @@ Chroma, or the OS remain ordinary errors for the current invocation.
 ## Result delivery
 
 The lower runtime can produce one in-memory result plus detail items. The root
-wrapper resolves optional URIs first, then publishes the final bundle once.
+wrapper resolves optional Source Link fields first, then publishes the final
+bundle once.
 It never edits an already-published summary.
+
+Each result manifest records the byte size and SHA-256 digest of every
+immutable payload file (`summary.json` and cached detail items). `meta.json`
+is the mutable ready/expiry marker, so it is intentionally outside that
+immutable file map.
 
 Temporary result location:
 
