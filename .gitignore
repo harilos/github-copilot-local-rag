@@ -34,6 +34,7 @@ windows_ac_rag_job/
 .copilot/rag/config/source-connections.json
 .copilot/rag/config/source-connections.secrets.json
 .copilot/rag/config/.source-connections.key
+.copilot/rag/config/.source-connections.*
 
 # Optional machine-local source hygiene denylist
 .copilot/rag/config/sensitive-terms.local
