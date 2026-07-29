@@ -64,6 +64,9 @@ from .subprocess_stream import (
     extract_json_result,
     run_streaming_process,
 )
+from .redmine_incremental import install_redmine_incremental_refresh
+
+install_redmine_incremental_refresh()
 
 __all__ = [
     "FetchPlan",
