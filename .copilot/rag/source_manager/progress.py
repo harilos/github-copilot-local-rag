@@ -1,7 +1,7 @@
 """Human-facing Source progress rendering.
 
 Progress callbacks are observational: malformed events and rendering failures
-must never fail a Source operation.  Exact percentages are shown only when a
+must never fail a Source operation. Exact percentages are shown only when a
 producer supplied an exact total; unknown totals remain count/elapsed based.
 """
 
@@ -63,6 +63,7 @@ class ProgressRenderer:
         self._started_at = self._clock()
         self._last_rendered_at = float("-inf")
         self._last_phase = ""
+        self._last_add_file_event: dict[str, Any] | None = None
 
     def __call__(self, event: Mapping[str, Any]) -> None:
         try:
@@ -73,6 +74,16 @@ class ProgressRenderer:
             return
 
     def _render(self, event: dict[str, Any]) -> None:
+        if (
+            event.get("event") == "heartbeat"
+            and self._last_add_file_event is not None
+        ):
+            replay = dict(self._last_add_file_event)
+            replay["elapsed_seconds"] = event.get("elapsed_seconds")
+            event = replay
+        if event.get("event") == "add.file_progress":
+            self._last_add_file_event = dict(event)
+
         now = self._clock()
         phase = str(event.get("phase") or event.get("event") or "processing")
         status = str(event.get("status") or "").lower()
@@ -117,6 +128,14 @@ class ProgressRenderer:
         if elapsed is None:
             elapsed = max(0.0, now - self._started_at)
         current_item = str(event.get("current_item") or "").strip()
+        current_index = _optional_non_negative_int(event.get("current_index"))
+        if (
+            current_index is None
+            and total is not None
+            and total > 0
+            and completed is not None
+        ):
+            current_index = total if completed >= total else completed + 1
 
         provider_percentage = _optional_non_negative_int(
             event.get("provider_percentage")
@@ -125,6 +144,29 @@ class ProgressRenderer:
             detail = f"{min(100, provider_percentage)}%（Provider内部進捗）"
         elif total == 0 and total_kind == "exact":
             detail = "対象なし"
+        elif (
+            current_index is not None
+            and current_index > 0
+            and total is not None
+            and total > 0
+            and total_kind == "exact"
+        ):
+            progress_value = (
+                completed
+                if completed is not None
+                else max(0, current_index - 1)
+            )
+            percentage = min(100, int(progress_value * 100 / total))
+            checkpoint_complete = bool(event.get("checkpoint_saved")) or status in {
+                "completed",
+                "success",
+            }
+            if percentage == 100 and not checkpoint_complete:
+                percentage = 99
+            detail = (
+                f"{percentage}%（全{total:,}件中、"
+                f"今{min(total, current_index):,}ファイル目）"
+            )
         elif (
             completed is not None
             and total is not None
@@ -143,13 +185,31 @@ class ProgressRenderer:
             detail = f"{completed}{unit}処理済み"
         else:
             detail = "処理中"
+
         if current_item:
-            detail += f" {current_item}"
+            detail += f" 対象: {current_item}"
+
+        eta = _optional_non_negative_number(event.get("eta_seconds"))
+        remaining_min = _optional_non_negative_number(
+            event.get("remaining_seconds_min")
+        )
+        remaining_max = _optional_non_negative_number(
+            event.get("remaining_seconds_max")
+        )
+        if eta is not None:
+            detail += f" 残り約{_format_duration(eta)}"
+        elif remaining_min is not None and remaining_max is not None:
+            detail += (
+                " 残り目安約"
+                f"{_format_duration(remaining_min)}～"
+                f"{_format_duration(remaining_max)}"
+            )
+
         message_detail = str(event.get("message") or "").strip()
         if message_detail and event.get("event") == "subprocess.log":
             detail += f" {message_detail}"
         if elapsed is not None:
-            detail += f" 経過{int(elapsed)}秒"
+            detail += f" 経過{_format_duration(elapsed)}"
         if status == "retry" or event.get("retry"):
             detail += "（再試行）"
 
@@ -192,6 +252,32 @@ def _optional_non_negative_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    if total < 60:
+        return f"{total}秒"
+    minutes, remaining_seconds = divmod(total, 60)
+    if minutes < 60:
+        return (
+            f"{minutes}分{remaining_seconds}秒"
+            if remaining_seconds
+            else f"{minutes}分"
+        )
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours < 24:
+        return (
+            f"{hours}時間{remaining_minutes}分"
+            if remaining_minutes
+            else f"{hours}時間"
+        )
+    days, remaining_hours = divmod(hours, 24)
+    return (
+        f"{days}日{remaining_hours}時間"
+        if remaining_hours
+        else f"{days}日"
+    )
 
 
 def _render_http_attempt(prefix: str, event: Mapping[str, Any]) -> str:
