@@ -11,8 +11,16 @@ _URL_CREDENTIAL = re.compile(
 _NAMED_SECRET = re.compile(
     r"(?i)([\"']?\b(?:"
     r"authorization|proxy-authorization|x-redmine-api-key|"
-    r"api[_-]?key|access[_-]?token|password|passwd|secret"
-    r")\b[\"']?\s*[:=]\s*)([^\r\n,;}]+)"
+    r"api[_-]?key|access[_-]?token|oauth[_-]?token|token|"
+    r"credential|private[_-]?key|password|passwd|secret|"
+    r"cookie|set-cookie"
+    r")\b[\"']?\s*[:=]\s*)([^\r\n,;}&]+)"
+)
+_QUERY_SECRET = re.compile(
+    r"(?i)([?&](?:"
+    r"api[_-]?key|access[_-]?token|token|password|passwd|secret|"
+    r"authorization|cookie|sig|signature"
+    r")=)([^&#\s]*)"
 )
 
 
@@ -22,9 +30,19 @@ def sanitize_diagnostic(value: Any, *, max_chars: int = 8_000) -> str:
     text = _ANSI_ESCAPE.sub("", text)
     text = _URL_CREDENTIAL.sub(r"\1<REDACTED>@", text)
     text = _NAMED_SECRET.sub(r"\1<REDACTED>", text)
+    text = _QUERY_SECRET.sub(r"\1<REDACTED>", text)
     text = text.strip()
     if len(text) > max_chars:
-        return text[:max_chars].rstrip() + "\n...（診断ログを省略しました）"
+        marker_reserve = 120
+        available = max(2, max_chars - marker_reserve)
+        head = available // 2
+        tail = available - head
+        omitted = max(0, len(text) - head - tail)
+        return (
+            text[:head].rstrip()
+            + f"\n...（診断ログを{omitted:,}文字省略）...\n"
+            + text[-tail:].lstrip()
+        )
     return text
 
 

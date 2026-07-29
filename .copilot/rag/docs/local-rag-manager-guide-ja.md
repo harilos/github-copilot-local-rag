@@ -35,8 +35,11 @@ Windows Git Bash:
 
 ```bash
 "$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
-  "$HOME/.copilot/rag/manage.py"
+"$HOME/.copilot/rag/manage.py"
 ```
+
+初回セットアップは、依存パッケージと検索モデルの取得を含むため、通常は
+10分程度かかります。ネットワーク速度や端末性能により前後します。
 
 共通入力:
 
@@ -46,6 +49,17 @@ Windows Git Bash:
 - Enter: 編集中の既存値を維持します。
 - `-`: 編集中の任意値を消します。
 - `Ctrl+C`またはEOF: 未保存変更を破棄して終了します。
+
+入力例を組織向けに変更する場合は、
+`config/manage-custom.example.json`を参考に、Git管理されない
+`config/manage-custom.json`を作成します。schemaは
+`local-rag.manage-custom.v1`です。必要な`examples` keyだけを上書きできます。
+
+優先順位は、`LOCAL_RAG_MANAGE_CUSTOM_CONFIG`で指定した絶対パスの設定、
+`manage-custom.json`、同梱exampleの順です。不正JSONはline、column、offsetを
+含む警告を表示し、不正な項目だけを下位設定へ戻します。未知keyや型不正も
+同様に警告し、ほかの正常項目は利用します。password、token、credential入り
+URLなどの秘密値は入力例設定へ保存できません。
 
 ## 3. 最終メニュー
 

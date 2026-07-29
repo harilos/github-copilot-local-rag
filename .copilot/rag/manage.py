@@ -9,7 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
-import traceback
+import time
 import uuid
 import webbrowser
 from datetime import datetime, timezone
@@ -21,6 +21,18 @@ if str(_MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULE_ROOT))
 from help_links import MANAGER_HELP_EPILOG, MANAGER_HELP_URL
 from source_manager.errors import sanitize_diagnostic
+from source_manager.manage_custom import load_manage_custom
+from source_manager.progress import ProgressRenderer
+from source_manager.subprocess_stream import (
+    ResultExtractionError,
+    extract_json_result,
+)
+from source_manager.diagnostics import (
+    append_diagnostic_event,
+    exception_diagnostic,
+    process_diagnostic,
+    render_diagnostic,
+)
 
 
 RAG_ROOT = Path(__file__).resolve().parent
@@ -201,8 +213,11 @@ class LocalRagManager:
         self._sidecar_etags: dict[str, str] = {}
         self._sidecar_migrations: dict[str, bool] = {}
         self._sidecar_source_statuses: dict[str, dict[str, str]] = {}
+        self._manage_custom = load_manage_custom(self.rag_root)
+        self._manage_custom_warnings_shown = False
 
     def run(self) -> int:
+        self._show_manage_custom_warnings()
         self._print_info(f"ヘルプ: {MANAGER_HELP_URL}")
         while True:
             self._print_screen_header("メインメニュー")
@@ -211,20 +226,71 @@ class LocalRagManager:
             choice = self._ask("番号を入力してください: ")
             if choice is None or choice == "0":
                 return 0
-            if choice == "1":
-                self._create_database()
-            elif choice == "2":
-                selected = self._select_database()
-                if selected:
-                    self._database_screen(selected)
-            elif choice == "3":
-                self._update_all_sources()
-            elif choice == "4":
-                self._package_and_transfer_screen()
-            elif choice == "5":
-                self._machine_setup_screen()
-            else:
-                self._invalid_selection("0～5")
+            try:
+                if choice == "1":
+                    self._create_database()
+                elif choice == "2":
+                    selected = self._select_database()
+                    if selected:
+                        try:
+                            self._database_screen(selected)
+                        except Exception as exc:
+                            self._print_internal_diagnostic(
+                                exc,
+                                operation="選択DBの管理",
+                                stage="manager.database_screen",
+                                db_name=selected,
+                            )
+                elif choice == "3":
+                    self._update_all_sources()
+                elif choice == "4":
+                    self._package_and_transfer_screen()
+                elif choice == "5":
+                    self._machine_setup_screen()
+                else:
+                    self._invalid_selection("0～5")
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Local RAG Manager",
+                    stage="manager.menu_action",
+                )
+
+    def _examples(self, key: str) -> tuple[str, ...]:
+        return self._manage_custom.values(key)
+
+    def _progress_callback(
+        self,
+        operation: str,
+        *,
+        provider: str | None = None,
+    ) -> ProgressRenderer:
+        def emit(message: str) -> None:
+            if self.output is print:
+                if message.startswith("\r"):
+                    print(message, end="", flush=True)
+                else:
+                    print(message, flush=True)
+                return
+            self.output(message)
+
+        return ProgressRenderer(
+            emit,
+            operation=operation,
+            provider=_PROVIDER_JA.get(str(provider or ""), str(provider or "")),
+            is_tty=(
+                self._supports_color(sys.stdout)
+                if self.output is print
+                else False
+            ),
+        )
+
+    def _show_manage_custom_warnings(self) -> None:
+        if self._manage_custom_warnings_shown:
+            return
+        self._manage_custom_warnings_shown = True
+        for warning in self._manage_custom.warnings:
+            self._print_warning(warning.render())
 
     def _open_help(self) -> None:
         self._print_info(f"日本語操作ガイド: {MANAGER_HELP_URL}")
@@ -396,14 +462,21 @@ class LocalRagManager:
                 self._database_root(db_name),
                 python_executable=self._runtime_python(),
                 rag_root=self.rag_root,
+                progress_callback=self._progress_callback(
+                    "このDBの全Source更新"
+                ),
             )
         except Exception as exc:
-            self._print_error(
-                "Sourceの一括処理に失敗しました。"
-                f"完了済みのSourceは保存されています（{type(exc).__name__}）。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="このDBの全Sourceを更新・再開",
+                stage="source.update_all",
+                db_name=db_name,
+                can_resume=True,
             )
+            self.output("完了済みのSourceと再開位置は保存されています。")
             return {"status": "failed", "error": type(exc).__name__}
-        self._show_source_update_result(result)
+        self._show_source_update_result(result, db_name=db_name)
         if bool(result.get("snapshot_marker_eligible")):
             self._write_content_snapshot(
                 db_name,
@@ -437,15 +510,21 @@ class LocalRagManager:
                     self._database_root(db_name),
                     python_executable=self._runtime_python(),
                     rag_root=self.rag_root,
+                    progress_callback=self._progress_callback(
+                        "全DBの全Source更新"
+                    ),
                 )
             except Exception as exc:
                 failed += 1
-                self._print_error(
-                    f"DB「{db_name}」の処理に失敗しました"
-                    f"（{type(exc).__name__}）。"
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="全DBの全Sourceを更新・再開",
+                    stage="source.update_all_databases",
+                    db_name=db_name,
+                    can_resume=True,
                 )
                 continue
-            self._show_source_update_result(result)
+            self._show_source_update_result(result, db_name=db_name)
             groups = self._source_update_groups(result)
             failed_items = groups["failed"]
             skipped_items = groups["skipped"]
@@ -462,7 +541,12 @@ class LocalRagManager:
         self.output(f"失敗: {failed} Source")
         self.output(f"スキップ: {skipped} Source")
 
-    def _show_source_update_result(self, result: dict[str, Any]) -> None:
+    def _show_source_update_result(
+        self,
+        result: dict[str, Any],
+        *,
+        db_name: str | None = None,
+    ) -> None:
         self.output("\nSource処理結果")
         groups = self._source_update_groups(result)
         for key, label in (
@@ -487,6 +571,21 @@ class LocalRagManager:
                         or ""
                     )
                     self.output(f"  - {name}" + (f": {reason}" if reason else ""))
+                    diagnostic = value.get("failure_diagnostic")
+                    if key == "failed" and isinstance(diagnostic, dict):
+                        self._print_error(
+                            f"Source「{name}」の詳細診断"
+                        )
+                        process = value.get("process_diagnostic")
+                        for line in render_diagnostic(
+                            diagnostic,
+                            process=(
+                                process
+                                if isinstance(process, dict)
+                                else None
+                            ),
+                        ):
+                            self.output(line)
                 else:
                     self.output(f"  - {value}")
 
@@ -559,11 +658,18 @@ class LocalRagManager:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-        except OSError:
+        except OSError as exc:
             try:
                 temporary.unlink()
             except OSError:
                 pass
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB全体更新日時の保存",
+                stage="snapshot.atomic_write",
+                db_name=db_name,
+                can_resume=True,
+            )
             self._print_warning(
                 "DBの全体更新日時を保存できませんでした。"
                 "検索は引き続き利用できます。"
@@ -584,10 +690,10 @@ class LocalRagManager:
                 f"{label}の新しい保存先を指定します。"
                 "既存のファイルやフォルダは上書きしません。"
             ),
-            examples=(
-                "local-rag-search-package.zip"
+            examples=self._examples(
+                "distribution_output"
                 if is_distribution
-                else "local-rag-admin-transfer",
+                else "admin_transfer_output"
             ),
         )
         if destination is None:
@@ -619,9 +725,11 @@ class LocalRagManager:
                     output,
                 )
         except Exception as exc:
-            self._print_error(
-                f"{label}を作成できませんでした"
-                f"（{type(exc).__name__}）。"
+            self._print_internal_diagnostic(
+                exc,
+                operation=f"{label}の作成",
+                stage="package.create",
+                can_resume=not is_distribution,
             )
             self.output(
                 "作成途中の内容は完成パッケージとして公開されていません。"
@@ -643,7 +751,7 @@ class LocalRagManager:
                 "利用者向けZIPまたは管理PC引っ越し用フォルダを指定します。"
                 "最初に全ファイルの一覧とSHA-256を検証します。"
             ),
-            examples=("local-rag-search-package.zip",),
+            examples=self._examples("package_input"),
         )
         if value is None:
             return
@@ -660,9 +768,11 @@ class LocalRagManager:
                 else validate_package_tree(package)
             )
         except Exception as exc:
-            self._print_error(
-                "パッケージの検証に失敗しました"
-                f"（{type(exc).__name__}）。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="パッケージの検証",
+                stage="package.validate",
+                can_resume=False,
             )
             self.output("この端末のLocal RAGは変更されていません。")
             return
@@ -710,9 +820,11 @@ class LocalRagManager:
 
             result = import_package(package, self.rag_root.parent)
         except Exception as exc:
-            self._print_error(
-                "パッケージを取り込めませんでした"
-                f"（{type(exc).__name__}）。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="パッケージの取り込み",
+                stage="package.import",
+                can_resume=True,
             )
             self.output(
                 "既存の同名DBは保持されています。"
@@ -769,6 +881,46 @@ class LocalRagManager:
     def _print_error(self, text: str) -> None:
         self._message("error", text)
 
+    def _print_internal_diagnostic(
+        self,
+        exc: BaseException,
+        *,
+        operation: str,
+        stage: str,
+        db_name: str | None = None,
+        source_name: str | None = None,
+        source_key: str | None = None,
+        provider: str | None = None,
+        can_resume: bool | None = None,
+        events_jsonl: str | None = None,
+        process: dict[str, Any] | None = None,
+    ) -> str:
+        diagnostic = exception_diagnostic(
+            exc,
+            operation=operation,
+            stage=stage,
+            db_name=db_name,
+            source_name=source_name,
+            source_key=source_key,
+            provider=provider,
+            can_resume=can_resume,
+            events_jsonl=events_jsonl,
+        )
+        self._print_error(f"{operation}に失敗しました。")
+        for line in render_diagnostic(diagnostic, process=process):
+            self.output(line)
+        if db_name and source_key:
+            try:
+                append_diagnostic_event(
+                    self._validated_database_root(db_name),
+                    source_key,
+                    diagnostic,
+                    process=process,
+                )
+            except Exception:
+                pass
+        return str(diagnostic["run_id"])
+
     @staticmethod
     def _source_failure_stage_label(value: Any) -> str:
         stage = str(value or "").strip()
@@ -799,17 +951,43 @@ class LocalRagManager:
         exc: BaseException,
         *,
         operation: str,
+        db_name: str | None = None,
+        source_name: str | None = None,
+        source_key: str | None = None,
+        provider: str | None = None,
     ) -> None:
-        self._print_error(f"{operation}に失敗しました。")
+        stage = str(getattr(exc, "stage", None) or "source.operation")
+        effective_key = str(
+            source_key
+            or getattr(exc, "local_source_key", "")
+            or ""
+        )
+        event_log = str(getattr(exc, "events_jsonl", "") or "").strip()
+        self._print_internal_diagnostic(
+            exc,
+            operation=operation,
+            stage=stage,
+            db_name=db_name,
+            source_name=source_name,
+            source_key=effective_key,
+            provider=provider,
+            can_resume=bool(getattr(exc, "source_saved", False)),
+            events_jsonl=event_log,
+            process=(
+                getattr(exc, "process_diagnostic")
+                if isinstance(
+                    getattr(exc, "process_diagnostic", None),
+                    dict,
+                )
+                else None
+            ),
+        )
         self.output(
-            "失敗段階: "
-            + self._source_failure_stage_label(
-                getattr(exc, "stage", None)
-            )
+            "失敗段階: " + self._source_failure_stage_label(stage)
         )
         detail = self._safe_source_diagnostic(
             f"{type(exc).__name__}: {exc}",
-            max_chars=8_000,
+            max_chars=65_536,
         )
         self.output(f"例外: {detail or type(exc).__name__}")
         if bool(getattr(exc, "source_saved", False)):
@@ -821,19 +999,8 @@ class LocalRagManager:
             )
         else:
             self.output("保存状態: Source設定は保存されていません。")
-        event_log = str(getattr(exc, "events_jsonl", "") or "").strip()
         if event_log:
             self.output(f"進捗ログ: {event_log}")
-        formatted = "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        )
-        formatted = self._safe_source_diagnostic(
-            formatted,
-            max_chars=16_000,
-        )
-        if formatted:
-            self.output("例外ログ（診断用）:")
-            self.output(formatted)
 
     def _print_source_result_failure(
         self,
@@ -970,9 +1137,21 @@ class LocalRagManager:
         if result is None:
             return
         try:
-            payload = json.loads(str(result.stdout or ""))
-        except json.JSONDecodeError:
-            self._print_error("初期設定の結果を読み取れませんでした。")
+            payload = extract_json_result(
+                result,
+                validator=lambda value: isinstance(value, dict)
+                and (
+                    "status" in value
+                    or "setup_complete" in value
+                    or "lookup_ready" in value
+                ),
+            )
+        except ResultExtractionError as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="初期設定結果の解析",
+                stage="setup.parse_result",
+            )
             return
         if not isinstance(payload, dict):
             self._print_error("初期設定から想定外の結果が返されました。")
@@ -1156,11 +1335,18 @@ class LocalRagManager:
                 start=action == "1",
                 python_executable=self._runtime_python(),
                 rag_root=self.rag_root,
+                progress_callback=self._progress_callback(
+                    "Source追加",
+                    provider=str(specification.get("source_type") or ""),
+                ),
             )
         except Exception as exc:
             self._print_source_exception(
                 exc,
                 operation="Source登録",
+                db_name=db_name,
+                source_name=str(specification.get("display_name") or ""),
+                provider=str(specification.get("source_type") or ""),
             )
             return
         if action == "1":
@@ -1188,14 +1374,13 @@ class LocalRagManager:
     def _prompt_new_github_source(self) -> dict[str, Any] | None:
         self.output(
             "\n[1/2] GitHubリポジトリのURL【必須】\n"
-            "リポジトリ全体をDB内の専用作業場所へ取得します。\n"
-            "例: https://github.com/<owner>/<repository>.git"
+            "リポジトリ全体をDB内の専用作業場所へ取得します。"
         )
         url = self._prompt_preserving_value(
             "URL",
             "",
             required=True,
-            examples=("https://github.com/<owner>/<repository>.git",),
+            examples=self._examples("github_repository_clone_url"),
         )
         if url is None:
             return None
@@ -1208,7 +1393,7 @@ class LocalRagManager:
             "Sourceの名前",
             proposed,
             required=True,
-            examples=("製品コード",),
+            examples=self._examples("github_source_display_name"),
         )
         if name is None:
             return None
@@ -1233,13 +1418,13 @@ class LocalRagManager:
             description=(
                 "HTTP(S)のSVN URLからDB内の専用作業場所へ取得します。"
             ),
-            examples=("https://svn.example.invalid/repos/project/trunk",),
+            examples=self._examples("svn_repository_url"),
         )
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
             required=True,
-            examples=("製品仕様",),
+            examples=self._examples("svn_source_display_name"),
         )
         if url is None or name is None:
             return None
@@ -1272,7 +1457,7 @@ class LocalRagManager:
                     "製品固有のファイルURLは推測せず、"
                     "すべての検索結果からこのページを開きます。"
                 ),
-                examples=("https://svn-web.example.invalid/project#files",),
+                examples=self._examples("svn_link_web_root"),
             )
             if top_url is None:
                 return None
@@ -1310,13 +1495,13 @@ class LocalRagManager:
             "RedmineプロジェクトのURL",
             "",
             required=True,
-            examples=("https://redmine.example.invalid/projects/project-id",),
+            examples=self._examples("redmine_project_url"),
         )
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
             required=True,
-            examples=("製品サポート",),
+            examples=self._examples("redmine_source_display_name"),
         )
         if url is None or name is None:
             return None
@@ -1340,7 +1525,7 @@ class LocalRagManager:
                 "",
                 required=True,
                 description="1以上の日数を入力します。",
-                examples=("180",),
+                examples=self._examples("redmine_days"),
             )
             if raw_days is None:
                 return None
@@ -1401,22 +1586,19 @@ class LocalRagManager:
             "SharePoint rootからの相対フォルダ",
             "",
             required=True,
-            examples=("Team Documents/manuals",),
+            examples=self._examples("sharepoint_relative_path"),
         )
         browser = self._prompt_preserving_value(
             "SharePointのbrowser URL",
             "",
             required=True,
-            examples=(
-                "https://tenant.example.invalid/sites/project/"
-                "Shared%20Documents/manuals",
-            ),
+            examples=self._examples("sharepoint_browser_url"),
         )
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
             required=True,
-            examples=("設計資料",),
+            examples=self._examples("sharepoint_source_display_name"),
         )
         if relative is None or browser is None or name is None:
             return None
@@ -1448,13 +1630,13 @@ class LocalRagManager:
             description=(
                 "今回だけ取り込みます。完了後、入力した絶対パスは保存しません。"
             ),
-            examples=("選択したファイルまたはフォルダ",),
+            examples=self._examples("other_input_path"),
         )
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
             required=True,
-            examples=("引継ぎ資料",),
+            examples=self._examples("other_source_display_name"),
         )
         if path is None or name is None:
             return None
@@ -1494,7 +1676,7 @@ class LocalRagManager:
             description=(
                 "選択中のDBで確認したい内容を、自然な文章で入力します。"
             ),
-            examples=("この製品の運用上の注意点を教えて",),
+            examples=self._examples("search_question"),
         )
         if question is None:
             return
@@ -1520,11 +1702,26 @@ class LocalRagManager:
 
     def _show_search_result(self, raw_output: str) -> None:
         try:
-            payload = json.loads(raw_output)
-        except json.JSONDecodeError:
-            self._print_error("検索結果をJSONとして読み取れませんでした。")
-            if raw_output.strip():
-                self.output(raw_output.strip())
+            payload = extract_json_result(
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=raw_output,
+                    stderr="",
+                ),
+                validator=lambda value: isinstance(value, dict)
+                and (
+                    "status" in value
+                    or value.get("schema_version")
+                    == "rag-result-pointer-v1"
+                ),
+            )
+        except ResultExtractionError as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="検索結果の解析",
+                stage="search.parse_result",
+            )
             return
         if not isinstance(payload, dict):
             self._print_error("検索から想定外の結果が返されました。")
@@ -1536,9 +1733,11 @@ class LocalRagManager:
             try:
                 summary_path = Path(str(payload["summary_file"]))
                 payload = json.loads(summary_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                self._print_error(
-                    "検索結果ファイルを読み取れませんでした。"
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="検索結果ファイルの解析",
+                    stage="search.summary.read",
                 )
                 return
         self.output("\n検索結果")
@@ -1670,7 +1869,7 @@ class LocalRagManager:
                 "末尾が -rag になる半角英数字名です。\n"
                 "使用可能な文字: 半角英数字、_、.、-"
             ),
-            examples=("project-rag", "incident-rag", "product-manual-rag"),
+            examples=self._examples("database_name"),
         )
         if name is None:
             return
@@ -1680,7 +1879,9 @@ class LocalRagManager:
                 "DB名は半角英数字で始まり、使用可能な文字だけを使い、"
                 "末尾を -rag にしてください。"
             )
-            self.output("入力例: project-rag")
+            examples = self._examples("database_name")
+            if examples:
+                self.output(f"入力例: {examples[0]}")
             self.output("DBは作成されていません。")
             return
         if self._database_root(name).exists():
@@ -1691,7 +1892,7 @@ class LocalRagManager:
             "",
             required=False,
             description="人間が一覧で識別しやすい名前です。",
-            examples=("製品A 設計資料",),
+            examples=self._examples("database_title"),
             empty_help="DB名を表示名として利用",
         )
         if title is None:
@@ -1704,7 +1905,7 @@ class LocalRagManager:
                 "CopilotがDBを選ぶときに使う短い説明です。"
                 "文書本文には入りません。"
             ),
-            examples=("製品Aの設計、障害、運用、会議記録を収録",),
+            examples=self._examples("database_query_hint"),
             empty_help="検索ヒントなし",
         )
         if query_hint is None:
@@ -1750,7 +1951,7 @@ class LocalRagManager:
             current["title"],
             required=False,
             description="DB一覧で人間が識別しやすい名前です。",
-            examples=("製品A 設計・運用資料",),
+            examples=self._examples("database_title_edit"),
             empty_help="DB名を表示名として利用",
         )
         if title is None:
@@ -1764,7 +1965,7 @@ class LocalRagManager:
                 "Copilotが複数のDBから選ぶときに使う短い説明です。"
                 "文書本文や検索索引には入りません。"
             ),
-            examples=("製品Aの設計、障害、運用手順を収録",),
+            examples=self._examples("database_query_hint_edit"),
             empty_help="検索ヒントなし",
         )
         if query_hint is None:
@@ -1791,8 +1992,12 @@ class LocalRagManager:
                 query_hint=normalized_hint,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            self._print_error(
-                f"DB情報を保存できませんでした: {type(exc).__name__}: {exc}"
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB情報の保存",
+                stage="database_metadata.save",
+                db_name=db_name,
+                can_resume=False,
             )
             return
         self._print_success("DBの表示名と検索ヒントを保存しました。")
@@ -1988,10 +2193,7 @@ class LocalRagManager:
                 "RAGへ取り込むファイル群の基準ディレクトリです。\n"
                 "このディレクトリ名は保存パスの先頭へ必ず含まれます。"
             ),
-            examples=(
-                r"C:\path\to\project-docs",
-                "/path/to/project-docs",
-            ),
+            examples=self._examples("ingestion_root"),
         )
         if root is None:
             return None
@@ -2007,15 +2209,7 @@ class LocalRagManager:
                     "GitHub、GitLab、Azure DevOps、SharePoint、Redmineを"
                     "同じIDへ混在させないでください。"
                 ),
-                examples=(
-                    "github-repository",
-                    "gitlab-repository",
-                    "azure-repository",
-                    "svn-repository",
-                    "sharepoint-docs",
-                    "redmine-issues",
-                    "filesystem-docs",
-                ),
+                examples=self._examples("source_id"),
             )
             if source_id is None:
                 return None
@@ -2026,7 +2220,7 @@ class LocalRagManager:
             description=(
                 "論理ルート全体ではなく、一部だけを読み込む場合に指定します。"
             ),
-            examples=("docs", "manuals/ja"),
+            examples=self._examples("scan_subdirectory"),
             empty_help="論理ルート全体を対象",
         )
         if scan_subdir is None:
@@ -2075,11 +2269,9 @@ class LocalRagManager:
         self.output(
             f"{new_index}. 新しいSource IDを入力"
         )
-        self.output(
-            "例: sharepoint-docs、redmine-issues、github-repository、"
-            "gitlab-repository、azure-repository、svn-repository、"
-            "filesystem-docs"
-        )
+        source_examples = self._examples("source_id")
+        if source_examples:
+            self.output(f"例: {'、'.join(source_examples)}")
         choice = self._ask("番号を入力してください（0: キャンセル）: ")
         if choice in (None, "0"):
             return None
@@ -2100,11 +2292,7 @@ class LocalRagManager:
             description=(
                 "Providerごとに分けた、今後変更しない識別子です。"
             ),
-            examples=(
-                "github-repository",
-                "sharepoint-docs",
-                "redmine-issues",
-            ),
+            examples=self._examples("new_source_id"),
         )
         if value is None:
             return None
@@ -2192,22 +2380,18 @@ class LocalRagManager:
 
     @staticmethod
     def _last_json_object(raw: str) -> dict[str, Any] | None:
-        text = raw[-2_000_000:]
-        decoder = json.JSONDecoder()
-        candidates = [
-            index
-            for index, character in enumerate(text)
-            if character == "{"
-            and (index == 0 or text[index - 1] in "\r\n")
-        ]
-        for index in reversed(candidates):
-            try:
-                value, _end = decoder.raw_decode(text[index:])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                return value
-        return None
+        try:
+            return extract_json_result(
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=str(raw),
+                    stderr="",
+                ),
+                validator=lambda value: isinstance(value, dict),
+            )
+        except ResultExtractionError:
+            return None
 
     def _sources_screen(self, db_name: str) -> None:
         while self._database_root(db_name).is_dir():
@@ -2263,9 +2447,11 @@ class LocalRagManager:
                 db_name,
             )
         except Exception as exc:
-            self._print_error(
-                "Source一覧を読み取れませんでした: "
-                f"{type(exc).__name__}: {exc}"
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source一覧の取得",
+                stage="source_inventory.read",
+                db_name=db_name,
             )
             return None
 
@@ -2297,7 +2483,15 @@ class LocalRagManager:
                 continue
             try:
                 source = json.loads(source_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Source取得設定の読込",
+                    stage="source_config.read",
+                    db_name=db_name,
+                    source_key=directory.name,
+                    can_resume=None,
+                )
                 continue
             if not isinstance(source, dict):
                 continue
@@ -2311,7 +2505,16 @@ class LocalRagManager:
             if state_path.is_file() and not state_path.is_symlink():
                 try:
                     state = json.loads(state_path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError):
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    self._print_internal_diagnostic(
+                        exc,
+                        operation="Source進捗の読込",
+                        stage="source_state.read",
+                        db_name=db_name,
+                        source_key=str(value["_local_source_key"]),
+                        provider=str(value.get("source_type") or ""),
+                        can_resume=None,
+                    )
                     state = {}
                 if isinstance(state, dict):
                     value["_state"] = state
@@ -2581,13 +2784,19 @@ class LocalRagManager:
                     self.rag_root,
                 )
                 metadata_removed = True
-            except Exception:
-                self._print_error(
-                    "検索結果リンク設定を安全に削除できなかったため、"
-                    "検索済み文書と取得設定は削除していません。"
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Source削除",
+                    stage="source_delete.metadata",
+                    db_name=db_name,
+                    source_name=display_name,
+                    source_key=local_key,
+                    provider=source_type,
+                    can_resume=True,
                 )
-                self.output(traceback.format_exc().strip())
                 self._print_info(
+                    "検索済み文書と取得設定は削除していません。"
                     "設定の問題を修正後、Source削除を再実行してください。"
                 )
                 return False
@@ -2598,22 +2807,41 @@ class LocalRagManager:
                 report_nonzero=False,
             )
             if result is None or int(result.returncode) != 0:
-                self._print_error(
-                    "検索済み文書の削除に失敗しました。"
-                    "取得設定と作業ファイルは削除していません。"
-                )
+                if result is not None:
+                    error = ManagerError(
+                        "検索済み文書の削除子プロセスが失敗しました"
+                    )
+                    process = process_diagnostic(
+                        arguments=getattr(result, "args", ()),
+                        cwd=self.rag_root,
+                        returncode=int(result.returncode),
+                        elapsed_seconds=0.0,
+                        stdout=getattr(result, "stdout", ""),
+                        stderr=getattr(result, "stderr", ""),
+                    )
+                    self._print_internal_diagnostic(
+                        error,
+                        operation="Source削除",
+                        stage="source_delete.indexed_documents",
+                        db_name=db_name,
+                        source_name=display_name,
+                        source_key=local_key,
+                        provider=source_type,
+                        can_resume=True,
+                        process=process,
+                    )
+                else:
+                    self._print_error(
+                        "検索済み文書の削除を開始できませんでした。"
+                    )
                 if metadata_removed:
                     self._print_warning(
                         "検索結果リンク設定は削除済みです。"
                         "検索済み文書は残っているため、"
                         "再実行すると削除を続けます。"
                     )
-                if result is not None:
-                    if result.stderr:
-                        self.output(str(result.stderr).strip())
-                    if result.stdout:
-                        self.output(str(result.stdout).strip())
                 self._print_info(
+                    "取得設定と作業ファイルは削除していません。"
                     "原因を修正後、同じSourceの削除を再実行できます。"
                 )
                 return False
@@ -2630,13 +2858,19 @@ class LocalRagManager:
                     expected_etag=loaded.etag,
                 )
                 management_removed = True
-            except Exception:
-                self._print_error(
-                    "検索済み文書とLink設定は削除しましたが、"
-                    "取得設定または作業ファイルの削除に失敗しました。"
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Source削除",
+                    stage="source_delete.management",
+                    db_name=db_name,
+                    source_name=display_name,
+                    source_key=local_key,
+                    provider=source_type,
+                    can_resume=True,
                 )
-                self.output(traceback.format_exc().strip())
                 self._print_info(
+                    "検索済み文書とLink設定は削除済みです。"
                     "再実行すると残っている取得設定を削除します。"
                 )
                 return False
@@ -2680,7 +2914,7 @@ class LocalRagManager:
                     "今回取り込み直す資料を選びます。完了後、"
                     "この端末の絶対パスは保存しません。"
                 ),
-                examples=("選択したファイルまたはフォルダ",),
+                examples=self._examples("other_input_path"),
             )
             if runtime_input is None:
                 self._print_info("再取り込みを開始しませんでした。")
@@ -2697,11 +2931,19 @@ class LocalRagManager:
                 python_executable=self._runtime_python(),
                 rag_root=self.rag_root,
                 runtime_input=runtime_input,
+                progress_callback=self._progress_callback(
+                    "Source更新",
+                    provider=source_type,
+                ),
             )
         except Exception as exc:
             self._print_source_exception(
                 exc,
                 operation="Sourceの更新・再開",
+                db_name=db_name,
+                source_name=str(source.get("display_name") or ""),
+                source_key=local_key,
+                provider=source_type,
             )
             return
         result_status = str(result.get("status") or "")
@@ -2811,12 +3053,10 @@ class LocalRagManager:
                 label,
                 str(fetch.get("repository_url") or ""),
                 required=True,
-                examples=(
-                    ("https://github.com/<owner>/<repository>.git",)
+                examples=self._examples(
+                    "github_repository_clone_url"
                     if source_type == "github"
-                    else (
-                        "https://svn.example.invalid/repos/project/trunk",
-                    )
+                    else "svn_repository_url"
                 ),
             )
             if repository_url is None:
@@ -2856,9 +3096,7 @@ class LocalRagManager:
                 "RedmineプロジェクトのURL",
                 str(fetch.get("project_url") or ""),
                 required=True,
-                examples=(
-                    "https://redmine.example.invalid/projects/project-id",
-                ),
+                examples=self._examples("redmine_project_url"),
             )
             if project_url is None:
                 return
@@ -2871,7 +3109,7 @@ class LocalRagManager:
                 description=(
                     "Issueの更新日時を基準にします。空欄は制限なしです。"
                 ),
-                examples=("365", "90", "30"),
+                examples=self._examples("redmine_days"),
                 empty_help="制限なし",
             )
             if days is None:
@@ -2908,7 +3146,7 @@ class LocalRagManager:
                 "SharePoint rootからの相対フォルダ",
                 str(fetch.get("relative_path") or ""),
                 required=True,
-                examples=("Team Documents/manuals",),
+                examples=self._examples("sharepoint_relative_path"),
             )
             if relative is None:
                 return
@@ -2929,9 +3167,15 @@ class LocalRagManager:
                 fetch=updated,
             )
         except Exception as exc:
-            self._print_error(
-                "取得設定を保存できませんでした。"
-                f"処理状況を確認してください（{type(exc).__name__}）。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source取得設定の保存",
+                stage="source_config.save",
+                db_name=db_name,
+                source_name=str(source.get("display_name") or ""),
+                source_key=local_key,
+                provider=source_type,
+                can_resume=True,
             )
             return
         self._print_success("取得設定を保存しました。")
@@ -3030,7 +3274,7 @@ class LocalRagManager:
                 "Manager上でSourceを識別しやすくする表示専用の名前です。"
                 "Source IDは変更されません。"
             ),
-            examples=("設計資料", "障害管理", "ソースコード"),
+            examples=self._examples("source_display_name"),
             empty_help="Source IDを表示",
         )
         if display_name is None:
@@ -3121,11 +3365,27 @@ class LocalRagManager:
         try:
             db_root = self._validated_database_root(db_name)
         except ManagerError as exc:
-            self._print_error(f"DBを安全に開けません: {exc}")
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source Link設定の読込",
+                stage="source_metadata.validate_database",
+                db_name=db_name,
+                can_resume=False,
+            )
             return None
-        loaded = source_links.load_source_links(
-            db_root, db_name
-        )
+        try:
+            loaded = source_links.load_source_links(
+                db_root, db_name
+            )
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source Link設定の読込",
+                stage="source_metadata.load",
+                db_name=db_name,
+                can_resume=True,
+            )
+            return None
         if loaded.status == "invalid":
             self._print_error(
                 "Source Link設定ファイルが不正です。変更は保存していません。"
@@ -3236,10 +3496,14 @@ class LocalRagManager:
                 db_root, payload, **kwargs
             )
         except Exception as exc:
-            self._print_error(
-                "Source Link設定を保存できませんでした: "
-                f"{type(exc).__name__}: {exc}。設定は変更されていません。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source Link設定の保存",
+                stage="source_metadata.save",
+                db_name=db_name,
+                can_resume=True,
             )
+            self.output("設定は変更されていません。")
             return False
         self._sidecar_migrations[db_name] = False
         return True
@@ -3384,8 +3648,13 @@ class LocalRagManager:
         try:
             link = source_links.validate_source_link(link)
         except Exception as exc:
-            self._print_error(
-                f"Source Link設定が不正です: {type(exc).__name__}: {exc}"
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source Link設定の検証",
+                stage="source_metadata.validate",
+                db_name=db_name,
+                source_name=source_id,
+                can_resume=False,
             )
             self.output("設定は保存されていません。入力例を確認してください。")
             return
@@ -3757,7 +4026,7 @@ class LocalRagManager:
                 "Manager上でSourceを識別しやすくする表示専用の名前です。"
                 "Source IDは変更されません。"
             ),
-            examples=("GitHubソースコード", "SharePoint設計資料"),
+            examples=self._examples("source_display_name"),
             empty_help="Source IDを表示",
         )
         if display_name is None:
@@ -3853,10 +4122,7 @@ class LocalRagManager:
                     "検索結果から個別ファイルを開くための基準URLです。\n"
                     "RAGが自動計算した相対パスを、このURLの末尾に追加します。"
                 ),
-                examples=(
-                    "https://contoso.sharepoint.com/sites/manual/"
-                    "Shared%20Documents",
-                ),
+                examples=self._examples("sharepoint_link_root"),
             )
             if root is None:
                 return None
@@ -3883,7 +4149,7 @@ class LocalRagManager:
                     "Source全体の入口としてManagerで確認するURLです。"
                     "ファイル単位のURLは生成しません。"
                 ),
-                examples=("https://example.com/project",),
+                examples=self._examples("generic_home_url"),
             )
             if value is None:
                 return None
@@ -3896,7 +4162,7 @@ class LocalRagManager:
                 description=(
                     "このURLの末尾へSource相対パスを追加します。"
                 ),
-                examples=("https://example.com/documents",),
+                examples=self._examples("generic_web_root"),
             )
             if value is None:
                 return None
@@ -3919,10 +4185,7 @@ class LocalRagManager:
                     "Source相対パス全体に一致する、安全なnamed group付き"
                     "正規表現です。"
                 ),
-                examples=(
-                    r"^issues/(?P<issue_id>[0-9]+)\.md$",
-                    r"^wiki/(?P<page>.+)\.md$",
-                ),
+                examples=self._examples("regex_pattern"),
             )
             template = self._prompt_preserving_value(
                 "URLテンプレート",
@@ -3931,10 +4194,7 @@ class LocalRagManager:
                 description=(
                     "正規表現のnamed groupと同じ名前を{name}で指定します。"
                 ),
-                examples=(
-                    "https://redmine.example.com/issues/{issue_id}",
-                    "https://redmine.example.com/projects/project/wiki/{page}",
-                ),
+                examples=self._examples("regex_url_template"),
             )
             if pattern is None or template is None:
                 return None
@@ -3954,9 +4214,8 @@ class LocalRagManager:
     ) -> dict[str, Any] | None:
         provider_label = _PROVIDER_JA.get(provider, provider)
         if provider == "github":
-            repository_examples = (
-                "https://github.com/owner/repository",
-                "https://git.example.com/owner/repository",
+            repository_examples = self._examples(
+                "github_repository_web_url"
             )
             repository_help = (
                 "GitHubまたはGitHub EnterpriseのリポジトリトップURLです。"
@@ -3965,11 +4224,10 @@ class LocalRagManager:
             ref_help = (
                 "GitHub上で通常表示するブランチ、タグ、またはコミットです。"
             )
-            ref_examples = ("main", "develop", "release/v2", "v1.2.3")
+            ref_examples = self._examples("git_ref")
         elif provider == "gitlab":
-            repository_examples = (
-                "https://gitlab.com/group/subgroup/repository",
-                "https://gitlab.example.com/group/repository",
+            repository_examples = self._examples(
+                "gitlab_repository_web_url"
             )
             repository_help = (
                 "GitLab.comまたはセルフホストGitLabのプロジェクトトップURLです。"
@@ -3978,11 +4236,10 @@ class LocalRagManager:
             ref_help = (
                 "GitLab上で通常表示するブランチ、タグ、またはコミットです。"
             )
-            ref_examples = ("main", "develop", "release/v2", "v1.2.3")
+            ref_examples = self._examples("git_ref")
         else:
-            repository_examples = (
-                "https://dev.azure.com/organization/project/_git/repository",
-                "https://organization.visualstudio.com/project/_git/repository",
+            repository_examples = self._examples(
+                "azure_repository_web_url"
             )
             repository_help = (
                 "Azure DevOps ReposのリポジトリルートURLです。"
@@ -3992,7 +4249,7 @@ class LocalRagManager:
                 "通常リンクで開くブランチ名です。Azure DevOpsでは今回、"
                 "通常refをブランチとして扱います。"
             )
-            ref_examples = ("main", "develop", "release/v2")
+            ref_examples = self._examples("git_ref")
 
         repository = self._prompt_preserving_value(
             f"{provider_label}リポジトリURL",
@@ -4027,10 +4284,7 @@ class LocalRagManager:
                 "これはRAG保存パスから取り除くprefixではありません。"
                 "保存ルートの除去はManagerが自動で行います。"
             ),
-            examples=(
-                "RAG: docs/manual.md / リポジトリ: "
-                "product-a/docs/manual.md → product-a",
-            ),
+            examples=self._examples("git_repository_path_prefix"),
             empty_help=f"{provider_label}リポジトリ直下として扱う",
         )
         commit = self._prompt_preserving_value(
@@ -4041,7 +4295,7 @@ class LocalRagManager:
                 "将来内容が変わらない固定URLを付ける場合に、"
                 "完全なコミットSHAを指定します。回答では固定リンクが優先されます。"
             ),
-            examples=("0123456789abcdef0123456789abcdef01234567",),
+            examples=self._examples("git_commit"),
             empty_help="通常のref URLだけを生成",
         )
         if repository_prefix is None or commit is None:
@@ -4072,9 +4326,7 @@ class LocalRagManager:
                     "VisualSVN、ViewVC、WebSVN、Trac等のトップURLです。"
                     "query、fragment、末尾の/は入力どおり保持します。"
                 ),
-                examples=(
-                    "https://svn-web.example.com/project?view=summary#files",
-                ),
+                examples=self._examples("svn_link_web_root"),
             )
             return (
                 {"repository_url": repository}
@@ -4095,10 +4347,7 @@ class LocalRagManager:
                 "取り込んだローカルルートに対応するHTTP(S) URLです。"
                 "trunk、branches、tagsを含むURLもそのまま使用できます。"
             ),
-            examples=(
-                "https://svn.example.com/repos/project/trunk",
-                "https://svn.example.com/repos/project/branches/release-2",
-            ),
+            examples=self._examples("svn_link_repository_url"),
         )
         repository_prefix = self._prompt_preserving_value(
             "SVNリポジトリ内の追加パス",
@@ -4108,7 +4357,7 @@ class LocalRagManager:
                 "SVN URLとSource相対パスの間へ追加するディレクトリです。"
                 "通常は空欄です。"
             ),
-            examples=("docs", "manuals/ja"),
+            examples=self._examples("svn_repository_path_prefix"),
             empty_help="SVNリポジトリURL直下として扱う",
         )
         current_choice = (
@@ -4144,7 +4393,7 @@ class LocalRagManager:
                     "混在リビジョンの作業コピーでは、単一revisionの固定リンクが"
                     "各ファイルの実際の版と一致しない場合があります。"
                 ),
-                examples=("1234",),
+                examples=self._examples("svn_revision"),
             )
             if revision is None:
                 return None
@@ -4272,8 +4521,12 @@ class LocalRagManager:
         try:
             root = self._validated_database_root(db_name)
         except Exception as exc:
-            self._print_error(
-                f"DBを削除できません: {type(exc).__name__}: {exc}"
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB削除対象の確認",
+                stage="database_delete.validate_target",
+                db_name=db_name,
+                can_resume=False,
             )
             return False
         documents = 0
@@ -4310,11 +4563,14 @@ class LocalRagManager:
         try:
             active_states = self._in_progress_source_states(root)
         except ManagerError as exc:
-            self._print_error(
-                "Sourceの処理状態を安全に確認できないため、"
-                "DBは削除されませんでした。"
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB削除前のSource状態確認",
+                stage="database_delete.inspect_sources",
+                db_name=db_name,
+                can_resume=False,
             )
-            self.output(str(exc))
+            self.output("DBは削除されませんでした。")
             return False
         if active_states:
             self._print_warning(
@@ -4340,15 +4596,18 @@ class LocalRagManager:
                     )
                     interrupted += 1
             except (ManagerError, OSError) as exc:
-                self._print_error(
-                    "Sourceの中断記録を完了できないため、"
-                    "DBは削除されませんでした。"
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="DB削除前のSource中断記録",
+                    stage="database_delete.save_interrupted_state",
+                    db_name=db_name,
+                    can_resume=True,
                 )
                 self.output(
                     f"中断状態を保存済み: {interrupted:,}件 / "
                     f"未保存: {len(active_states) - interrupted:,}件"
                 )
-                self.output(f"理由: {type(exc).__name__}: {exc}")
+                self.output("DBは削除されませんでした。")
                 return False
             self._print_success(
                 f"{interrupted:,}件のSourceを中断状態として記録しました。"
@@ -4362,6 +4621,13 @@ class LocalRagManager:
         try:
             self._delete_database(db_name, confirmation)
         except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB削除",
+                stage="database.delete",
+                db_name=db_name,
+                can_resume=False,
+            )
             if root.exists():
                 self._print_error(
                     "DB削除は完了していません。"
@@ -4372,7 +4638,6 @@ class LocalRagManager:
                     "DB削除中にエラーが発生しました。"
                     "削除結果を正常完了として確認できません。"
                 )
-            self.output(f"理由: {type(exc).__name__}: {exc}")
             return False
         self._print_success(f"DB「{db_name}」を削除しました。")
         return True
@@ -4636,9 +4901,17 @@ class LocalRagManager:
         if result is None or int(result.returncode) != 0:
             return None
         try:
-            payload = json.loads(str(result.stdout or ""))
-        except json.JSONDecodeError:
-            self._print_error("DB状態を読み取れませんでした。")
+            payload = extract_json_result(
+                result,
+                validator=lambda value: isinstance(value, dict),
+            )
+        except ResultExtractionError as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB状態の解析",
+                stage="status.parse_result",
+                db_name=db_name,
+            )
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -4647,8 +4920,14 @@ class LocalRagManager:
             self._validated_database_root(db_name)
         except Exception as exc:
             self._print_error(
-                f"DB「{db_name}」を安全な操作対象として確認できません: "
-                f"{type(exc).__name__}: {exc}"
+                f"DB「{db_name}」を安全な操作対象として確認できません。"
+            )
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB操作対象の確認",
+                stage="database.validate_target",
+                db_name=db_name,
+                can_resume=False,
             )
             return False
         return True
@@ -4773,9 +5052,17 @@ class LocalRagManager:
         if result is None or int(result.returncode) != 0:
             return []
         try:
-            payload = json.loads(str(result.stdout or ""))
-        except json.JSONDecodeError:
-            self._print_error("DB一覧を読み取れませんでした。")
+            payload = extract_json_result(
+                result,
+                validator=lambda value: isinstance(value, dict)
+                and isinstance(value.get("databases"), list),
+            )
+        except ResultExtractionError as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="DB一覧の解析",
+                stage="database_list.parse_result",
+            )
             return []
         databases = payload.get("databases") if isinstance(payload, dict) else []
         if not isinstance(databases, list):
@@ -4810,6 +5097,12 @@ class LocalRagManager:
             )
             return None
         argv = [str(runtime), str(script), *[str(value) for value in arguments]]
+        argument_values = [str(value) for value in arguments]
+        db_name = ""
+        if "--db" in argument_values:
+            position = argument_values.index("--db")
+            if position + 1 < len(argument_values):
+                db_name = argument_values[position + 1]
         kwargs: dict[str, Any] = {
             "shell": False,
             "check": False,
@@ -4831,19 +5124,47 @@ class LocalRagManager:
                     "errors": "replace",
                 }
             )
+        started = time.monotonic()
         try:
             completed = self.runner(argv, **kwargs)
         except OSError as exc:
-            self._print_error(
-                f"処理を開始できませんでした: {type(exc).__name__}: {exc}"
+            elapsed = time.monotonic() - started
+            process = process_diagnostic(
+                arguments=argv,
+                cwd=self.rag_root,
+                returncode=None,
+                elapsed_seconds=elapsed,
+            )
+            self._print_internal_diagnostic(
+                exc,
+                operation=normalized,
+                stage="subprocess.start",
+                db_name=db_name,
+                can_resume=None,
+                process=process,
             )
             return None
         if int(completed.returncode) != 0 and report_nonzero:
-            self._print_error(
-                f"処理が終了コード{int(completed.returncode)}で失敗しました。"
+            elapsed = time.monotonic() - started
+            process = process_diagnostic(
+                arguments=argv,
+                cwd=self.rag_root,
+                returncode=int(completed.returncode),
+                elapsed_seconds=elapsed,
+                stdout=getattr(completed, "stdout", ""),
+                stderr=getattr(completed, "stderr", ""),
             )
-            if capture_output and completed.stderr:
-                self.output(str(completed.stderr).strip())
+            error = ManagerError(
+                f"子プロセスが終了コード{int(completed.returncode)}を返しました"
+            )
+            self._print_internal_diagnostic(
+                error,
+                operation=normalized,
+                stage="subprocess.completed",
+                db_name=db_name,
+                can_resume=None,
+                process=process,
+            )
         return completed
 
     def _runtime_python(self) -> Path:

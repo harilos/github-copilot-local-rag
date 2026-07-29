@@ -36,6 +36,11 @@ class PackageContractTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_distribution_is_allowlisted_and_validated(self) -> None:
+        self._write(
+            self.home / "rag/config/manage-custom.json",
+            '{"schema_version":"local-rag.manage-custom.v1",'
+            '"examples":{"database_name":["private-rag"]}}\n',
+        )
         source_version = self._read_bytes(
             self.home / "rag/dbs/demo-rag/VERSION.json"
         )
@@ -79,6 +84,14 @@ class PackageContractTests(unittest.TestCase):
             paths,
         )
         self.assertNotIn(".copilot/rag/manage.py", paths)
+        self.assertIn(
+            ".copilot/rag/config/manage-custom.example.json",
+            paths,
+        )
+        self.assertNotIn(
+            ".copilot/rag/config/manage-custom.json",
+            paths,
+        )
         self.assertFalse(
             any("/source_manager/" in path for path in paths)
         )
@@ -516,6 +529,11 @@ class PackageContractTests(unittest.TestCase):
         self,
     ) -> None:
         output = self.root / "admin-transfer"
+        self._write(
+            self.home / "rag/config/manage-custom.json",
+            '{"schema_version":"local-rag.manage-custom.v1",'
+            '"examples":{"database_name":["private-rag"]}}\n',
+        )
         business_record = (
             self.home
             / "rag/dbs/demo-rag/data/clean/business.json"
@@ -579,6 +597,14 @@ class PackageContractTests(unittest.TestCase):
         )
         paths = {item["path"] for item in manifest["files"]}
         self.assertIn(".copilot/rag/manage.py", paths)
+        self.assertIn(
+            ".copilot/rag/config/manage-custom.example.json",
+            paths,
+        )
+        self.assertNotIn(
+            ".copilot/rag/config/manage-custom.json",
+            paths,
+        )
         self.assertIn(
             ".copilot/rag/source_manager/store.py",
             paths,
@@ -1229,6 +1255,11 @@ class PackageContractTests(unittest.TestCase):
             self._write(rag / "gen_db" / name, "fixture\n")
         self._write(rag / "source_manager/__init__.py", "")
         self._write(rag / "source_manager/store.py", "")
+        self._write(
+            rag / "config/manage-custom.example.json",
+            '{"schema_version":"local-rag.manage-custom.v1",'
+            '"examples":{"database_name":["example-rag"]}}\n',
+        )
         self._write(rag / "source_manager/tests/test_hidden.py", "")
         self._write(
             self.home / "instructions/rag.instructions.md",

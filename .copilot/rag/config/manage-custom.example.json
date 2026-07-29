@@ -1,0 +1,154 @@
+{
+  "schema_version": "local-rag.manage-custom.v1",
+  "examples": {
+    "admin_transfer_output": [
+      "local-rag-admin-transfer"
+    ],
+    "azure_repository_web_url": [
+      "https://dev.azure.com/<organization>/<project>/_git/<repository>",
+      "https://<organization>.visualstudio.com/<project>/_git/<repository>"
+    ],
+    "database_name": [
+      "project-rag",
+      "incident-rag",
+      "product-manual-rag"
+    ],
+    "database_query_hint": [
+      "Product design, incidents, operations, and meeting records"
+    ],
+    "database_query_hint_edit": [
+      "Product design, incidents, and operating procedures"
+    ],
+    "database_title": [
+      "Product Design Documents"
+    ],
+    "database_title_edit": [
+      "Product Design and Operations"
+    ],
+    "distribution_output": [
+      "local-rag-search-package.zip"
+    ],
+    "generic_home_url": [
+      "https://example.invalid/<project>"
+    ],
+    "generic_web_root": [
+      "https://example.invalid/<documents>"
+    ],
+    "git_commit": [
+      "0123456789abcdef0123456789abcdef01234567"
+    ],
+    "git_ref": [
+      "main",
+      "develop",
+      "release/v2",
+      "v1.2.3"
+    ],
+    "git_repository_path_prefix": [
+      "RAG: docs/manual.md / repository: product/docs/manual.md -> product"
+    ],
+    "github_repository_clone_url": [
+      "https://github.com/<owner>/<repository>.git"
+    ],
+    "github_repository_web_url": [
+      "https://github.com/<owner>/<repository>",
+      "https://<git-host>/<owner>/<repository>"
+    ],
+    "github_source_display_name": [
+      "Product Source Code"
+    ],
+    "gitlab_repository_web_url": [
+      "https://gitlab.com/<group>/<repository>",
+      "https://<git-host>/<group>/<repository>"
+    ],
+    "ingestion_root": [
+      "C:\\path\\to\\source-root",
+      "/path/to/source-root"
+    ],
+    "new_source_id": [
+      "github-repository",
+      "sharepoint-docs",
+      "redmine-issues"
+    ],
+    "other_input_path": [
+      "<selected-file-or-directory>"
+    ],
+    "other_source_display_name": [
+      "Imported Documents"
+    ],
+    "package_input": [
+      "local-rag-search-package.zip"
+    ],
+    "redmine_days": [
+      "365",
+      "90",
+      "30"
+    ],
+    "redmine_project_url": [
+      "https://<redmine-host>/projects/<project-id>"
+    ],
+    "redmine_source_display_name": [
+      "Product Support"
+    ],
+    "regex_pattern": [
+      "^issues/(?P<issue_id>[0-9]+)\\.md$",
+      "^wiki/(?P<page>.+)\\.md$"
+    ],
+    "regex_url_template": [
+      "https://<redmine-host>/issues/{issue_id}",
+      "https://<redmine-host>/projects/<project-id>/wiki/{page}"
+    ],
+    "scan_subdirectory": [
+      "docs",
+      "manuals/ja"
+    ],
+    "search_question": [
+      "What operating considerations are documented for this product?"
+    ],
+    "sharepoint_browser_url": [
+      "https://<tenant>.sharepoint.com/sites/<site>/<library>/<folder>"
+    ],
+    "sharepoint_link_root": [
+      "https://<tenant>.sharepoint.com/sites/<site>/<library>"
+    ],
+    "sharepoint_relative_path": [
+      "<library>/<folder>"
+    ],
+    "sharepoint_source_display_name": [
+      "Design Documents"
+    ],
+    "source_display_name": [
+      "Design Documents",
+      "Incident Management",
+      "Source Code"
+    ],
+    "source_id": [
+      "github-repository",
+      "gitlab-repository",
+      "azure-repository",
+      "svn-repository",
+      "sharepoint-docs",
+      "redmine-issues",
+      "filesystem-docs"
+    ],
+    "svn_link_repository_url": [
+      "https://<svn-host>/repos/<project>/trunk",
+      "https://<svn-host>/repos/<project>/branches/<branch>"
+    ],
+    "svn_link_web_root": [
+      "https://<svn-web-host>/<project>?view=summary#files"
+    ],
+    "svn_repository_path_prefix": [
+      "docs",
+      "manuals/ja"
+    ],
+    "svn_repository_url": [
+      "https://<svn-host>/repos/<project>/trunk"
+    ],
+    "svn_revision": [
+      "1234"
+    ],
+    "svn_source_display_name": [
+      "Product Specifications"
+    ]
+  }
+}

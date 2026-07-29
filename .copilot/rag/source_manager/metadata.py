@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
+from .redmine import repair_generated_redmine_link
 
 
 def publish_source_metadata(
@@ -139,14 +140,32 @@ def _canonical_source(
         "source_type": str(source["source_type"]),
     }
     pending = source.get("pending_metadata")
+    selected_link: Mapping[str, Any] | None = None
     if isinstance(pending, Mapping):
         link = pending.get("link")
         if isinstance(link, Mapping):
-            value["link"] = copy.deepcopy(dict(link))
+            selected_link = link
     elif isinstance(current_source, Mapping):
         current_link = current_source.get("link")
         if isinstance(current_link, Mapping):
-            value["link"] = copy.deepcopy(dict(current_link))
+            selected_link = current_link
+    if selected_link is not None:
+        link_value = copy.deepcopy(dict(selected_link))
+        if value["source_type"] == "redmine":
+            fetch = source.get("fetch")
+            project_url = (
+                fetch.get("project_url")
+                if isinstance(fetch, Mapping)
+                else None
+            )
+            if project_url:
+                repaired = repair_generated_redmine_link(
+                    project_url,
+                    link_value,
+                )
+                if repaired is not None:
+                    link_value = repaired
+        value["link"] = link_value
     return value
 
 

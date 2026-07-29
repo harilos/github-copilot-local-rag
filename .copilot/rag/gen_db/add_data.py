@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -16,6 +17,57 @@ from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
+
+
+_PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
+_RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
+
+
+class _ManagerProtocolWriter:
+    """Route legacy ADD progress away from the framed result stdout."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+
+    def write(self, value: str) -> int:
+        self._buffer += str(value)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line)
+        return len(value)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit(self._buffer)
+            self._buffer = ""
+        sys.stderr.flush()
+
+    @staticmethod
+    def _emit(line: str) -> None:
+        text = str(line).strip()
+        if not text:
+            return
+        if text.startswith("PROGRESS "):
+            values: dict[str, object] = {
+                "phase": "reflect",
+                "label_ja": "検索反映",
+                "unit": "件",
+                "total_kind": "unknown",
+            }
+            for field in text[len("PROGRESS ") :].split():
+                key, separator, raw = field.partition("=")
+                if separator and raw.isdigit():
+                    values[key] = int(raw)
+            values["completed"] = int(values.get("indexed_files") or 0)
+            sys.stderr.write(
+                _PROGRESS_FRAME
+                + json.dumps(values, ensure_ascii=False)
+                + "\n"
+            )
+            sys.stderr.flush()
+            return
+        sys.stderr.write(text + "\n")
+        sys.stderr.flush()
 from software_rag_tool.paths import dbs_dir
 
 
@@ -72,6 +124,11 @@ def main() -> None:
     parser.add_argument("--chunk-max-chars", type=int, default=1400, help="Optional chunk size for evaluation builds")
     parser.add_argument("--chunk-overlap", type=int, default=160, help="Optional chunk overlap for evaluation builds")
     parser.add_argument("--operation", default="add", choices=["add", "build"], help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--manager-protocol-v1",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.resume and (args.reset_db or args.reset_clean):
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
@@ -84,21 +141,35 @@ def main() -> None:
         "CHROMA_COLLECTION",
         collection_name_for_db(db_name),
     )
-    summary = add_or_update_root(
-        root=Path(args.root),
-        source_id=args.source_id,
-        scan_subdir=args.scan_subdir,
-        include_root_name_in_path=True,
-        batch_size_files=args.batch_size_files,
-        reset_db=args.reset_db,
-        reset_clean=args.reset_clean,
-        retry_errors=args.retry_errors,
-        operation=args.operation,
-        chunk_max_chars=args.chunk_max_chars,
-        chunk_overlap=args.chunk_overlap,
-        resume=args.resume,
+    protocol_writer = _ManagerProtocolWriter()
+    output_context = (
+        contextlib.redirect_stdout(protocol_writer)
+        if args.manager_protocol_v1
+        else contextlib.nullcontext()
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    with output_context:
+        summary = add_or_update_root(
+            root=Path(args.root),
+            source_id=args.source_id,
+            scan_subdir=args.scan_subdir,
+            include_root_name_in_path=True,
+            batch_size_files=args.batch_size_files,
+            reset_db=args.reset_db,
+            reset_clean=args.reset_clean,
+            retry_errors=args.retry_errors,
+            operation=args.operation,
+            chunk_max_chars=args.chunk_max_chars,
+            chunk_overlap=args.chunk_overlap,
+            resume=args.resume,
+        )
+    if args.manager_protocol_v1:
+        protocol_writer.flush()
+        print(
+            _RESULT_FRAME
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        )
+    else:
+        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

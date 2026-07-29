@@ -23,6 +23,12 @@ management-PC transfer, say:
 
 Do not open the Manager automatically.
 
+If Local RAG is not installed or its virtual-environment interpreter is
+missing, tell the human in their language that initial setup normally takes
+about 10 minutes and must be run from Local RAG Manager.
+
+Do not attempt setup from Copilot.
+
 If the latest prompt names a database ending in `-rag`, search that database
 once and do not list databases. Otherwise list databases once. Choose a
 database only when one candidate clearly matches the title, query hint,

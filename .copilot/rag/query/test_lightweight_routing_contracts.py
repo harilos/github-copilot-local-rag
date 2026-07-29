@@ -61,6 +61,13 @@ class LightweightRoutingContractTests(unittest.TestCase):
             lookup,
         )
 
+    def test_missing_setup_is_reported_as_about_ten_minutes(self) -> None:
+        for path in (ROUTER, LOOKUP):
+            text = path.read_text(encoding="utf-8")
+            self.assertRegex(text, r"(?:about|normally takes)\s+10 minutes")
+            self.assertIn("Local RAG Manager", text)
+            self.assertRegex(text, r"Do not (?:attempt|run) setup")
+
     def test_lookup_contract_is_one_list_then_one_search(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("database-list calls: 0", text)

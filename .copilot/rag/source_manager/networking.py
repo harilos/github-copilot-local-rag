@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -9,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
+from .subprocess_stream import ProgressCallback, run_streaming_process
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ def resolve_source_network_route(
     rag_root: Path,
     *,
     environment: Mapping[str, str] | None,
+    progress_callback: ProgressCallback | None = None,
 ) -> SourceNetworkRoute:
     """Resolve the canonical route exactly once for one Source operation."""
     network = _network_module(Path(rag_root))
@@ -38,16 +39,11 @@ def resolve_source_network_route(
     opener = resolution.build_url_opener()
 
     def command_runner(arguments: list[str]):
-        return subprocess.run(
+        return run_streaming_process(
             arguments,
-            shell=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=300,
-            check=False,
             env=effective_environment,
+            progress_callback=progress_callback,
         )
 
     def http_get(

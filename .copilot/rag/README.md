@@ -74,6 +74,15 @@ Windows PowerShell:
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
+Manager prompt examples are organization-customizable without editing
+`manage.py`. Copy `config/manage-custom.example.json` to the untracked
+`config/manage-custom.json` and override only the required keys. The schema is
+`local-rag.manage-custom.v1`. An absolute file selected by
+`LOCAL_RAG_MANAGE_CUSTOM_CONFIG` has highest priority, followed by
+`manage-custom.json`, then the tracked example. Invalid individual fields
+fall back to the next layer with a non-sensitive warning. Credentials and
+other secret values are rejected.
+
 Top-level menu:
 
 1. Create a new database.

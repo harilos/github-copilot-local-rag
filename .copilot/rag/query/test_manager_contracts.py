@@ -817,6 +817,56 @@ class ManagerContractTests(unittest.TestCase):
             "\n".join(self.output),
         )
 
+    def test_source_link_load_failure_uses_redacted_common_diagnostic(
+        self,
+    ) -> None:
+        self.make_db()
+
+        class FailingSourceLinks:
+            @staticmethod
+            def load_source_links(*_args: Any) -> None:
+                raise RuntimeError("token=not-for-output")
+
+        manager = self.manager()
+        manager._import_source_links = lambda: FailingSourceLinks()
+        self.assertIsNone(manager._load_sidecar_payload("example-rag"))
+        rendered = "\n".join(self.output)
+        self.assertIn("source_metadata.load", rendered)
+        self.assertIn("RuntimeError", rendered)
+        self.assertNotIn("not-for-output", rendered)
+
+    def test_source_link_validation_uses_redacted_common_diagnostic(
+        self,
+    ) -> None:
+        self.make_db()
+
+        class FailingSourceLinks:
+            @staticmethod
+            def validate_source_link(_link: dict[str, Any]) -> None:
+                raise ValueError("password=not-for-output")
+
+        manager = self.manager()
+        manager._source_link = lambda *_args: (
+            FailingSourceLinks(),
+            {"revision": 0, "sources": []},
+            None,
+        )
+        manager._prompt_source_link = lambda **_kwargs: {
+            "provider": "other",
+            "enabled": True,
+            "strategy": "home-only",
+            "settings": {},
+        }
+        manager._configure_source_link(
+            "example-rag",
+            FakeInventory(),
+            "source-a",
+        )
+        rendered = "\n".join(self.output)
+        self.assertIn("source_metadata.validate", rendered)
+        self.assertIn("ValueError", rendered)
+        self.assertNotIn("not-for-output", rendered)
+
     def test_per_file_link_requires_one_observed_root(self) -> None:
         self.make_db()
         links = FakeSourceLinks()

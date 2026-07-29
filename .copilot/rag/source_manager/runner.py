@@ -4,7 +4,7 @@ import copy
 import json
 import os
 import sqlite3
-import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,15 +18,67 @@ from .errors import (
     sanitize_diagnostic,
 )
 from .execution import execute_fetch_plan, validate_managed_work_tree
+from .diagnostics import exception_diagnostic, process_diagnostic
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
 from .providers import validate_provider_config
+from .redmine import (
+    REDMINE_CUTOFF_STATE_KEY,
+    redmine_updated_on_cutoff,
+    repair_generated_redmine_link,
+)
 from .store import MISSING_ETAG, SourceStore, StoredJson
+from .subprocess_stream import (
+    ProgressCallback,
+    ResultExtractionError,
+    extract_json_result,
+    run_streaming_process,
+)
 
 
 FetchExecutor = Callable[[dict[str, Any], Path, dict[str, Any]], Mapping[str, Any]]
 CommandRunner = Callable[[list[str]], Any]
 MetadataPublisher = Callable[[Path, Mapping[str, Any], Path], None]
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    event: Mapping[str, Any],
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(dict(event))
+    except Exception:
+        return
+
+
+def _persistable_http_diagnostic(
+    event: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Remove secret-bearing header entries before durable event storage.
+
+    The live UI may show the header name with a ``<REDACTED>`` value, while
+    the Source event contract intentionally rejects credential-like keys as
+    well as values.  Persist non-secret headers and only a count for redacted
+    entries.
+    """
+    value = copy.deepcopy(dict(event))
+    for field in ("request_headers", "response_headers"):
+        headers = value.get(field)
+        if not isinstance(headers, Mapping):
+            continue
+        visible: dict[str, Any] = {}
+        redacted_count = 0
+        for name, header_value in headers.items():
+            if str(header_value) == "<REDACTED>":
+                redacted_count += 1
+            else:
+                visible[str(name)] = header_value
+        value[field] = visible
+        if redacted_count:
+            value[f"{field}_redacted_count"] = redacted_count
+    return value
 
 
 def register_source(
@@ -47,19 +99,27 @@ def register_source(
     http_get: Callable[..., Any] | None = None,
     environment: Mapping[str, str] | None = None,
     metadata_publisher: MetadataPublisher | None = None,
+    clock: Callable[[], datetime] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Register one provisional Source without assigning indexed identity."""
     values = dict(fetch)
     runtime_path = runtime_input or values.pop("runtime_path", None)
     runtime = _validate_registration_runtime(source_type, runtime_path)
     store = SourceStore(db_root)
+    effective_link = link
+    if str(source_type).strip().lower() == "redmine":
+        effective_link = repair_generated_redmine_link(
+            values.get("project_url"),
+            link,
+        )
     stored = store.create_source(
         source_type=source_type,
         display_name=display_name,
         fetch=values,
         local_source_key=local_source_key,
         source_id=source_id,
-        link=link,
+        link=effective_link,
     )
     if runtime is not None:
         plan = store.plan(stored.payload)
@@ -88,6 +148,8 @@ def register_source(
                 python_executable=python_executable,
                 rag_root=rag_root,
                 metadata_publisher=metadata_publisher,
+                clock=clock,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
             _attach_registration_failure(
@@ -129,12 +191,16 @@ def update_source(
     environment: Mapping[str, str] | None = None,
     metadata_publisher: MetadataPublisher | None = None,
     runtime_input: str | Path | None = None,
+    clock: Callable[[], datetime] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Prepare or execute one fetch; network access exists only in executor."""
     store = SourceStore(db_root)
     source = store.read_source(local_source_key)
     if not source.payload:
         raise SourceManagerError("Source does not exist")
+    if source.payload.get("source_type") == "redmine":
+        source = _normalize_redmine_source(store, source)
     runtime = _validate_registration_runtime(
         str(source.payload["source_type"]),
         runtime_input,
@@ -169,6 +235,7 @@ def update_source(
         route = resolve_source_network_route(
             Path(rag_root),
             environment=environment,
+            progress_callback=progress_callback,
         )
         provider_command_runner = route.command_runner
         provider_http_get = route.http_get
@@ -189,6 +256,8 @@ def update_source(
             http_get=provider_http_get,
             environment=provider_environment,
             metadata_publisher=metadata_publisher,
+            clock=clock,
+            progress_callback=progress_callback,
         )
     plan = store.plan(source.payload)
     state_stored = existing_state
@@ -206,6 +275,7 @@ def update_source(
             rag_root=rag_root,
             command_runner=command_runner,
             metadata_publisher=metadata_publisher,
+            progress_callback=progress_callback,
         )
     if (
         state_stored.payload
@@ -225,6 +295,16 @@ def update_source(
         expected_etag=state_stored.etag,
     )
     work = store.ensure_work_directory(local_source_key)
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": f"{source.payload['source_type']}.fetch",
+            "label_ja": "取得開始",
+            "provider": source.payload["source_type"],
+            "total_kind": "unknown",
+            "status": "running",
+        },
+    )
     effective_executor = executor
     if (
         effective_executor is None
@@ -239,6 +319,8 @@ def update_source(
                 command_runner=provider_command_runner,
                 http_get=provider_http_get,
                 environment=provider_environment,
+                clock=clock,
+                progress_callback=progress_callback,
             )
         )
     if effective_executor is None:
@@ -361,6 +443,19 @@ def update_source(
             "documents": int(outcome.get("documents") or 0),
         },
     )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": f"{source.payload['source_type']}.fetch",
+            "label_ja": "取得",
+            "provider": source.payload["source_type"],
+            "completed": fetched_count,
+            "unit": "件",
+            "total_kind": "unknown",
+            "status": "completed",
+            "checkpoint_saved": True,
+        },
+    )
     result = {
         **_source_dto(store, source),
         "status": "fetched",
@@ -382,6 +477,7 @@ def update_source(
             rag_root=Path(rag_root),
             command_runner=command_runner,
             metadata_publisher=metadata_publisher,
+            progress_callback=progress_callback,
         )
     return result
 
@@ -396,12 +492,21 @@ def update_all_sources(
     http_get: Callable[..., Any] | None = None,
     environment: Mapping[str, str] | None = None,
     metadata_publisher: MetadataPublisher | None = None,
+    clock: Callable[[], datetime] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    for item in list_sources(db_root):
+    source_items = list_sources(db_root)
+    for source_index, item in enumerate(source_items, start=1):
         key = str(item.get("local_source_key") or "")
         if not key or item.get("status") == "invalid":
             results.append(item)
+            _emit_source_count_progress(
+                progress_callback,
+                item,
+                source_index,
+                len(source_items),
+            )
             continue
         if (
             item.get("source_type") == "other"
@@ -415,6 +520,12 @@ def update_all_sources(
                     "skip_reason": "one_shot_source_complete",
                 }
             )
+            _emit_source_count_progress(
+                progress_callback,
+                item,
+                source_index,
+                len(source_items),
+            )
             continue
         if item.get("source_type") == "sharepoint" and not _is_windows():
             results.append(
@@ -423,6 +534,12 @@ def update_all_sources(
                     "status": "skipped",
                     "skip_reason": "sharepoint_update_requires_windows",
                 }
+            )
+            _emit_source_count_progress(
+                progress_callback,
+                item,
+                source_index,
+                len(source_items),
             )
             continue
         try:
@@ -437,19 +554,50 @@ def update_all_sources(
                     http_get=http_get,
                     environment=environment,
                     metadata_publisher=metadata_publisher,
+                    clock=clock,
+                    progress_callback=progress_callback,
                 )
             )
         except SourceManagerError as exc:
             paths = SourceStore(db_root).paths(key)
+            failure_diagnostic = exception_diagnostic(
+                exc,
+                operation="Source更新・再開",
+                stage=str(getattr(exc, "stage", None) or "source.update"),
+                db_name=Path(db_root).name,
+                source_name=str(item.get("display_name") or ""),
+                source_key=key,
+                provider=str(item.get("source_type") or ""),
+                can_resume=True,
+                events_jsonl=str(paths.events_jsonl),
+            )
             results.append(
                 {
+                    "display_name": item.get("display_name"),
+                    "source_type": item.get("source_type"),
                     "local_source_key": key,
                     "status": "failed",
                     "failure_stage": getattr(exc, "stage", None),
                     "error_type": type(exc).__name__,
                     "error": exception_summary(exc),
                     "events_jsonl": paths.events_jsonl,
+                    "failure_diagnostic": failure_diagnostic,
+                    "process_diagnostic": (
+                        getattr(exc, "process_diagnostic")
+                        if isinstance(
+                            getattr(exc, "process_diagnostic", None),
+                            dict,
+                        )
+                        else None
+                    ),
                 }
+            )
+        finally:
+            _emit_source_count_progress(
+                progress_callback,
+                item,
+                source_index,
+                len(source_items),
             )
     failed = [item for item in results if item.get("status") == "failed"]
     blocking_skips = [
@@ -484,6 +632,33 @@ def update_all_sources(
         ),
         "results": results,
     }
+
+
+def _emit_source_count_progress(
+    progress_callback: ProgressCallback | None,
+    item: Mapping[str, Any],
+    completed: int,
+    total: int,
+) -> None:
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "sources",
+            "label_ja": "Source単位の進捗",
+            "provider": item.get("source_type"),
+            "completed": completed,
+            "total": total,
+            "unit": " Source",
+            "total_kind": "exact",
+            "current_item": str(
+                item.get("display_name")
+                or item.get("local_source_key")
+                or ""
+            ),
+            "status": "completed" if completed == total else "running",
+            "checkpoint_saved": True,
+        },
+    )
 
 
 def _is_windows() -> bool:
@@ -611,6 +786,38 @@ def _apply_fetch_metadata(
     return saved, False
 
 
+def _normalize_redmine_source(
+    store: SourceStore,
+    source: StoredJson,
+) -> StoredJson:
+    """Refresh legacy derived fetch fields and known generated Link defaults."""
+    payload = copy.deepcopy(source.payload)
+    normalized_fetch = validate_provider_config(
+        "redmine",
+        payload.get("fetch") or {},
+    )
+    changed = normalized_fetch != payload.get("fetch")
+    payload["fetch"] = normalized_fetch
+    pending = payload.get("pending_metadata")
+    if isinstance(pending, dict) and isinstance(pending.get("link"), Mapping):
+        repaired = repair_generated_redmine_link(
+            normalized_fetch["project_url"],
+            pending["link"],
+        )
+        if repaired is not None and repaired != pending["link"]:
+            pending = copy.deepcopy(pending)
+            pending["link"] = repaired
+            payload["pending_metadata"] = pending
+            changed = True
+    if not changed:
+        return source
+    return store.save_source(
+        payload,
+        expected_revision=source.revision,
+        expected_etag=source.etag,
+    )
+
+
 def _github_browser_root(fetch_url: str) -> str | None:
     split = urlsplit(fetch_url)
     if (
@@ -689,6 +896,7 @@ def _execute_add(
     python_executable: Path,
     rag_root: Path,
     command_runner: CommandRunner | None,
+    progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     key = str(source["local_source_key"])
     arguments = [
@@ -701,18 +909,27 @@ def _execute_add(
         "--source-id",
         key,
         "--include-root-name-in-path",
+        "--manager-protocol-v1",
     ]
-    runner = command_runner or _run_command
-    completed = runner(arguments)
+    started = time.monotonic()
+    completed = (
+        command_runner(arguments)
+        if command_runner is not None
+        else run_streaming_process(
+            arguments,
+            progress_callback=progress_callback,
+        )
+    )
+    elapsed = time.monotonic() - started
     returncode = int(getattr(completed, "returncode", 1))
     if returncode != 0:
         stderr = sanitize_diagnostic(
             getattr(completed, "stderr", ""),
-            max_chars=4_000,
+            max_chars=65_536,
         )
         stdout = sanitize_diagnostic(
             getattr(completed, "stdout", ""),
-            max_chars=2_000,
+            max_chars=65_536,
         )
         details: list[str] = []
         if stderr:
@@ -720,28 +937,81 @@ def _execute_add(
         if stdout:
             details.append(f"標準出力:\n{stdout}")
         suffix = "\n" + "\n".join(details) if details else ""
-        raise SourceManagerError(
+        error = SourceManagerError(
             "ADD failed: 検索への反映に失敗しました"
             f"（終了コード: {returncode}）。{suffix}",
             stage="reflect.add",
         )
+        error.process_diagnostic = process_diagnostic(
+            arguments=arguments,
+            cwd=rag_root,
+            returncode=returncode,
+            elapsed_seconds=elapsed,
+            stdout=getattr(completed, "stdout", ""),
+            stderr=getattr(completed, "stderr", ""),
+        )
+        raise error
+
+    def validate_add_result(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("source_id") != key:
+            return False
+        # This boundary invokes add_data.py without --operation=build.  A
+        # build-shaped summary must not be accepted as proof that this ADD
+        # reflected the requested Source.
+        if value.get("operation") != "add":
+            return False
+        for field in (
+            "file_count",
+            "indexed_files",
+            "skipped_files",
+            "error_files",
+            "upserted_records",
+            "deleted_records",
+        ):
+            count = value.get(field)
+            if (
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+            ):
+                return False
+        return True
+
     try:
-        summary = json.loads(str(getattr(completed, "stdout", "") or ""))
-    except json.JSONDecodeError as exc:
-        stdout = sanitize_diagnostic(
-            getattr(completed, "stdout", ""),
-            max_chars=2_000,
+        summary = extract_json_result(
+            completed,
+            validator=validate_add_result,
+        )
+    except ResultExtractionError as exc:
+        diagnostic_codes = sorted(
+            {
+                str(item.get("error"))
+                for item in exc.diagnostics
+                if item.get("error")
+            }
+        )
+        suffix = (
+            f" ({', '.join(diagnostic_codes)})"
+            if diagnostic_codes
+            else ""
         )
         raise SourceManagerError(
-            "ADD did not return trusted JSON."
-            + (f"\n標準出力:\n{stdout}" if stdout else ""),
+            "ADD did not return exactly one trusted JSON result "
+            "with trusted source_id and schema"
+            + suffix
+            + "\nJSON候補診断:\n"
+            + sanitize_diagnostic(
+                json.dumps(
+                    list(exc.diagnostics),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                max_chars=65_536,
+            ),
             stage="reflect.add",
         ) from exc
-    if not isinstance(summary, dict):
-        raise SourceManagerError(
-            "ADD did not return trusted JSON",
-            stage="reflect.add",
-        )
     reported_source_id = summary.get("source_id")
     if not isinstance(reported_source_id, str) or reported_source_id != key:
         raise SourceManagerError(
@@ -762,11 +1032,20 @@ def _update_redmine_source(
     http_get: Callable[..., Any] | None,
     environment: Mapping[str, str] | None,
     metadata_publisher: MetadataPublisher | None,
+    clock: Callable[[], datetime] | None,
+    progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     """Fetch Redmine serially and reflect each stable batch of five."""
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)
+        cutoff = redmine_updated_on_cutoff(
+            source.payload["fetch"].get("updated_within_days"),
+            {},
+            clock=clock,
+        )
+        if cutoff is not None:
+            initial[REDMINE_CUTOFF_STATE_KEY] = cutoff
         initial["initial_database_reflection"] = (
             _is_initial_database_reflection(store, source)
         )
@@ -779,6 +1058,15 @@ def _update_redmine_source(
     else:
         resumed = copy.deepcopy(state.payload)
         resumed["plan_etag"] = plan.plan_etag
+        cutoff = redmine_updated_on_cutoff(
+            source.payload["fetch"].get("updated_within_days"),
+            resumed,
+            clock=clock,
+        )
+        if cutoff is not None:
+            resumed[REDMINE_CUTOFF_STATE_KEY] = cutoff
+        else:
+            resumed.pop(REDMINE_CUTOFF_STATE_KEY, None)
         current_state = store.save_state(
             source.payload["local_source_key"],
             resumed,
@@ -797,10 +1085,15 @@ def _update_redmine_source(
             python_executable=python_executable,
             rag_root=rag_root,
             command_runner=command_runner,
+            progress_callback=progress_callback,
         )
 
     state_holder = [current_state]
     source_holder = [current_source]
+    progress_total_holder = [
+        len(current_state.payload.get("redmine_issue_ids") or [])
+        or None
+    ]
 
     def inventory_checkpoint(issue_ids: list[int]) -> None:
         stored = state_holder[0]
@@ -812,6 +1105,21 @@ def _update_redmine_source(
             value,
             expected_revision=stored.revision,
             expected_etag=stored.etag,
+        )
+        progress_total_holder[0] = len(issue_ids)
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "redmine.inventory",
+                "label_ja": "Redmine Issue一覧取得",
+                "provider": "redmine",
+                "completed": len(issue_ids),
+                "total": len(issue_ids),
+                "unit": "件",
+                "total_kind": "exact",
+                "status": "completed",
+                "checkpoint_saved": True,
+            },
         )
 
     def item_checkpoint(completed_count: int, issue_id: int) -> None:
@@ -834,6 +1142,22 @@ def _update_redmine_source(
             value,
             expected_revision=stored.revision,
             expected_etag=stored.etag,
+        )
+        total = progress_total_holder[0]
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "redmine.detail",
+                "label_ja": "Redmine Issue詳細取得",
+                "provider": "redmine",
+                "completed": int(completed_count),
+                "total": total,
+                "unit": "件",
+                "total_kind": "exact" if total is not None else "unknown",
+                "current_item": f"Issue #{int(issue_id)}",
+                "status": "running",
+                "checkpoint_saved": True,
+            },
         )
 
     def reflect_batch(completed_count: int, issue_id: int) -> None:
@@ -858,6 +1182,26 @@ def _update_redmine_source(
             expected_revision=stored.revision,
             expected_etag=stored.etag,
         )
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "redmine.reflect",
+                "label_ja": "検索反映",
+                "provider": "redmine",
+                "completed": int(
+                    value.get("indexed_confirmed_count") or 0
+                ),
+                "total": progress_total_holder[0],
+                "unit": "件",
+                "total_kind": (
+                    "exact"
+                    if progress_total_holder[0] is not None
+                    else "unknown"
+                ),
+                "current_item": f"Issue #{int(issue_id)}",
+                "status": "running",
+            },
+        )
         (
             source_holder[0],
             state_holder[0],
@@ -869,6 +1213,30 @@ def _update_redmine_source(
             python_executable=python_executable,
             rag_root=rag_root,
             command_runner=command_runner,
+            progress_callback=progress_callback,
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "redmine.reflect",
+                "label_ja": "検索反映",
+                "provider": "redmine",
+                "completed": int(
+                    state_holder[0].payload.get(
+                        "indexed_confirmed_count"
+                    )
+                    or 0
+                ),
+                "total": progress_total_holder[0],
+                "unit": "件",
+                "total_kind": (
+                    "exact"
+                    if progress_total_holder[0] is not None
+                    else "unknown"
+                ),
+                "status": "completed",
+                "checkpoint_saved": True,
+            },
         )
 
     resume_count = int(
@@ -880,6 +1248,19 @@ def _update_redmine_source(
         if isinstance(stable_ids_value, list)
         else None
     )
+
+    def redmine_progress(event: Mapping[str, Any]) -> None:
+        if event.get("event") == "redmine.http_attempt":
+            try:
+                store.append_event(
+                    source.payload["local_source_key"],
+                    "redmine.http_attempt",
+                    _persistable_http_diagnostic(event),
+                )
+            except Exception:
+                pass
+        _emit_progress(progress_callback, event)
+
     try:
         outcome = execute_fetch_plan(
             plan.to_dict(),
@@ -893,6 +1274,8 @@ def _update_redmine_source(
             resume_count=resume_count,
             stable_issue_ids=stable_issue_ids,
             inventory_callback=inventory_checkpoint,
+            clock=clock,
+            progress_callback=redmine_progress,
         )
     except Exception as exc:
         stored = state_holder[0]
@@ -914,6 +1297,18 @@ def _update_redmine_source(
             )
         except SourceManagerError:
             pass
+        details: dict[str, Any] = {"error": error_detail}
+        if isinstance(getattr(exc, "process_diagnostic", None), dict):
+            details["process"] = getattr(exc, "process_diagnostic")
+        if isinstance(getattr(exc, "diagnostic", None), dict):
+            details["diagnostic"] = _persistable_http_diagnostic(
+                getattr(exc, "diagnostic")
+            )
+        store.append_event(
+            source.payload["local_source_key"],
+            "redmine.fetch.interrupted",
+            details,
+        )
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "fetch.redmine")
         raise
@@ -941,6 +1336,24 @@ def _update_redmine_source(
         source_holder[0],
         rag_root=rag_root,
         metadata_publisher=metadata_publisher,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "metadata",
+            "label_ja": "Source Metadata反映",
+            "provider": "redmine",
+            "completed": 1 if not sync_result.get("metadata_sync_pending") else 0,
+            "total": 1,
+            "unit": "件",
+            "total_kind": "exact",
+            "status": (
+                "completed"
+                if not sync_result.get("metadata_sync_pending")
+                else "failed"
+            ),
+            "checkpoint_saved": not sync_result.get("metadata_sync_pending"),
+        },
     )
     stored = state_holder[0]
     final = copy.deepcopy(stored.payload)
@@ -994,6 +1407,7 @@ def _redmine_reflect_batch(
     python_executable: Path,
     rag_root: Path,
     command_runner: CommandRunner | None,
+    progress_callback: ProgressCallback | None,
 ) -> tuple[StoredJson, StoredJson, dict[str, Any]]:
     work = store.ensure_work_directory(source.payload["local_source_key"])
     validate_managed_work_tree(work)
@@ -1005,6 +1419,7 @@ def _redmine_reflect_batch(
             python_executable=python_executable,
             rag_root=rag_root,
             command_runner=command_runner,
+            progress_callback=progress_callback,
         )
     except Exception as exc:
         interrupted = copy.deepcopy(state.payload)
@@ -1022,6 +1437,21 @@ def _redmine_reflect_batch(
             interrupted,
             expected_revision=state.revision,
             expected_etag=state.etag,
+        )
+        store.append_event(
+            source.payload["local_source_key"],
+            "redmine.reflect.interrupted",
+            {
+                "error": error_detail,
+                **(
+                    {"process": getattr(exc, "process_diagnostic")}
+                    if isinstance(
+                        getattr(exc, "process_diagnostic", None),
+                        dict,
+                    )
+                    else {}
+                ),
+            },
         )
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "reflect.redmine_batch")
@@ -1065,6 +1495,7 @@ def _resume_add_only(
     rag_root: str | Path | None,
     command_runner: CommandRunner | None,
     metadata_publisher: MetadataPublisher | None,
+    progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     if python_executable is None or rag_root is None:
         return {
@@ -1083,6 +1514,7 @@ def _resume_add_only(
         rag_root=Path(rag_root),
         command_runner=command_runner,
         metadata_publisher=metadata_publisher,
+        progress_callback=progress_callback,
     )
     result["resumed_operation"] = "add"
     return result
@@ -1098,6 +1530,7 @@ def _reflect_and_sync(
     rag_root: Path,
     command_runner: CommandRunner | None,
     metadata_publisher: MetadataPublisher | None,
+    progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     work = Path(add_root)
     validate_managed_work_tree(work)
@@ -1105,6 +1538,21 @@ def _reflect_and_sync(
         store,
         source,
         state,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "reflect",
+            "label_ja": "検索反映",
+            "provider": source.payload.get("source_type"),
+            "completed": int(
+                state.payload.get("indexed_confirmed_count") or 0
+            ),
+            "total": int(state.payload.get("fetched_count") or 0),
+            "unit": "件",
+            "total_kind": "exact",
+            "status": "running",
+        },
     )
     try:
         add_result = _execute_add(
@@ -1114,6 +1562,7 @@ def _reflect_and_sync(
             python_executable=python_executable,
             rag_root=rag_root,
             command_runner=command_runner,
+            progress_callback=progress_callback,
         )
     except Exception as exc:
         interrupted = copy.deepcopy(state.payload)
@@ -1136,7 +1585,22 @@ def _reflect_and_sync(
         store.append_event(
             source.payload["local_source_key"],
             "add.interrupted",
-            {"error": error_detail},
+            {
+                "error": error_detail,
+                **(
+                    {"process": getattr(exc, "process_diagnostic")}
+                    if isinstance(
+                        getattr(exc, "process_diagnostic", None),
+                        dict,
+                    )
+                    else {}
+                ),
+                **(
+                    {"diagnostic": getattr(exc, "diagnostic")}
+                    if isinstance(getattr(exc, "diagnostic", None), dict)
+                    else {}
+                ),
+            },
         )
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "reflect.add")
@@ -1147,6 +1611,20 @@ def _reflect_and_sync(
         source.payload["local_source_key"],
         source_id=str(add_result["source_id"]),
     )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "reflect",
+            "label_ja": "検索反映",
+            "provider": source.payload.get("source_type"),
+            "completed": int(state.payload.get("fetched_count") or 0),
+            "total": int(state.payload.get("fetched_count") or 0),
+            "unit": "件",
+            "total_kind": "exact",
+            "status": "completed",
+            "checkpoint_saved": True,
+        },
+    )
     if initial_database_reflection:
         _write_initial_snapshot_marker(store.db_root)
     confirmed_source = store.read_source(source.payload["local_source_key"])
@@ -1155,6 +1633,24 @@ def _reflect_and_sync(
         confirmed_source,
         rag_root=rag_root,
         metadata_publisher=metadata_publisher,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "metadata",
+            "label_ja": "Source Metadata反映",
+            "provider": source.payload.get("source_type"),
+            "completed": 1 if not sync_result.get("metadata_sync_pending") else 0,
+            "total": 1,
+            "unit": "件",
+            "total_kind": "exact",
+            "status": (
+                "completed"
+                if not sync_result.get("metadata_sync_pending")
+                else "failed"
+            ),
+            "checkpoint_saved": not sync_result.get("metadata_sync_pending"),
+        },
     )
     reflected = copy.deepcopy(state.payload)
     fetched_count = int(reflected.get("fetched_count") or 0)
@@ -1292,19 +1788,6 @@ def _write_initial_snapshot_marker(db_root: Path) -> None:
             temporary.unlink()
         except OSError:
             pass
-
-
-def _run_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        arguments,
-        shell=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=3600,
-        check=False,
-    )
 
 
 def _attach_registration_failure(

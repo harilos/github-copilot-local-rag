@@ -7,9 +7,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from .errors import SourceManagerError
+from .redmine import parse_redmine_project_url
 from .security import (
     validate_environment_name,
     validate_persistable,
@@ -265,20 +266,7 @@ def _validate_redmine(settings: dict[str, Any]) -> dict[str, Any]:
             "project_id",
         },
     )
-    project_url = validate_web_url(
-        settings.get("project_url"),
-        field="project_url",
-    )
-    split = urlsplit(project_url)
-    if split.query or split.fragment:
-        raise SourceManagerError("project_url cannot contain query or fragment")
-    components = [
-        component for component in split.path.strip("/").split("/") if component
-    ]
-    if len(components) < 2 or components[-2].casefold() != "projects":
-        raise SourceManagerError(
-            "project_url must end with /projects/<project-id>"
-        )
+    project = parse_redmine_project_url(settings.get("project_url"))
     days = settings.get("updated_within_days")
     if days is not None:
         if (
@@ -290,29 +278,17 @@ def _validate_redmine(settings: dict[str, Any]) -> dict[str, Any]:
                 "updated_within_days must be null or between 1 and 3650"
             )
     output: dict[str, Any] = {
-        "project_url": project_url.rstrip("/"),
-        "base_url": urlunsplit(
-            (split.scheme, split.netloc, "", "", "")
-        ).rstrip("/"),
-        "project_id": components[-1],
+        "project_url": project.project_url,
+        "base_url": project.api_root,
+        "project_id": project.project_id,
         "updated_within_days": int(days) if days is not None else None,
         "api_key_env": validate_environment_name(
             settings.get("api_key_env") or "RAG_REDMINE_API_KEY",
             field="api_key_env",
         ),
     }
-    if (
-        settings.get("base_url") is not None
-        and str(settings["base_url"]).rstrip("/") != output["base_url"]
-    ):
-        raise SourceManagerError("Redmine base_url does not match project_url")
-    if (
-        settings.get("project_id") is not None
-        and str(settings["project_id"]) != output["project_id"]
-    ):
-        raise SourceManagerError(
-            "Redmine project_id does not match project_url"
-        )
+    # Legacy base_url/project_id values are derived caches, never authorities.
+    # Normalization deliberately replaces stale values from project_url.
     return output
 
 

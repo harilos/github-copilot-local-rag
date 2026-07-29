@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
+import ssl
 import tempfile
 import unittest
+import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -14,11 +18,15 @@ from source_manager import (
     REDMINE_RETRY_POLICY,
     SourceManagerError,
     SourceStore,
+    generated_redmine_link,
     build_fetch_plan,
     confirm_add_success,
     execute_fetch_plan,
     list_sources,
     redmine_batches,
+    parse_redmine_project_url,
+    redmine_updated_on_cutoff,
+    repair_generated_redmine_link,
     register_source,
     resolve_environment_root,
     update_all_sources,
@@ -29,6 +37,20 @@ from source_manager import (
 from source_manager.metadata import _canonical_source
 from source_manager.metadata import publish_source_metadata
 from source_manager.errors import sanitize_diagnostic
+from source_manager import execution as execution_module
+
+
+def _valid_add_summary(source_id: str, *, file_count: int = 1) -> dict:
+    return {
+        "operation": "add",
+        "source_id": source_id,
+        "file_count": file_count,
+        "indexed_files": file_count,
+        "skipped_files": 0,
+        "error_files": 0,
+        "upserted_records": file_count,
+        "deleted_records": 0,
+    }
 
 
 class SourceStoreContracts(unittest.TestCase):
@@ -292,6 +314,202 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             normalized["redmine"]["api_key_env"],
         )
 
+    def test_redmine_project_url_preserves_mount_path_and_port(self) -> None:
+        project = parse_redmine_project_url(
+            "https://issues.example.invalid:8443/tools/redmine/"
+            "projects/fixture/"
+        )
+        self.assertEqual(
+            "https://issues.example.invalid:8443/tools/redmine/"
+            "projects/fixture",
+            project.project_url,
+        )
+        self.assertEqual(
+            "https://issues.example.invalid:8443/tools/redmine",
+            project.api_root,
+        )
+        self.assertEqual(
+            "https://issues.example.invalid:8443/tools/redmine/issues.json",
+            project.issues_api_url,
+        )
+        self.assertEqual(
+            "https://issues.example.invalid:8443/tools/redmine/"
+            "issues/{issue_id}",
+            project.issue_link_template,
+        )
+
+    def test_redmine_project_url_rejects_noncanonical_authority_suffixes(
+        self,
+    ) -> None:
+        for value in (
+            "https://user:secret@issues.example.invalid/projects/fixture",
+            "https://issues.example.invalid/projects/fixture?key=value",
+            "https://issues.example.invalid/projects/fixture#section",
+            "https://issues.example.invalid/projects/fixture/other",
+        ):
+            with self.subTest(value=value), self.assertRaises(
+                SourceManagerError
+            ):
+                parse_redmine_project_url(value)
+
+    def test_redmine_legacy_derivatives_are_recomputed_from_project_url(
+        self,
+    ) -> None:
+        normalized = validate_provider_config(
+            "redmine",
+            {
+                "project_url": (
+                    "https://issues.example.invalid:8443/redmine/"
+                    "projects/fixture/"
+                ),
+                "base_url": "https://stale.example.invalid",
+                "project_id": "stale",
+                "updated_within_days": 30,
+            },
+        )
+        self.assertEqual(
+            "https://issues.example.invalid:8443/redmine",
+            normalized["base_url"],
+        )
+        self.assertEqual("fixture", normalized["project_id"])
+
+    def test_only_known_generated_redmine_link_is_repaired(self) -> None:
+        project_url = (
+            "https://issues.example.invalid/redmine/projects/fixture"
+        )
+        legacy = {
+            "enabled": True,
+            "strategy": "regex-template",
+            "settings": {
+                "path_pattern": r"^issues/(?P<issue_id>[0-9]+)\.md$",
+                "url_template": (
+                    "https://issues.example.invalid/issues/{issue_id}"
+                ),
+            },
+        }
+        self.assertEqual(
+            generated_redmine_link(project_url),
+            repair_generated_redmine_link(project_url, legacy),
+        )
+        manual = {
+            **legacy,
+            "settings": {
+                **legacy["settings"],
+                "url_template": (
+                    "https://links.example.invalid/items/{issue_id}"
+                ),
+            },
+        }
+        self.assertEqual(
+            manual,
+            repair_generated_redmine_link(project_url, manual),
+        )
+
+    def test_runner_repairs_generated_link_and_legacy_fetch_derivatives(
+        self,
+    ) -> None:
+        project_url = (
+            "https://issues.example.invalid/redmine/projects/fixture"
+        )
+        legacy_link = {
+            "enabled": True,
+            "strategy": "regex-template",
+            "settings": {
+                "path_pattern": r"^issues/(?P<issue_id>[0-9]+)\.md$",
+                "url_template": (
+                    "https://issues.example.invalid/issues/{issue_id}"
+                ),
+            },
+        }
+        registered = register_source(
+            self.db_root,
+            source_type="redmine",
+            display_name="Mounted tracker",
+            fetch={
+                "project_url": project_url,
+                "updated_within_days": None,
+            },
+            link=legacy_link,
+        )
+        key = registered["local_source_key"]
+        stored = SourceStore(self.db_root).read_source(key)
+        self.assertEqual(
+            generated_redmine_link(project_url),
+            stored.payload["pending_metadata"]["link"],
+        )
+
+        legacy_payload = dict(stored.payload)
+        legacy_payload["fetch"] = {
+            **stored.payload["fetch"],
+            "base_url": "https://stale.example.invalid",
+            "project_id": "stale",
+        }
+        stale = SourceStore(self.db_root).save_source(
+            legacy_payload,
+            expected_revision=stored.revision,
+            expected_etag=stored.etag,
+        )
+        manual_link = {
+            "enabled": True,
+            "strategy": "regex-template",
+            "settings": {
+                "path_pattern": r"^issues/(?P<issue_id>[0-9]+)\.md$",
+                "url_template": (
+                    "https://links.example.invalid/items/{issue_id}"
+                ),
+            },
+        }
+        manual_payload = dict(stale.payload)
+        manual_payload["pending_metadata"] = {
+            "source_type": "redmine",
+            "link": manual_link,
+        }
+        SourceStore(self.db_root).save_source(
+            manual_payload,
+            expected_revision=stale.revision,
+            expected_etag=stale.etag,
+        )
+
+        update_source(self.db_root, key)
+
+        repaired = SourceStore(self.db_root).read_source(key).payload
+        self.assertEqual(
+            "https://issues.example.invalid/redmine",
+            repaired["fetch"]["base_url"],
+        )
+        self.assertEqual("fixture", repaired["fetch"]["project_id"])
+        self.assertEqual(
+            manual_link,
+            repaired["pending_metadata"]["link"],
+        )
+
+    def test_redmine_cutoff_is_absolute_utc_and_resume_stable(self) -> None:
+        first = redmine_updated_on_cutoff(
+            30,
+            {},
+            clock=lambda: datetime(
+                2026, 7, 29, 23, 30, tzinfo=timezone.utc
+            ),
+        )
+        self.assertEqual("2026-06-29", first)
+        resumed = redmine_updated_on_cutoff(
+            30,
+            {"redmine_updated_on_cutoff": first},
+            clock=lambda: datetime(
+                2027, 1, 1, 0, 0, tzinfo=timezone.utc
+            ),
+        )
+        self.assertEqual(first, resumed)
+        self.assertIsNone(
+            redmine_updated_on_cutoff(
+                None,
+                {},
+                clock=lambda: datetime(
+                    2026, 7, 29, tzinfo=timezone.utc
+                ),
+            )
+        )
+
     def test_redmine_batches_five_and_never_retries_http_500(self) -> None:
         self.assertEqual(
             [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11]],
@@ -306,6 +524,321 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         self.assertFalse(
             REDMINE_RETRY_POLICY.should_retry(attempt=3, status_code=503)
         )
+
+    def test_redmine_http_status_diagnostics_are_complete_and_bounded(
+        self,
+    ) -> None:
+        for status in (401, 403, 404, 500):
+            with self.subTest(status=status):
+                calls = 0
+
+                def getter(_url, _headers, _timeout):
+                    nonlocal calls
+                    calls += 1
+                    return (
+                        status,
+                        (
+                            b'{"password":"body-secret","detail":"'
+                            + b"x" * 70_000
+                            + b'"}'
+                        ),
+                        {
+                            "Content-Type": "application/json; charset=utf-8",
+                            "Set-Cookie": "session=response-secret",
+                        },
+                    )
+
+                with self.assertRaises(SourceManagerError) as captured:
+                    execution_module._get_with_retry(
+                        getter,
+                        (
+                            "https://issues.example.invalid/issues.json"
+                            "?api_key=url-secret"
+                        ),
+                        {
+                            "X-Redmine-API-Key": "header-secret",
+                            "Accept": "application/json",
+                        },
+                    )
+                self.assertEqual(1, calls)
+                diagnostic = captured.exception.diagnostic
+                self.assertEqual("GET", diagnostic["method"])
+                self.assertEqual(status, diagnostic["status"])
+                self.assertEqual(1, diagnostic["attempt"])
+                self.assertEqual(3, diagnostic["max_attempts"])
+                self.assertFalse(diagnostic["retry"])
+                self.assertEqual(
+                    "application/json; charset=utf-8",
+                    diagnostic["content_type"],
+                )
+                self.assertGreater(diagnostic["body_bytes"], 65_536)
+                self.assertTrue(diagnostic["body_truncated"])
+                self.assertLessEqual(
+                    len(diagnostic["body_preview"]),
+                    65_536,
+                )
+                serialized = json.dumps(
+                    diagnostic,
+                    ensure_ascii=False,
+                ) + str(captured.exception)
+                for secret in (
+                    "url-secret",
+                    "header-secret",
+                    "response-secret",
+                    "body-secret",
+                ):
+                    self.assertNotIn(secret, serialized)
+
+    def test_redmine_http_retry_progress_reports_retry_after_immediately(
+        self,
+    ) -> None:
+        responses = [
+            (
+                429,
+                b'{"error":"rate limited"}',
+                {
+                    "Retry-After": "2",
+                    "Content-Type": "application/json",
+                },
+            ),
+            (200, b'{"issues":[]}', {"Content-Type": "application/json"}),
+        ]
+        events: list[dict[str, object]] = []
+
+        def getter(_url, _headers, _timeout):
+            return responses.pop(0)
+
+        with mock.patch.object(execution_module.time, "sleep") as sleeper:
+            status, _body = execution_module._get_with_retry(
+                getter,
+                "https://issues.example.invalid/issues.json",
+                {"X-Redmine-API-Key": "secret"},
+                progress_callback=events.append,
+            )
+        self.assertEqual(200, status)
+        self.assertEqual(2, len(events))
+        self.assertEqual(429, events[0]["status"])
+        self.assertTrue(events[0]["retry"])
+        self.assertEqual("2", events[0]["retry_after"])
+        self.assertEqual(2.0, events[0]["wait_seconds"])
+        self.assertEqual(200, events[1]["status"])
+        self.assertFalse(events[1]["retry"])
+        sleeper.assert_called_once_with(2.0)
+        self.assertNotIn("secret", json.dumps(events))
+
+    def test_redmine_429_final_failure_retains_retry_diagnostics(self) -> None:
+        calls = 0
+
+        def getter(_url, _headers, _timeout):
+            nonlocal calls
+            calls += 1
+            return (
+                429,
+                b'{"error":"rate limited"}',
+                {"Retry-After": "0", "Content-Type": "application/json"},
+            )
+
+        with (
+            mock.patch.object(execution_module.time, "sleep"),
+            self.assertRaises(SourceManagerError) as captured,
+        ):
+            execution_module._get_with_retry(
+                getter,
+                "https://issues.example.invalid/issues.json",
+                {"X-Redmine-API-Key": "secret"},
+            )
+        self.assertEqual(3, calls)
+        diagnostic = captured.exception.diagnostic
+        self.assertEqual(429, diagnostic["status"])
+        self.assertEqual("Too Many Requests", diagnostic["reason"])
+        self.assertEqual(3, diagnostic["attempt"])
+        self.assertEqual("0", diagnostic["retry_after"])
+        self.assertFalse(diagnostic["retry"])
+        self.assertEqual(0.0, diagnostic["wait_seconds"])
+
+    def test_retry_after_http_date_is_respected(self) -> None:
+        with mock.patch.object(
+            execution_module.time,
+            "time",
+            return_value=1_000.0,
+        ):
+            value = execution_module._retry_after_seconds(
+                "Thu, 01 Jan 1970 00:16:50 GMT"
+            )
+        self.assertEqual(10.0, value)
+
+    def test_redmine_malformed_200_retains_safe_response_diagnostic(
+        self,
+    ) -> None:
+        source_key = "src_fixture-0123456789ab"
+        relative_work = f"sources/{source_key}/work/ingest/{source_key}"
+        work = Path(self.temporary.name) / "malformed-redmine"
+        work.mkdir()
+        plan = build_fetch_plan(
+            source_key=source_key,
+            provider="redmine",
+            settings={
+                "project_url": (
+                    "https://issues.example.invalid/projects/fixture"
+                ),
+                "updated_within_days": None,
+            },
+            logical_root=relative_work,
+            work_path=relative_work,
+        ).to_dict()
+
+        def getter(_url, _headers, _timeout):
+            return (
+                200,
+                b'{"issues":[{"password":"body-secret"}',
+                {
+                    "Content-Type": "application/json",
+                    "X-Api-Key": "response-secret",
+                },
+            )
+
+        with self.assertRaises(SourceManagerError) as captured:
+            execute_fetch_plan(
+                plan,
+                work,
+                {},
+                http_get=getter,
+                environment={"RAG_REDMINE_API_KEY": "request-secret"},
+            )
+        diagnostic = captured.exception.diagnostic
+        self.assertEqual(200, diagnostic["status"])
+        self.assertEqual(
+            "response_parse_failed",
+            diagnostic["error_kind"],
+        )
+        self.assertEqual(
+            "application/json",
+            diagnostic["content_type"],
+        )
+        self.assertEqual(
+            "<REDACTED>",
+            diagnostic["request_headers"]["X-Redmine-API-Key"],
+        )
+        self.assertEqual(
+            "<REDACTED>",
+            diagnostic["response_headers"]["X-Api-Key"],
+        )
+        self.assertIn("response_parse_failed", diagnostic["reason"])
+        rendered = json.dumps(diagnostic, ensure_ascii=False)
+        for secret in ("request-secret", "response-secret", "body-secret"):
+            self.assertNotIn(secret, rendered)
+
+    def test_redmine_http_attempt_is_persisted_before_fetch_failure(
+        self,
+    ) -> None:
+        registered = register_source(
+            self.db_root,
+            source_type="redmine",
+            display_name="Issue tracker",
+            fetch={
+                "project_url": (
+                    "https://issues.example.invalid/projects/fixture"
+                ),
+                "updated_within_days": None,
+            },
+        )
+        key = registered["local_source_key"]
+
+        def getter(_url, _headers, _timeout):
+            return (
+                401,
+                b'{"password":"body-secret"}',
+                {
+                    "Content-Type": "application/json",
+                    "X-Auth-Token": "response-secret",
+                },
+            )
+
+        with self.assertRaises(SourceManagerError):
+            update_source(
+                self.db_root,
+                key,
+                python_executable=Path(self.temporary.name) / "venv-python",
+                rag_root=Path(self.temporary.name) / "rag-runtime",
+                http_get=getter,
+                environment={"RAG_REDMINE_API_KEY": "request-secret"},
+            )
+        store = SourceStore(self.db_root)
+        relative_events = store.paths(key).events_jsonl
+        events_path = store.paths(key).absolute(
+            self.db_root,
+            relative_events,
+        )
+        raw = events_path.read_text(encoding="utf-8")
+        events = [
+            json.loads(line)
+            for line in raw.splitlines()
+            if line.strip()
+        ]
+        attempts = [
+            item
+            for item in events
+            if item.get("event") == "redmine.http_attempt"
+        ]
+        self.assertEqual(1, len(attempts))
+        self.assertEqual(401, attempts[0]["details"]["status"])
+        self.assertFalse(attempts[0]["details"]["retry"])
+        for secret in ("request-secret", "response-secret", "body-secret"):
+            self.assertNotIn(secret, raw)
+
+    def test_redmine_network_failure_kinds_and_retry_counts(self) -> None:
+        cases = (
+            (
+                "timeout",
+                lambda: TimeoutError("timed out"),
+                "connection_timeout",
+                3,
+            ),
+            (
+                "dns",
+                lambda: urllib.error.URLError(
+                    socket.gaierror(-2, "name lookup failed")
+                ),
+                "dns_resolution_failed",
+                3,
+            ),
+            (
+                "tls",
+                lambda: urllib.error.URLError(
+                    ssl.SSLError("certificate verify failed")
+                ),
+                "tls_verification_failed",
+                1,
+            ),
+        )
+        for name, exception_factory, error_kind, expected_calls in cases:
+            with self.subTest(name=name):
+                calls = 0
+                events: list[dict[str, object]] = []
+
+                def getter(_url, _headers, _timeout):
+                    nonlocal calls
+                    calls += 1
+                    raise exception_factory()
+
+                with (
+                    mock.patch.object(execution_module.time, "sleep"),
+                    self.assertRaises(SourceManagerError) as captured,
+                ):
+                    execution_module._get_with_retry(
+                        getter,
+                        "https://issues.example.invalid/issues.json",
+                        {"X-Redmine-API-Key": "secret"},
+                        progress_callback=events.append,
+                    )
+                self.assertEqual(expected_calls, calls)
+                self.assertEqual(error_kind, captured.exception.error_kind)
+                self.assertEqual(error_kind, events[-1]["error_kind"])
+                self.assertFalse(events[-1]["retry"])
+                self.assertNotIn(
+                    "secret",
+                    json.dumps(captured.exception.diagnostic),
+                )
 
     def test_sharepoint_runtime_root_is_not_persisted(self) -> None:
         runtime_root = Path(self.temporary.name).resolve() / "sharepoint"
@@ -407,9 +940,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {"status": "ok", "source_id": source_id}
-                ),
+                stdout=json.dumps(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -590,6 +1121,46 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         value = _canonical_source(source, current_source=current)
         self.assertEqual(current["link"], value["link"])
 
+    def test_metadata_repairs_legacy_generated_redmine_canonical_link(
+        self,
+    ) -> None:
+        current = {
+            "source_id": "indexed-source",
+            "display_name": "Issue tracker",
+            "source_type": "redmine",
+            "link": {
+                "enabled": True,
+                "strategy": "regex-template",
+                "settings": {
+                    "path_pattern": (
+                        r"^issues/(?P<issue_id>[0-9]+)\.md$"
+                    ),
+                    "url_template": (
+                        "https://issues.example.invalid/issues/{issue_id}"
+                    ),
+                },
+            },
+        }
+        source = {
+            "source_id": "indexed-source",
+            "display_name": "Mounted issue tracker",
+            "source_type": "redmine",
+            "fetch": {
+                "project_url": (
+                    "https://issues.example.invalid/redmine/"
+                    "projects/fixture"
+                )
+            },
+        }
+        value = _canonical_source(source, current_source=current)
+        self.assertEqual(
+            (
+                "https://issues.example.invalid/redmine/"
+                "issues/{issue_id}"
+            ),
+            value["link"]["settings"]["url_template"],
+        )
+
     def test_pending_metadata_publishes_to_canonical_sidecar(self) -> None:
         stored = SourceStore(self.db_root).create_source(
             source_type="github",
@@ -710,6 +1281,144 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             },
         )
         self.assertIsNone(normalized["updated_within_days"])
+
+    def test_redmine_api_uses_project_mount_and_absolute_cutoff(self) -> None:
+        source_key = "src_fixture-0123456789ab"
+        relative_work = f"sources/{source_key}/work/ingest/{source_key}"
+        work = Path(self.temporary.name) / "mounted-redmine"
+        work.mkdir()
+        plan = build_fetch_plan(
+            source_key=source_key,
+            provider="redmine",
+            settings={
+                "project_url": (
+                    "https://issues.example.invalid:8443/redmine/"
+                    "projects/fixture/"
+                ),
+                "updated_within_days": 30,
+            },
+            logical_root=relative_work,
+            work_path=relative_work,
+        ).to_dict()
+        calls: list[str] = []
+
+        def getter(url, _headers, _timeout):
+            calls.append(url)
+            return (
+                200,
+                json.dumps({"issues": [], "total_count": 0}).encode(),
+            )
+
+        execute_fetch_plan(
+            plan,
+            work,
+            {},
+            http_get=getter,
+            environment={"RAG_REDMINE_API_KEY": "fixture-key"},
+            clock=lambda: datetime(
+                2026, 7, 29, 12, 0, tzinfo=timezone.utc
+            ),
+        )
+
+        self.assertEqual(1, len(calls))
+        parsed = urlsplit(calls[0])
+        self.assertEqual("/redmine/issues.json", parsed.path)
+        self.assertEqual(
+            [">=2026-06-29"],
+            parse_qs(parsed.query)["updated_on"],
+        )
+
+    def test_redmine_inventory_reports_each_completed_page(self) -> None:
+        source_key = "src_fixture-0123456789ab"
+        relative_work = f"sources/{source_key}/work/ingest/{source_key}"
+        work = Path(self.temporary.name) / "redmine-page-progress"
+        work.mkdir()
+        plan = build_fetch_plan(
+            source_key=source_key,
+            provider="redmine",
+            settings={
+                "project_url": (
+                    "https://issues.example.invalid/projects/fixture"
+                ),
+                "updated_within_days": None,
+                "api_key_env": "LOCAL_RAG_REDMINE_API_KEY",
+            },
+            logical_root=relative_work,
+            work_path=relative_work,
+        ).to_dict()
+        events: list[dict[str, object]] = []
+
+        def getter(url, _headers, _timeout):
+            parsed = urlsplit(url)
+            if parsed.path.endswith("/issues.json"):
+                offset = int(parse_qs(parsed.query).get("offset", ["0"])[0])
+                issue_ids = range(1, 6) if offset == 0 else range(6, 7)
+                return (
+                    200,
+                    json.dumps(
+                        {
+                            "issues": [{"id": value} for value in issue_ids],
+                            "total_count": 6,
+                        }
+                    ).encode(),
+                )
+            issue_id = int(parsed.path.rsplit("/", 1)[-1].split(".", 1)[0])
+            return (
+                200,
+                json.dumps(
+                    {"issue": {"id": issue_id, "subject": f"Issue {issue_id}"}}
+                ).encode(),
+            )
+
+        execute_fetch_plan(
+            plan,
+            work,
+            {},
+            http_get=getter,
+            environment={"LOCAL_RAG_REDMINE_API_KEY": "fixture-key"},
+            progress_callback=events.append,
+        )
+        inventory = [
+            event
+            for event in events
+            if event.get("event") == "provider.page"
+        ]
+        self.assertEqual([5, 6], [event["completed"] for event in inventory])
+        self.assertTrue(
+            all(event["total"] == 6 for event in inventory)
+        )
+        self.assertTrue(
+            all(event["total_kind"] == "exact" for event in inventory)
+        )
+
+    def test_large_file_copy_reports_exact_byte_progress(self) -> None:
+        source = Path(self.temporary.name).resolve() / "large-source.bin"
+        source.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+        destination = Path(self.temporary.name) / "copy-destination"
+        destination.mkdir()
+        events: list[dict[str, object]] = []
+
+        result = execution_module._copy_tree(
+            source,
+            destination,
+            progress_callback=events.append,
+            provider="other",
+        )
+
+        copied = destination / source.name
+        self.assertEqual(source.read_bytes(), copied.read_bytes())
+        self.assertEqual(1, result["documents"])
+        byte_events = [
+            event
+            for event in events
+            if event.get("event") == "provider.bytes"
+        ]
+        self.assertGreaterEqual(len(byte_events), 3)
+        self.assertEqual(source.stat().st_size, byte_events[-1]["completed"])
+        self.assertEqual(source.stat().st_size, byte_events[-1]["total"])
+        self.assertTrue(
+            all(event["total_kind"] == "exact" for event in byte_events)
+        )
 
     def test_redmine_fetches_stable_detailed_markdown_serially(self) -> None:
         source_key = "src_fixture-0123456789ab"
@@ -848,9 +1557,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {"status": "ok", "source_id": source_id}
-                ),
+                stdout=json.dumps(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -866,7 +1573,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                     "project_url": (
                         "https://issues.example.invalid/projects/fixture"
                     ),
-                    "updated_within_days": None,
+                    "updated_within_days": 30,
                     "api_key_env": "LOCAL_RAG_REDMINE_API_KEY",
                 },
                 start=True,
@@ -876,6 +1583,9 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                 http_get=getter,
                 environment={"LOCAL_RAG_REDMINE_API_KEY": "fixture-key"},
                 metadata_publisher=lambda *_: None,
+                clock=lambda: datetime(
+                    2025, 3, 10, 12, 0, tzinfo=timezone.utc
+                ),
             )
         self.assertIn("終了コード: 1", str(captured.exception))
         self.assertIn("fixture failure", str(captured.exception))
@@ -891,6 +1601,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         self.assertEqual(5, interrupted["indexed_confirmed_count"])
         self.assertEqual(5, interrupted["pending_count"])
         self.assertEqual(issue_ids, interrupted["redmine_issue_ids"])
+        self.assertEqual(
+            "2025-02-08",
+            interrupted["redmine_updated_on_cutoff"],
+        )
         self.assertIn("fixture failure", interrupted["last_error"])
         self.assertEqual(list(range(1, 11)), detail_calls)
         self.assertEqual(3, list_calls)
@@ -906,6 +1620,9 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             http_get=getter,
             environment={"LOCAL_RAG_REDMINE_API_KEY": "fixture-key"},
             metadata_publisher=lambda *_: None,
+            clock=lambda: datetime(
+                2027, 1, 1, 12, 0, tzinfo=timezone.utc
+            ),
         )
         self.assertEqual("updated", result["status"])
         self.assertEqual(12, result["indexed_confirmed_count"])
@@ -917,6 +1634,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         ).payload
         self.assertEqual("complete", final["phase"])
         self.assertFalse(final["can_resume"])
+        self.assertEqual(
+            "2025-02-08",
+            final["redmine_updated_on_cutoff"],
+        )
 
     def test_diagnostic_text_redacts_credentials_but_keeps_failure(self) -> None:
         detail = sanitize_diagnostic(
@@ -1120,13 +1841,9 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             return SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(
-                    {
-                        "status": "ok",
-                        "indexed_files": 1,
-                        "source_id": arguments[
-                            arguments.index("--source-id") + 1
-                        ],
-                    }
+                    _valid_add_summary(
+                        arguments[arguments.index("--source-id") + 1]
+                    )
                 ),
                 stderr="",
             )
@@ -1239,7 +1956,18 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             key = list_sources(self.db_root)[0]["local_source_key"]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps({"status": "ok", "source_id": key}),
+                stdout=json.dumps(
+                    {
+                        "operation": "add",
+                        "source_id": key,
+                        "file_count": 1,
+                        "indexed_files": 1,
+                        "skipped_files": 0,
+                        "error_files": 0,
+                        "upserted_records": 1,
+                        "deleted_records": 0,
+                    }
+                ),
                 stderr="",
             )
 
@@ -1324,12 +2052,9 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             return SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(
-                    {
-                        "status": "ok",
-                        "source_id": arguments[
-                            arguments.index("--source-id") + 1
-                        ],
-                    }
+                    _valid_add_summary(
+                        arguments[arguments.index("--source-id") + 1]
+                    )
                 ),
                 stderr="",
             )
@@ -1361,9 +2086,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {"status": "ok", "source_id": source_id}
-                ),
+                stdout=json.dumps(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -1520,7 +2243,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             payload = (
                 {"status": "ok"}
                 if calls["add"] == 1
-                else {"status": "ok", "source_id": source_id}
+                else _valid_add_summary(source_id, file_count=3)
             )
             return SimpleNamespace(
                 returncode=0,

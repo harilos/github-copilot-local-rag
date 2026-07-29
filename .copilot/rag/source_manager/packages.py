@@ -977,6 +977,12 @@ def _distribution_entries(
     )
     _add_file(
         entries,
+        rag_root / "config" / "manage-custom.example.json",
+        ".copilot/rag/config/manage-custom.example.json",
+        required=False,
+    )
+    _add_file(
+        entries,
         copilot_home / "instructions" / "rag.instructions.md",
         ".copilot/instructions/rag.instructions.md",
         required=True,

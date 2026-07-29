@@ -25,6 +25,12 @@ distribution, transfer, or link configuration, do not list or search. Say:
 
 Do not open the Manager automatically.
 
+If setup is missing, say:
+
+`Initial setup normally takes about 10 minutes. Please run setup from Local RAG Manager.`
+
+Do not run setup from Copilot.
+
 ## One-call routing
 
 If the human names a database ending in `-rag`, use it directly:
@@ -131,8 +137,8 @@ Execute one direct process and read stdout/stderr directly. Do not combine the
 search invocation with a pipeline or JSON-processing command.
 
 Do not add `--no-daemon` to ordinary lookup. Do not select a retrieval mode.
-If the platform-specific interpreter is missing, report that setup is
-required and stop.
+If the platform-specific interpreter is missing, use the setup message above
+in the human's language and stop.
 
 ## Initial result
 
