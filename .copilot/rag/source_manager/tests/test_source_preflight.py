@@ -8,6 +8,7 @@ from typing import Any
 from source_manager.source_preflight import (
     _confirm_and_store,
     _install_manager_confirmation,
+    _install_redmine_preflight,
     estimate_minutes_range,
 )
 
@@ -20,9 +21,15 @@ class _Stored:
 
 
 class _Store:
-    def __init__(self) -> None:
+    def __init__(self, state: _Stored | None = None) -> None:
         self.saved: dict[str, Any] | None = None
         self.events: list[tuple[str, str, dict[str, Any]]] = []
+        self.current = state
+        self.issue_ids: list[int] = []
+
+    def read_state(self, key: str) -> _Stored:
+        assert self.current is not None
+        return self.current
 
     def save_state(
         self,
@@ -33,7 +40,12 @@ class _Store:
         expected_etag: str,
     ) -> _Stored:
         self.saved = dict(value)
-        return _Stored(dict(value), expected_revision + 1, "etag-2")
+        self.current = _Stored(
+            dict(value),
+            expected_revision + 1,
+            f"etag-{expected_revision + 1}",
+        )
+        return self.current
 
     def append_event(
         self,
@@ -164,6 +176,166 @@ class SourcePreflightTests(unittest.TestCase):
             ["約7件追加します。よろしいですか？"],
             manager.prompts,
         )
+
+    def test_redmine_decline_happens_after_inventory_but_before_detail_fetch(self) -> None:
+        detail_started: list[bool] = []
+        execution = types.SimpleNamespace()
+
+        def base_redmine(
+            settings: dict[str, Any],
+            work: Any,
+            getter: Any,
+            environment: dict[str, str],
+            *,
+            item_callback: Any,
+            batch_callback: Any,
+            resume_count: int,
+            stable_issue_ids: list[int] | None,
+            inventory_callback: Any,
+            updated_on_cutoff: str | None,
+            progress_callback: Any,
+        ) -> dict[str, Any]:
+            if stable_issue_ids is None:
+                inventory_callback([101, 102, 103])
+            detail_started.append(True)
+            return {"status": "ok", "documents": 3}
+
+        execution._redmine = base_redmine
+        source = types.SimpleNamespace(
+            payload={
+                "local_source_key": "src_redmine-0123456789ab",
+                "source_id": None,
+            }
+        )
+        state = _Stored(
+            {
+                "schema_version": "local-rag-source-state-v1",
+                "local_source_key": "src_redmine-0123456789ab",
+                "status": "planned",
+                "phase": "fetch",
+            }
+        )
+        store = _Store(state)
+        runner = types.SimpleNamespace()
+
+        def base_update(
+            store_value: _Store,
+            source_value: Any,
+            state_value: _Stored,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return execution._redmine(
+                {},
+                None,
+                None,
+                {},
+                item_callback=None,
+                batch_callback=None,
+                resume_count=0,
+                stable_issue_ids=None,
+                inventory_callback=lambda ids: store_value.issue_ids.extend(ids),
+                updated_on_cutoff=None,
+                progress_callback=kwargs.get("progress_callback"),
+            )
+
+        runner._update_redmine_source = base_update
+        runner._source_dto = lambda store_value, source_value: {
+            "local_source_key": source_value.payload["local_source_key"],
+            "source_id": source_value.payload.get("source_id"),
+        }
+        _install_redmine_preflight(execution, runner)
+        callback = _Callback(False)
+
+        result = runner._update_redmine_source(
+            store,
+            source,
+            state,
+            progress_callback=callback,
+        )
+
+        self.assertEqual("confirmation_declined", result["status"])
+        self.assertEqual([3], callback.counts)
+        self.assertEqual([101, 102, 103], store.issue_ids)
+        self.assertEqual([], detail_started)
+        assert store.current is not None
+        self.assertTrue(store.current.payload["can_resume"])
+        self.assertFalse(store.current.payload["preflight_confirmed"])
+
+    def test_redmine_confirmation_is_persisted_for_resume(self) -> None:
+        execution = types.SimpleNamespace()
+
+        def base_redmine(
+            settings: dict[str, Any],
+            work: Any,
+            getter: Any,
+            environment: dict[str, str],
+            *,
+            item_callback: Any,
+            batch_callback: Any,
+            resume_count: int,
+            stable_issue_ids: list[int] | None,
+            inventory_callback: Any,
+            updated_on_cutoff: str | None,
+            progress_callback: Any,
+        ) -> dict[str, Any]:
+            inventory_callback([1, 2])
+            return {"status": "ok", "documents": 2}
+
+        execution._redmine = base_redmine
+        source = types.SimpleNamespace(
+            payload={
+                "local_source_key": "src_redmine-abcdef012345",
+                "source_id": None,
+            }
+        )
+        state = _Stored(
+            {
+                "schema_version": "local-rag-source-state-v1",
+                "local_source_key": "src_redmine-abcdef012345",
+                "status": "planned",
+                "phase": "fetch",
+            }
+        )
+        store = _Store(state)
+        runner = types.SimpleNamespace()
+
+        def base_update(
+            store_value: _Store,
+            source_value: Any,
+            state_value: _Stored,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return execution._redmine(
+                {},
+                None,
+                None,
+                {},
+                item_callback=None,
+                batch_callback=None,
+                resume_count=0,
+                stable_issue_ids=None,
+                inventory_callback=lambda ids: store_value.issue_ids.extend(ids),
+                updated_on_cutoff=None,
+                progress_callback=kwargs.get("progress_callback"),
+            )
+
+        runner._update_redmine_source = base_update
+        runner._source_dto = lambda store_value, source_value: {}
+        _install_redmine_preflight(execution, runner)
+        callback = _Callback(True)
+
+        result = runner._update_redmine_source(
+            store,
+            source,
+            state,
+            progress_callback=callback,
+        )
+
+        self.assertEqual("ok", result["status"])
+        assert store.current is not None
+        self.assertTrue(store.current.payload["preflight_confirmed"])
+        self.assertEqual(2, store.current.payload["preflight_estimated_documents"])
+        self.assertEqual("source.preflight.confirmed", store.events[-1][1])
 
 
 if __name__ == "__main__":
