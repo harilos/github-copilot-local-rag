@@ -87,6 +87,7 @@ from .machine_connections import (
     source_runtime_environment,
 )
 from .manager_connections import install_manage_custom_hook
+from .provisional_source_merge import install_provisional_source_merge_runtime
 
 
 def _remove_default_source_operation_timeout() -> None:
@@ -100,6 +101,7 @@ def _remove_default_source_operation_timeout() -> None:
 _remove_default_source_operation_timeout()
 install_redmine_incremental_refresh()
 install_machine_connection_runtime()
+install_provisional_source_merge_runtime()
 install_manage_custom_hook()
 
 # Runtime installation replaces runner.update_source. Keep the package-level
