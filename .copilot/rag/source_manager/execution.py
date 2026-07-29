@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .errors import SourceManagerError
+from .errors import SourceManagerError, sanitize_diagnostic
 from .security import validate_environment_name
 
 
@@ -111,7 +111,9 @@ def _github(
                     "git", f"--git-dir={control}",
                     f"--work-tree={work}", "fetch", "--prune", "origin",
                 ]
-            )
+            ),
+            operation="Gitの更新",
+            stage="fetch.github",
         )
     else:
         if any(work.iterdir()):
@@ -125,7 +127,9 @@ def _github(
                     f"--separate-git-dir={control}",
                     "--", repository, str(work),
                 ]
-            )
+            ),
+            operation="Gitリポジトリの取得",
+            stage="fetch.github",
         )
         pointer = work / ".git"
         if pointer.exists() or pointer.is_symlink():
@@ -142,7 +146,9 @@ def _github(
                 "git", f"--git-dir={control}", "symbolic-ref", "--short",
                 "refs/remotes/origin/HEAD",
             ]
-        )
+        ),
+        operation="Gitの既定ブランチ確認",
+        stage="fetch.github",
     )
     branch = str(getattr(branch_result, "stdout", "") or "").strip()
     if branch.startswith("origin/"):
@@ -156,7 +162,9 @@ def _github(
                 "git", f"--git-dir={control}", f"--work-tree={work}",
                 "reset", "--hard", remote_branch,
             ]
-        )
+        ),
+        operation="Git作業ファイルの反映",
+        stage="fetch.github",
     )
     _checked(
         runner(
@@ -164,7 +172,9 @@ def _github(
                 "git", f"--git-dir={control}", f"--work-tree={work}",
                 "clean", "-ffdqx",
             ]
-        )
+        ),
+        operation="Git作業ファイルの整理",
+        stage="fetch.github",
     )
     return {"status": "ok", "default_branch": branch, "documents": 0}
 
@@ -184,7 +194,9 @@ def _svn(
                 [
                     "svn", "update", "--set-depth", depth, str(checkout),
                 ]
-            )
+            ),
+            operation="SVNの更新",
+            stage="fetch.svn",
         )
     else:
         if checkout.exists() and any(checkout.iterdir()):
@@ -195,7 +207,9 @@ def _svn(
                     "svn", "checkout", "--depth", depth,
                     str(settings["repository_url"]), str(checkout),
                 ]
-            )
+            ),
+            operation="SVNリポジトリの取得",
+            stage="fetch.svn",
         )
     if settings.get("recursive", True):
         _replace_materialized_tree(checkout, work)
@@ -206,7 +220,9 @@ def _svn(
             [
                 "svn", "info", "--show-item", "revision", str(checkout),
             ]
-        )
+        ),
+        operation="SVNリビジョンの確認",
+        stage="fetch.svn",
     )
     revision = str(getattr(revision_result, "stdout", "") or "").strip()
     return {
@@ -622,9 +638,33 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _checked(result: Any) -> Any:
-    if int(getattr(result, "returncode", 1)) != 0:
-        raise SourceManagerError("provider command failed")
+def _checked(
+    result: Any,
+    *,
+    operation: str,
+    stage: str,
+) -> Any:
+    returncode = int(getattr(result, "returncode", 1))
+    if returncode != 0:
+        stderr = sanitize_diagnostic(
+            getattr(result, "stderr", ""),
+            max_chars=4_000,
+        )
+        stdout = sanitize_diagnostic(
+            getattr(result, "stdout", ""),
+            max_chars=2_000,
+        )
+        details: list[str] = []
+        if stderr:
+            details.append(f"標準エラー:\n{stderr}")
+        if stdout:
+            details.append(f"標準出力:\n{stdout}")
+        suffix = "\n" + "\n".join(details) if details else ""
+        raise SourceManagerError(
+            f"{operation}に失敗しました（終了コード: {returncode}）。"
+            f"{suffix}",
+            stage=stage,
+        )
     return result
 
 

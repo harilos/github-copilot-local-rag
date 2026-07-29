@@ -12,7 +12,11 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from .checkpoints import complete_run, new_run_state
-from .errors import SourceManagerError
+from .errors import (
+    SourceManagerError,
+    exception_summary,
+    sanitize_diagnostic,
+)
 from .execution import execute_fetch_plan, validate_managed_work_tree
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
@@ -73,17 +77,27 @@ def register_source(
         {"source_type": source_type},
     )
     if start:
-        return update_source(
-            db_root,
-            stored.payload["local_source_key"],
-            executor=executor,
-            command_runner=command_runner,
-            http_get=http_get,
-            environment=environment,
-            python_executable=python_executable,
-            rag_root=rag_root,
-            metadata_publisher=metadata_publisher,
-        )
+        try:
+            return update_source(
+                db_root,
+                stored.payload["local_source_key"],
+                executor=executor,
+                command_runner=command_runner,
+                http_get=http_get,
+                environment=environment,
+                python_executable=python_executable,
+                rag_root=rag_root,
+                metadata_publisher=metadata_publisher,
+            )
+        except Exception as exc:
+            _attach_registration_failure(
+                exc,
+                local_source_key=stored.payload["local_source_key"],
+                events_jsonl=store.paths(
+                    stored.payload["local_source_key"]
+                ).events_jsonl,
+            )
+            raise
     return _source_dto(store, stored)
 
 
@@ -245,16 +259,45 @@ def update_source(
         return result
 
     runtime_state = copy.deepcopy(saved_state.payload)
-    outcome = dict(
-        effective_executor(plan.to_dict(), work, runtime_state)
-    )
+    try:
+        outcome = dict(
+            effective_executor(plan.to_dict(), work, runtime_state)
+        )
+    except Exception as exc:
+        runtime_state.update(
+            {
+                "status": "interrupted",
+                "phase": "fetch",
+                "can_resume": True,
+                "last_error": exception_summary(exc),
+            }
+        )
+        try:
+            store.save_state(
+                local_source_key,
+                runtime_state,
+                expected_revision=saved_state.revision,
+                expected_etag=saved_state.etag,
+            )
+            store.append_event(
+                local_source_key,
+                "fetch.interrupted",
+                {"error": exception_summary(exc)},
+            )
+        except SourceManagerError:
+            pass
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", f"fetch.{source.payload['source_type']}")
+        raise
     if outcome.get("status") not in {"ok", "complete"}:
+        failure_detail = sanitize_diagnostic(
+            outcome.get("error") or "fetch_failed",
+            max_chars=4_000,
+        )
         runtime_state["status"] = "failed"
         runtime_state["phase"] = "fetch"
         runtime_state["can_resume"] = True
-        runtime_state["last_error"] = str(
-            outcome.get("error") or "fetch_failed"
-        )[:200]
+        runtime_state["last_error"] = failure_detail
         failed = store.save_state(
             local_source_key,
             runtime_state,
@@ -270,6 +313,14 @@ def update_source(
             **_source_dto(store, source),
             "status": "failed",
             "state_revision": failed.revision,
+            "failure_stage": "fetch",
+            "error": failure_detail,
+            "error_type": str(
+                outcome.get("error_type") or "ProviderResultError"
+            ),
+            "events_jsonl": store.paths(
+                local_source_key
+            ).events_jsonl,
         }
 
     source, link_pending = _apply_fetch_metadata(store, source, outcome)
@@ -389,11 +440,15 @@ def update_all_sources(
                 )
             )
         except SourceManagerError as exc:
+            paths = SourceStore(db_root).paths(key)
             results.append(
                 {
                     "local_source_key": key,
                     "status": "failed",
-                    "error": type(exc).__name__,
+                    "failure_stage": getattr(exc, "stage", None),
+                    "error_type": type(exc).__name__,
+                    "error": exception_summary(exc),
+                    "events_jsonl": paths.events_jsonl,
                 }
             )
     failed = [item for item in results if item.get("status") == "failed"]
@@ -649,18 +704,49 @@ def _execute_add(
     ]
     runner = command_runner or _run_command
     completed = runner(arguments)
-    if int(getattr(completed, "returncode", 1)) != 0:
-        raise SourceManagerError("ADD failed")
+    returncode = int(getattr(completed, "returncode", 1))
+    if returncode != 0:
+        stderr = sanitize_diagnostic(
+            getattr(completed, "stderr", ""),
+            max_chars=4_000,
+        )
+        stdout = sanitize_diagnostic(
+            getattr(completed, "stdout", ""),
+            max_chars=2_000,
+        )
+        details: list[str] = []
+        if stderr:
+            details.append(f"標準エラー:\n{stderr}")
+        if stdout:
+            details.append(f"標準出力:\n{stdout}")
+        suffix = "\n" + "\n".join(details) if details else ""
+        raise SourceManagerError(
+            "ADD failed: 検索への反映に失敗しました"
+            f"（終了コード: {returncode}）。{suffix}",
+            stage="reflect.add",
+        )
     try:
         summary = json.loads(str(getattr(completed, "stdout", "") or ""))
     except json.JSONDecodeError as exc:
-        raise SourceManagerError("ADD did not return trusted JSON") from exc
+        stdout = sanitize_diagnostic(
+            getattr(completed, "stdout", ""),
+            max_chars=2_000,
+        )
+        raise SourceManagerError(
+            "ADD did not return trusted JSON."
+            + (f"\n標準出力:\n{stdout}" if stdout else ""),
+            stage="reflect.add",
+        ) from exc
     if not isinstance(summary, dict):
-        raise SourceManagerError("ADD did not return trusted JSON")
+        raise SourceManagerError(
+            "ADD did not return trusted JSON",
+            stage="reflect.add",
+        )
     reported_source_id = summary.get("source_id")
     if not isinstance(reported_source_id, str) or reported_source_id != key:
         raise SourceManagerError(
-            "ADD did not return the requested trusted source_id"
+            "ADD did not return the requested trusted source_id",
+            stage="reflect.add",
         )
     return {"source_id": reported_source_id, "summary": summary}
 
@@ -811,11 +897,12 @@ def _update_redmine_source(
     except Exception as exc:
         stored = state_holder[0]
         value = copy.deepcopy(stored.payload)
+        error_detail = exception_summary(exc)
         value.update(
             {
                 "status": "interrupted",
                 "can_resume": True,
-                "last_error": type(exc).__name__,
+                "last_error": error_detail,
             }
         )
         try:
@@ -827,6 +914,8 @@ def _update_redmine_source(
             )
         except SourceManagerError:
             pass
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", "fetch.redmine")
         raise
 
     if not source_holder[0].payload.get("source_id"):
@@ -919,12 +1008,13 @@ def _redmine_reflect_batch(
         )
     except Exception as exc:
         interrupted = copy.deepcopy(state.payload)
+        error_detail = exception_summary(exc)
         interrupted.update(
             {
                 "status": "interrupted",
                 "phase": "reflect",
                 "can_resume": True,
-                "last_error": type(exc).__name__,
+                "last_error": error_detail,
             }
         )
         store.save_state(
@@ -933,6 +1023,8 @@ def _redmine_reflect_batch(
             expected_revision=state.revision,
             expected_etag=state.etag,
         )
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", "reflect.redmine_batch")
         raise
     if source.payload.get("source_id"):
         current_source = source
@@ -1025,12 +1117,13 @@ def _reflect_and_sync(
         )
     except Exception as exc:
         interrupted = copy.deepcopy(state.payload)
+        error_detail = exception_summary(exc)
         interrupted.update(
             {
                 "status": "interrupted",
                 "phase": "reflect",
                 "can_resume": True,
-                "last_error": type(exc).__name__,
+                "last_error": error_detail,
                 "metadata_sync_pending": False,
             }
         )
@@ -1043,8 +1136,10 @@ def _reflect_and_sync(
         store.append_event(
             source.payload["local_source_key"],
             "add.interrupted",
-            {"error": type(exc).__name__},
+            {"error": error_detail},
         )
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", "reflect.add")
         raise
 
     confirmed = confirm_add_success(
@@ -1212,6 +1307,20 @@ def _run_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _attach_registration_failure(
+    exc: BaseException,
+    *,
+    local_source_key: str,
+    events_jsonl: str,
+) -> None:
+    """Attach non-secret recovery context for the human Manager."""
+    if getattr(exc, "stage", None) is None:
+        setattr(exc, "stage", "registration.initial_processing")
+    setattr(exc, "source_saved", True)
+    setattr(exc, "local_source_key", str(local_source_key))
+    setattr(exc, "events_jsonl", str(events_jsonl))
+
+
 def _validate_registration_runtime(
     source_type: str,
     runtime_path: str | Path | None,
@@ -1307,13 +1416,14 @@ def _synchronize_metadata(
             "metadata_sync_pending": False,
         }
     except Exception as exc:
+        error_detail = exception_summary(exc)
         store.append_event(
             source.payload["local_source_key"],
             "metadata.synchronization_failed",
-            {"error": type(exc).__name__},
+            {"error": error_detail},
         )
         return {
             "status": "metadata_sync_pending",
             "metadata_sync_pending": True,
-            "metadata_error": type(exc).__name__,
+            "metadata_error": error_detail,
         }

@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import traceback
 import uuid
 import webbrowser
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ _MODULE_ROOT = Path(__file__).resolve().parent
 if str(_MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULE_ROOT))
 from help_links import MANAGER_HELP_EPILOG, MANAGER_HELP_URL
+from source_manager.errors import sanitize_diagnostic
 
 
 RAG_ROOT = Path(__file__).resolve().parent
@@ -765,6 +767,104 @@ class LocalRagManager:
     def _print_error(self, text: str) -> None:
         self._message("error", text)
 
+    @staticmethod
+    def _source_failure_stage_label(value: Any) -> str:
+        stage = str(value or "").strip()
+        if stage.startswith("fetch.github"):
+            return "GitHubからの取得"
+        if stage.startswith("fetch.svn"):
+            return "SVNからの取得"
+        if stage.startswith("fetch.redmine"):
+            return "Redmineからの取得"
+        if stage.startswith("fetch.sharepoint"):
+            return "SharePointフォルダの確認"
+        if stage.startswith("fetch.other"):
+            return "手元資料の取り込み準備"
+        if stage.startswith("reflect"):
+            return "検索への反映"
+        if stage.startswith("metadata"):
+            return "Source情報の保存"
+        if stage.startswith("registration"):
+            return "Source登録後の初回処理"
+        return stage or "Source登録・更新処理"
+
+    @staticmethod
+    def _safe_source_diagnostic(value: Any, *, max_chars: int) -> str:
+        return sanitize_diagnostic(value, max_chars=max_chars)
+
+    def _print_source_exception(
+        self,
+        exc: BaseException,
+        *,
+        operation: str,
+    ) -> None:
+        self._print_error(f"{operation}に失敗しました。")
+        self.output(
+            "失敗段階: "
+            + self._source_failure_stage_label(
+                getattr(exc, "stage", None)
+            )
+        )
+        detail = self._safe_source_diagnostic(
+            f"{type(exc).__name__}: {exc}",
+            max_chars=8_000,
+        )
+        self.output(f"例外: {detail or type(exc).__name__}")
+        if bool(getattr(exc, "source_saved", False)):
+            self.output("保存状態: Sourceの取得設定と再開情報は保存済みです。")
+            self.output("検索への反映: 完了していません。")
+            self.output(
+                "対応: 原因を修正後、このSourceの「更新・再開する」"
+                "からそのまま再実行できます。"
+            )
+        else:
+            self.output("保存状態: Source設定は保存されていません。")
+        event_log = str(getattr(exc, "events_jsonl", "") or "").strip()
+        if event_log:
+            self.output(f"進捗ログ: {event_log}")
+        formatted = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        formatted = self._safe_source_diagnostic(
+            formatted,
+            max_chars=16_000,
+        )
+        if formatted:
+            self.output("例外ログ（診断用）:")
+            self.output(formatted)
+
+    def _print_source_result_failure(
+        self,
+        result: dict[str, Any],
+        *,
+        operation: str,
+    ) -> None:
+        self._print_error(f"{operation}に失敗しました。")
+        self.output(
+            "失敗段階: "
+            + self._source_failure_stage_label(
+                result.get("failure_stage")
+            )
+        )
+        error_type = str(result.get("error_type") or "ProviderResultError")
+        detail = self._safe_source_diagnostic(
+            result.get("error") or "詳細なし",
+            max_chars=8_000,
+        )
+        self.output(f"例外: {error_type}: {detail}")
+        self.output("保存状態: Sourceの取得設定と再開情報は保存済みです。")
+        self.output("検索への反映: 完了していません。")
+        event_log = str(result.get("events_jsonl") or "").strip()
+        paths = result.get("paths")
+        if not event_log and isinstance(paths, dict):
+            event_log = str(paths.get("events_jsonl") or "").strip()
+        if event_log:
+            self.output(f"進捗ログ: {event_log}")
+        self.output(
+            "対応: 原因を修正後、このSourceの「更新・再開する」"
+            "からそのまま再実行できます。"
+        )
+
     def _print_screen_header(
         self,
         title: str,
@@ -1056,12 +1156,9 @@ class LocalRagManager:
                 rag_root=self.rag_root,
             )
         except Exception as exc:
-            self._print_error(
-                "Sourceを登録できませんでした。"
-                f"設定または取得元を確認してください（{type(exc).__name__}）。"
-            )
-            self.output(
-                "検索DBへ反映できていない内容は、次回このSourceから再開できます。"
+            self._print_source_exception(
+                exc,
+                operation="Source登録",
             )
             return
         if action == "1":
@@ -1069,6 +1166,11 @@ class LocalRagManager:
             if status == "updated":
                 self._print_success(
                     "Sourceを保存し、検索へ反映しました。"
+                )
+            elif status in {"failed", "error"}:
+                self._print_source_result_failure(
+                    result,
+                    operation="Source登録後の初回処理",
                 )
             else:
                 self._print_warning(
@@ -2455,12 +2557,13 @@ class LocalRagManager:
                 runtime_input=runtime_input,
             )
         except Exception as exc:
-            self._print_error(
-                "Sourceの処理に失敗しました。"
-                f"次回このSourceから再開できます（{type(exc).__name__}）。"
+            self._print_source_exception(
+                exc,
+                operation="Sourceの更新・再開",
             )
             return
-        if str(result.get("status") or "") in {
+        result_status = str(result.get("status") or "")
+        if result_status in {
             "ok",
             "complete",
             "completed",
@@ -2468,6 +2571,11 @@ class LocalRagManager:
             "updated",
         }:
             self._print_success("Sourceを検索へ反映しました。")
+        elif result_status in {"failed", "error"}:
+            self._print_source_result_failure(
+                result,
+                operation="Sourceの更新・再開",
+            )
         else:
             self._print_warning(
                 str(result.get("message") or "処理は再開可能な位置で停止しました。")

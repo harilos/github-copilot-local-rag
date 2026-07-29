@@ -17,7 +17,10 @@ SPEC = importlib.util.spec_from_file_location("local_rag_manage", MANAGER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 manage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(manage)
-from source_manager import packages as source_packages  # noqa: E402
+from source_manager import (  # noqa: E402
+    SourceManagerError,
+    packages as source_packages,
+)
 
 
 class RecordingRunner:
@@ -184,6 +187,92 @@ class ManagerContractTests(unittest.TestCase):
                 "戻る",
             ],
         )
+
+    def test_source_registration_failure_shows_detailed_exception_log(
+        self,
+    ) -> None:
+        self.make_db()
+        manager = self.manager(["1", "1"])
+        specification = {
+            "label": "GitHub",
+            "display_name": "Fixture",
+            "source_type": "github",
+            "fetch": {
+                "repository_url": "https://example.invalid/o/r.git",
+            },
+            "summary": [],
+        }
+        failure = SourceManagerError(
+            "Gitリポジトリの取得に失敗しました（終了コード: 128）。\n"
+            "標準エラー:\nfatal: repository not found",
+            stage="fetch.github",
+        )
+        failure.source_saved = True
+        failure.local_source_key = "src_fixture-0123456789ab"
+        failure.events_jsonl = (
+            "sources/src_fixture-0123456789ab/events.jsonl"
+        )
+        with (
+            mock.patch.object(
+                manager,
+                "_prompt_new_github_source",
+                return_value=specification,
+            ),
+            mock.patch(
+                "source_manager.runner.register_source",
+                side_effect=failure,
+            ),
+        ):
+            manager._add_source_screen("example-rag")
+        rendered = "\n".join(self.output)
+        self.assertIn("[エラー] Source登録に失敗しました。", rendered)
+        self.assertIn("失敗段階: GitHubからの取得", rendered)
+        self.assertIn("SourceManagerError", rendered)
+        self.assertIn("fatal: repository not found", rendered)
+        self.assertIn("終了コード: 128", rendered)
+        self.assertIn("取得設定と再開情報は保存済み", rendered)
+        self.assertIn("例外ログ（診断用）", rendered)
+        self.assertIn("events.jsonl", rendered)
+
+    def test_source_registration_failed_result_shows_provider_detail(
+        self,
+    ) -> None:
+        self.make_db()
+        manager = self.manager(["1", "1"])
+        specification = {
+            "label": "GitHub",
+            "display_name": "Fixture",
+            "source_type": "github",
+            "fetch": {
+                "repository_url": "https://example.invalid/o/r.git",
+            },
+            "summary": [],
+        }
+        with (
+            mock.patch.object(
+                manager,
+                "_prompt_new_github_source",
+                return_value=specification,
+            ),
+            mock.patch(
+                "source_manager.runner.register_source",
+                return_value={
+                    "status": "failed",
+                    "failure_stage": "fetch",
+                    "error_type": "ProviderResultError",
+                    "error": "remote server rejected the request",
+                    "events_jsonl": "sources/src_fixture/events.jsonl",
+                },
+            ),
+        ):
+            manager._add_source_screen("example-rag")
+        rendered = "\n".join(self.output)
+        self.assertIn(
+            "[エラー] Source登録後の初回処理に失敗しました。",
+            rendered,
+        )
+        self.assertIn("remote server rejected the request", rendered)
+        self.assertIn("検索への反映: 完了していません。", rendered)
 
     def test_full_source_update_writes_content_snapshot_contract(self) -> None:
         root = self.make_db()

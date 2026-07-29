@@ -28,6 +28,7 @@ from source_manager import (
 )
 from source_manager.metadata import _canonical_source
 from source_manager.metadata import publish_source_metadata
+from source_manager.errors import sanitize_diagnostic
 
 
 class SourceStoreContracts(unittest.TestCase):
@@ -818,7 +819,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                 stderr="",
             )
 
-        with self.assertRaisesRegex(SourceManagerError, "ADD failed"):
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "ADD failed",
+        ) as captured:
             register_source(
                 self.db_root,
                 source_type="redmine",
@@ -838,6 +842,11 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                 environment={"LOCAL_RAG_REDMINE_API_KEY": "fixture-key"},
                 metadata_publisher=lambda *_: None,
             )
+        self.assertIn("終了コード: 1", str(captured.exception))
+        self.assertIn("fixture failure", str(captured.exception))
+        self.assertEqual("reflect.add", captured.exception.stage)
+        self.assertTrue(captured.exception.source_saved)
+        self.assertTrue(captured.exception.events_jsonl.endswith("events.jsonl"))
         registered = list_sources(self.db_root)[0]
         interrupted = SourceStore(self.db_root).read_state(
             registered["local_source_key"]
@@ -847,6 +856,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         self.assertEqual(5, interrupted["indexed_confirmed_count"])
         self.assertEqual(5, interrupted["pending_count"])
         self.assertEqual(issue_ids, interrupted["redmine_issue_ids"])
+        self.assertIn("fixture failure", interrupted["last_error"])
         self.assertEqual(list(range(1, 11)), detail_calls)
         self.assertEqual(3, list_calls)
 
@@ -872,6 +882,21 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         ).payload
         self.assertEqual("complete", final["phase"])
         self.assertFalse(final["can_resume"])
+
+    def test_diagnostic_text_redacts_credentials_but_keeps_failure(self) -> None:
+        detail = sanitize_diagnostic(
+            "fatal: connection refused "
+            "https://user:password@example.invalid/repository\n"
+            "X-Redmine-API-Key=secret-value\n"
+            'Authorization: Bearer bearer-secret\n'
+            '"password": "json-secret"'
+        )
+        self.assertIn("connection refused", detail)
+        self.assertNotIn("user:password", detail)
+        self.assertNotIn("secret-value", detail)
+        self.assertNotIn("bearer-secret", detail)
+        self.assertNotIn("json-secret", detail)
+        self.assertIn("<REDACTED>", detail)
 
     def test_redmine_shorter_window_retains_previously_fetched_issues(
         self,
