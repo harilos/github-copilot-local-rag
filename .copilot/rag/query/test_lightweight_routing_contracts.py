@@ -103,10 +103,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
         self.assertIn("assistant answer", text)
         self.assertRegex(text, r"earlier\s+RAG result as a verified fact")
         self.assertRegex(text, r"distinct\s+follow-up\s+search")
-        self.assertRegex(
-            text,
-            r"Put\s+speculation only in `--semantic-hypothesis`",
-        )
+        self.assertRegex(text, r"Put\s+speculation only in `--semantic-hypothesis`")
         self.assertRegex(
             text,
             r"ask for clarification without\s+listing or searching",
@@ -120,10 +117,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
             for path in (ROUTER, LOOKUP)
         )
         self.assertIn("Local RAG's private implementation files", combined)
-        self.assertRegex(
-            combined,
-            r"does not prohibit reading the human's workspace",
-        )
+        self.assertRegex(combined, r"does not prohibit reading the human's workspace")
         self.assertIn("workspace files and folder structure", combined)
 
     def test_platform_commands_use_the_installed_venv_and_public_script(
@@ -159,10 +153,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
             self.assertIn("`source_url`", text)
             self.assertIn("`source_permalink`", text)
             self.assertIn("## References", text)
-            self.assertRegex(
-                text.casefold(),
-                r"do not put a url|do not expose\s+a raw url",
-            )
+            self.assertRegex(text.casefold(), r"do not put a url|do not expose\s+a raw url")
         lookup = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("reference.markdown", lookup)
         self.assertIn("display at most one URL", lookup)
