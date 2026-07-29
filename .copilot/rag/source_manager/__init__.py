@@ -94,6 +94,7 @@ from .database_copy import (
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
+from .teams_source import install_teams_source_runtime
 
 
 def _remove_default_source_operation_timeout() -> None:
@@ -110,13 +111,24 @@ install_machine_connection_runtime()
 install_source_preflight_runtime()
 install_provisional_source_merge_runtime()
 install_database_copy_runtime()
+install_teams_source_runtime()
 install_manage_custom_hook()
 
-# Runtime installation replaces runner.update_source. Keep the package-level
-# convenience export aligned with the patched function.
+# Runtime installers wrap several module functions. Keep package-level exports
+# aligned with the final implementations rather than stale pre-install aliases.
+from . import execution as _execution
+from . import machine_connections as _machine_connections
+from . import providers as _providers
 from . import runner as _runner
 
+SUPPORTED_PROVIDERS = _providers.SUPPORTED_PROVIDERS
+execute_fetch_plan = _execution.execute_fetch_plan
+resolve_environment_root = _providers.resolve_environment_root
+source_runtime_environment = _machine_connections.source_runtime_environment
+update_all_sources = _runner.update_all_sources
 update_source = _runner.update_source
+update_source_configuration = _runner.update_source_configuration
+validate_provider_config = _providers.validate_provider_config
 
 __all__ = [
     "CONNECTION_SCHEMA_VERSION",
@@ -156,6 +168,7 @@ __all__ = [
     "extract_json_result",
     "generated_redmine_link",
     "has_stored_redmine_api_key",
+    "install_teams_source_runtime",
     "list_redmine_registrations",
     "list_sources",
     "new_run_state",
