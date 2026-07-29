@@ -159,6 +159,13 @@ class ProgressRenderer:
             detail = "対象なし"
         elif (
             is_add_progress
+            and total_kind == "estimated"
+            and total is not None
+            and total > 0
+        ):
+            detail = f"準備中（約{total:,}件）"
+        elif (
+            is_add_progress
             and current_index is not None
             and current_index > 0
             and total is not None
