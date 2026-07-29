@@ -60,45 +60,56 @@ def copy_chroma_snapshot(
         path=str(destination_chroma), settings=settings
     )
     try:
-        source_collection = source_client.get_collection(name=old_collection)
-    except Exception as exc:
-        raise error_type(
-            f"source Chroma collection is unavailable: {old_collection}"
-        ) from exc
-    try:
-        destination_client.delete_collection(new_collection)
-    except Exception:
-        pass
-    destination_collection = destination_client.create_collection(
-        name=new_collection, metadata=source_collection.metadata
-    )
-    total = int(source_collection.count())
-    copied = 0
-    while copied < total:
-        batch = source_collection.get(
-            limit=min(_COPY_BATCH_SIZE, total - copied),
-            offset=copied,
-            include=["embeddings", "documents", "metadatas"],
+        try:
+            source_collection = source_client.get_collection(name=old_collection)
+        except Exception as exc:
+            raise error_type(
+                f"source Chroma collection is unavailable: {old_collection}"
+            ) from exc
+        try:
+            destination_client.delete_collection(new_collection)
+        except Exception:
+            pass
+        destination_collection = destination_client.create_collection(
+            name=new_collection, metadata=source_collection.metadata
         )
-        ids = [str(value) for value in batch.get("ids") or []]
-        if not ids:
-            raise error_type("Chroma snapshot ended before the expected count")
-        arguments: dict[str, Any] = {"ids": ids}
-        embeddings = batch.get("embeddings")
-        if embeddings is not None:
-            arguments["embeddings"] = (
-                embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings
+        total = int(source_collection.count())
+        copied = 0
+        while copied < total:
+            batch = source_collection.get(
+                limit=min(_COPY_BATCH_SIZE, total - copied),
+                offset=copied,
+                include=["embeddings", "documents", "metadatas"],
             )
-        if batch.get("documents") is not None:
-            arguments["documents"] = batch["documents"]
-        if batch.get("metadatas") is not None:
-            arguments["metadatas"] = batch["metadatas"]
-        destination_collection.add(**arguments)
-        copied += len(ids)
-        _emit(progress_callback, "copy.vector", "ベクトルDBのコピー", copied, total)
-    if int(destination_collection.count()) != total:
-        raise error_type("copied Chroma collection count does not match")
-    return total
+            ids = [str(value) for value in batch.get("ids") or []]
+            if not ids:
+                raise error_type("Chroma snapshot ended before the expected count")
+            arguments: dict[str, Any] = {"ids": ids}
+            embeddings = batch.get("embeddings")
+            if embeddings is not None:
+                arguments["embeddings"] = (
+                    embeddings.tolist()
+                    if hasattr(embeddings, "tolist")
+                    else embeddings
+                )
+            if batch.get("documents") is not None:
+                arguments["documents"] = batch["documents"]
+            if batch.get("metadatas") is not None:
+                arguments["metadatas"] = batch["metadatas"]
+            destination_collection.add(**arguments)
+            copied += len(ids)
+            _emit(
+                progress_callback,
+                "copy.vector",
+                "ベクトルDBのコピー",
+                copied,
+                total,
+            )
+        if int(destination_collection.count()) != total:
+            raise error_type("copied Chroma collection count does not match")
+        return total
+    finally:
+        _release_chroma_runtime(source_client, destination_client)
 
 
 def delete_excluded_sources(
@@ -122,47 +133,55 @@ def delete_excluded_sources(
         raise error_type("Source deletion runtime is unavailable") from exc
 
     results: list[dict[str, Any]] = []
-    with temporary_environment(
-        {
-            "RAG_DB_NAME": destination_name,
-            "RAG_OUTPUT_ROOT": str(staging),
-            "CHROMA_COLLECTION": collection,
-        }
-    ):
-        for position, source in enumerate(excluded_sources, start=1):
-            source_id = str(source.get("source_id") or "").strip()
-            local_key = str(source.get("_local_source_key") or "").strip()
-            display_name = str(
-                source.get("display_name") or source_id or local_key or "Source"
-            )
-            indexed_result: dict[str, Any] | None = None
-            if source_id:
-                indexed_result = dict(delete_source_data(source_id))
-                try:
-                    remove_source_metadata(staging, source_id, rag_root)
-                except Exception as exc:
-                    raise error_type(
-                        f"failed to remove copied Source Metadata: {display_name}"
-                    ) from exc
-            if local_key:
-                delete_management_source(staging, local_key, error_type=error_type)
-            results.append(
-                {
-                    "display_name": display_name,
-                    "source_id": source_id or None,
-                    "local_source_key": local_key or None,
-                    "indexed": indexed_result,
-                }
-            )
-            _emit(
-                progress_callback,
-                "copy.exclude",
-                "除外Sourceの削除",
-                position,
-                len(excluded_sources),
-                current_item=display_name,
-            )
-    return results
+    try:
+        with temporary_environment(
+            {
+                "RAG_DB_NAME": destination_name,
+                "RAG_OUTPUT_ROOT": str(staging),
+                "CHROMA_COLLECTION": collection,
+            }
+        ):
+            for position, source in enumerate(excluded_sources, start=1):
+                source_id = str(source.get("source_id") or "").strip()
+                local_key = str(source.get("_local_source_key") or "").strip()
+                display_name = str(
+                    source.get("display_name") or source_id or local_key or "Source"
+                )
+                indexed_result: dict[str, Any] | None = None
+                if source_id:
+                    indexed_result = dict(delete_source_data(source_id))
+                    try:
+                        remove_source_metadata(staging, source_id, rag_root)
+                    except Exception as exc:
+                        raise error_type(
+                            "failed to remove copied Source Metadata: "
+                            f"{display_name}"
+                        ) from exc
+                if local_key:
+                    delete_management_source(
+                        staging,
+                        local_key,
+                        error_type=error_type,
+                    )
+                results.append(
+                    {
+                        "display_name": display_name,
+                        "source_id": source_id or None,
+                        "local_source_key": local_key or None,
+                        "indexed": indexed_result,
+                    }
+                )
+                _emit(
+                    progress_callback,
+                    "copy.exclude",
+                    "除外Sourceの削除",
+                    position,
+                    len(excluded_sources),
+                    current_item=display_name,
+                )
+        return results
+    finally:
+        _release_chroma_runtime()
 
 
 def delete_management_source(
@@ -178,6 +197,29 @@ def delete_management_source(
             expected_revision=loaded.revision,
             expected_etag=loaded.etag,
         )
+
+
+def _release_chroma_runtime(*clients: Any) -> None:
+    """Release SQLite handles before the staging directory is renamed on Windows."""
+
+    systems: set[int] = set()
+    for client in clients:
+        system = getattr(client, "_system", None)
+        if system is None or id(system) in systems:
+            continue
+        systems.add(id(system))
+        stop = getattr(system, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:
+                pass
+    try:
+        from chromadb.api.client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
+    except Exception:
+        pass
 
 
 @contextmanager
