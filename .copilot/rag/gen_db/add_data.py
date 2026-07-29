@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,38 @@ from software_rag_tool.paths import dbs_dir
 
 _PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
 _RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
+_SUPPORTED_EXTENSIONS = frozenset(
+    {
+        ".md",
+        ".txt",
+        ".log",
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".pptx",
+        ".ppt",
+        ".xlsx",
+        ".py",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".java",
+        ".go",
+        ".rs",
+        ".cs",
+        ".rb",
+        ".php",
+        ".sh",
+        ".ps1",
+        ".sql",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+    }
+)
 
 
 class _ManagerProtocolWriter:
@@ -72,6 +104,8 @@ class _AddProgressWatcher:
         self._last_emit = float("-inf")
         self._last_signature = ""
         self._last_payload: dict[str, Any] | None = None
+        self._file_positions: dict[str, int] | None = None
+        self._file_position_scope: tuple[str, str, str] | None = None
         try:
             self._baseline_mtime_ns = self._path.stat().st_mtime_ns
         except OSError:
@@ -160,16 +194,27 @@ class _AddProgressWatcher:
                 for key in ("indexed_files", "skipped_files", "error_files")
             )
         done = min(done, total) if total else done
-        current = str(snapshot.get("current_file") or "").strip()
-        if not current:
-            batch = snapshot.get("current_batch_files")
-            if isinstance(batch, list) and batch:
-                current = str(batch[0] or "").strip()
-        current_index = 0
-        if total:
-            current_index = total if done >= total else min(total, done + 1)
         phase = str(snapshot.get("phase") or "reflect")
         status = str(snapshot.get("status") or "running")
+        current = str(snapshot.get("current_file") or "").strip()
+        if not current and status == "running" and phase in {
+            "delete",
+            "embedding",
+            "catalog",
+            "save_state",
+        }:
+            batch = snapshot.get("current_batch_files")
+            if isinstance(batch, list) and batch:
+                current = str(batch[-1] or "").strip()
+        if total == 0 and phase == "scan":
+            current = ""
+
+        current_index = self._exact_file_position(snapshot, current)
+        if current_index is None:
+            current_index = 0
+            if total:
+                current_index = total if done >= total else min(total, done + 1)
+
         payload: dict[str, Any] = {
             "event": "add.file_progress",
             "phase": "reflect",
@@ -186,6 +231,67 @@ class _AddProgressWatcher:
         }
         self._refresh_remaining(payload)
         return payload
+
+    def _exact_file_position(
+        self,
+        snapshot: dict[str, Any],
+        current: str,
+    ) -> int | None:
+        if not current:
+            return None
+        scan_root_text = str(snapshot.get("scan_root") or "").strip()
+        resolved_root_text = str(snapshot.get("resolved_root") or "").strip()
+        root_name = str(snapshot.get("root_display_name") or "").strip()
+        if not scan_root_text or not resolved_root_text or not root_name:
+            return None
+        scope = (scan_root_text, resolved_root_text, root_name)
+        if self._file_positions is None or self._file_position_scope != scope:
+            self._file_positions = self._build_file_positions(
+                Path(scan_root_text),
+                Path(resolved_root_text),
+                root_name,
+            )
+            self._file_position_scope = scope
+        return self._file_positions.get(current)
+
+    @staticmethod
+    def _build_file_positions(
+        scan_root: Path,
+        resolved_root: Path,
+        root_name: str,
+    ) -> dict[str, int]:
+        try:
+            scan = scan_root.expanduser().resolve(strict=True)
+            root = resolved_root.expanduser().resolve(strict=True)
+            scan.relative_to(root)
+        except (OSError, ValueError):
+            return {}
+        discovered: list[Path] = []
+        try:
+            for directory, child_directories, filenames in os.walk(
+                scan,
+                topdown=True,
+                followlinks=False,
+            ):
+                child_directories.sort()
+                for filename in sorted(filenames):
+                    path = Path(directory) / filename
+                    if (
+                        path.is_file()
+                        and path.suffix.lower() in _SUPPORTED_EXTENSIONS
+                    ):
+                        discovered.append(path)
+        except OSError:
+            return {}
+        positions: dict[str, int] = {}
+        for index, path in enumerate(sorted(discovered), start=1):
+            try:
+                relative = path.resolve(strict=True).relative_to(root)
+            except (OSError, ValueError):
+                continue
+            stored = PurePosixPath(root_name, *relative.parts).as_posix()
+            positions[stored] = index
+        return positions
 
     def _refresh_remaining(self, payload: dict[str, Any]) -> None:
         total = _non_negative_int(payload.get("total"))
