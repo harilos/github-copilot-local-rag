@@ -28,6 +28,10 @@ fi
   tar \
     --exclude='./rag/config/network.json' \
     --exclude='./rag/config/sensitive-terms.local' \
+    --exclude='./rag/config/source-connections.json' \
+    --exclude='./rag/config/source-connections.secrets.json' \
+    --exclude='./rag/config/.source-connections.key' \
+    --exclude='./rag/config/.source-connections.*' \
     --exclude='./rag/query/run' \
     --exclude='./rag/query/run/*' \
     --exclude='*/.venv' \
@@ -72,4 +76,4 @@ fi
 
 echo "Installed Copilot Local RAG files to: $TARGET_DIR"
 echo "Existing copilot-instructions.md was not overwritten by this repository."
-echo "Existing rag/config/network.json was preserved."
+echo "Existing machine-local network and Source connection settings were preserved."
