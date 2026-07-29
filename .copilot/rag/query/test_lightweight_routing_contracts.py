@@ -68,22 +68,27 @@ class LightweightRoutingContractTests(unittest.TestCase):
             self.assertIn("Local RAG Manager", text)
             self.assertRegex(text, r"Do not (?:attempt|run) setup")
 
-    def test_lookup_contract_is_one_list_then_one_search(self) -> None:
+    def test_lookup_contract_is_bounded_to_four_retrieval_searches(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("database-list calls: 0", text)
         self.assertIn("database-list calls: exactly 1", text)
-        self.assertIn("search calls: 1", text)
-        self.assertIn("Never use `--auto`.", text)
-        self.assertIn("Never retry", text)
+        self.assertIn("exactly 1 for a simple direct question", text)
+        self.assertRegex(text, r"at\s+most\s+4")
+        self.assertRegex(text, r"same\s+selected\s+database")
+        self.assertIn("Stop early", text)
+        self.assertRegex(text, r"distinct\s+follow-up\s+search")
+        self.assertIn("Never use `--auto`", text)
+        self.assertIn("retry an error or timeout", text)
+        self.assertIn("does not count toward the four", text)
         self.assertIn("--compact-json", text)
         self.assertIn("--result-delivery file", text)
-        self.assertIn("read `summary_file` once", text)
+        self.assertIn("read its `summary_file` once", text)
         self.assertRegex(
             text,
-            r"through the\s+same public search entry point",
+            r"through the same\s+public search entry point",
         )
 
-    def test_context_references_use_hints_without_rewriting_prompt(
+    def test_context_references_and_result_concepts_are_hints_not_facts(
         self,
     ) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
@@ -95,16 +100,31 @@ class LightweightRoutingContractTests(unittest.TestCase):
             "--answer-goal",
         ):
             self.assertIn(f"- `{option}`", text)
-        self.assertIn(
-            "Never append earlier messages to the positional question.",
-            text,
-        )
         self.assertIn("assistant answer", text)
-        self.assertIn("Put speculation only in `--semantic-hypothesis`", text)
+        self.assertRegex(text, r"earlier\s+RAG result as a verified fact")
+        self.assertRegex(text, r"distinct\s+follow-up\s+search")
         self.assertRegex(
             text,
-            r"ask for\s+clarification without listing or searching",
+            r"Put\s+speculation only in `--semantic-hypothesis`",
         )
+        self.assertRegex(
+            text,
+            r"ask for clarification without\s+listing or searching",
+        )
+
+    def test_workspace_files_are_not_blocked_by_private_runtime_boundary(
+        self,
+    ) -> None:
+        combined = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROUTER, LOOKUP)
+        )
+        self.assertIn("Local RAG's private implementation files", combined)
+        self.assertRegex(
+            combined,
+            r"does not prohibit reading the human's workspace",
+        )
+        self.assertIn("workspace files and folder structure", combined)
 
     def test_platform_commands_use_the_installed_venv_and_public_script(
         self,
@@ -123,7 +143,9 @@ class LightweightRoutingContractTests(unittest.TestCase):
         self.assertIn("Do not probe", text)
         self.assertIn("do not use `cmd.exe /c`", text)
 
-    def test_stale_notice_and_uri_citation_contracts_are_explicit(self) -> None:
+    def test_citation_footer_contract_is_explicit_but_body_structure_is_free(
+        self,
+    ) -> None:
         for path in (ROUTER, LOOKUP):
             text = path.read_text(encoding="utf-8")
             self.assertIn(
@@ -132,12 +154,21 @@ class LightweightRoutingContractTests(unittest.TestCase):
             )
             self.assertRegex(
                 text,
-                r"(?:at most|exactly)\s+once in the current\s+chat",
+                r"(?:at\s+most|exactly)\s+once in the current\s+chat",
             )
             self.assertIn("`source_url`", text)
             self.assertIn("`source_permalink`", text)
             self.assertIn("## References", text)
-            self.assertRegex(text.casefold(), r"never\s+show a raw url")
+            self.assertRegex(
+                text.casefold(),
+                r"do not put a url|do not expose\s+a raw url",
+            )
+        lookup = LOOKUP.read_text(encoding="utf-8")
+        self.assertIn("reference.markdown", lookup)
+        self.assertIn("display at most one URL", lookup)
+        self.assertIn("Do not constrain the answer's structure", lookup)
+        self.assertIn("[R1-E1]", lookup)
+        self.assertIn("[W1]", lookup)
 
     def test_no_skill_sets_a_model_or_creates_an_agent_contract(self) -> None:
         for path in (ROUTER, LOOKUP):
