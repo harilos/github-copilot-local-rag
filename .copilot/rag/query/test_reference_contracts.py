@@ -5,6 +5,11 @@ import json
 import types
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
+
+
+QUERY_ROOT = Path(__file__).resolve().parent
+RAG_ROOT = QUERY_ROOT.parent
 
 from reference_contract import (  # noqa: E402
     add_reference_metadata_to_payload,
@@ -68,6 +73,18 @@ class ReferenceContractTests(unittest.TestCase):
         )
         self.assertEqual("", reference["url"])
         self.assertNotIn("https://", reference["markdown"])
+
+    def test_nested_source_path_is_used_for_reference_filename(self) -> None:
+        reference = reference_metadata(
+            {
+                "source": {
+                    "path": "root/docs/nested-source.md",
+                    "title": "Nested title",
+                }
+            }
+        )
+        self.assertEqual("nested-source.md", reference["filename"])
+        self.assertEqual("root/docs/nested-source.md", reference["path"])
 
     def test_payload_projection_adds_reference_and_response_rules(self) -> None:
         payload = {
@@ -155,9 +172,28 @@ class ReferenceContractTests(unittest.TestCase):
             details[0][2]["reference"],
             expanded["reference"],
         )
+        # Idempotent installation must not wrap the same functions again.
         first = module.build_initial_summary
         install_result_bundle_reference_contract(module)
         self.assertIs(first, module.build_initial_summary)
+
+    def test_public_entry_points_install_reference_projection(self) -> None:
+        search_source = (RAG_ROOT / "search.py").read_text(encoding="utf-8")
+        detail_source = (QUERY_ROOT / "result_detail.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "install_result_bundle_reference_contract()",
+            search_source,
+        )
+        self.assertIn(
+            "install_search_command_reference_contract(search_command)",
+            search_source,
+        )
+        self.assertIn(
+            "install_result_bundle_reference_contract()",
+            detail_source,
+        )
 
     def test_search_command_patch_projects_final_json(self) -> None:
         output = io.StringIO()
