@@ -86,6 +86,11 @@ from .machine_connections import (
     sharepoint_root_status,
     source_runtime_environment,
 )
+from .database_copy import (
+    DatabaseCopyError,
+    copy_database,
+    install_database_copy_runtime,
+)
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
@@ -104,6 +109,7 @@ install_redmine_incremental_refresh()
 install_machine_connection_runtime()
 install_source_preflight_runtime()
 install_provisional_source_merge_runtime()
+install_database_copy_runtime()
 install_manage_custom_hook()
 
 # Runtime installation replaces runner.update_source. Keep the package-level
@@ -114,6 +120,7 @@ update_source = _runner.update_source
 
 __all__ = [
     "CONNECTION_SCHEMA_VERSION",
+    "DatabaseCopyError",
     "FetchPlan",
     "FetchStep",
     "LEGACY_REDMINE_API_KEY_ENV",
@@ -144,6 +151,7 @@ __all__ = [
     "confirm_add_success",
     "connection_config_path",
     "connection_secret_path",
+    "copy_database",
     "execute_fetch_plan",
     "extract_json_result",
     "generated_redmine_link",
