@@ -78,6 +78,56 @@ def publish_source_metadata(
         ) from exc
 
 
+def remove_source_metadata(
+    db_root: Path,
+    source_id: str,
+    rag_root: Path,
+) -> bool:
+    """CAS-remove one Source from the canonical sidecar."""
+    value = str(source_id or "")
+    if not value:
+        return False
+    source_links = _source_links_module(Path(rag_root))
+    loaded = source_links.load_source_links(
+        Path(db_root),
+        Path(db_root).name,
+    )
+    if loaded.status == "unconfigured":
+        return False
+    if loaded.status != "configured" or not isinstance(loaded.payload, dict):
+        raise SourceManagerError(
+            "canonical Source Metadata is not writable"
+        )
+    payload = copy.deepcopy(loaded.payload)
+    sources = payload.get("sources")
+    sources = sources if isinstance(sources, list) else []
+    remaining = [
+        item
+        for item in sources
+        if not isinstance(item, dict)
+        or str(item.get("source_id") or "") != value
+    ]
+    if len(remaining) == len(sources):
+        return False
+    payload["schema_version"] = source_links.SCHEMA_VERSION
+    payload["revision"] = int(loaded.revision) + 1
+    payload["sources"] = remaining
+    try:
+        source_links.save_source_links(
+            Path(db_root),
+            payload,
+            db_name=Path(db_root).name,
+            allow_unmatched_sources=True,
+            expected_revision=int(loaded.revision),
+            expected_etag=str(loaded.etag),
+        )
+    except Exception as exc:
+        raise SourceManagerError(
+            "Source Metadata removal failed"
+        ) from exc
+    return True
+
+
 def _canonical_source(
     source: Mapping[str, Any],
     *,

@@ -89,6 +89,41 @@ class SourceStoreContracts(unittest.TestCase):
         self.assertEqual(key, confirmed["local_source_key"])
         self.assertEqual("trusted-source", confirmed["source_id"])
 
+    def test_delete_source_removes_only_selected_management_directory(
+        self,
+    ) -> None:
+        first = self.store.create_source(
+            source_type="github",
+            display_name="First",
+            fetch={
+                "repository_url": (
+                    "https://git.example.invalid/team/first.git"
+                )
+            },
+        )
+        second = self.store.create_source(
+            source_type="github",
+            display_name="Second",
+            fetch={
+                "repository_url": (
+                    "https://git.example.invalid/team/second.git"
+                )
+            },
+        )
+        first_key = first.payload["local_source_key"]
+        second_key = second.payload["local_source_key"]
+        self.store.delete_source(
+            first_key,
+            expected_revision=first.revision,
+            expected_etag=first.etag,
+        )
+        self.assertFalse(
+            (self.db_root / self.store.paths(first_key).source_dir).exists()
+        )
+        self.assertTrue(
+            (self.db_root / self.store.paths(second_key).source_json).is_file()
+        )
+
     def test_one_link_cas_and_metadata_pending(self) -> None:
         stored = self.store.create_source(
             source_type="github",

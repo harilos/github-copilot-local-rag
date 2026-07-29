@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import unicodedata
 import uuid
@@ -251,6 +252,39 @@ class SourceStore:
             expected_revision=expected_revision,
             expected_etag=expected_etag,
         )
+
+    def delete_source(
+        self,
+        local_source_key: str,
+        *,
+        expected_revision: int,
+        expected_etag: str,
+    ) -> None:
+        """Delete one management directory after an optimistic recheck."""
+        paths = self.paths(local_source_key)
+        loaded = self.read_source(local_source_key)
+        if (
+            loaded.revision != int(expected_revision)
+            or loaded.etag != str(expected_etag)
+        ):
+            raise SourceManagerError("source_configuration_changed")
+        directory = paths.absolute(self.db_root, paths.source_dir)
+        sources_root = self.db_root / "sources"
+        if (
+            directory.parent != sources_root
+            or directory.name != paths.local_source_key
+            or directory.is_symlink()
+            or not directory.is_dir()
+        ):
+            raise SourceManagerError("Source directory is unsafe")
+        # Re-read immediately before the destructive step.
+        latest = self.read_source(local_source_key)
+        if (
+            latest.revision != int(expected_revision)
+            or latest.etag != str(expected_etag)
+        ):
+            raise SourceManagerError("source_configuration_changed")
+        shutil.rmtree(directory, onerror=_remove_readonly_path)
 
     def plan(self, source: Mapping[str, Any]):
         payload = dict(source)
@@ -521,6 +555,12 @@ def _is_link(metadata: os.stat_result, path: Path) -> bool:
         or bool(getattr(metadata, "st_file_attributes", 0) & reparse)
         or (hasattr(path, "is_junction") and path.is_junction())
     )
+
+
+def _remove_readonly_path(function: Any, path: str, _error: Any) -> None:
+    """Allow cleanup of read-only Git/SVN work files on Windows."""
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
 
 
 def _safe_append_open(path: Path) -> int:

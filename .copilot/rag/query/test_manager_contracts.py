@@ -656,6 +656,142 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("画面: Source詳細", text)
         self.assertIn("1. 更新・再開する", text)
         self.assertIn("5. 技術情報", text)
+        self.assertIn("6. このSourceを削除する【危険】", text)
+
+    def test_source_delete_requires_exact_name_and_default_no(self) -> None:
+        self.make_db()
+        source = {
+            "source_id": "source-a",
+            "display_name": "Synthetic Source",
+            "source_type": "github",
+            "document_count": 2,
+            "chunk_count": 5,
+        }
+        manager = self.manager(["wrong"])
+        self.assertFalse(
+            manager._delete_source_interactive("example-rag", source)
+        )
+        self.assertEqual(self.runner.calls, [])
+        self.assertIn(
+            "Source名が一致しません。何も削除されていません",
+            "\n".join(self.output),
+        )
+
+        self.output.clear()
+        manager = self.manager(["Synthetic Source", ""])
+        self.assertFalse(
+            manager._delete_source_interactive("example-rag", source)
+        )
+        self.assertEqual(self.runner.calls, [])
+        self.assertIn("Source削除を中止しました", "\n".join(self.output))
+
+    def test_source_delete_removes_metadata_and_index(self) -> None:
+        self.make_db()
+        source = {
+            "source_id": "source-a",
+            "display_name": "Synthetic Source",
+            "source_type": "github",
+            "document_count": 2,
+            "chunk_count": 5,
+        }
+        self.runner.respond(
+            "delete_source.py",
+            stdout=json.dumps(
+                {
+                    "status": "deleted",
+                    "documents_deleted": 2,
+                    "chunks_deleted": 5,
+                }
+            ),
+        )
+        manager = self.manager(["Synthetic Source", "y"])
+        with mock.patch(
+            "source_manager.metadata.remove_source_metadata",
+            return_value=True,
+        ) as remove_metadata:
+            self.assertTrue(
+                manager._delete_source_interactive(
+                    "example-rag",
+                    source,
+                )
+            )
+        argv = self.runner.calls[-1][0]
+        self.assertEqual("delete_source.py", Path(argv[1]).name)
+        self.assertEqual(
+            argv[-4:],
+            ["--db", "example-rag", "--source-id", "source-a"],
+        )
+        remove_metadata.assert_called_once()
+        rendered = "\n".join(self.output)
+        self.assertIn("ほかのSourceとその文書", rendered)
+        self.assertIn(
+            "Source「Synthetic Source」を削除しました",
+            rendered,
+        )
+
+    def test_source_delete_core_failure_keeps_work_and_reports_progress(
+        self,
+    ) -> None:
+        self.make_db()
+        source = {
+            "source_id": "source-a",
+            "display_name": "Synthetic Source",
+            "source_type": "github",
+            "_local_source_key": "src_fixture-0123456789ab",
+            "document_count": 2,
+            "chunk_count": 5,
+        }
+        self.runner.respond(
+            "delete_source.py",
+            returncode=1,
+            stderr="Traceback: synthetic delete failure",
+        )
+        manager = self.manager(["Synthetic Source", "y"])
+        with mock.patch(
+            "source_manager.metadata.remove_source_metadata",
+        ) as remove_metadata:
+            self.assertFalse(
+                manager._delete_source_interactive(
+                    "example-rag",
+                    source,
+                )
+            )
+        remove_metadata.assert_called_once()
+        rendered = "\n".join(self.output)
+        self.assertIn(
+            "取得設定と作業ファイルは削除していません",
+            rendered,
+        )
+        self.assertIn("検索結果リンク設定は削除済み", rendered)
+        self.assertIn("synthetic delete failure", rendered)
+
+    def test_source_delete_metadata_failure_does_not_delete_index(self) -> None:
+        self.make_db()
+        source = {
+            "source_id": "source-a",
+            "display_name": "Synthetic Source",
+            "source_type": "github",
+            "document_count": 2,
+            "chunk_count": 5,
+        }
+        manager = self.manager(["Synthetic Source", "y"])
+        with mock.patch(
+            "source_manager.metadata.remove_source_metadata",
+            side_effect=RuntimeError("synthetic metadata failure"),
+        ):
+            self.assertFalse(
+                manager._delete_source_interactive(
+                    "example-rag",
+                    source,
+                )
+            )
+        self.assertEqual(self.runner.calls, [])
+        rendered = "\n".join(self.output)
+        self.assertIn(
+            "検索済み文書と取得設定は削除していません",
+            rendered,
+        )
+        self.assertIn("synthetic metadata failure", rendered)
 
     def test_source_link_add_uses_sidecar_api_only(self) -> None:
         self.make_db()

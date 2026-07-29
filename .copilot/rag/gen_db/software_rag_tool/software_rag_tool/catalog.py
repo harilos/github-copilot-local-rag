@@ -285,6 +285,66 @@ def delete_chunks(ids: Iterable[str]) -> int:
         return _delete_chunks(conn, chunk_ids)
 
 
+def source_chunk_ids(source_id: str) -> list[str]:
+    """Return every chunk ID owned by one exact Source."""
+    value = str(source_id or "")
+    if not value or not catalog_path().is_file():
+        return []
+    with connect_readonly(catalog_path()) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.chunk_uid
+            FROM chunk c
+            JOIN document d ON d.doc_pk = c.doc_pk
+            WHERE d.source_id = ?
+            ORDER BY c.chunk_uid
+            """,
+            (value,),
+        ).fetchall()
+    return [str(row["chunk_uid"]) for row in rows]
+
+
+def delete_source_documents(source_id: str) -> dict[str, int]:
+    """Delete catalog rows for one exact Source without touching siblings."""
+    value = str(source_id or "")
+    if not value:
+        raise ValueError("source_id is required")
+    if not catalog_path().is_file():
+        return {"documents": 0, "chunks": 0}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT doc_pk FROM document WHERE source_id = ?",
+            (value,),
+        ).fetchall()
+        document_ids = [int(row["doc_pk"]) for row in rows]
+        if not document_ids:
+            return {"documents": 0, "chunks": 0}
+        placeholders = ",".join("?" for _ in document_ids)
+        chunk_rows = conn.execute(
+            f"SELECT chunk_uid FROM chunk WHERE doc_pk IN ({placeholders})",
+            document_ids,
+        ).fetchall()
+        chunk_ids = [str(row["chunk_uid"]) for row in chunk_rows]
+        _delete_chunks(conn, chunk_ids)
+        # Remove inconsistent zero-chunk documents as well.  Normal ingestion
+        # never leaves these behind, but deletion must converge if it does.
+        remaining = conn.execute(
+            "SELECT doc_pk FROM document WHERE source_id = ?",
+            (value,),
+        ).fetchall()
+        _delete_orphan_documents(
+            conn,
+            [int(row["doc_pk"]) for row in remaining],
+        )
+        _delete_orphan_identifier_terms(conn)
+        _refresh_identifier_stats(conn)
+        _set_meta(conn, "updated_at", datetime.now(timezone.utc).isoformat())
+        return {
+            "documents": len(document_ids),
+            "chunks": len(chunk_ids),
+        }
+
+
 def rebuild_from_clean(reset: bool = True) -> int:
     records: list[dict[str, Any]] = []
     directory = clean_dir()

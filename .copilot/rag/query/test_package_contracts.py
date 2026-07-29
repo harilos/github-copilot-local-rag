@@ -69,6 +69,15 @@ class PackageContractTests(unittest.TestCase):
             "software_rag_tool/incremental.py",
             paths,
         )
+        self.assertNotIn(
+            ".copilot/rag/gen_db/software_rag_tool/"
+            "software_rag_tool/source_delete.py",
+            paths,
+        )
+        self.assertNotIn(
+            ".copilot/rag/gen_db/delete_source.py",
+            paths,
+        )
         self.assertNotIn(".copilot/rag/manage.py", paths)
         self.assertFalse(
             any("/source_manager/" in path for path in paths)
@@ -575,6 +584,12 @@ class PackageContractTests(unittest.TestCase):
             paths,
         )
         self.assertIn(".copilot/rag/gen_db/add_data.py", paths)
+        self.assertIn(".copilot/rag/gen_db/delete_source.py", paths)
+        self.assertIn(
+            ".copilot/rag/gen_db/software_rag_tool/"
+            "software_rag_tool/source_delete.py",
+            paths,
+        )
         self.assertNotIn(
             ".copilot/skills/local-rag-admin/SKILL.md",
             paths,
@@ -1202,6 +1217,8 @@ class PackageContractTests(unittest.TestCase):
         self._write(tool / "pyproject.toml", "[project]\nname='fixture'\n")
         self._write(tool / "requirements.txt", "")
         for name in packages._DISTRIBUTION_TOOL_MODULES:
+            self._write(tool / "software_rag_tool" / name, "")
+        for name in packages._ADMIN_TOOL_MODULES:
             self._write(tool / "software_rag_tool" / name, "")
         self._write(
             tool / "software_rag_tool/incremental.py",

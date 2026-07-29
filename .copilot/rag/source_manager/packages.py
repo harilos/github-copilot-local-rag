@@ -139,11 +139,13 @@ _ADMIN_GEN_DB_FILES = frozenset(
         "add_data.py",
         "build_db.py",
         "create_db.py",
+        "delete_source.py",
         "rebuild_component.py",
         "requirements.txt",
         "status.py",
     }
 )
+_ADMIN_TOOL_MODULES = frozenset({"source_delete.py"})
 _DB_SEARCH_FILES = frozenset(
     {
         "DB_PROFILE.md",
@@ -1037,6 +1039,22 @@ def _admin_entries(
             }
         ),
     )
+    tool_package = (
+        rag_root
+        / "gen_db"
+        / "software_rag_tool"
+        / "software_rag_tool"
+    )
+    for name in sorted(_ADMIN_TOOL_MODULES):
+        _add_file(
+            entries,
+            tool_package / name,
+            (
+                ".copilot/rag/gen_db/software_rag_tool/"
+                f"software_rag_tool/{name}"
+            ),
+            required=True,
+        )
     gen_db = rag_root / "gen_db"
     for name in sorted(_ADMIN_GEN_DB_FILES):
         _add_file(

@@ -17,6 +17,7 @@ from .checkpoints import (
 )
 from .errors import SourceManagerError
 from .execution import execute_fetch_plan
+from .metadata import remove_source_metadata
 from .providers import (
     SUPPORTED_PROVIDERS,
     FetchPlan,
@@ -69,6 +70,7 @@ __all__ = [
     "list_sources",
     "new_run_state",
     "record_retry",
+    "remove_source_metadata",
     "register_source",
     "redact_runtime_path",
     "redact_runtime_paths",

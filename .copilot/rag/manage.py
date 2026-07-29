@@ -54,6 +54,7 @@ SOURCE_DETAIL_MENU = (
     ("3", "検索結果リンクを確認・変更する"),
     ("4", "進捗・ログを見る"),
     ("5", "技術情報"),
+    ("6", "このSourceを削除する【危険】"),
     ("0", "戻る"),
 )
 SOURCE_LINK_MENU = (
@@ -82,6 +83,7 @@ ALLOWED_SCRIPTS = frozenset(
         "gen_db/create_db.py",
         "gen_db/build_db.py",
         "gen_db/add_data.py",
+        "gen_db/delete_source.py",
         "gen_db/status.py",
         "gen_db/rebuild_component.py",
     }
@@ -2436,7 +2438,8 @@ class LocalRagManager:
                 f"   保存ルート: {', '.join(str(v) for v in roots) or '未検出'}"
             )
         self._print_info(
-            "Source IDは読み取り専用です。追加・削除・名称変更はできません。"
+            "Source IDは読み取り専用です。"
+            "Source全体の削除はSource詳細の危険操作から行います。"
         )
         choice = self._ask("Source番号を入力してください（0: 戻る）: ")
         if choice in (None, "0"):
@@ -2482,6 +2485,7 @@ class LocalRagManager:
                 ("3", "検索結果リンクを確認・変更する"),
                 ("4", "進捗・ログを見る"),
                 ("5", "技術情報"),
+                ("6", "このSourceを削除する【危険】"),
                 ("0", "戻る"),
             )
             self._print_menu("操作", entries)
@@ -2503,8 +2507,146 @@ class LocalRagManager:
                 self._show_source_progress(source)
             elif choice == "5":
                 self._show_source_technical_info(source)
+            elif choice == "6":
+                if self._delete_source_interactive(db_name, source):
+                    return
             else:
-                self._invalid_selection("0～5")
+                self._invalid_selection("0～6")
+
+    def _delete_source_interactive(
+        self,
+        db_name: str,
+        source: dict[str, Any],
+    ) -> bool:
+        source_id = str(source.get("source_id") or "")
+        local_key = str(source.get("_local_source_key") or "").strip()
+        display_name = str(
+            source.get("display_name")
+            or source_id
+            or "既存データ"
+        )
+        source_type = self._ui_source_type(source.get("source_type"))
+        documents = int(source.get("document_count") or 0)
+        chunks = int(source.get("chunk_count") or 0)
+        self._print_screen_header(
+            "Source削除【危険】",
+            db_name=db_name,
+        )
+        self._print_warning(
+            "この操作は元に戻せません。選択したSourceだけを削除します。"
+        )
+        self.output(
+            "\n削除対象\n"
+            f"  DB: {db_name}\n"
+            f"  Source: {display_name}\n"
+            f"  種類: {_PROVIDER_JA.get(source_type, 'Other')}\n"
+            f"  検索済み文書: {documents:,}\n"
+            f"  検索レコード: {chunks:,}\n"
+            "\n削除されるもの\n"
+            "  ・このSourceの検索済み文書\n"
+            "  ・このSourceの検索結果リンク設定\n"
+            "  ・このSourceの取得設定、進捗、DB内の作業ファイル\n"
+            "\n削除されないもの\n"
+            "  ・DB自体\n"
+            "  ・ほかのSourceとその文書"
+        )
+        typed = self._ask(
+            f"\n削除するにはSource名「{display_name}」を"
+            "正確に入力してください（:q: 中止）: "
+        )
+        if typed is None or typed == ":q":
+            self._print_info("Source削除を中止しました。")
+            return False
+        if typed != display_name:
+            self._print_error(
+                "Source名が一致しません。何も削除されていません。"
+            )
+            return False
+        if not self._confirm(
+            f"Source「{display_name}」を本当に削除しますか？"
+        ):
+            self._print_info("Source削除を中止しました。")
+            return False
+
+        indexed_deleted = not source_id
+        metadata_removed = not source_id
+        management_removed = not local_key
+        if source_id:
+            try:
+                from source_manager.metadata import remove_source_metadata
+
+                remove_source_metadata(
+                    self._validated_database_root(db_name),
+                    source_id,
+                    self.rag_root,
+                )
+                metadata_removed = True
+            except Exception:
+                self._print_error(
+                    "検索結果リンク設定を安全に削除できなかったため、"
+                    "検索済み文書と取得設定は削除していません。"
+                )
+                self.output(traceback.format_exc().strip())
+                self._print_info(
+                    "設定の問題を修正後、Source削除を再実行してください。"
+                )
+                return False
+            result = self._invoke(
+                "gen_db/delete_source.py",
+                ["--db", db_name, "--source-id", source_id],
+                capture_output=True,
+                report_nonzero=False,
+            )
+            if result is None or int(result.returncode) != 0:
+                self._print_error(
+                    "検索済み文書の削除に失敗しました。"
+                    "取得設定と作業ファイルは削除していません。"
+                )
+                if metadata_removed:
+                    self._print_warning(
+                        "検索結果リンク設定は削除済みです。"
+                        "検索済み文書は残っているため、"
+                        "再実行すると削除を続けます。"
+                    )
+                if result is not None:
+                    if result.stderr:
+                        self.output(str(result.stderr).strip())
+                    if result.stdout:
+                        self.output(str(result.stdout).strip())
+                self._print_info(
+                    "原因を修正後、同じSourceの削除を再実行できます。"
+                )
+                return False
+            indexed_deleted = True
+        if local_key:
+            try:
+                from source_manager.store import SourceStore
+
+                store = SourceStore(self._validated_database_root(db_name))
+                loaded = store.read_source(local_key)
+                store.delete_source(
+                    local_key,
+                    expected_revision=loaded.revision,
+                    expected_etag=loaded.etag,
+                )
+                management_removed = True
+            except Exception:
+                self._print_error(
+                    "検索済み文書とLink設定は削除しましたが、"
+                    "取得設定または作業ファイルの削除に失敗しました。"
+                )
+                self.output(traceback.format_exc().strip())
+                self._print_info(
+                    "再実行すると残っている取得設定を削除します。"
+                )
+                return False
+        if indexed_deleted and metadata_removed and management_removed:
+            self._print_success(
+                f"Source「{display_name}」を削除しました。"
+            )
+            self._print_info("DBとほかのSourceは変更していません。")
+            return True
+        return False
 
     def _update_single_source(
         self,
