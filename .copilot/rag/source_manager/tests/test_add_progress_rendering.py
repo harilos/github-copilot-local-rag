@@ -109,6 +109,31 @@ class AddProgressRenderingTests(unittest.TestCase):
         self.assertIn("issues/123.md", rendered)
         self.assertNotIn("処理継続中", rendered)
 
+    def test_non_add_exact_progress_keeps_count_format(self) -> None:
+        lines: list[str] = []
+        renderer = ProgressRenderer(
+            lines.append,
+            operation="Source更新",
+            provider="redmine",
+            is_tty=False,
+            clock=_Clock(),
+        )
+        renderer(
+            {
+                "event": "provider.page",
+                "phase": "redmine.inventory",
+                "status": "running",
+                "completed": 2,
+                "total": 10,
+                "total_kind": "exact",
+                "unit": "件",
+            }
+        )
+
+        rendered = lines[-1]
+        self.assertIn("20%（2/10件）", rendered)
+        self.assertNotIn("ファイル目", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
