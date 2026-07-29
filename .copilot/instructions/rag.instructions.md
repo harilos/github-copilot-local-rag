@@ -19,19 +19,22 @@ commands merely to bypass those public entry points. This restriction does not
 prohibit reading the human's workspace files, repository files, folder
 structure, or configuration when they are relevant to the requested analysis.
 Do not delegate ordinary lookup to another agent, create a plan, or run a
-management command. If the human asks to create or change a database, Source,
-retrieval setting, repair, distribution package, or management-PC transfer,
-say:
+management command.
+
+Initial runtime setup is the only management exception. When Local RAG is not
+installed completely, its virtual-environment interpreter is missing, or a
+public lookup returns `setup_required`, activate the `local-rag-setup` Skill and
+run the public `~/.copilot/rag/setup.py` entry point directly. Do not redirect
+the human to Local RAG Manager for initial runtime setup. Setup may install
+Python dependencies and prepare the local embedding model, so report meaningful
+progress and preserve any network/proxy/CA error details needed by the human.
+
+If the human asks to create or change a database, Source, retrieval setting,
+repair, distribution package, or management-PC transfer, say:
 
 `Please use Local RAG Manager for that operation.`
 
 Do not open the Manager automatically.
-
-If Local RAG is not installed or its virtual-environment interpreter is
-missing, tell the human in their language that initial setup normally takes
-about 10 minutes and must be run from Local RAG Manager.
-
-Do not attempt setup from Copilot.
 
 If the latest prompt names a database ending in `-rag`, use that database and
 do not list databases. Otherwise list databases exactly once. Choose a database
