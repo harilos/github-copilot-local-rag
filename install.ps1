@@ -37,6 +37,17 @@ function Test-InstallPayloadExcluded {
         return $true
     }
     if (
+        ($Normalized -ieq "rag\config\source-connections.json") -or
+        ($Normalized -ieq "rag\config\source-connections.secrets.json") -or
+        ($Normalized -ieq "rag\config\.source-connections.key") -or
+        $Normalized.StartsWith(
+            "rag\config\.source-connections.",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
+    if (
         ($Normalized -ieq "rag\query\run") -or
         $Normalized.StartsWith(
             "rag\query\run\",
@@ -125,4 +136,4 @@ if ($null -ne $PreUpdateMarker) {
 
 Write-Host "Installed Copilot Local RAG files to: $Target"
 Write-Host "Existing copilot-instructions.md was not overwritten by this repository."
-Write-Host "Existing rag/config/network.json was preserved."
+Write-Host "Existing machine-local network and Source connection settings were preserved."
