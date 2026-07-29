@@ -8,6 +8,7 @@ from typing import Any, Mapping
 _RUNTIME_PATCH_MARKER = "_local_rag_source_preflight_runtime_installed"
 _MANAGER_PATCH_MARKER = "_local_rag_source_preflight_manager_installed"
 _REDMINE_REQUIRED_ATTR = "_local_rag_preflight_required"
+_RESULT_ATTR = "_local_rag_preflight_result"
 _CONFIRM_METHOD = "confirm_source_estimate"
 
 
@@ -209,10 +210,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
         required = bool(
             getattr(progress_callback, _REDMINE_REQUIRED_ATTR, False)
         )
-        if not required or bool(state_value := False):
-            # The named expression keeps this branch intentionally simple while
-            # avoiding a second wrapper for ordinary Redmine refreshes.
-            del state_value
+        if not required:
             return original_redmine(
                 settings,
                 work,
@@ -227,15 +225,14 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 progress_callback=progress_callback,
             )
 
-        # ``state`` is not an explicit argument of _redmine.  The source state
-        # reaches this boundary through the closure-owned callbacks.  For a
-        # resumed inventory we can confirm immediately; for a new inventory we
-        # confirm in the callback before any issue detail or ADD is performed.
+        # A resumed first import already has a stable issue inventory. Confirm
+        # before any issue detail request or ADD batch.
         if stable_issue_ids is not None:
             documents = len(stable_issue_ids)
-            if not _request_confirmation(progress_callback, documents):
+            confirmed = _request_confirmation(progress_callback, documents)
+            _record_callback_result(progress_callback, documents, confirmed)
+            if not confirmed:
                 raise SourceEstimateDeclined(documents)
-            _mark_progress_callback_confirmed(progress_callback, documents)
             return original_redmine(
                 settings,
                 work,
@@ -250,14 +247,13 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 progress_callback=progress_callback,
             )
 
+        # A new first import learns the approximate count from the inventory.
+        # The original inventory callback is still invoked so the stable IDs are
+        # checkpointed even when the human declines.
         def confirmed_inventory(issue_ids: list[int]) -> None:
             documents = len(issue_ids)
             confirmed = _request_confirmation(progress_callback, documents)
-            _mark_progress_callback_confirmed(
-                progress_callback,
-                documents,
-                confirmed=confirmed,
-            )
+            _record_callback_result(progress_callback, documents, confirmed)
             if inventory_callback is not None:
                 inventory_callback(issue_ids)
             if not confirmed:
@@ -292,63 +288,129 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
         required = not bool(source.payload.get("source_id")) and not bool(
             state.payload.get("preflight_confirmed")
         )
-        previous = _set_optional_attribute(
+        previous_required = _set_optional_attribute(
             progress_callback,
             _REDMINE_REQUIRED_ATTR,
             required,
         )
+        previous_result = _set_optional_attribute(
+            progress_callback,
+            _RESULT_ATTR,
+            None,
+        )
         try:
             return original_update(store, source, state, **kwargs)
         except SourceEstimateDeclined as exc:
-            current = store.read_state(source.payload["local_source_key"])
-            value = copy.deepcopy(current.payload)
-            value.update(
-                {
-                    "status": "interrupted",
-                    "phase": "reflect",
-                    "can_resume": True,
-                    "last_error": None,
-                    "preflight_estimated_documents": exc.documents,
-                    "preflight_confirmed": False,
-                    "preflight_confirmation": "declined",
-                }
-            )
-            saved = store.save_state(
-                source.payload["local_source_key"],
-                value,
-                expected_revision=current.revision,
-                expected_etag=current.etag,
-            )
-            minimum, maximum = estimate_minutes_range(exc.documents)
-            store.append_event(
-                source.payload["local_source_key"],
-                "source.preflight.declined",
-                {
-                    "estimated_documents": exc.documents,
-                    "estimated_minutes_min": minimum,
-                    "estimated_minutes_max": maximum,
-                },
-            )
-            result = runner._source_dto(store, source)
-            result.update(
-                {
-                    "status": "confirmation_declined",
-                    "message": "概算確認で追加を開始しませんでした。",
-                    "estimated_documents": exc.documents,
-                    "estimated_minutes_min": minimum,
-                    "estimated_minutes_max": maximum,
-                    "state_revision": saved.revision,
-                }
-            )
-            return result
+            return _record_redmine_decline(store, source, runner, exc.documents)
         finally:
+            result = getattr(progress_callback, _RESULT_ATTR, None)
+            if isinstance(result, Mapping) and bool(result.get("confirmed")):
+                _persist_redmine_confirmation(
+                    store,
+                    source,
+                    int(result.get("documents") or 0),
+                )
+            _restore_optional_attribute(
+                progress_callback,
+                _RESULT_ATTR,
+                previous_result,
+            )
             _restore_optional_attribute(
                 progress_callback,
                 _REDMINE_REQUIRED_ATTR,
-                previous,
+                previous_required,
             )
 
     runner._update_redmine_source = update_redmine_source
+
+
+def _record_redmine_decline(
+    store: Any,
+    source: Any,
+    runner: Any,
+    documents: int,
+) -> dict[str, Any]:
+    current = store.read_state(source.payload["local_source_key"])
+    value = copy.deepcopy(current.payload)
+    value.update(
+        {
+            "status": "interrupted",
+            "phase": "reflect",
+            "can_resume": True,
+            "last_error": None,
+            "preflight_estimated_documents": documents,
+            "preflight_confirmed": False,
+            "preflight_confirmation": "declined",
+        }
+    )
+    saved = store.save_state(
+        source.payload["local_source_key"],
+        value,
+        expected_revision=current.revision,
+        expected_etag=current.etag,
+    )
+    minimum, maximum = estimate_minutes_range(documents)
+    store.append_event(
+        source.payload["local_source_key"],
+        "source.preflight.declined",
+        {
+            "estimated_documents": documents,
+            "estimated_minutes_min": minimum,
+            "estimated_minutes_max": maximum,
+        },
+    )
+    result = runner._source_dto(store, source)
+    result.update(
+        {
+            "status": "confirmation_declined",
+            "message": "概算確認で追加を開始しませんでした。",
+            "estimated_documents": documents,
+            "estimated_minutes_min": minimum,
+            "estimated_minutes_max": maximum,
+            "state_revision": saved.revision,
+        }
+    )
+    return result
+
+
+def _persist_redmine_confirmation(
+    store: Any,
+    source: Any,
+    documents: int,
+) -> None:
+    try:
+        current = store.read_state(source.payload["local_source_key"])
+        if not current.payload or bool(current.payload.get("preflight_confirmed")):
+            return
+        value = copy.deepcopy(current.payload)
+        value.update(
+            {
+                "preflight_estimated_documents": max(0, int(documents)),
+                "preflight_confirmed": True,
+                "preflight_confirmation": "confirmed",
+            }
+        )
+        store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=current.revision,
+            expected_etag=current.etag,
+        )
+        minimum, maximum = estimate_minutes_range(documents)
+        store.append_event(
+            source.payload["local_source_key"],
+            "source.preflight.confirmed",
+            {
+                "estimated_documents": max(0, int(documents)),
+                "estimated_minutes_min": minimum,
+                "estimated_minutes_max": maximum,
+            },
+        )
+    except Exception:
+        # The confirmation has already been given. Failure to persist this
+        # convenience flag must not turn a successful or resumable import into
+        # a failed Source operation.
+        return
 
 
 def _request_confirmation(progress_callback: Any, documents: int) -> bool:
@@ -358,18 +420,17 @@ def _request_confirmation(progress_callback: Any, documents: int) -> bool:
     return bool(callback(max(0, int(documents))))
 
 
-def _mark_progress_callback_confirmed(
+def _record_callback_result(
     progress_callback: Any,
     documents: int,
-    *,
-    confirmed: bool = True,
+    confirmed: bool,
 ) -> None:
     if progress_callback is None:
         return
     try:
         setattr(
             progress_callback,
-            "_local_rag_preflight_result",
+            _RESULT_ATTR,
             {
                 "documents": max(0, int(documents)),
                 "confirmed": bool(confirmed),
