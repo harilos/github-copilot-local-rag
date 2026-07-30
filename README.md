@@ -280,8 +280,10 @@ Managerは用途の異なる2種類を作成します。
 | 利用者向け検索package | 現在の全DBを別PCで検索する | ZIP |
 | 管理PC引っ越しpackage | 現在の全DBとSource再開情報を含めて管理を移す | 再開可能なfolder |
 
-利用者向けpackageの受取側は、ZIPを展開し、中の`.copilot` folderを自分の
-home directoryへcopyします。その端末で初期設定がまだなら、Copilotへ
+利用者向けpackageの受取側はZIPを展開し、Windowsでは`.\install.ps1`、
+macOS/Linuxでは`sh ./install.sh`を実行します。スクリプトは中の`.copilot`
+本体を自分のhome directoryへ統合copyし、既存のPython環境や端末固有設定を
+削除しません。その端末で初期設定がまだなら、Copilotへ
 `ローカルRAGの初期設定をして`と依頼します。また、
 `~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
 追加します。管理PC引っ越しpackageは、Managerの

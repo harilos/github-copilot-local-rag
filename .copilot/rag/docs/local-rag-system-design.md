@@ -265,7 +265,10 @@ The Manager creates two different artifacts:
 ### Distribution ZIP
 
 Contains read-only public entry points, runtime, selected databases, and
-required search assets. It excludes management acquisition state.
+required search assets. It also contains package-root `install.sh` and
+`install.ps1` helpers that overlay-copy only the packaged `.copilot` payload
+into the receiving user's Copilot home. It excludes management acquisition
+state.
 
 ### Management-PC transfer folder
 

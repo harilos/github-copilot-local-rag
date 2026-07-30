@@ -40,10 +40,13 @@ class PackageContractTests(unittest.TestCase):
             copilot_home,
             db_names=None,
         )
+        destinations = {entry.destination for entry in generated}
         self.assertIn(
             ".copilot/rag/setup_copy.py",
-            {entry.destination for entry in generated},
+            destinations,
         )
+        self.assertIn("install.sh", destinations)
+        self.assertIn("install.ps1", destinations)
 
     def test_manager_import_accepts_package_without_bootstrap(self) -> None:
         package = self.root / "package"
@@ -59,6 +62,8 @@ class PackageContractTests(unittest.TestCase):
         catalog.write_bytes(b"catalog")
 
         entries = [
+            packages._Entry(None, "install.sh", mode="install_sh"),
+            packages._Entry(None, "install.ps1", mode="install_ps1"),
             packages._Entry(setup, ".copilot/rag/query/setup.py"),
             packages._Entry(db_config, ".copilot/rag/dbs/demo-rag/db.json"),
             packages._Entry(version, ".copilot/rag/dbs/demo-rag/VERSION.json"),
@@ -93,6 +98,8 @@ class PackageContractTests(unittest.TestCase):
 
         self.assertEqual("imported", result["status"])
         self.assertTrue((target / "rag/query/setup.py").is_file())
+        self.assertFalse((target / "install.sh").exists())
+        self.assertFalse((target / "install.ps1").exists())
         self.assertFalse((target / "rag/dbs/demo-rag/old.txt").exists())
         self.assertTrue((target / "rag/dbs/demo-rag/db.json").is_file())
         self.assertEqual(

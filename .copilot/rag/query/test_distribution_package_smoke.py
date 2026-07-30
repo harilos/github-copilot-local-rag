@@ -50,6 +50,8 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             for record in manifest["files"]
         }
         required = {
+            "install.ps1",
+            "install.sh",
             ".copilot/rag/setup.py",
             ".copilot/rag/query/reference_contract.py",
             (
@@ -163,6 +165,53 @@ class DistributionPackageSmokeTests(unittest.TestCase):
         )
         self.assertEqual([], json.loads(listed.stdout)["databases"])
 
+        installed = self.root / "installed"
+        local_config = installed / "rag/config/source-connections.json"
+        local_config.parent.mkdir(parents=True)
+        local_config.write_text(
+            '{"machine_local":"preserve"}\n',
+            encoding="utf-8",
+        )
+        user_instructions = installed / "copilot-instructions.md"
+        user_instructions.write_text(
+            "existing user instructions\n",
+            encoding="utf-8",
+        )
+        install_environment = {
+            **self.environment,
+            "COPILOT_HOME": str(installed),
+            "HOME": str(self.root / "home"),
+        }
+        copied = subprocess.run(
+            ["sh", "install.sh"],
+            cwd=unpacked,
+            env=install_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(
+            0,
+            copied.returncode,
+            msg=f"stdout:\n{copied.stdout}\nstderr:\n{copied.stderr}",
+        )
+        self.assertTrue((installed / "rag/setup.py").is_file())
+        self.assertTrue(
+            (installed / "instructions/rag.instructions.md").is_file()
+        )
+        self.assertFalse((installed / "manifest.json").exists())
+        self.assertEqual(
+            '{"machine_local":"preserve"}\n',
+            local_config.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            "existing user instructions\n",
+            user_instructions.read_text(encoding="utf-8"),
+        )
+
     def test_admin_transfer_starts_management_entrypoints(self) -> None:
         output = self.root / "admin-transfer"
         with mock.patch.object(
@@ -193,6 +242,8 @@ class DistributionPackageSmokeTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(paths))
         self.assertNotIn("bootstrap.py", paths)
+        self.assertNotIn("install.sh", paths)
+        self.assertNotIn("install.ps1", paths)
         self.assertFalse(
             any("/tests/" in path or "/test_" in path for path in paths)
         )

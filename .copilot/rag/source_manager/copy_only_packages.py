@@ -16,6 +16,7 @@ from .setup_copy_bridge import restore_portable_database
 
 _PATCH_MARKER = "_local_rag_copy_only_packages_installed"
 _BUFFER_SIZE = 1024 * 1024
+_PACKAGE_INSTALLERS = frozenset({"install.ps1", "install.sh"})
 
 
 def install_copy_only_package_runtime() -> None:
@@ -167,6 +168,11 @@ def _publish_copy_tree(
             relative = packages._safe_relative(str(record.get("path") or ""))
             if relative.as_posix() == "bootstrap.py":
                 # Backward-compatible import of an older package; never execute it.
+                continue
+            if relative.as_posix() in _PACKAGE_INSTALLERS:
+                # Package-root helpers copy the .copilot payload when a human
+                # installs an extracted package. Manager import already owns
+                # the destination publication and does not copy these helpers.
                 continue
             if not relative.parts or relative.parts[0] != ".copilot":
                 raise packages.PackageError("package_copy_root_invalid")

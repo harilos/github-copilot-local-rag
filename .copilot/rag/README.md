@@ -2,9 +2,10 @@
 
 This directory is installed under `~/.copilot/rag`. From a repository clone,
 use the repository installers; an overlay install preserves machine-local
-runtime state and removes only explicitly retired product files. From a
-Manager-generated package, extract it and copy the contained `.copilot`
-directory into the user's home directory.
+runtime state and removes only explicitly retired product files. A
+Manager-generated package includes `install.sh` and `install.ps1` at its root.
+Extract the package and run the installer for the receiving operating system;
+it copies the contained `.copilot` directory into the user's home directory.
 
 On a clean installation, prepare the runtime before lookup or Manager use:
 
@@ -170,7 +171,8 @@ The Manager provides two distinct package types:
 
 - Distribution package: a ZIP for read-only search clients. It contains the
   public wrappers, runtime code, all current databases, and model
-  assets needed by the selected package contract.
+  assets needed by the selected package contract. After extraction, run
+  `sh ./install.sh` on macOS/Linux or `.\install.ps1` in Windows PowerShell.
 - Management-PC transfer: a resumable folder for another management computer.
   It also carries all current databases, administration code, and Source
   acquisition state.

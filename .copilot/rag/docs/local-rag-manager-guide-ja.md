@@ -375,7 +375,9 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 - 現行schemaとして検証済みのSource Metadata全体
 - 管理用取得stateは含めない
 
-受取側はZIPを展開し、中の`.copilot` folderをhome directoryへcopyします。
+受取側はZIPを展開し、Windowsでは`.\install.ps1`、macOS/Linuxでは
+`sh ./install.sh`を実行します。スクリプトは中の`.copilot`本体をhome
+directoryへ統合copyし、既存のPython環境や端末固有設定を削除しません。
 その端末の検索用Python環境が未設定なら、Copilotへ
 `ローカルRAGの初期設定をして`と依頼します。
 
