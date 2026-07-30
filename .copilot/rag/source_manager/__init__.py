@@ -91,6 +91,7 @@ from .database_copy import (
     copy_database,
     install_database_copy_runtime,
 )
+from .copy_only_packages import install_copy_only_package_runtime
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
@@ -112,6 +113,7 @@ install_source_preflight_runtime()
 install_provisional_source_merge_runtime()
 install_database_copy_runtime()
 install_teams_source_runtime()
+install_copy_only_package_runtime()
 install_manage_custom_hook()
 
 # Runtime installers wrap several module functions. Keep package-level exports
@@ -168,6 +170,7 @@ __all__ = [
     "extract_json_result",
     "generated_redmine_link",
     "has_stored_redmine_api_key",
+    "install_copy_only_package_runtime",
     "install_teams_source_runtime",
     "list_redmine_registrations",
     "list_sources",
