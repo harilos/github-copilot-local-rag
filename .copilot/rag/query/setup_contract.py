@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,42 @@ REQUIRED_RUNTIME_PASSES = (
     "list_dbs",
 )
 EXPECTED_EMBEDDING_DIMENSION = 256
+_COPY_RESTORE_SKIP_ARGUMENTS = frozenset(
+    {
+        "--verify-only",
+        "--migrate-legacy-marker",
+        "--refresh-completion-marker",
+        "--repair-completion-marker",
+    }
+)
+COPY_RESTORE_RESULT: dict[str, Any] | None = None
+
+
+def _restore_copy_only_installation_for_setup() -> None:
+    """Perform post-copy path rebinding only during a modifying setup run."""
+
+    global COPY_RESTORE_RESULT
+    if Path(sys.argv[0]).name.casefold() != "setup.py":
+        return
+    if any(argument in _COPY_RESTORE_SKIP_ARGUMENTS for argument in sys.argv[1:]):
+        return
+    try:
+        from setup_copy import restore_copied_installation
+
+        COPY_RESTORE_RESULT = restore_copied_installation(
+            Path(__file__).resolve().parents[1]
+        )
+    except Exception as exc:
+        # Setup itself still performs its normal structured verification.  Keep
+        # copy restoration diagnostics non-secret and machine-readable without
+        # corrupting setup.py JSON stdout during module import.
+        COPY_RESTORE_RESULT = {
+            "status": "warning",
+            "error_kind": type(exc).__name__,
+        }
+
+
+_restore_copy_only_installation_for_setup()
 
 
 def requirements_fingerprint(rag_root: Path) -> str:
