@@ -234,7 +234,7 @@ def _validate_github(settings: dict[str, Any]) -> dict[str, Any]:
 def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:
     _only_keys(
         settings,
-        {"repository_url", "recursive"},
+        {"repository_url", "recursive", "updated_within_days"},
     )
     repository = validate_web_url(
         settings.get("repository_url"),
@@ -252,6 +252,18 @@ def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(recursive, bool):
         raise SourceManagerError("recursive must be boolean")
     output["recursive"] = recursive
+    days = settings.get("updated_within_days")
+    if days is not None:
+        if (
+            isinstance(days, bool)
+            or not str(days).isdigit()
+            or not 1 <= int(days) <= 3650
+        ):
+            raise SourceManagerError(
+                "updated_within_days must be null or between 1 and 3650"
+            )
+        days = int(days)
+    output["updated_within_days"] = days
     return output
 
 

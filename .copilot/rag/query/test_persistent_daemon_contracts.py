@@ -24,9 +24,212 @@ from rag_worker import (  # noqa: E402
 )
 from rag_manager import PersistentWorkerManager  # noqa: E402
 from ragd import _drain_worker_then_stop_listener  # noqa: E402
+import search as search_module  # noqa: E402
 
 
 class PersistentDaemonContracts(unittest.TestCase):
+    def test_public_stop_reports_when_daemon_is_not_running(self) -> None:
+        with mock.patch.object(search_module, "_read_state", return_value=None):
+            result = search_module.stop_persistent_daemon()
+        self.assertEqual("not_running", result["status"])
+        self.assertTrue(result["stopped"])
+
+    def test_public_stop_authenticates_and_waits_for_retirement(self) -> None:
+        state = {
+            "pid": 123,
+            "generation": "generation",
+            "token": "token",
+            "code_fingerprint": "fingerprint",
+        }
+        identity = {
+            "status": "ok",
+            "pid": 123,
+            "generation": "generation",
+            "code_fingerprint": "fingerprint",
+        }
+        with (
+            mock.patch.object(
+                search_module,
+                "_read_state",
+                return_value=state,
+            ),
+            mock.patch.object(
+                search_module,
+                "_daemon_health_payload",
+                return_value=identity,
+            ),
+            mock.patch.object(
+                search_module,
+                "_request_daemon_shutdown",
+                return_value=True,
+            ) as shutdown,
+            mock.patch.object(
+                search_module,
+                "_wait_for_daemon_retirement",
+                return_value=True,
+            ) as wait,
+            mock.patch.object(
+                search_module,
+                "_process_is_alive",
+                return_value=False,
+            ),
+            mock.patch.object(
+                search_module,
+                "_discard_published_state",
+            ),
+        ):
+            result = search_module.stop_persistent_daemon(
+                timeout_seconds=3.0,
+            )
+        self.assertEqual("stopped", result["status"])
+        self.assertTrue(result["stopped"])
+        shutdown.assert_called_once()
+        wait.assert_called_once()
+
+    def test_public_stop_never_kills_an_unauthenticated_pid(self) -> None:
+        state = {
+            "pid": 123,
+            "generation": "generation",
+            "token": "token",
+            "code_fingerprint": "fingerprint",
+        }
+        with (
+            mock.patch.object(
+                search_module,
+                "_read_state",
+                return_value=state,
+            ),
+            mock.patch.object(
+                search_module,
+                "_daemon_health_payload",
+                return_value=None,
+            ),
+            mock.patch.object(
+                search_module,
+                "_process_is_alive",
+                return_value=True,
+            ),
+            mock.patch.object(
+                search_module,
+                "_request_daemon_shutdown",
+            ) as shutdown,
+            mock.patch.object(
+                search_module,
+                "_terminate_daemon_process",
+            ) as terminate,
+        ):
+            result = search_module.stop_persistent_daemon()
+        self.assertEqual("unreachable", result["status"])
+        self.assertFalse(result["stopped"])
+        shutdown.assert_not_called()
+        terminate.assert_not_called()
+
+    def test_public_stop_reports_a_concurrent_replacement_generation(
+        self,
+    ) -> None:
+        old_state = {
+            "pid": 123,
+            "generation": "old-generation",
+            "token": "old-token",
+            "code_fingerprint": "fingerprint",
+        }
+        new_state = {
+            "pid": 456,
+            "generation": "new-generation",
+            "token": "new-token",
+            "code_fingerprint": "fingerprint",
+        }
+
+        def identity(state: dict, *, timeout: float) -> dict:
+            del timeout
+            return {
+                "status": "ok",
+                "pid": state["pid"],
+                "generation": state["generation"],
+                "code_fingerprint": state["code_fingerprint"],
+            }
+
+        with (
+            mock.patch.object(
+                search_module,
+                "_read_state",
+                side_effect=[old_state, new_state],
+            ),
+            mock.patch.object(
+                search_module,
+                "_daemon_health_payload",
+                side_effect=identity,
+            ),
+            mock.patch.object(
+                search_module,
+                "_request_daemon_shutdown",
+                return_value=True,
+            ),
+            mock.patch.object(
+                search_module,
+                "_wait_for_daemon_retirement",
+                return_value=True,
+            ),
+            mock.patch.object(
+                search_module,
+                "_process_is_alive",
+                return_value=False,
+            ),
+        ):
+            result = search_module.stop_persistent_daemon()
+
+        self.assertEqual("restarted", result["status"])
+        self.assertFalse(result["stopped"])
+        self.assertEqual(456, result["pid"])
+
+    def test_state_discard_rechecks_generation_under_start_lock(
+        self,
+    ) -> None:
+        old_state = {
+            "pid": 123,
+            "generation": "old-generation",
+            "token": "old-token",
+        }
+        new_state = {
+            "pid": 456,
+            "generation": "new-generation",
+            "token": "new-token",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="rag-daemon-discard-",
+        ) as temporary:
+            state_file = Path(temporary) / "ragd.json"
+            state_file.write_text("replacement", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    search_module,
+                    "STATE_FILE",
+                    state_file,
+                ),
+                mock.patch.object(
+                    search_module,
+                    "_secure_runtime_directory",
+                ),
+                mock.patch.object(
+                    search_module,
+                    "_acquire_start_lock",
+                    return_value=1234,
+                ),
+                mock.patch.object(
+                    search_module,
+                    "_release_start_lock",
+                ) as release,
+                mock.patch.object(
+                    search_module,
+                    "_read_state",
+                    return_value=new_state,
+                ),
+            ):
+                search_module._discard_published_state(old_state)
+
+            self.assertTrue(state_file.exists())
+            release.assert_called_once_with(1234)
+
     def test_private_wrapper_handoff_environment_is_request_scoped(
         self,
     ) -> None:

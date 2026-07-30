@@ -109,6 +109,18 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertIn("【任意】", "\n".join(outputs))
 
+    def test_select_value_accepts_an_internal_default_on_enter(self) -> None:
+        manager, _outputs = self.manager([""])
+        selected = manager._select_value(
+            "取り込む範囲",
+            (
+                ("recursive", "配下も含める"),
+                ("direct", "この階層だけ"),
+            ),
+            default="recursive",
+        )
+        self.assertEqual("recursive", selected)
+
     def test_github_form_keeps_internal_contract_values(self) -> None:
         manager, outputs = self.manager(
             [
@@ -277,6 +289,33 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         web_text = "\n".join(web_outputs)
         self.assertNotIn("SVNリポジトリ内の追加パス【任意】", web_text)
         self.assertNotIn("SVNリビジョン番号", web_text)
+
+    def test_svn_source_form_accepts_recent_update_window(self) -> None:
+        manager, outputs = self.manager(
+            [
+                "https://svn.example.com/repos/project/trunk",
+                "Recent specifications",
+                "1",
+                "4",
+                "45",
+                "1",
+                "1",
+            ]
+        )
+
+        value = manager._prompt_new_svn_source()
+
+        assert value is not None
+        self.assertEqual("svn", value["source_type"])
+        self.assertTrue(value["fetch"]["recursive"])
+        self.assertEqual(45, value["fetch"]["updated_within_days"])
+        self.assertIn(
+            ("取得期間", "過去45日（SVN最終更新日時）"),
+            value["summary"],
+        )
+        text = "\n".join(outputs)
+        self.assertIn("ファイルのSVN最終更新日時", text)
+        self.assertIn("制限しない【既定・従来どおり】", text)
 
     def test_svn_strategy_switch_drops_hidden_settings(self) -> None:
         existing = {

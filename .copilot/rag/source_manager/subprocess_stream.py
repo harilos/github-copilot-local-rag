@@ -15,11 +15,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Mapping, Sequence
 
 from .errors import sanitize_diagnostic
 from .diagnostics import process_diagnostic
@@ -31,6 +32,8 @@ RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
 CAPTURE_HEAD_BYTES = 32 * 1024
 CAPTURE_TAIL_BYTES = 32 * 1024
 _MAX_LINE_BYTES = 256 * 1024
+_POST_EXIT_DRAIN_IDLE_SECONDS = 0.25
+_POST_EXIT_TERMINATE_SECONDS = 0.5
 
 ProgressCallback = Callable[[Mapping[str, Any]], None]
 ResultValidator = Callable[[Any], bool | None]
@@ -172,6 +175,55 @@ def _progress_event(payload: str) -> dict[str, Any]:
     }
 
 
+def _wait_for_output_readers(
+    readers: Sequence[threading.Thread],
+    captures: Sequence[_BoundedCapture],
+    *,
+    idle_timeout: float,
+) -> bool:
+    """Wait while output is still flowing, without trusting inherited pipes."""
+    totals = tuple(capture.total_bytes for capture in captures)
+    last_progress = time.monotonic()
+    while any(reader.is_alive() for reader in readers):
+        for reader in readers:
+            reader.join(timeout=0.02)
+        current = tuple(capture.total_bytes for capture in captures)
+        now = time.monotonic()
+        if current != totals:
+            totals = current
+            last_progress = now
+        elif now - last_progress >= idle_timeout:
+            return False
+    return True
+
+
+def _signal_process_tree(
+    process: subprocess.Popen[bytes],
+    *,
+    force: bool,
+) -> None:
+    """Best-effort termination of the isolated POSIX process group."""
+    if os.name != "nt":
+        try:
+            os.killpg(
+                process.pid,
+                signal.SIGKILL if force else signal.SIGTERM,
+            )
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    if process.poll() is None:
+        try:
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+        except OSError:
+            return
+
+
 def run_streaming_process(
     arguments: Sequence[str],
     *,
@@ -180,8 +232,14 @@ def run_streaming_process(
     heartbeat_interval: float = 5.0,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    stdout_sink: BinaryIO | None = None,
 ) -> StreamingProcessResult:
-    """Run one command with concurrent, bounded stdout/stderr consumption."""
+    """Run one command with concurrent, bounded diagnostics.
+
+    When ``stdout_sink`` is supplied, the caller-owned binary stream receives
+    the complete stdout byte sequence in addition to the bounded diagnostic
+    capture.  The sink is never closed here.
+    """
 
     argv = tuple(str(item) for item in arguments)
     if not argv:
@@ -194,6 +252,7 @@ def run_streaming_process(
         stdin=subprocess.DEVNULL,
         cwd=cwd,
         env=dict(env) if env is not None else None,
+        start_new_session=(os.name != "nt"),
     )
     if process.stdout is None or process.stderr is None:
         process.kill()
@@ -204,6 +263,7 @@ def run_streaming_process(
     result_frames: list[str] = []
     result_lock = threading.Lock()
     callback_lock = threading.Lock()
+    sink_failures: list[BaseException] = []
 
     def handle_stdout(line: bytes) -> None:
         text = line.decode("utf-8", errors="replace")
@@ -244,24 +304,39 @@ def run_streaming_process(
         stream: Any,
         capture: _BoundedCapture,
         line_callback: Callable[[bytes], None],
+        full_sink: BinaryIO | None = None,
     ) -> None:
         decoder = _LineDecoder(line_callback)
         read_chunk = getattr(stream, "read1", stream.read)
+        active_sink = full_sink
         try:
             while True:
                 chunk = read_chunk(8192)
                 if not chunk:
                     break
                 capture.append(chunk)
+                if active_sink is not None:
+                    try:
+                        written = active_sink.write(chunk)
+                        if written is not None and int(written) != len(chunk):
+                            raise OSError("stdout sink accepted a partial write")
+                    except BaseException as exc:
+                        sink_failures.append(exc)
+                        active_sink = None
                 decoder.feed(chunk)
         finally:
+            if active_sink is not None:
+                try:
+                    active_sink.flush()
+                except BaseException as exc:
+                    sink_failures.append(exc)
             decoder.finish()
             stream.close()
 
     readers = [
         threading.Thread(
             target=drain,
-            args=(process.stdout, stdout_capture, handle_stdout),
+            args=(process.stdout, stdout_capture, handle_stdout, stdout_sink),
             daemon=True,
         ),
         threading.Thread(
@@ -280,44 +355,71 @@ def run_streaming_process(
         else float("inf")
     )
     timed_out = False
-    while process.poll() is None:
-        now = time.monotonic()
-        if timeout is not None and now - started >= timeout:
-            timed_out = True
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            break
-        if now >= next_heartbeat:
-            _safe_progress(
-                progress_callback,
-                callback_lock,
-                {
-                    "event": "heartbeat",
-                    "protocol": "local-rag.progress.v1",
-                    "elapsed_seconds": round(now - started, 3),
-                },
-            )
-            next_heartbeat = now + heartbeat_interval
-        wait_for = min(
-            0.05,
-            max(0.001, next_heartbeat - now),
-        )
-        if timeout is not None:
+    try:
+        while process.poll() is None:
+            now = time.monotonic()
+            if timeout is not None and now - started >= timeout:
+                timed_out = True
+                _signal_process_tree(process, force=False)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _signal_process_tree(process, force=True)
+                break
+            if now >= next_heartbeat:
+                _safe_progress(
+                    progress_callback,
+                    callback_lock,
+                    {
+                        "event": "heartbeat",
+                        "protocol": "local-rag.progress.v1",
+                        "elapsed_seconds": round(now - started, 3),
+                    },
+                )
+                next_heartbeat = now + heartbeat_interval
             wait_for = min(
-                wait_for,
-                max(0.001, timeout - (now - started)),
+                0.05,
+                max(0.001, next_heartbeat - now),
             )
+            if timeout is not None:
+                wait_for = min(
+                    wait_for,
+                    max(0.001, timeout - (now - started)),
+                )
+            try:
+                process.wait(timeout=wait_for)
+            except subprocess.TimeoutExpired:
+                pass
+        process.wait()
+    except BaseException:
+        _signal_process_tree(process, force=False)
         try:
-            process.wait(timeout=wait_for)
+            process.wait(timeout=_POST_EXIT_TERMINATE_SECONDS)
         except subprocess.TimeoutExpired:
-            pass
-
-    process.wait()
-    for reader in readers:
-        reader.join(timeout=5)
+            _signal_process_tree(process, force=True)
+        raise
+    drained = _wait_for_output_readers(
+        readers,
+        (stdout_capture, stderr_capture),
+        idle_timeout=_POST_EXIT_DRAIN_IDLE_SECONDS,
+    )
+    if not drained:
+        # A descendant may have inherited stdout/stderr after the direct child
+        # exited.  Never wait forever or report a complete sink in that state.
+        _signal_process_tree(process, force=False)
+        if not _wait_for_output_readers(
+            readers,
+            (stdout_capture, stderr_capture),
+            idle_timeout=_POST_EXIT_TERMINATE_SECONDS,
+        ):
+            _signal_process_tree(process, force=True)
+            _wait_for_output_readers(
+                readers,
+                (stdout_capture, stderr_capture),
+                idle_timeout=_POST_EXIT_TERMINATE_SECONDS,
+            )
+    if sink_failures:
+        raise OSError("complete stdout sink write failed") from sink_failures[0]
     result = StreamingProcessResult(
         args=argv,
         returncode=int(process.returncode),
@@ -345,6 +447,10 @@ def run_streaming_process(
             stderr=result.stderr,
         )
         raise error
+    if not drained:
+        raise OSError(
+            "subprocess output pipes remained open after the process exited"
+        )
     return result
 
 

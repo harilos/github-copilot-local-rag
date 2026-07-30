@@ -45,6 +45,7 @@ TOP_MENU = (
     ("3", "全DBの全Sourceを更新・再開する"),
     ("4", "配布・管理PCの引っ越し"),
     ("5", "この端末の設定・動作確認"),
+    ("6", "検索daemonを終了する"),
     ("0", "終了"),
 )
 DATABASE_MENU = (
@@ -247,8 +248,10 @@ class LocalRagManager:
                     self._package_and_transfer_screen()
                 elif choice == "5":
                     self._machine_setup_screen()
+                elif choice == "6":
+                    self._stop_search_daemon()
                 else:
-                    self._invalid_selection("0～5")
+                    self._invalid_selection("0～6")
             except Exception as exc:
                 self._print_internal_diagnostic(
                     exc,
@@ -369,6 +372,60 @@ class LocalRagManager:
                 else "not configured"
             )
         )
+
+    def _stop_search_daemon(self) -> None:
+        self._print_screen_header("検索daemonを終了する")
+        self.output(
+            "認証済みの検索daemonに終了を依頼します。"
+            "次回の検索時に自動で起動します。"
+        )
+        self._print_warning(
+            "実行中または待機中の検索は失敗する可能性があります。"
+            "検索している人がいないことを確認してください。"
+        )
+        if not self._confirm("検索daemonを終了しますか？"):
+            self._print_info("検索daemonは終了していません。")
+            return
+        try:
+            from source_manager.daemon_control import stop_search_daemon
+
+            result = stop_search_daemon(
+                self.rag_root,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="検索daemonの終了",
+                stage="daemon.stop",
+            )
+            return
+        status = str(result.get("status") or "")
+        if status == "not_running":
+            self._print_info("検索daemonは起動していません。")
+        elif status == "stopped":
+            self._print_success(
+                "検索daemonを終了しました。"
+                "次回の検索時に自動で起動します。"
+            )
+        elif status == "draining":
+            self._print_warning(
+                "検索daemonは終了処理中です。"
+                "実行中の検索が終わってから、もう一度確認してください。"
+            )
+        elif status == "restarted":
+            self._print_warning(
+                "終了後に新しい検索daemonが起動しました。"
+                "別の検索が開始されていないか確認してください。"
+            )
+        else:
+            self._print_error(
+                "検索daemonを安全に終了できませんでした"
+                f"（状態: {status or 'unknown'}）。"
+            )
+            self._print_info(
+                "実行中の検索を終了してから、もう一度実行してください。"
+            )
 
     def _problem_screen(self, db_name: str) -> None:
         while self._database_root(db_name).is_dir():
@@ -1438,6 +1495,43 @@ class LocalRagManager:
         )
         if scope is None:
             return None
+        period = self._select_value(
+            "どこまでさかのぼって取得しますか？"
+            "（ファイルのSVN最終更新日時）",
+            (
+                ("1", "過去1年"),
+                ("2", "過去90日"),
+                ("3", "過去30日"),
+                ("4", "期間を指定"),
+                ("5", "制限しない【既定・従来どおり】"),
+            ),
+            default="5",
+        )
+        if period is None:
+            return None
+        days: int | None = {"1": 365, "2": 90, "3": 30}.get(period)
+        if period == "4":
+            raw_days = self._prompt_preserving_value(
+                "日数",
+                "",
+                required=True,
+                description="1～3650の日数を入力します。",
+                examples=self._examples("svn_days"),
+            )
+            if raw_days is None:
+                return None
+            try:
+                days = int(raw_days)
+            except ValueError:
+                self._print_error(
+                    "日数は1～3650の整数で入力してください。"
+                )
+                return None
+            if not 1 <= days <= 3650:
+                self._print_error(
+                    "日数は1～3650の整数で入力してください。"
+                )
+                return None
         link_strategy = self._select_value(
             "検索結果リンクの形式",
             (
@@ -1474,6 +1568,7 @@ class LocalRagManager:
             "fetch": {
                 "repository_url": url,
                 "recursive": scope == "1",
+                "updated_within_days": days,
             },
             "link": {
                 "enabled": True,
@@ -1484,6 +1579,12 @@ class LocalRagManager:
                 (
                     "取得範囲",
                     "再帰" if scope == "1" else "この階層のファイルだけ",
+                ),
+                (
+                    "取得期間",
+                    "制限なし"
+                    if days is None
+                    else f"過去{days}日（SVN最終更新日時）",
                 ),
                 ("過去文書の自動削除", "行わない"),
                 ("途中再開", "可能"),
@@ -2466,30 +2567,32 @@ class LocalRagManager:
 
     def _source_manager_records(self, db_name: str) -> list[dict[str, Any]]:
         try:
-            root = self._validated_database_root(db_name) / "sources"
+            database_root = self._validated_database_root(db_name)
+            from source_manager.store import SourceStore
+
+            store = SourceStore(database_root)
         except ManagerError:
             return []
-        if not root.is_dir() or root.is_symlink():
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source取得設定の読込",
+                stage="source_config.open",
+                db_name=db_name,
+                can_resume=None,
+            )
             return []
         records: list[dict[str, Any]] = []
-        for directory in sorted(root.iterdir(), key=lambda value: value.name):
-            source_path = directory / "source.json"
-            if (
-                directory.is_symlink()
-                or not directory.is_dir()
-                or source_path.is_symlink()
-                or not source_path.is_file()
-            ):
-                continue
+        for local_key in store.list_keys():
             try:
-                source = json.loads(source_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                source = store.read_source(local_key).payload
+            except Exception as exc:
                 self._print_internal_diagnostic(
                     exc,
                     operation="Source取得設定の読込",
                     stage="source_config.read",
                     db_name=db_name,
-                    source_key=directory.name,
+                    source_key=local_key,
                     can_resume=None,
                 )
                 continue
@@ -2499,25 +2602,23 @@ class LocalRagManager:
             value["_local_source_key"] = str(
                 source.get("local_source_key")
                 or source.get("source_key")
-                or directory.name
+                or local_key
             )
-            state_path = directory / "state.json"
-            if state_path.is_file() and not state_path.is_symlink():
-                try:
-                    state = json.loads(state_path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                    self._print_internal_diagnostic(
-                        exc,
-                        operation="Source進捗の読込",
-                        stage="source_state.read",
-                        db_name=db_name,
-                        source_key=str(value["_local_source_key"]),
-                        provider=str(value.get("source_type") or ""),
-                        can_resume=None,
-                    )
-                    state = {}
-                if isinstance(state, dict):
-                    value["_state"] = state
+            try:
+                state = store.read_state(local_key).payload
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Source進捗の読込",
+                    stage="source_state.read",
+                    db_name=db_name,
+                    source_key=str(value["_local_source_key"]),
+                    provider=str(value.get("source_type") or ""),
+                    can_resume=None,
+                )
+                state = {}
+            if isinstance(state, dict):
+                value["_state"] = state
             records.append(value)
         return records
 
@@ -2565,6 +2666,28 @@ class LocalRagManager:
             )
         )
         return combined
+
+    def _refresh_source_detail_record(
+        self,
+        db_name: str,
+        inventory: Any | None,
+        source: dict[str, Any],
+    ) -> dict[str, Any]:
+        local_key = str(source.get("_local_source_key") or "")
+        if not local_key:
+            return source
+        catalog_sources = (
+            self._inventory_sources(inventory)
+            if inventory is not None
+            else []
+        )
+        for refreshed in self._combined_source_records(
+            db_name,
+            catalog_sources,
+        ):
+            if str(refreshed.get("_local_source_key") or "") == local_key:
+                return refreshed
+        return source
 
     @staticmethod
     def _ui_source_type(value: Any) -> str:
@@ -2663,8 +2786,13 @@ class LocalRagManager:
         inventory: Any | None,
         source: dict[str, Any],
     ) -> None:
-        source_id = str(source.get("source_id") or "")
         while True:
+            source = self._refresh_source_detail_record(
+                db_name,
+                inventory,
+                source,
+            )
+            source_id = str(source.get("source_id") or "")
             source_type = self._ui_source_type(source.get("source_type"))
             display_name = str(source.get("display_name") or "既存データ")
             state_label = self._source_manager_status(source)
@@ -2977,6 +3105,13 @@ class LocalRagManager:
         if not isinstance(fetch, dict):
             fetch = source.get("provider_settings")
         fetch = fetch if isinstance(fetch, dict) else {}
+        if (
+            self._ui_source_type(source.get("source_type")) == "svn"
+            and "updated_within_days" not in fetch
+        ):
+            # Existing SVN Sources predate this setting.  Materialize the
+            # compatibility default so the UI shows and preserves it.
+            fetch = {**fetch, "updated_within_days": None}
         public_labels = {
             "repository_url": "取得URL",
             "project_url": "プロジェクトURL",
@@ -3087,6 +3222,44 @@ class LocalRagManager:
                         else "この階層のファイルだけ",
                     )
                 )
+                current_days = fetch.get("updated_within_days")
+                days = self._prompt_preserving_value(
+                    "取得期間（日）",
+                    "" if current_days is None else str(current_days),
+                    required=False,
+                    description=(
+                        "各ファイルのSVN最終更新日時を基準にします。"
+                        "空欄は現在値を維持し、- は制限なしです。"
+                    ),
+                    examples=self._examples("svn_days"),
+                    empty_help="制限なし",
+                )
+                if days is None:
+                    return
+                if days:
+                    try:
+                        parsed_days = int(days)
+                    except ValueError:
+                        self._print_error(
+                            "取得期間は1～3650の整数で入力してください。"
+                        )
+                        return
+                    if not 1 <= parsed_days <= 3650:
+                        self._print_error(
+                            "取得期間は1～3650の整数で入力してください。"
+                        )
+                        return
+                    updated["updated_within_days"] = parsed_days
+                else:
+                    updated["updated_within_days"] = None
+                summary.append(
+                    (
+                        "取得期間",
+                        "制限なし"
+                        if updated["updated_within_days"] is None
+                        else f"{updated['updated_within_days']}日",
+                    )
+                )
         elif source_type == "redmine":
             # base URL and project identifier are validated derivatives of
             # project_url, not independently editable settings.
@@ -3107,7 +3280,8 @@ class LocalRagManager:
                 "" if current_days is None else str(current_days),
                 required=False,
                 description=(
-                    "Issueの更新日時を基準にします。空欄は制限なしです。"
+                    "Issueの更新日時を基準にします。"
+                    "空欄は現在値を維持し、- は制限なしです。"
                 ),
                 examples=self._examples("redmine_days"),
                 empty_help="制限なし",
@@ -5298,6 +5472,8 @@ class LocalRagManager:
         )
         choice = self._ask(f"番号を入力してください{suffix}: ")
         if choice == "" and default is not None:
+            if any(value == default for value, _label in choices):
+                return default
             choice = default
         if choice in (None, "0"):
             return None

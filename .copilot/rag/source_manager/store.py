@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -24,9 +25,11 @@ STATE_SCHEMA_VERSION = "local-rag-source-state-v1"
 EVENT_SCHEMA_VERSION = "local-rag-source-event-v1"
 MISSING_ETAG = "missing"
 MAX_JSON_BYTES = 1_048_576
+WINDOWS_FILE_RETRY_SECONDS = 2.0
 _SOURCE_ID = re.compile(r"^[^\x00-\x1f/\\]{1,200}$")
 _LOCAL_KEY = re.compile(r"^src_[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{12}$")
 _SLUG = re.compile(r"[^a-z0-9]+")
+_WINDOWS_TRANSIENT_FILE_ERRORS = frozenset({5, 32, 33})
 
 
 @dataclass(frozen=True)
@@ -406,7 +409,7 @@ class SourceStore:
     ) -> StoredJson:
         _reject_linked_components(self.db_root, path)
         try:
-            raw = path.read_bytes()
+            raw = _read_bytes_with_windows_retry(path)
         except FileNotFoundError:
             return StoredJson({}, 0, MISSING_ETAG, path)
         if len(raw) > MAX_JSON_BYTES:
@@ -468,7 +471,26 @@ class SourceStore:
             )
             if latest.revision != int(expected_revision) or latest.etag != str(expected_etag):
                 raise SourceManagerError("source_configuration_changed")
-            os.replace(temporary, path)
+
+            def verify_current() -> None:
+                current_value = self._read_json(
+                    path,
+                    expected_schema=expected_schema,
+                    allow_transient_runtime_path=allow_transient_runtime_path,
+                )
+                if (
+                    current_value.revision != int(expected_revision)
+                    or current_value.etag != str(expected_etag)
+                ):
+                    raise SourceManagerError(
+                        "source_configuration_changed"
+                    )
+
+            _replace_with_windows_retry(
+                temporary,
+                path,
+                before_retry=verify_current,
+            )
             _reject_linked_components(self.db_root, path)
             _fsync_directory(path.parent)
         finally:
@@ -606,6 +628,63 @@ def _write_bytes(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
     finally:
         os.close(descriptor)
+
+
+def _read_bytes_with_windows_retry(path: Path) -> bytes:
+    deadline = (
+        time.monotonic() + WINDOWS_FILE_RETRY_SECONDS
+        if _is_windows()
+        else 0.0
+    )
+    delay = 0.01
+    while True:
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            if not _should_retry_windows_file_error(exc, deadline):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
+def _replace_with_windows_retry(
+    source: Path,
+    target: Path,
+    *,
+    before_retry: Any,
+) -> None:
+    deadline = (
+        time.monotonic() + WINDOWS_FILE_RETRY_SECONDS
+        if _is_windows()
+        else 0.0
+    )
+    delay = 0.01
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if not _should_retry_windows_file_error(exc, deadline):
+                raise
+            time.sleep(delay)
+            before_retry()
+            delay = min(delay * 2, 0.1)
+
+
+def _should_retry_windows_file_error(
+    exc: OSError,
+    deadline: float,
+) -> bool:
+    return (
+        _is_windows()
+        and getattr(exc, "winerror", None)
+        in _WINDOWS_TRANSIENT_FILE_ERRORS
+        and time.monotonic() < deadline
+    )
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
 
 
 def _fsync_directory(path: Path) -> None:

@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, BinaryIO, Mapping
 
 from .errors import SourceManagerError
 from .subprocess_stream import ProgressCallback, run_streaming_process
@@ -38,13 +38,20 @@ def resolve_source_network_route(
     effective_environment = dict(resolution.environment)
     opener = resolution.build_url_opener()
 
-    def command_runner(arguments: list[str]):
+    def command_runner(
+        arguments: list[str],
+        *,
+        stdout_sink: BinaryIO | None = None,
+    ):
         return run_streaming_process(
             arguments,
             timeout=300,
             env=effective_environment,
             progress_callback=progress_callback,
+            stdout_sink=stdout_sink,
         )
+
+    command_runner.supports_stdout_sink = True
 
     def http_get(
         url: str,

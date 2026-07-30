@@ -366,7 +366,10 @@ def update_source(
                 "fetch.interrupted",
                 {"error": exception_summary(exc)},
             )
-        except SourceManagerError:
+        except Exception:
+            # Recording recovery state is best effort. A Windows sharing or
+            # access-denied error here must not replace the original fetch
+            # exception that explains why the operation stopped.
             pass
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", f"fetch.{source.payload['source_type']}")
@@ -1295,7 +1298,9 @@ def _update_redmine_source(
                 expected_revision=stored.revision,
                 expected_etag=stored.etag,
             )
-        except SourceManagerError:
+        except Exception:
+            # Preserve the provider failure even when Windows temporarily
+            # denies access to the recovery state file.
             pass
         details: dict[str, Any] = {"error": error_detail}
         if isinstance(getattr(exc, "process_diagnostic", None), dict):
@@ -1304,11 +1309,16 @@ def _update_redmine_source(
             details["diagnostic"] = _persistable_http_diagnostic(
                 getattr(exc, "diagnostic")
             )
-        store.append_event(
-            source.payload["local_source_key"],
-            "redmine.fetch.interrupted",
-            details,
-        )
+        try:
+            store.append_event(
+                source.payload["local_source_key"],
+                "redmine.fetch.interrupted",
+                details,
+            )
+        except Exception:
+            # The primary Redmine exception remains authoritative; diagnostics
+            # persistence must not mask it.
+            pass
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "fetch.redmine")
         raise
@@ -1432,27 +1442,33 @@ def _redmine_reflect_batch(
                 "last_error": error_detail,
             }
         )
-        store.save_state(
-            source.payload["local_source_key"],
-            interrupted,
-            expected_revision=state.revision,
-            expected_etag=state.etag,
-        )
-        store.append_event(
-            source.payload["local_source_key"],
-            "redmine.reflect.interrupted",
-            {
-                "error": error_detail,
-                **(
-                    {"process": getattr(exc, "process_diagnostic")}
-                    if isinstance(
-                        getattr(exc, "process_diagnostic", None),
-                        dict,
-                    )
-                    else {}
-                ),
-            },
-        )
+        try:
+            store.save_state(
+                source.payload["local_source_key"],
+                interrupted,
+                expected_revision=state.revision,
+                expected_etag=state.etag,
+            )
+        except Exception:
+            pass
+        try:
+            store.append_event(
+                source.payload["local_source_key"],
+                "redmine.reflect.interrupted",
+                {
+                    "error": error_detail,
+                    **(
+                        {"process": getattr(exc, "process_diagnostic")}
+                        if isinstance(
+                            getattr(exc, "process_diagnostic", None),
+                            dict,
+                        )
+                        else {}
+                    ),
+                },
+            )
+        except Exception:
+            pass
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "reflect.redmine_batch")
         raise
@@ -1576,32 +1592,38 @@ def _reflect_and_sync(
                 "metadata_sync_pending": False,
             }
         )
-        store.save_state(
-            source.payload["local_source_key"],
-            interrupted,
-            expected_revision=state.revision,
-            expected_etag=state.etag,
-        )
-        store.append_event(
-            source.payload["local_source_key"],
-            "add.interrupted",
-            {
-                "error": error_detail,
-                **(
-                    {"process": getattr(exc, "process_diagnostic")}
-                    if isinstance(
-                        getattr(exc, "process_diagnostic", None),
-                        dict,
-                    )
-                    else {}
-                ),
-                **(
-                    {"diagnostic": getattr(exc, "diagnostic")}
-                    if isinstance(getattr(exc, "diagnostic", None), dict)
-                    else {}
-                ),
-            },
-        )
+        try:
+            store.save_state(
+                source.payload["local_source_key"],
+                interrupted,
+                expected_revision=state.revision,
+                expected_etag=state.etag,
+            )
+        except Exception:
+            pass
+        try:
+            store.append_event(
+                source.payload["local_source_key"],
+                "add.interrupted",
+                {
+                    "error": error_detail,
+                    **(
+                        {"process": getattr(exc, "process_diagnostic")}
+                        if isinstance(
+                            getattr(exc, "process_diagnostic", None),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    **(
+                        {"diagnostic": getattr(exc, "diagnostic")}
+                        if isinstance(getattr(exc, "diagnostic", None), dict)
+                        else {}
+                    ),
+                },
+            )
+        except Exception:
+            pass
         if getattr(exc, "stage", None) is None:
             setattr(exc, "stage", "reflect.add")
         raise

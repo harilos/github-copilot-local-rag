@@ -172,6 +172,7 @@ class ManagerContractTests(unittest.TestCase):
                 "全DBの全Sourceを更新・再開する",
                 "配布・管理PCの引っ越し",
                 "この端末の設定・動作確認",
+                "検索daemonを終了する",
                 "終了",
             ],
         )
@@ -187,6 +188,21 @@ class ManagerContractTests(unittest.TestCase):
                 "戻る",
             ],
         )
+
+    def test_manager_can_stop_search_daemon(self) -> None:
+        manager = self.manager(["y"])
+        with mock.patch(
+            "source_manager.daemon_control.stop_search_daemon",
+            return_value={"status": "stopped", "stopped": True},
+        ) as stop:
+            manager._stop_search_daemon()
+        stop.assert_called_once_with(
+            self.rag_root,
+            timeout_seconds=10.0,
+        )
+        rendered = "\n".join(self.output)
+        self.assertIn("検索daemonを終了しました", rendered)
+        self.assertIn("次回の検索時に自動で起動", rendered)
 
     def test_source_registration_failure_shows_detailed_exception_log(
         self,
@@ -657,6 +673,135 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("1. 更新・再開する", text)
         self.assertIn("5. 技術情報", text)
         self.assertIn("6. このSourceを削除する【危険】", text)
+
+    def test_redmine_fetch_settings_refresh_within_source_detail(
+        self,
+    ) -> None:
+        from source_manager.runner import register_source
+        from source_manager.store import SourceStore
+
+        db_root = self.make_db()
+        registered = register_source(
+            db_root,
+            source_type="redmine",
+            display_name="Issue tracker",
+            fetch={
+                "project_url": (
+                    "https://issues.example.invalid/projects/fixture"
+                ),
+                "updated_within_days": 30,
+                "api_key_env": "LOCAL_RAG_REDMINE_API_KEY",
+            },
+        )
+        manager = self.manager(
+            [
+                "2",
+                "",
+                "90",
+                "y",
+                "2",
+                "",
+                "",
+                "y",
+                "0",
+            ]
+        )
+        store = SourceStore(db_root)
+        inventory = FakeInventory()
+        inventory.payload["documents_without_source_id"] = 0
+        inventory.payload["sources"] = [
+            {
+                "source_id": registered["local_source_key"],
+                "display_name": "Issue tracker",
+                "source_type": "redmine",
+                "document_count": 7,
+                "chunk_count": 11,
+                "observed_stored_roots": [
+                    f"{registered['local_source_key']}/"
+                ],
+            },
+        ]
+        source = manager._combined_source_records(
+            "example-rag",
+            manager._inventory_sources(inventory),
+        )[0]
+        self.assertTrue(source["_provisional_catalog_identity"])
+
+        manager._source_detail_screen("example-rag", inventory, source)
+
+        rendered = "\n".join(self.output)
+        self.assertIn("取得期間（日）: 90", rendered)
+        stored = store.read_source(
+            registered["local_source_key"]
+        )
+        self.assertEqual(90, stored.payload["fetch"]["updated_within_days"])
+        refreshed = manager._refresh_source_detail_record(
+            "example-rag",
+            inventory,
+            source,
+        )
+        self.assertEqual(
+            registered["local_source_key"],
+            refreshed["source_id"],
+        )
+        self.assertTrue(refreshed["_provisional_catalog_identity"])
+        self.assertEqual(7, refreshed["document_count"])
+        self.assertEqual(11, refreshed["chunk_count"])
+
+    def test_legacy_svn_fetch_settings_show_unlimited_period(self) -> None:
+        manager = self.manager()
+        fetch = manager._show_source_fetch_settings(
+            {
+                "source_type": "svn",
+                "fetch": {
+                    "repository_url": "https://svn.example.invalid/project",
+                    "recursive": True,
+                },
+            }
+        )
+        self.assertIsNone(fetch["updated_within_days"])
+        self.assertIn("取得期間（日）: 制限なし", "\n".join(self.output))
+
+    def test_svn_fetch_period_can_be_changed_and_cleared(self) -> None:
+        from source_manager.runner import register_source
+        from source_manager.store import SourceStore
+
+        db_root = self.make_db()
+        registered = register_source(
+            db_root,
+            source_type="svn",
+            display_name="SVN repository",
+            fetch={
+                "repository_url": (
+                    "https://svn.example.invalid/project/trunk"
+                ),
+                "recursive": True,
+                "updated_within_days": 30,
+            },
+        )
+        key = registered["local_source_key"]
+        store = SourceStore(db_root)
+
+        manager = self.manager(["", "", "", "90", "y"])
+        source = {
+            **store.read_source(key).payload,
+            "_local_source_key": key,
+        }
+        manager._edit_source_fetch_settings("example-rag", source)
+        self.assertEqual(
+            90,
+            store.read_source(key).payload["fetch"]["updated_within_days"],
+        )
+
+        manager = self.manager(["", "", "", "-", "y"])
+        source = {
+            **store.read_source(key).payload,
+            "_local_source_key": key,
+        }
+        manager._edit_source_fetch_settings("example-rag", source)
+        self.assertIsNone(
+            store.read_source(key).payload["fetch"]["updated_within_days"]
+        )
 
     def test_source_delete_requires_exact_name_and_default_no(self) -> None:
         self.make_db()

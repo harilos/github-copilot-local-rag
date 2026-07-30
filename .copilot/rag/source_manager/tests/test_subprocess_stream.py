@@ -22,6 +22,48 @@ from source_manager.runner import _execute_add
 
 
 class StreamingProcessTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX process-group contract")
+    def test_inherited_output_pipe_fails_without_unbounded_wait(self) -> None:
+        script = (
+            "import subprocess,sys\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(10)'])\n"
+            "print('direct child complete')\n"
+        )
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+            OSError,
+            "output pipes remained open",
+        ):
+            run_streaming_process(
+                [sys.executable, "-c", script],
+                heartbeat_interval=0,
+            )
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_complete_stdout_sink_receives_large_untruncated_byte_stream(
+        self,
+    ) -> None:
+        expected = b"<info>" + (b"x" * 200_000) + b"</info>"
+        script = (
+            "import sys\n"
+            "sys.stdout.buffer.write("
+            "b'<info>' + b'x' * 200000 + b'</info>')\n"
+        )
+        with tempfile.TemporaryFile(mode="w+b") as sink:
+            result = run_streaming_process(
+                [sys.executable, "-c", script],
+                heartbeat_interval=0,
+                stdout_sink=sink,
+            )
+            sink.seek(0)
+            captured = sink.read()
+
+        self.assertEqual(0, result.returncode)
+        self.assertTrue(result.stdout_truncated)
+        self.assertEqual(len(expected), result.stdout_total_bytes)
+        self.assertEqual(expected, captured)
+
     def test_drains_both_pipes_and_bounds_verbose_diagnostics(self) -> None:
         script = (
             "import os,sys,threading\n"

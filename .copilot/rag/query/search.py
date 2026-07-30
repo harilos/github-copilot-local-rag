@@ -851,6 +851,116 @@ def daemon_state_snapshot(state: dict) -> dict:
     return snapshot
 
 
+def stop_persistent_daemon(
+    *,
+    timeout_seconds: float = 10.0,
+) -> dict:
+    """Gracefully stop the authenticated local search daemon.
+
+    This deliberately does not force-kill an unresponsive PID.  The published
+    state contains enough information to authenticate a healthy daemon, but a
+    stale PID must never be treated as proof that an unrelated process is safe
+    to terminate.
+    """
+    timeout = max(0.1, float(timeout_seconds))
+    try:
+        state = _read_state()
+    except OSError as exc:
+        return {
+            "status": "state_unreadable",
+            "stopped": False,
+            "error_type": type(exc).__name__,
+        }
+    if state is None:
+        return {
+            "status": "not_running",
+            "stopped": True,
+            "was_running": False,
+        }
+
+    pid = _state_pid(state)
+    probe_timeout = min(1.0, timeout)
+    identity = _daemon_health_payload(state, timeout=probe_timeout)
+    if not _daemon_identity_matches(state, identity):
+        if not _process_is_alive(pid):
+            _discard_published_state(state)
+            return {
+                "status": "not_running",
+                "stopped": True,
+                "was_running": False,
+                "stale_state_removed": True,
+            }
+        return {
+            "status": "unreachable",
+            "stopped": False,
+            "was_running": True,
+            "pid": pid or None,
+        }
+
+    started = time.monotonic()
+    acknowledged = _request_daemon_shutdown(
+        state,
+        timeout=min(1.0, timeout),
+    )
+    if not acknowledged:
+        return {
+            "status": "shutdown_not_acknowledged",
+            "stopped": False,
+            "was_running": True,
+            "pid": pid or None,
+        }
+
+    remaining = max(0.0, timeout - (time.monotonic() - started))
+    _wait_for_daemon_retirement(state, timeout=remaining)
+    old_process_alive = _process_is_alive(pid)
+    try:
+        current = _read_state()
+    except OSError as exc:
+        return {
+            "status": "state_unreadable",
+            "stopped": False,
+            "was_running": True,
+            "pid": pid or None,
+            "error_type": type(exc).__name__,
+        }
+    if current and (
+        current.get("pid") != state.get("pid")
+        or current.get("generation") != state.get("generation")
+        or current.get("token") != state.get("token")
+    ):
+        current_identity = _daemon_health_payload(
+            current,
+            timeout=min(1.0, timeout),
+        )
+        if _daemon_identity_matches(current, current_identity):
+            return {
+                "status": "restarted",
+                "stopped": False,
+                "was_running": True,
+                "pid": _state_pid(current) or None,
+            }
+        return {
+            "status": "unreachable",
+            "stopped": False,
+            "was_running": True,
+            "pid": _state_pid(current) or None,
+        }
+    if not old_process_alive:
+        _discard_published_state(state)
+        return {
+            "status": "stopped",
+            "stopped": True,
+            "was_running": True,
+            "pid": pid or None,
+        }
+    return {
+        "status": "draining",
+        "stopped": False,
+        "was_running": True,
+        "pid": pid or None,
+    }
+
+
 def _retire_daemon(
     state: dict,
     *,
@@ -1411,19 +1521,28 @@ def _daemon_identity_matches(state: dict, identity: dict | None) -> bool:
 
 
 def _discard_published_state(state: dict) -> None:
-    current = _read_state()
-    if not current:
-        return
-    if (
-        current.get("pid") != state.get("pid")
-        or current.get("generation") != state.get("generation")
-        or current.get("token") != state.get("token")
-    ):
+    _secure_runtime_directory(RUN_DIR)
+    lock_fd = _acquire_start_lock()
+    if lock_fd is None:
+        # A concurrent search may be publishing a replacement generation.
+        # Leaving one stale state file is safer than deleting that new state.
         return
     try:
-        STATE_FILE.unlink()
-    except FileNotFoundError:
-        pass
+        current = _read_state()
+        if not current:
+            return
+        if (
+            current.get("pid") != state.get("pid")
+            or current.get("generation") != state.get("generation")
+            or current.get("token") != state.get("token")
+        ):
+            return
+        try:
+            STATE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    finally:
+        _release_start_lock(lock_fd)
 
 
 def _read_state() -> dict | None:

@@ -84,6 +84,7 @@ EXAMPLE_KEYS = frozenset(
         "source_id",
         "svn_link_repository_url",
         "svn_link_web_root",
+        "svn_days",
         "svn_repository_path_prefix",
         "svn_repository_url",
         "svn_revision",

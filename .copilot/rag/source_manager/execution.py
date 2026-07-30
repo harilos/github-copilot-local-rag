@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -8,17 +9,19 @@ import socket
 import ssl
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+import xml.etree.ElementTree as ElementTree
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
-from pathlib import Path
-from typing import Any, Callable, Mapping
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO, Callable, Mapping
 
 from .errors import (
     SourceManagerError,
@@ -75,10 +78,16 @@ def execute_fetch_plan(
                 progress_callback=progress_callback,
             )
         elif provider == "svn":
+            cutoff = _svn_updated_on_cutoff(
+                parameters.get("updated_within_days"),
+                state,
+                clock=clock,
+            )
             result = _svn(
                 parameters,
                 work,
                 runner,
+                updated_on_cutoff=cutoff,
                 progress_callback=progress_callback,
             )
         elif provider == "redmine":
@@ -260,6 +269,7 @@ def _svn(
     work: Path,
     runner: CommandRunner,
     *,
+    updated_on_cutoff: datetime | None,
     progress_callback: HttpProgressCallback | None = None,
 ) -> dict[str, Any]:
     depth = "infinity" if settings.get("recursive", True) else "files"
@@ -289,19 +299,43 @@ def _svn(
             operation="SVNリポジトリの取得",
             stage="fetch.svn",
         )
-    if settings.get("recursive", True):
-        _replace_materialized_tree(
-            checkout,
-            work,
-            progress_callback=progress_callback,
-            provider="svn",
-        )
+    if updated_on_cutoff is None:
+        if settings.get("recursive", True):
+            _replace_materialized_tree(
+                checkout,
+                work,
+                progress_callback=progress_callback,
+                provider="svn",
+            )
+        else:
+            _materialize_direct_files(
+                checkout,
+                work,
+                progress_callback=progress_callback,
+            )
+        inventory_documents = None
+        eligible_documents = None
     else:
-        _materialize_direct_files(
+        inventory = _svn_file_inventory(
+            checkout,
+            depth=depth,
+            runner=runner,
+        )
+        eligible = {
+            relative
+            for relative, changed_at in inventory.items()
+            if changed_at >= updated_on_cutoff
+        }
+        _materialize_svn_files(
             checkout,
             work,
+            all_paths=set(inventory),
+            eligible_paths=eligible,
+            recursive=bool(settings.get("recursive", True)),
             progress_callback=progress_callback,
         )
+        inventory_documents = len(inventory)
+        eligible_documents = len(eligible)
     revision_result = _checked(
         runner(
             [
@@ -312,11 +346,347 @@ def _svn(
         stage="fetch.svn",
     )
     revision = str(getattr(revision_result, "stdout", "") or "").strip()
-    return {
+    result: dict[str, Any] = {
         "status": "ok",
         "documents": _regular_file_count(work),
         "revision": revision,
     }
+    if inventory_documents is not None and eligible_documents is not None:
+        result["inventory_documents"] = inventory_documents
+        result["eligible_documents"] = eligible_documents
+    return result
+
+
+def _svn_updated_on_cutoff(
+    updated_within_days: Any,
+    state: Mapping[str, Any] | None,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> datetime | None:
+    if updated_within_days is None:
+        return None
+    if (
+        isinstance(updated_within_days, bool)
+        or not str(updated_within_days).isdigit()
+        or not 1 <= int(updated_within_days) <= 3650
+    ):
+        raise SourceManagerError(
+            "updated_within_days must be null or between 1 and 3650",
+            stage="fetch.svn",
+        )
+    payload = state if isinstance(state, Mapping) else {}
+    started_at = payload.get("started_at")
+    if started_at is not None:
+        if not isinstance(started_at, str) or not started_at.strip():
+            raise SourceManagerError(
+                "SVN run start time is invalid",
+                stage="fetch.svn",
+            )
+        try:
+            anchor = datetime.fromisoformat(
+                started_at.strip().replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise SourceManagerError(
+                "SVN run start time is invalid",
+                stage="fetch.svn",
+            ) from exc
+    else:
+        anchor = (
+            clock or (lambda: datetime.now(timezone.utc))
+        )()
+    if not isinstance(anchor, datetime):
+        raise SourceManagerError(
+            "SVN clock must return a datetime",
+            stage="fetch.svn",
+        )
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+    anchor = anchor.astimezone(timezone.utc)
+    return anchor - timedelta(days=int(updated_within_days))
+
+
+def _svn_file_inventory(
+    checkout: Path,
+    *,
+    depth: str,
+    runner: CommandRunner,
+) -> dict[PurePosixPath, datetime]:
+    arguments = [
+        "svn",
+        "info",
+        "--xml",
+        "--depth",
+        depth,
+        "--",
+        str(checkout),
+    ]
+    with tempfile.TemporaryFile(mode="w+b") as stdout_sink:
+        if bool(getattr(runner, "supports_stdout_sink", False)):
+            completed = runner(arguments, stdout_sink=stdout_sink)
+            _checked(
+                completed,
+                operation="SVN更新日時の確認",
+                stage="fetch.svn",
+            )
+            try:
+                stdout_sink.flush()
+                stdout_sink.seek(0)
+            except OSError as exc:
+                raise SourceManagerError(
+                    "SVN更新日時の一時出力を読み取れません",
+                    stage="fetch.svn",
+                ) from exc
+            return _parse_svn_info_xml(stdout_sink, checkout)
+
+        completed = _checked(
+            runner(arguments),
+            operation="SVN更新日時の確認",
+            stage="fetch.svn",
+        )
+        if bool(getattr(completed, "stdout_truncated", False)):
+            raise SourceManagerError(
+                "SVN更新日時の出力が途中で切れました",
+                stage="fetch.svn",
+            )
+        raw = getattr(completed, "stdout", "")
+        if isinstance(raw, bytes):
+            encoded = raw
+        else:
+            encoded = str(raw or "").encode("utf-8")
+        return _parse_svn_info_xml(io.BytesIO(encoded), checkout)
+
+
+def _parse_svn_info_xml(
+    stream: BinaryIO,
+    checkout: Path,
+) -> dict[PurePosixPath, datetime]:
+    inventory: dict[PurePosixPath, datetime] = {}
+    root_path: str | None = None
+    try:
+        for _event, entry in ElementTree.iterparse(stream, events=("end",)):
+            if _xml_local_name(entry.tag) != "entry":
+                continue
+            kind = str(entry.attrib.get("kind") or "").strip().casefold()
+            entry_path = _normalized_svn_xml_path(entry.attrib.get("path"))
+            if root_path is None:
+                if kind != "dir":
+                    raise SourceManagerError(
+                        "SVN更新日時XMLのroot entryが不正です",
+                        stage="fetch.svn",
+                    )
+                root_path = entry_path
+                entry.clear()
+                continue
+            relative = _svn_xml_relative_path(entry_path, root_path)
+            if kind == "dir":
+                entry.clear()
+                continue
+            if kind != "file":
+                raise SourceManagerError(
+                    "SVN更新日時XMLのentry種別が不正です",
+                    stage="fetch.svn",
+                )
+            changed_at = _svn_xml_commit_date(entry)
+            if relative in inventory:
+                raise SourceManagerError(
+                    "SVN更新日時XMLに重複pathがあります",
+                    stage="fetch.svn",
+                )
+            source = checkout.joinpath(*relative.parts)
+            try:
+                _reject_linked_path_components(source)
+                metadata = os.lstat(source)
+            except OSError as exc:
+                raise SourceManagerError(
+                    "SVN更新日時XMLのpathが作業コピーと一致しません",
+                    stage="fetch.svn",
+                ) from exc
+            if (
+                _is_link_or_reparse(source, metadata)
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                raise SourceManagerError(
+                    "SVN作業コピーにlinkまたは特殊fileがあります",
+                    stage="fetch.svn",
+                )
+            inventory[relative] = changed_at
+            entry.clear()
+    except ElementTree.ParseError as exc:
+        raise SourceManagerError(
+            "SVN更新日時XMLが不正です",
+            stage="fetch.svn",
+        ) from exc
+    if root_path is None:
+        raise SourceManagerError(
+            "SVN更新日時XMLにroot entryがありません",
+            stage="fetch.svn",
+        )
+    return inventory
+
+
+def _normalized_svn_xml_path(value: Any) -> str:
+    text = str(value or "")
+    if (
+        not text
+        or any(ord(character) < 0x20 for character in text)
+    ):
+        raise SourceManagerError(
+            "SVN更新日時XMLのpathが不正です",
+            stage="fetch.svn",
+        )
+    normalized = text.replace("\\", "/")
+    if normalized != "/":
+        normalized = normalized.rstrip("/")
+    if not normalized:
+        raise SourceManagerError(
+            "SVN更新日時XMLのpathが不正です",
+            stage="fetch.svn",
+        )
+    return normalized
+
+
+def _svn_xml_relative_path(
+    entry_path: str,
+    root_path: str,
+) -> PurePosixPath:
+    if root_path == ".":
+        if entry_path == ".":
+            raise SourceManagerError(
+                "SVN更新日時XMLにroot entryが重複しています",
+                stage="fetch.svn",
+            )
+        text = entry_path[2:] if entry_path.startswith("./") else entry_path
+        if text.startswith("/") or re.match(r"^[A-Za-z]:/", text):
+            raise SourceManagerError(
+                "SVN更新日時XMLのpathがroot外です",
+                stage="fetch.svn",
+            )
+    else:
+        prefix = root_path + "/"
+        if not entry_path.startswith(prefix):
+            raise SourceManagerError(
+                "SVN更新日時XMLのpathがroot外です",
+                stage="fetch.svn",
+            )
+        text = entry_path[len(prefix) :]
+    parts = text.split("/")
+    if (
+        not text
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(part.casefold() == ".svn" for part in parts)
+    ):
+        raise SourceManagerError(
+            "SVN更新日時XMLの相対pathが不正です",
+            stage="fetch.svn",
+        )
+    return PurePosixPath(*parts)
+
+
+def _svn_xml_commit_date(entry: ElementTree.Element) -> datetime:
+    value: str | None = None
+    for child in entry:
+        if _xml_local_name(child.tag) != "commit":
+            continue
+        for field in child:
+            if _xml_local_name(field.tag) == "date":
+                value = field.text
+                break
+        break
+    text = str(value or "").strip()
+    if not text:
+        raise SourceManagerError(
+            "SVN更新日時XMLにfileのcommit dateがありません",
+            stage="fetch.svn",
+        )
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SourceManagerError(
+            "SVN更新日時XMLのcommit dateが不正です",
+            stage="fetch.svn",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise SourceManagerError(
+            "SVN更新日時XMLのcommit dateにtimezoneがありません",
+            stage="fetch.svn",
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _xml_local_name(value: Any) -> str:
+    return str(value).rsplit("}", 1)[-1]
+
+
+def _materialize_svn_files(
+    checkout: Path,
+    destination: Path,
+    *,
+    all_paths: set[PurePosixPath],
+    eligible_paths: set[PurePosixPath],
+    recursive: bool,
+    progress_callback: HttpProgressCallback | None,
+) -> None:
+    if not eligible_paths.issubset(all_paths):
+        raise SourceManagerError(
+            "SVN取得対象pathが棚卸しと一致しません",
+            stage="fetch.svn",
+        )
+    validate_managed_work_tree(destination)
+    active_files: list[tuple[PurePosixPath, Path]] = []
+    if recursive:
+        for directory, _children, filenames in os.walk(
+            destination,
+            followlinks=False,
+        ):
+            directory_path = Path(directory)
+            for name in sorted(filenames):
+                candidate = directory_path / name
+                relative = PurePosixPath(
+                    candidate.relative_to(destination).as_posix()
+                )
+                active_files.append((relative, candidate))
+    else:
+        for candidate in sorted(destination.iterdir()):
+            metadata = os.lstat(candidate)
+            if stat.S_ISREG(metadata.st_mode):
+                active_files.append((PurePosixPath(candidate.name), candidate))
+    for relative, candidate in active_files:
+        if relative not in all_paths:
+            candidate.unlink()
+
+    if recursive:
+        for relative in sorted(all_paths, key=lambda value: value.as_posix()):
+            target = destination.joinpath(*relative.parts)
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+
+    copied = 0
+    for relative in sorted(
+        eligible_paths,
+        key=lambda value: value.as_posix(),
+    ):
+        source = checkout.joinpath(*relative.parts)
+        target = destination.joinpath(*relative.parts)
+        if target.is_dir() and not target.is_symlink():
+            raise SourceManagerError(
+                "SVN fileの反映先がdirectoryと競合しています",
+                stage="fetch.svn",
+            )
+        _reject_linked_path_components(source)
+        _copy_regular_file(
+            source,
+            target,
+            progress_callback=progress_callback,
+            provider="svn",
+        )
+        copied += 1
+        _emit_file_progress(
+            progress_callback,
+            "svn",
+            copied,
+            relative.as_posix(),
+        )
 
 
 def _redmine(

@@ -137,6 +137,11 @@
     "svn_link_web_root": [
       "https://<svn-web-host>/<project>?view=summary#files"
     ],
+    "svn_days": [
+      "365",
+      "90",
+      "30"
+    ],
     "svn_repository_path_prefix": [
       "docs",
       "manuals/ja"

@@ -174,6 +174,13 @@ belongs only to that invocation; after correcting the cause, the operator can
 retry immediately. SQLite, Chroma, and normal OS file operations may still
 report their own concurrent-access errors.
 
+The Manager exposes an explicit authenticated daemon shutdown for diagnosis and
+maintenance. Queued searches are cancelled, and a long-running active search
+may be stopped after the bounded drain period. It is not an exclusive writer
+lease: operators must ensure no concurrent search starts while using that
+manual control. The next ordinary search starts a fresh daemon generation
+lazily.
+
 ## 9. Stored paths and ingestion scope
 
 Newly indexed paths are canonical POSIX-style relative paths:
