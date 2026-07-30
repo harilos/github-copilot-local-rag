@@ -65,9 +65,10 @@ SOURCE_DETAIL_MENU = (
     ("1", "更新・再開する"),
     ("2", "取得設定を確認・変更する"),
     ("3", "検索結果リンクを確認・変更する"),
-    ("4", "進捗・ログを見る"),
-    ("5", "技術情報"),
-    ("6", "このSourceを削除する【危険】"),
+    ("4", "秘密区分を確認・変更する"),
+    ("5", "進捗・ログを見る"),
+    ("6", "技術情報"),
+    ("7", "このSourceを削除する【危険】"),
     ("0", "戻る"),
 )
 SOURCE_LINK_MENU = (
@@ -740,6 +741,9 @@ class LocalRagManager:
             if is_distribution
             else "管理PCの引っ越し用フォルダ"
         )
+        db_names = self._select_package_databases(label)
+        if db_names is None:
+            return
         destination = self._prompt_preserving_value(
             "保存先",
             "",
@@ -759,10 +763,18 @@ class LocalRagManager:
         output = Path(destination).expanduser()
         self.output("\n作成内容")
         self.output(f"種類: {label}")
-        self.output(f"対象: 現在の全DB")
+        self.output(f"対象DB: {len(db_names):,}件")
+        for db_name in db_names:
+            self.output(f"  - {db_name}")
         self.output(
             "認証情報、端末設定、実行中の一時情報: 含めない"
         )
+        if is_distribution:
+            self._print_warning(
+                "選択したDBはDB単位でそのまま収録します。"
+                "秘密Sourceを自動除外しません。"
+                "秘密Sourceを除く場合は、先にDBコピーを作成してください。"
+            )
         if not self._confirm("この内容で作成しますか？"):
             self._print_info("パッケージを作成しませんでした。")
             return
@@ -776,11 +788,13 @@ class LocalRagManager:
                 result = create_distribution_package(
                     self.rag_root.parent,
                     output,
+                    db_names=db_names,
                 )
             else:
                 result = create_admin_transfer_package(
                     self.rag_root.parent,
                     output,
+                    db_names=db_names,
                 )
         except Exception as exc:
             self._print_internal_diagnostic(
@@ -799,6 +813,123 @@ class LocalRagManager:
         if isinstance(total, dict):
             self.output(f"ファイル数: {int(total.get('files') or 0):,}")
             self.output(f"合計サイズ: {int(total.get('bytes') or 0):,} bytes")
+
+    def _select_package_databases(
+        self,
+        label: str,
+    ) -> list[str] | None:
+        databases = [
+            item
+            for item in self._package_database_summaries()
+            if self._valid_database_name(str(item.get("name") or ""))
+        ]
+        if not databases:
+            self._print_info(
+                "パッケージへ含められるLocal RAGデータベースがありません。"
+            )
+            return None
+        names = [str(item["name"]) for item in databases]
+        selected = set(names)
+        while True:
+            self._print_screen_header("パッケージ対象DBの選択")
+            self.output(
+                f"{label}へ含めるDBを選びます。"
+                "初期状態では全DBを含めます。"
+            )
+            self.output("\nDB選択")
+            for index, item in enumerate(databases, start=1):
+                name = str(item["name"])
+                title = str(item.get("title") or name)
+                state = "含める" if name in selected else "含めない"
+                self.output(
+                    f"{index}. [{state}] {name}／{title}"
+                )
+            self.output(
+                "\n番号／カンマ区切り: 切替  A: 全て含める  X: 全て外す"
+                "\nC: 選択確定  0: 中止"
+            )
+            action = self._ask("操作: ")
+            if action in (None, "0"):
+                self._print_info("パッケージ作成を中止しました。")
+                return None
+            normalized = str(action).strip().casefold()
+            if normalized == "a":
+                selected = set(names)
+                continue
+            if normalized == "x":
+                selected.clear()
+                continue
+            if normalized == "c":
+                if not selected:
+                    self._print_error(
+                        "少なくとも1つのDBを選択してください。"
+                    )
+                    continue
+                return [name for name in names if name in selected]
+            try:
+                indexes = {
+                    int(value.strip())
+                    for value in normalized.split(",")
+                    if value.strip()
+                }
+            except ValueError:
+                self._invalid_selection("DB番号、A、X、C、または0")
+                continue
+            if not indexes or any(
+                index < 1 or index > len(databases)
+                for index in indexes
+            ):
+                self._invalid_selection(
+                    f"1～{len(databases)}、A、X、C、または0"
+                )
+                continue
+            for index in indexes:
+                name = names[index - 1]
+                if name in selected:
+                    selected.remove(name)
+                else:
+                    selected.add(name)
+
+    def _package_database_summaries(self) -> list[dict[str, str]]:
+        summaries: list[dict[str, str]] = []
+        try:
+            candidates = sorted(
+                self.dbs_root.iterdir(),
+                key=lambda path: path.name.casefold(),
+            )
+        except OSError as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="パッケージ対象DBの一覧取得",
+                stage="package.database_list",
+                can_resume=False,
+            )
+            return summaries
+        for candidate in candidates:
+            name = candidate.name
+            if not self._valid_database_name(name):
+                continue
+            try:
+                database_root = self._validated_database_root(name)
+                if not (database_root / "db.json").is_file():
+                    continue
+                metadata = self._read_database_metadata(name)
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="パッケージ対象DBの確認",
+                    stage="package.database_validate",
+                    db_name=name,
+                    can_resume=False,
+                )
+                continue
+            summaries.append(
+                {
+                    "name": name,
+                    "title": str(metadata.get("title") or name),
+                }
+            )
+        return summaries
 
     def _verify_or_import_package(self) -> None:
         value = self._prompt_preserving_value(
@@ -2523,8 +2654,14 @@ class LocalRagManager:
                 name = str(source.get("display_name") or "既存データ")
                 source_type = self._ui_source_type(source.get("source_type"))
                 status = self._source_manager_status(source)
+                classification = (
+                    " [秘密]"
+                    if self._is_secret_source(source)
+                    else ""
+                )
+                label = name + classification
                 self.output(
-                    f"{index}. {name:<18} "
+                    f"{index}. {label:<22} "
                     f"{_PROVIDER_JA.get(source_type, 'Other'):<12} {status}"
                 )
             self.output("\n0. 戻る")
@@ -2627,10 +2764,56 @@ class LocalRagManager:
             records.append(value)
         return records
 
+    def _source_classifications(
+        self,
+        db_name: str,
+        *,
+        required: bool = False,
+    ) -> dict[str, str] | None:
+        try:
+            database_root = self._validated_database_root(db_name)
+            from source_manager.store import (
+                SourceStore,
+                normalize_source_id,
+            )
+
+            loaded = SourceStore(
+                database_root
+            ).read_source_classifications()
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source秘密区分の読込",
+                stage="source_classification.load",
+                db_name=db_name,
+                can_resume=True,
+            )
+            if required:
+                self._print_error(
+                    "秘密区分を安全に確認できないため、操作を中止しました。"
+                )
+            return None
+        sources = (
+            loaded.payload.get("sources")
+            if isinstance(loaded.payload, dict)
+            else []
+        )
+        return {
+            normalize_source_id(item["source_id"]): str(
+                item["classification"]
+            )
+            for item in (sources if isinstance(sources, list) else ())
+            if isinstance(item, dict)
+            and item.get("source_id")
+            and item.get("classification")
+        }
+
     def _combined_source_records(
         self,
         db_name: str,
         catalog_sources: Iterable[dict[str, Any]],
+        *,
+        classifications: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         managed = self._source_manager_records(db_name)
         by_source_id = {
@@ -2662,6 +2845,22 @@ class LocalRagManager:
             value = dict(configured)
             value["_catalog_present"] = False
             combined.append(value)
+        classification_values = (
+            classifications
+            if classifications is not None
+            else (self._source_classifications(db_name) or {})
+        )
+        from source_manager.store import normalize_source_id
+
+        for value in combined:
+            source_id = normalize_source_id(value.get("source_id"))
+            classification = str(
+                classification_values.get(source_id) or ""
+            )
+            if classification:
+                value["classification"] = classification
+            else:
+                value.pop("classification", None)
         combined.sort(
             key=lambda value: (
                 0 if value.get("_catalog_present") else 1,
@@ -2816,6 +3015,8 @@ class LocalRagManager:
             self.output(
                 f"Source: {display_name}\n"
                 f"種類  : {_PROVIDER_JA.get(source_type, 'Other')}\n"
+                f"秘密区分: "
+                f"{'秘密' if self._is_secret_source(source) else '制限なし'}\n"
                 f"状態  : {state_label}"
             )
             update_label = (
@@ -2827,9 +3028,10 @@ class LocalRagManager:
                 ("1", update_label),
                 ("2", "取得設定を確認・変更する"),
                 ("3", "検索結果リンクを確認・変更する"),
-                ("4", "進捗・ログを見る"),
-                ("5", "技術情報"),
-                ("6", "このSourceを削除する【危険】"),
+                ("4", "秘密区分を確認・変更する"),
+                ("5", "進捗・ログを見る"),
+                ("6", "技術情報"),
+                ("7", "このSourceを削除する【危険】"),
                 ("0", "戻る"),
             )
             self._print_menu("操作", entries)
@@ -2848,14 +3050,129 @@ class LocalRagManager:
                 else:
                     self._source_link_screen(db_name, inventory, source_id)
             elif choice == "4":
-                self._show_source_progress(source)
+                if not source_id:
+                    self._print_warning(
+                        "初回の検索反映が完了してから秘密区分を設定できます。"
+                    )
+                else:
+                    self._configure_source_classification(
+                        db_name,
+                        source,
+                    )
             elif choice == "5":
-                self._show_source_technical_info(source)
+                self._show_source_progress(source)
             elif choice == "6":
+                self._show_source_technical_info(source)
+            elif choice == "7":
                 if self._delete_source_interactive(db_name, source):
                     return
             else:
-                self._invalid_selection("0～6")
+                self._invalid_selection("0～7")
+
+    @staticmethod
+    def _is_secret_source(source: dict[str, Any]) -> bool:
+        return (
+            str(source.get("classification") or "").strip().lower()
+            == "secret"
+        )
+
+    def _configure_source_classification(
+        self,
+        db_name: str,
+        source: dict[str, Any],
+    ) -> None:
+        source_id = str(source.get("source_id") or "").strip()
+        display_name = str(
+            source.get("display_name") or source_id or "Source"
+        )
+        if not source_id:
+            self._print_warning(
+                "初回の検索反映が完了してから秘密区分を設定できます。"
+            )
+            return
+        try:
+            from source_manager.store import (
+                SourceStore,
+                normalize_source_id,
+            )
+
+            store = SourceStore(self._validated_database_root(db_name))
+            loaded = store.read_source_classifications()
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source秘密区分の読込",
+                stage="source_classification.load",
+                db_name=db_name,
+                source_name=display_name,
+                can_resume=True,
+            )
+            return
+        normalized_source_id = normalize_source_id(source_id)
+        current_sources = (
+            loaded.payload.get("sources") or []
+            if isinstance(loaded.payload, dict)
+            else []
+        )
+        current = next(
+            (
+                str(item.get("classification") or "")
+                for item in current_sources
+                if isinstance(item, dict)
+                and normalize_source_id(item.get("source_id"))
+                == normalized_source_id
+            ),
+            "",
+        )
+        self._print_screen_header(
+            "Source秘密区分",
+            db_name=db_name,
+            source_id=source_id,
+        )
+        self.output(
+            "秘密にすると、このDBからコピーを作る際に"
+            "初期状態で『コピーしない』になります。\n"
+            "検索の利用制限や配布パッケージの自動除外ではありません。"
+        )
+        selected = self._select_value(
+            "秘密区分を選択してください",
+            (
+                ("none", "制限なし【既定】"),
+                ("secret", "秘密（DBコピー時は既定で除外）"),
+            ),
+            default="secret" if current == "secret" else "none",
+        )
+        if selected is None:
+            self._print_info("秘密区分は変更されていません。")
+            return
+        classification = "secret" if selected == "secret" else ""
+        self.output("\n変更内容")
+        self.output(f"  Source: {display_name}")
+        self.output(
+            f"  秘密区分: {'秘密' if classification else '制限なし'}"
+        )
+        if not self._confirm("この秘密区分を保存しますか？"):
+            self._print_info("秘密区分は変更されていません。")
+            return
+        try:
+            store.save_source_classification(
+                source_id,
+                classification,
+                expected_revision=loaded.revision,
+                expected_etag=loaded.etag,
+            )
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="Source秘密区分の保存",
+                stage="source_classification.save",
+                db_name=db_name,
+                source_name=display_name,
+                can_resume=True,
+            )
+            self.output("秘密区分は変更されていません。")
+            return
+        self._print_success("Source秘密区分を保存しました。")
 
     def _delete_source_interactive(
         self,
@@ -2888,7 +3205,7 @@ class LocalRagManager:
             f"  検索レコード: {chunks:,}\n"
             "\n削除されるもの\n"
             "  ・このSourceの検索済み文書\n"
-            "  ・このSourceの検索結果リンク設定\n"
+            "  ・このSourceの検索結果リンク設定と秘密区分\n"
             "  ・このSourceの取得設定、進捗、DB内の作業ファイル\n"
             "\n削除されないもの\n"
             "  ・DB自体\n"
@@ -3016,6 +3333,29 @@ class LocalRagManager:
                 )
                 return False
         if indexed_deleted and metadata_removed and management_removed:
+            if source_id:
+                try:
+                    from source_manager.store import (
+                        remove_source_classification,
+                    )
+
+                    remove_source_classification(
+                        self._validated_database_root(db_name),
+                        source_id,
+                    )
+                except Exception as exc:
+                    self._print_internal_diagnostic(
+                        exc,
+                        operation="Source秘密区分の削除",
+                        stage="source_classification.remove",
+                        db_name=db_name,
+                        source_name=display_name,
+                        can_resume=True,
+                    )
+                    self._print_warning(
+                        "Source本体は削除済みですが、"
+                        "秘密区分の管理記録を削除できませんでした。"
+                    )
             self._print_success(
                 f"Source「{display_name}」を削除しました。"
             )

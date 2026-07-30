@@ -23,6 +23,9 @@ from .security import redact_runtime_paths, validate_persistable
 SOURCE_SCHEMA_VERSION = "local-rag-source-manager-v1"
 STATE_SCHEMA_VERSION = "local-rag-source-state-v1"
 EVENT_SCHEMA_VERSION = "local-rag-source-event-v1"
+CLASSIFICATION_SCHEMA_VERSION = "local-rag-source-classifications-v1"
+CLASSIFICATION_FILE_NAME = "source-classifications.json"
+SECRET_CLASSIFICATION = "secret"
 MISSING_ETAG = "missing"
 MAX_JSON_BYTES = 1_048_576
 WINDOWS_FILE_RETRY_SECONDS = 2.0
@@ -81,6 +84,41 @@ def validate_local_source_key(value: Any) -> str:
     return key
 
 
+def normalize_source_id(value: Any) -> str:
+    return unicodedata.normalize("NFC", str(value or "").strip())
+
+
+def remove_source_classification(
+    db_root: Path,
+    source_id: str,
+) -> bool:
+    store = SourceStore(db_root)
+    loaded = store.read_source_classifications()
+    sources = (
+        loaded.payload.get("sources")
+        if isinstance(loaded.payload, dict)
+        else []
+    )
+    source_value = _validate_source_id(source_id)
+    if (
+        source_value is None
+        or not isinstance(sources, list)
+        or not any(
+            isinstance(item, dict)
+            and item.get("source_id") == source_value
+            for item in sources
+        )
+    ):
+        return False
+    store.save_source_classification(
+        source_value,
+        "",
+        expected_revision=loaded.revision,
+        expected_etag=loaded.etag,
+    )
+    return True
+
+
 class SourceStore:
     def __init__(self, db_root: Path):
         self.db_root = _real_directory(Path(db_root))
@@ -98,6 +136,71 @@ class SourceStore:
             work_directory=work,
             logical_root_name=key,
         )
+
+    def read_source_classifications(self) -> StoredJson:
+        path = self.db_root / "sources" / CLASSIFICATION_FILE_NAME
+        loaded = self._read_json(
+            path,
+            expected_schema=CLASSIFICATION_SCHEMA_VERSION,
+        )
+        if loaded.payload:
+            _validate_classifications(loaded.payload)
+        return loaded
+
+    def save_source_classification(
+        self,
+        source_id: str,
+        classification: str,
+        *,
+        expected_revision: int,
+        expected_etag: str,
+    ) -> StoredJson:
+        source_value = _validate_source_id(source_id)
+        if source_value is None:
+            raise SourceManagerError("source_id is required")
+        classification_value = str(classification or "").strip().lower()
+        if classification_value not in {"", SECRET_CLASSIFICATION}:
+            raise SourceManagerError("unsupported Source classification")
+        loaded = self.read_source_classifications()
+        if (
+            loaded.revision != int(expected_revision)
+            or loaded.etag != str(expected_etag)
+        ):
+            raise SourceManagerError("source_configuration_changed")
+        current = loaded.payload.get("sources") if loaded.payload else []
+        values: dict[str, str] = {}
+        if isinstance(current, list):
+            values = {
+                str(item["source_id"]): str(item["classification"])
+                for item in current
+                if isinstance(item, dict)
+                and item.get("source_id")
+                and item.get("classification")
+            }
+        if classification_value:
+            values[source_value] = classification_value
+        else:
+            values.pop(source_value, None)
+        payload = {
+            "schema_version": CLASSIFICATION_SCHEMA_VERSION,
+            "sources": [
+                {
+                    "source_id": key,
+                    "classification": values[key],
+                }
+                for key in sorted(values)
+            ],
+        }
+        _validate_classifications(payload)
+        stored = self._atomic_json_write(
+            loaded.path,
+            payload,
+            expected_revision=expected_revision,
+            expected_etag=expected_etag,
+            expected_schema=CLASSIFICATION_SCHEMA_VERSION,
+        )
+        _validate_classifications(stored.payload)
+        return stored
 
     def create_source(
         self,
@@ -508,7 +611,7 @@ class SourceStore:
 def _validate_source_id(value: Any) -> str | None:
     if value is None:
         return None
-    text = unicodedata.normalize("NFC", str(value).strip())
+    text = normalize_source_id(value)
     if not _SOURCE_ID.fullmatch(text) or text in {".", ".."}:
         raise SourceManagerError("source_id is invalid")
     return text
@@ -543,6 +646,43 @@ def _validate_state(payload: Mapping[str, Any]) -> None:
         sanitized_runtime["input_path"] = "<TRANSIENT_RUNTIME_PATH>"
         sanitized["runtime"] = sanitized_runtime
     validate_persistable(sanitized, field="state")
+
+
+def _validate_classifications(payload: Mapping[str, Any]) -> None:
+    allowed = {
+        "schema_version",
+        "sources",
+        "revision",
+        "updated_at",
+    }
+    if set(payload) - allowed:
+        raise SourceManagerError(
+            "Source classifications contain unsupported fields"
+        )
+    if payload.get("schema_version") != CLASSIFICATION_SCHEMA_VERSION:
+        raise SourceManagerError("unsupported Source classification schema")
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or len(sources) > 100_000:
+        raise SourceManagerError(
+            "Source classifications must be a bounded array"
+        )
+    seen: set[str] = set()
+    for item in sources:
+        if not isinstance(item, dict) or set(item) != {
+            "source_id",
+            "classification",
+        }:
+            raise SourceManagerError("Source classification is invalid")
+        source_id = _validate_source_id(item.get("source_id"))
+        classification = item.get("classification")
+        if source_id is None:
+            raise SourceManagerError("Source classification requires source_id")
+        if source_id in seen:
+            raise SourceManagerError("duplicate Source classification")
+        seen.add(source_id)
+        if classification != SECRET_CLASSIFICATION:
+            raise SourceManagerError("unsupported Source classification")
+    validate_persistable(payload, field="source_classifications")
 
 
 def _real_directory(path: Path) -> Path:

@@ -141,9 +141,10 @@ Source詳細:
 1. 更新・再開する
 2. 取得設定を確認・変更する
 3. 検索結果リンクを確認・変更する
-4. 進捗・ログを見る
-5. 技術情報
-6. このSourceを削除する【危険】
+4. 秘密区分を確認・変更する
+5. 進捗・ログを見る
+6. 技術情報
+7. このSourceを削除する【危険】
 0. 戻る
 ```
 
@@ -157,7 +158,7 @@ Source削除では、選択したSourceの検索済み文書、検索結果リ�
 
 「問題があるとき」では検索を試し、必要なら検索用索引全体を再作成します。
 元文書の再取得を伴う操作とは分離されています。個別Sourceの状態、取得・反映
-件数、最後の再開位置は、Source詳細の`4. 進捗・ログを見る`から確認します。
+件数、最後の再開位置は、Source詳細の`5. 進捗・ログを見る`から確認します。
 
 ## 4. DB作成
 
@@ -172,9 +173,10 @@ titleとquery hintはCopilotが一覧からDBを選ぶための公開情報で�
 
 ### DBをコピーする
 
-選択DBメニューの`5. このDBのコピーを作る`を使います。初期状態では全Sourceが
-コピー対象です。Source番号を入力すると「コピーしない」へ切り替わり、対応端末
-では取り消し線付きで表示されます。
+選択DBメニューの`5. このDBのコピーを作る`を使います。秘密区分が未設定のSource
+は初期状態でコピー対象、`秘密`のSourceは初期状態で「コピーしない」です。
+Source番号を入力すると状態を切り替えられるため、秘密Sourceの明示的なコピーも
+可能です。対応端末ではコピーしないSourceを取り消し線付きで表示します。
 
 コピー先のDB名、表示名、検索ヒントを確認して作成します。除外したSourceは
 コピー先のvector、catalog、clean、取得設定から削除されます。元DBは変更せず、
@@ -336,6 +338,17 @@ Source inventoryはcatalogの現在有効なdocumentから読み取ります。s
 canonical schemaは`rag-source-metadata-v1`です。1 Sourceは最大1 Provider、
 最大1 URL設定です。path prefixやlongest-prefix選択はありません。
 
+秘密区分は検索用Source Metadataとは別の、Managerだけが読む管理情報です。
+Source詳細の`秘密区分を確認・変更する`から`秘密`または`制限なし`を選びます。
+未設定は`制限なし`です。保存先は次で、利用者向け検索packageには入りません。
+
+```text
+<db-root>/sources/source-classifications.json
+```
+
+この区分はDBコピー画面の初期選択だけに使います。元DBの検索を禁止せず、選択した
+元DBをpackageへ入れる際に秘密Sourceを自動除外するものでもありません。
+
 初版のSource Metadata編集はsingle-editorです。同じDBを2つのManager processから
 同時に編集しないでください。一時file、revision／etag再確認、atomic replaceで
 保存しますが、永続lock fileは作らず、厳密なmulti-process CASは保証しません。
@@ -369,7 +382,7 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 ### 利用者向け検索package
 
 - ZIP
-- 現在の全DB
+- 画面で選択した1件以上のDB
 - 公開wrapperと検索runtime
 - 必要なmodel
 - 現行schemaとして検証済みのSource Metadata全体
@@ -384,7 +397,7 @@ directoryへ統合copyし、既存のPython環境や端末固有設定を削除�
 ### 管理PC引っ越しpackage
 
 - resumable folder
-- 現在の全DBと管理用code
+- 画面で選択した1件以上のDBと管理用code
 - Source設定とcheckpoint
 - 途中中断後に同じ出力先で再開可能
 
@@ -407,6 +420,10 @@ package作成日時は内容更新日時と分けて記録します。配布、c
 
 activeな`source-links.json`には内部URLが含まれ得ます。packageを機密資料として
 安全に保管してください。
+
+DB選択画面は従来互換で全DBが選択済みの状態から始まり、番号またはカンマ区切りで
+任意の複数DBへ変更できます。packageは選択DBをDB単位で収録するため、秘密Source
+を除いた配布物が必要な場合は先にDBコピーを作成し、そのコピーだけを選びます。
 
 ## 10. この端末の設定・動作確認
 

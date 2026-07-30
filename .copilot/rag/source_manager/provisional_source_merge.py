@@ -121,8 +121,14 @@ def _install_manager_merge(manager_class: type[Any]) -> None:
         self: Any,
         db_name: str,
         catalog_sources: Iterable[dict[str, Any]],
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        records = original_combined(self, db_name, catalog_sources)
+        records = original_combined(
+            self,
+            db_name,
+            catalog_sources,
+            **kwargs,
+        )
         return merge_provisional_source_records(records)
 
     @functools.wraps(original_status)

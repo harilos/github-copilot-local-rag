@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .metadata import remove_source_metadata
-from .store import SourceStore
+from .store import SourceStore, remove_source_classification
 
 _LOCAL_SOURCE_KEY = re.compile(r"^src_[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{12}$")
 _COPY_BATCH_SIZE = 500
@@ -155,6 +155,13 @@ def delete_excluded_sources(
                     except Exception as exc:
                         raise error_type(
                             "failed to remove copied Source Metadata: "
+                            f"{display_name}"
+                        ) from exc
+                    try:
+                        remove_source_classification(staging, source_id)
+                    except Exception as exc:
+                        raise error_type(
+                            "failed to remove copied Source classification: "
                             f"{display_name}"
                         ) from exc
                 if local_key:

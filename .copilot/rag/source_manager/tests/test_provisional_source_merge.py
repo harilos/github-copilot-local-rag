@@ -95,6 +95,38 @@ class ProvisionalSourceMergeTests(unittest.TestCase):
             manager._source_manager_status(values[0]),
         )
 
+    def test_manager_wrapper_forwards_classification_keyword(self) -> None:
+        records = [_catalog_record("secret-source")]
+        received: dict[str, str] | None = None
+
+        class FakeManager:
+            def _combined_source_records(
+                self,
+                _db_name: str,
+                _catalog_sources: list[dict[str, Any]],
+                *,
+                classifications: dict[str, str] | None = None,
+            ) -> list[dict[str, Any]]:
+                nonlocal received
+                received = classifications
+                return list(records)
+
+            def _source_manager_status(self, _source: dict[str, Any]) -> str:
+                return "base-status"
+
+        _install_manager_merge(FakeManager)
+        values = FakeManager()._combined_source_records(
+            "example-rag",
+            [],
+            classifications={"secret-source": "secret"},
+        )
+
+        self.assertEqual(
+            {"secret-source": "secret"},
+            received,
+        )
+        self.assertEqual(records, values)
+
     def test_patch_is_idempotent(self) -> None:
         class FakeManager:
             def _combined_source_records(

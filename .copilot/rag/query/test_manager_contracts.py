@@ -189,6 +189,200 @@ class ManagerContractTests(unittest.TestCase):
             ],
         )
 
+    def test_package_database_selection_supports_arbitrary_multiple(self) -> None:
+        manager = self.manager(["2", "c"])
+        manager._package_database_summaries = lambda: [
+            {"name": "one-rag", "title": "One"},
+            {"name": "two-rag", "title": "Two"},
+            {"name": "three-rag", "title": "Three"},
+        ]
+
+        selected = manager._select_package_databases(
+            "利用者向け検索パッケージ"
+        )
+
+        self.assertEqual(["one-rag", "three-rag"], selected)
+
+    def test_package_database_list_ignores_uninitialized_directory(
+        self,
+    ) -> None:
+        ready = self.make_db("ready-rag")
+        (ready / "db.json").write_text(
+            '{"title":"Ready"}\n',
+            encoding="utf-8",
+        )
+        self.make_db("incomplete-rag")
+
+        summaries = self.manager()._package_database_summaries()
+
+        self.assertEqual(
+            [{"name": "ready-rag", "title": "Ready"}],
+            summaries,
+        )
+
+    def test_distribution_passes_selected_databases_to_package_builder(
+        self,
+    ) -> None:
+        output_path = self.base / "selected.zip"
+        manager = self.manager(["2", "c", str(output_path), "y"])
+        manager._package_database_summaries = lambda: [
+            {"name": "one-rag", "title": "One"},
+            {"name": "two-rag", "title": "Two"},
+            {"name": "three-rag", "title": "Three"},
+        ]
+        result = {
+            "status": "written",
+            "manifest": {"total": {"files": 3, "bytes": 100}},
+        }
+        with mock.patch.object(
+            source_packages,
+            "create_distribution_package",
+            return_value=result,
+        ) as create:
+            manager._create_portable_package("distribution")
+
+        create.assert_called_once_with(
+            self.rag_root.parent,
+            output_path,
+            db_names=["one-rag", "three-rag"],
+        )
+        self.assertIn(
+            "秘密Sourceを自動除外しません。",
+            "\n".join(self.output),
+        )
+
+    def test_source_secret_classification_is_manager_only(self) -> None:
+        self.make_db()
+        manager = self.manager(["2", "y"])
+        manager._configure_source_classification(
+            "example-rag",
+            {
+                "source_id": "source-a",
+                "display_name": "Sensitive Source",
+            },
+        )
+
+        from source_manager.store import SourceStore
+
+        loaded = SourceStore(
+            self.dbs_root / "example-rag"
+        ).read_source_classifications()
+        self.assertEqual(
+            [
+                {
+                    "source_id": "source-a",
+                    "classification": "secret",
+                }
+            ],
+            loaded.payload["sources"],
+        )
+        self.assertFalse(
+            (self.dbs_root / "example-rag" / "source-links.json").exists()
+        )
+        combined = manager._combined_source_records(
+            "example-rag",
+            [
+                {
+                    "source_id": "source-a",
+                    "display_name": "Sensitive Source",
+                    "document_count": 1,
+                }
+            ],
+        )
+        self.assertEqual("secret", combined[0]["classification"])
+
+    def test_unicode_source_id_secret_remains_excluded_after_reload(
+        self,
+    ) -> None:
+        self.make_db()
+        source_id = "source-e\u0301"
+        manager = self.manager(["2", "y", "c"])
+        manager._configure_source_classification(
+            "example-rag",
+            {
+                "source_id": source_id,
+                "display_name": "Unicode Source",
+            },
+        )
+
+        from source_manager.database_copy import choose_excluded_sources
+        from source_manager.store import SourceStore
+
+        stored = SourceStore(
+            self.dbs_root / "example-rag"
+        ).read_source_classifications()
+        self.assertEqual(
+            "source-\u00e9",
+            stored.payload["sources"][0]["source_id"],
+        )
+        combined = manager._combined_source_records(
+            "example-rag",
+            [
+                {
+                    "source_id": source_id,
+                    "display_name": "Unicode Source",
+                    "document_count": 1,
+                }
+            ],
+        )
+        self.assertEqual("secret", combined[0]["classification"])
+        self.assertEqual(
+            {source_id},
+            choose_excluded_sources(
+                manager,
+                "example-rag",
+                combined,
+            ),
+        )
+
+    def test_database_copy_fails_closed_without_source_inventory(self) -> None:
+        self.make_db()
+        manager = self.manager()
+        manager._load_source_inventory = lambda _name: None
+
+        with mock.patch(
+            "source_manager.database_copy.copy_database"
+        ) as copy:
+            manager._copy_database_screen("example-rag")
+
+        copy.assert_not_called()
+        rendered = "\n".join(self.output)
+        self.assertIn(
+            "Source一覧を安全に確認できないため、DBコピーを中止しました。",
+            rendered,
+        )
+        self.assertIn("秘密Sourceを含む全Source", rendered)
+
+    def test_runtime_patched_copy_defaults_secret_source_to_excluded(
+        self,
+    ) -> None:
+        db_root = self.make_db()
+        from source_manager.store import SourceStore
+
+        store = SourceStore(db_root)
+        loaded = store.read_source_classifications()
+        store.save_source_classification(
+            "source-a",
+            "secret",
+            expected_revision=loaded.revision,
+            expected_etag=loaded.etag,
+        )
+        manager = self.manager(
+            ["c", "example-copy-rag", "", "", "n"]
+        )
+        manager._load_source_inventory = lambda _name: FakeInventory()
+
+        with mock.patch(
+            "source_manager.database_copy.copy_database"
+        ) as copy:
+            manager._copy_database_screen("example-rag")
+
+        copy.assert_not_called()
+        rendered = "\n".join(self.output)
+        self.assertIn("コピーしないSource: 1件", rendered)
+        self.assertIn("[秘密]", rendered)
+        self.assertIn("DBコピーを中止しました。", rendered)
+
     def test_manager_can_stop_search_daemon(self) -> None:
         manager = self.manager(["y"])
         with mock.patch(
@@ -671,8 +865,9 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("同じ取得元と検索結果リンク設定", text)
         self.assertIn("画面: Source詳細", text)
         self.assertIn("1. 更新・再開する", text)
-        self.assertIn("5. 技術情報", text)
-        self.assertIn("6. このSourceを削除する【危険】", text)
+        self.assertIn("4. 秘密区分を確認・変更する", text)
+        self.assertIn("6. 技術情報", text)
+        self.assertIn("7. このSourceを削除する【危険】", text)
 
     def test_redmine_fetch_settings_refresh_within_source_detail(
         self,
@@ -831,7 +1026,17 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("Source削除を中止しました", "\n".join(self.output))
 
     def test_source_delete_removes_metadata_and_index(self) -> None:
-        self.make_db()
+        db_root = self.make_db()
+        from source_manager.store import SourceStore
+
+        classification_store = SourceStore(db_root)
+        loaded = classification_store.read_source_classifications()
+        classification_store.save_source_classification(
+            "source-a",
+            "secret",
+            expected_revision=loaded.revision,
+            expected_etag=loaded.etag,
+        )
         source = {
             "source_id": "source-a",
             "display_name": "Synthetic Source",
@@ -867,6 +1072,11 @@ class ManagerContractTests(unittest.TestCase):
             ["--db", "example-rag", "--source-id", "source-a"],
         )
         remove_metadata.assert_called_once()
+        self.assertEqual(
+            [],
+            classification_store.read_source_classifications()
+            .payload["sources"],
+        )
         rendered = "\n".join(self.output)
         self.assertIn("ほかのSourceとその文書", rendered)
         self.assertIn(

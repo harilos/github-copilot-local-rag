@@ -76,10 +76,27 @@ def install_manager_database_copy(manager_class: type[Any]) -> None:
             return
         source_root = self._validated_database_root(db_name)
         inventory = self._load_source_inventory(db_name)
-        catalog_sources = (
-            self._inventory_sources(inventory) if inventory is not None else []
+        if inventory is None:
+            self._print_error(
+                "Source一覧を安全に確認できないため、DBコピーを中止しました。"
+            )
+            self.output(
+                "秘密Sourceを含む全Sourceを確認できる状態にしてから、"
+                "もう一度実行してください。"
+            )
+            return
+        catalog_sources = self._inventory_sources(inventory)
+        classifications = self._source_classifications(
+            db_name,
+            required=True,
         )
-        sources = self._combined_source_records(db_name, catalog_sources)
+        if classifications is None:
+            return
+        sources = self._combined_source_records(
+            db_name,
+            catalog_sources,
+            classifications=classifications,
+        )
         excluded = choose_excluded_sources(self, db_name, sources)
         if excluded is None:
             return
@@ -137,6 +154,12 @@ def install_manager_database_copy(manager_class: type[Any]) -> None:
             for index, source in enumerate(sources, start=1)
             if choice_key(source, index) in excluded
         ]
+        included_secret_records = [
+            source
+            for index, source in enumerate(sources, start=1)
+            if is_secret_source(source)
+            and choice_key(source, index) not in excluded
+        ]
         copied_count = len(sources) - len(excluded_records)
         self.output("\nコピー内容")
         self.output(f"  元DB: {db_name}")
@@ -145,6 +168,12 @@ def install_manager_database_copy(manager_class: type[Any]) -> None:
         self.output(f"  コピーしないSource: {len(excluded_records):,}件")
         for source in excluded_records:
             self.output("    - " + strike_text(self, source_name(source)))
+        if included_secret_records:
+            self._print_warning(
+                "秘密Sourceを明示的にコピーする選択です。"
+            )
+            for source in included_secret_records:
+                self.output("    - [秘密] " + source_name(source))
         self.output(
             "  Sourceの取得先: 元DBと同じ設定をコピー\n"
             "  元DB: 変更しない\n"
@@ -197,14 +226,18 @@ def choose_excluded_sources(
     db_name: str,
     sources: list[dict[str, Any]],
 ) -> set[str] | None:
-    excluded: set[str] = set()
+    excluded: set[str] = {
+        choice_key(source, index)
+        for index, source in enumerate(sources, start=1)
+        if is_secret_source(source)
+    }
     if not sources:
         return excluded
     while True:
         manager._print_screen_header("DBのコピーを作る", db_name=db_name)
         manager.output(
-            "全Sourceがコピー対象です。番号を入力すると、"
-            "そのSourceを『コピーしない』へ切り替えます。"
+            "秘密Sourceは初期状態で『コピーしない』です。"
+            "それ以外はコピー対象です。番号を入力すると切り替わります。"
         )
         manager.output("\nSource選択")
         for index, source in enumerate(sources, start=1):
@@ -214,6 +247,8 @@ def choose_excluded_sources(
                 f"[{str(source.get('source_type') or 'other')}] "
                 f"{int(source.get('document_count') or 0):,}文書"
             )
+            if is_secret_source(source):
+                details = "[秘密] " + details
             state = "コピーする"
             if key in excluded:
                 details = strike_text(manager, details)
@@ -273,6 +308,13 @@ def source_name(source: Mapping[str, Any]) -> str:
         or source.get("source_id")
         or source.get("_local_source_key")
         or "Source"
+    )
+
+
+def is_secret_source(source: Mapping[str, Any]) -> bool:
+    return (
+        str(source.get("classification") or "").strip().lower()
+        == "secret"
     )
 
 

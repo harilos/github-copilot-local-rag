@@ -170,11 +170,12 @@ See [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja
 The Manager provides two distinct package types:
 
 - Distribution package: a ZIP for read-only search clients. It contains the
-  public wrappers, runtime code, all current databases, and model
+  public wrappers, runtime code, the one or more databases selected in the
+  Manager, and model
   assets needed by the selected package contract. After extraction, run
   `sh ./install.sh` on macOS/Linux or `.\install.ps1` in Windows PowerShell.
 - Management-PC transfer: a resumable folder for another management computer.
-  It also carries all current databases, administration code, and Source
+  It carries the selected databases, administration code, and Source
   acquisition state.
 
 Package creation takes no global Local RAG lock. It reads files defensively
@@ -183,6 +184,14 @@ uses relative paths and SHA-256 checksums. Temporary files, runtime locks,
 virtual environments, credentials, and `source-links.json.bak` are excluded.
 The active Source metadata sidecar can contain internal URLs, so every package
 must be handled as sensitive local data.
+
+The Manager keeps the optional `secret` Source classification separately at
+`<db-root>/sources/source-classifications.json`. It is administration-only
+state and is not included in a distribution ZIP. An unset Source has no
+restriction. A secret Source is excluded by default when the Manager creates
+an independent DB copy, but the human can explicitly include it. Packaging a
+selected DB does not filter its Sources; create and select a filtered DB copy
+when a distribution must omit secret Sources.
 
 ## Source Metadata and links
 

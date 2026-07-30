@@ -8,6 +8,7 @@ E: 通常設定として維持、を表します。
 |---|---|---|---|---|---|---|---|
 | Source詳細 | 共通 | `source_id` | Source ID（読み取り専用） | C | catalog由来の値を表示のみ | Source inventory、検索結果 | 文書identityと取り込み状態に関係するため変更しない |
 | Source詳細 | 共通 | `display_name` | Source表示名 | E | 任意の表示用値として維持 | Managerの一覧・詳細 | identityや検索には影響しない |
+| Source詳細 | 共通 | — | 秘密区分 | E（任意） | 未設定／制限なし、秘密から選択。秘密はDBコピー時に既定除外 | 管理専用`source-classifications.json` | 検索用Source Metadataや利用者向けpackageへ公開しない。packageはDB単位でありSource自動除外はしない |
 | Source詳細 | 共通 | `observed_root` | 自動検出された保存ルート | B/C | 現在有効なcatalog文書から自動導出し、入力不可 | `source_inventory.py`、`source_links.py` | URL生成時にpath component単位で1回だけ除去する内部状態 |
 | Source情報 | 共通 | — | Source種別 | E（任意） | 未設定、folder、git、GitHub、GitLab、Azure DevOps、SVN、SharePoint、Redmine、その他から選択 | `source-links.json`の`source_type` | Linkなしでも設定でき、未設定をfolderへ推測しない |
 | Source Link | 共通 | Provider | Source種別から自動 | B | Link設定時に選んだProviderを`source_type`へ保存し、nested `link`には重複保存しない | `validate_source_link()`、URL resolver | Provider二重管理を避ける。Linkなしなら種別も任意 |

@@ -258,6 +258,13 @@ The first release has a single-editor contract for Source Metadata. Atomic
 replacement plus revision/etag rechecks protect one Manager process, but no
 persistent lock file is created and strict multi-process CAS is not claimed.
 
+Source confidentiality is intentionally not Source Metadata. The Manager-only
+`<db-root>/sources/source-classifications.json` stores an optional `secret`
+classification keyed by Source ID. Missing entries are unrestricted. Lookup,
+result rendering, and distribution packages do not read or expose this file.
+The Manager uses it only to preselect secret Sources as excluded when creating
+an independent DB copy; an explicit human selection can still include them.
+
 ## 12. Portable packages
 
 The Manager creates two different artifacts:
@@ -273,8 +280,8 @@ state.
 ### Management-PC transfer folder
 
 Contains administration code, Source settings, checkpoints, databases, and
-assets required to continue management on another computer. Creation is
-resumable.
+assets required to continue management on another computer, including
+Manager-only Source classifications. Creation is resumable.
 
 Package creation does not take a global product lock. It detects file changes
 during copying and aborts rather than publishing an inconsistent artifact.

@@ -10,11 +10,13 @@ from pathlib import Path
 from unittest import mock
 
 from source_manager.database_copy import (
+    choose_excluded_sources,
     proposed_copy_name,
     strike_text,
 )
 from source_manager.database_copy_core import copy_database
 from source_manager.database_copy_storage import delete_excluded_sources
+from source_manager.store import SourceStore
 
 
 class DatabaseCopyTests(unittest.TestCase):
@@ -161,6 +163,13 @@ class DatabaseCopyTests(unittest.TestCase):
         source_dir = staging / "sources" / "src_secret-abcdef012345"
         source_dir.mkdir(parents=True)
         (source_dir / "source.json").write_text("{}", encoding="utf-8")
+        classifications = SourceStore(staging).read_source_classifications()
+        SourceStore(staging).save_source_classification(
+            "secret-source",
+            "secret",
+            expected_revision=classifications.revision,
+            expected_etag=classifications.etag,
+        )
         delete_calls: list[tuple[str, str, str]] = []
         source_delete = types.ModuleType("software_rag_tool.source_delete")
         source_delete.delete_source_data = lambda source_id: (
@@ -235,6 +244,8 @@ class DatabaseCopyTests(unittest.TestCase):
         )
         metadata_remove.assert_called_once()
         self.assertFalse(source_dir.exists())
+        remaining = SourceStore(staging).read_source_classifications()
+        self.assertEqual([], remaining.payload["sources"])
 
     def test_excluded_label_has_strikethrough_fallback(self) -> None:
         plain = types.SimpleNamespace(use_color=False)
@@ -242,6 +253,96 @@ class DatabaseCopyTests(unittest.TestCase):
         self.assertEqual("~~Secret~~", strike_text(plain, "Secret"))
         self.assertEqual("\033[9mSecret\033[0m", strike_text(colored, "Secret"))
         self.assertEqual("project-copy-rag", proposed_copy_name("project-rag"))
+
+    def test_secret_source_is_excluded_by_default_in_manager_choice(self) -> None:
+        output: list[str] = []
+        answers = iter(["c"])
+
+        class Manager:
+            use_color = False
+
+            @staticmethod
+            def _print_screen_header(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def _print_info(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def _invalid_selection(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("unexpected invalid selection")
+
+            @staticmethod
+            def _ask(_prompt: str) -> str:
+                return next(answers)
+
+            @staticmethod
+            def output(value: str) -> None:
+                output.append(value)
+
+        selected = choose_excluded_sources(
+            Manager(),
+            "master-rag",
+            [
+                {
+                    "source_id": "public",
+                    "display_name": "Public",
+                },
+                {
+                    "source_id": "secret",
+                    "display_name": "Secret",
+                    "classification": "secret",
+                },
+                {
+                    "source_id": "unset",
+                    "display_name": "Unset",
+                },
+            ],
+        )
+
+        self.assertEqual({"secret"}, selected)
+        self.assertIn("[秘密]", "\n".join(output))
+
+    def test_secret_source_can_be_explicitly_included(self) -> None:
+        answers = iter(["1", "c"])
+
+        class Manager:
+            use_color = False
+
+            @staticmethod
+            def _print_screen_header(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def _print_info(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def _invalid_selection(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("unexpected invalid selection")
+
+            @staticmethod
+            def _ask(_prompt: str) -> str:
+                return next(answers)
+
+            @staticmethod
+            def output(_value: str) -> None:
+                return None
+
+        selected = choose_excluded_sources(
+            Manager(),
+            "master-rag",
+            [
+                {
+                    "source_id": "secret",
+                    "display_name": "Secret",
+                    "classification": "secret",
+                }
+            ],
+        )
+
+        self.assertEqual(set(), selected)
 
 
 if __name__ == "__main__":
