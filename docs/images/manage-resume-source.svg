@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720" role="img" aria-labelledby="title desc">
+  <title id="title">Sourceの更新と再開の画面例</title>
+  <desc id="desc">中断したSVN Sourceを選び、進捗を確認しながら再開する擬似端末画面</desc>
+  <rect width="1000" height="720" rx="14" fill="#0d1117"/>
+  <rect width="1000" height="44" rx="14" fill="#21262d"/>
+  <rect y="30" width="1000" height="14" fill="#21262d"/>
+  <circle cx="24" cy="22" r="7" fill="#ff5f56"/>
+  <circle cx="47" cy="22" r="7" fill="#ffbd2e"/>
+  <circle cx="70" cy="22" r="7" fill="#27c93f"/>
+  <text x="500" y="28" text-anchor="middle" fill="#c9d1d9"
+        font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+        font-size="15">manage.py — Sourceの更新・再開</text>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+     font-size="17" fill="#e6edf3">
+    <text x="36" y="78" fill="#8b949e">============================================================</text>
+    <text x="36" y="108" font-weight="700">Local RAG Manager</text>
+    <text x="36" y="138">データベース: product-rag</text>
+    <text x="36" y="168">画面: Source詳細</text>
+    <text x="36" y="198" fill="#8b949e">============================================================</text>
+    <text x="36" y="234">Source: 製品仕様書</text>
+    <text x="36" y="264">種類  : Subversion（SVN）</text>
+    <text x="36" y="294">状態  : <tspan fill="#d29922">前回失敗・再開可能</tspan></text>
+    <text x="36" y="334"><tspan fill="#79c0ff">1.</tspan> 更新・再開する</text>
+    <text x="36" y="364"><tspan fill="#79c0ff">2.</tspan> 取得設定を確認・変更する</text>
+    <text x="36" y="394"><tspan fill="#79c0ff">3.</tspan> 検索結果リンクを確認・変更する</text>
+    <text x="36" y="424"><tspan fill="#79c0ff">4.</tspan> 進捗・ログを見る</text>
+    <text x="36" y="454"><tspan fill="#79c0ff">5.</tspan> 技術情報</text>
+    <text x="36" y="484"><tspan fill="#79c0ff">6.</tspan> このSourceを削除する【危険】</text>
+    <text x="36" y="514"><tspan fill="#79c0ff">0.</tspan> 戻る</text>
+    <text x="36" y="552">番号を入力してください: <tspan fill="#3fb950" font-weight="700">1</tspan></text>
+    <text x="36" y="584">このSourceの更新または再開を開始しますか？ [y/N]: <tspan fill="#3fb950" font-weight="700">y</tspan></text>
+    <text x="36" y="622" fill="#d2a8ff">[Source更新][Subversion（SVN）][ADD検索反映] 76%（全126件中、今97ファイル目）</text>
+    <text x="36" y="652" fill="#d2a8ff">対象: docs/specification.md　経過3分12秒</text>
+    <text x="36" y="688" fill="#3fb950">[成功] Sourceを検索へ反映しました。</text>
+  </g>
+</svg>

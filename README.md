@@ -1,30 +1,107 @@
 # GitHub Copilot Local RAG
 
-**Current development version: 1.0.1**
+> Current development version: 1.0.1
+>
+> Release status: Unreleased release candidate
 
-**Release status: Unreleased release candidate**
+ローカル文書や社内資料を、GitHub Copilotから自然な日本語で検索するための
+RAGパックです。普段の検索ではコマンドや検索方式を覚える必要はありません。
+Copilotへ「ローカルRAGを使って」と伝え、知りたいことをそのまま質問します。
 
-ローカル文書をGitHub Copilotから一度の検索で参照するためのRAGパックです。
-通常検索は読み取り専用で、検索方式の選択、再検索、DB変更をPython側または
-Copilotが勝手に行わない契約になっています。
+文書の抽出、索引作成、検索はPC内で行われます。Copilotへ渡るのはDB全文ではなく、
+選ばれた抜粋、出典、検索メタデータです。通常検索中に外部URLへアクセスする
+ことはありません。
 
-## 主な機能
+| やりたいこと | 使うもの | 操作する人 |
+|---|---|---|
+| 資料を検索して回答を得る | GitHub Copilotのチャット | 利用者 |
+| DBや取得元を追加・更新する | Local RAG Manager | 管理者 |
+| 検索用packageを配布する | Local RAG Manager | 管理者 |
 
-- Dense、BM25、Exact、metadataを組み合わせたHybrid検索
-- 直接根拠と、幅広い関連文書候補を分離した検索結果
-- 識別子の完全一致確認とnear-collision防止
-- 一度の検索で生成する初回summaryと、再検索しないfollow-up detail
-- 文書の見出し、表ヘッダー、前後段落を使う構造的context
-- Source単位の任意Webリンク（通常URLと固定リンクを区別）
-- 複数DB、複数Source、増分更新、再開、索引修復
-- Windowsの永続daemonと直接`python.exe`起動
-- 人間向けLocal RAG Manager
-- 検索利用者向けZIPと、管理PC引っ越し用フォルダの2種類のpackage
+## 利用者：Copilotから検索する
 
-検索本文と索引はローカルで処理されます。回答に必要な短い抜粋だけが
-Copilotへ渡されます。通常検索は外部URLへHTTPアクセスしません。
+### 1. 初回、または初期設定が必要と表示されたとき
 
-## 必要なもの
+インストール後の最初のチャットや、検索時に初期設定が必要と表示されたときは、
+Copilotへ次のように依頼します。
+
+```text
+ローカルRAGの初期設定をして
+```
+
+CopilotがPython環境、必要package、検索modelを準備します。この端末ですでに
+初期設定が完了している場合だけ、この手順を飛ばせます。
+
+### 2. 使えるDBを確認する
+
+一覧だけ先に確認したい場合は、次のように依頼します。
+
+```text
+使えるローカルRAGのDBと、それぞれ何が入っているか教えて
+```
+
+DB名は`project-rag`のように`-rag`で終わります。以後の質問でDB名を指定すると、
+一覧確認を省いてそのDBを検索できます。DB名が分からないまま質問しても、
+Copilotが内部で一覧を確認するため問題ありません。
+
+### 3. 普通の文章で質問する
+
+「ローカルRAG」「社内資料」「インストール済みの資料」など、ローカル資料を
+使うことを明示してください。単に専門用語を質問しただけでは、Copilotは勝手に
+RAG検索を始めません。
+
+| やりたいこと | Copilotへの依頼例 |
+|---|---|
+| 用語や識別子を調べる | `project-ragで、A2Lとは何か根拠付きで教えて` |
+| 関連資料を広く探す | `project-ragで、A2Lの直接根拠と関連資料を広く探し、資料ごとの観点を整理して` |
+| 複数の方式を比較する | `project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
+| DBをCopilotに選ばせる | `ローカルRAGで、A2Lの設計意図を社内資料から調べて` |
+| 結果の前後を詳しく読む | `さっきの[E2]の前後をもっと詳しく見せて` |
+
+キーワードを並べるより、知りたい目的、条件、比較軸まで含めた質問のほうが
+意図に合った結果になります。検索信号はPython側で内部的に組み合わされるため、
+利用者がベクトル検索、全文検索、完全一致検索などを指定する必要はありません。
+
+DB名を省略した場合、CopilotはDB一覧を1回確認します。収録内容から1つに
+絞れるときだけ検索し、候補が複数ある場合は検索前に利用者へ確認します。
+
+### 回答と出典の見方
+
+```text
+あなた > project-ragで、A2Lの目的と採用理由を根拠付きで教えて。
+
+Copilot > A2Lの目的は……です。[E1]
+          採用理由は……と説明されています。[E2]
+          次の文書は関連候補ですが、直接根拠ではありません。[D1]
+
+          ## References
+
+          - [E1] design.md
+          - [E2] specification.pdf
+          - [D1] operations-guide.md
+```
+
+- `[E…]`: 質問へ直接答える根拠
+- `[B…]`: 理解を補う背景情報
+- `[D…]`: 関連文書の候補。自動的に直接根拠とは扱いません
+
+複数の検索結果を組み合わせた回答では、`[R1-E1]`、`[R2-D1]`のように、
+何回目の検索結果かを示す番号が付きます。
+
+出典は回答末尾の`## References`にまとまります。検索結果リンクが設定されて
+いれば、ファイル名からGitHub、SVN、Redmine、SharePointなどの元資料を開けます。
+
+単純な質問は1回の検索で答えます。広い調査、比較、複数論点の質問では、同じDB
+の中で観点の異なる検索を必要な分だけ行います。上限は4回で、資料が十分なら
+そこで止めます。`[E2]を詳しく`のような依頼は、直前の検索結果のcacheが
+残っている間は、検索をやり直さず詳しい部分を読みます。
+
+DBの内容更新から30日以上たっている場合は、同じチャットで1回だけ警告します。
+古い可能性を承知で回答を読むか、管理者へDB更新を依頼してください。
+
+## 管理者：インストールする
+
+### 必要なもの
 
 - Python 3.10以上
 - macOS、Linux、またはWindows
@@ -33,9 +110,7 @@ Copilotへ渡されます。通常検索は外部URLへHTTPアクセスしませ
 - DB、model、索引用のdisk容量
 - 旧`.doc`や`.ppt`を扱う場合のみLibreOffice
 
-## インストール
-
-repository rootで実行します。
+repository rootでinstallerを実行します。
 
 macOS/Linux:
 
@@ -49,78 +124,42 @@ Windows PowerShell:
 .\install.ps1
 ```
 
-installerは`.copilot/`を`$HOME/.copilot/`へoverlayします。既存の
-`copilot-instructions.md`、runtime venv、daemon状態、machine-local
-`rag/config/network.json`を不用意に上書きしません。古い版から残る廃止済み
-Local RAG管理Skillと旧migration/export helperだけは、明示したtombstone一覧で
-削除します。
+既存の`~/.copilot/copilot-instructions.md`には次の1行を追加してください。
 
-既存の`~/.copilot/copilot-instructions.md`には次を追加してください。
+<!-- markdownlint-disable MD013 -->
 
 ```text
 For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
 ```
 
-## 通常検索
+<!-- markdownlint-enable MD013 -->
 
-Copilot向けの公開入口は次の2つだけです。
-
-```text
-~/.copilot/rag/list_dbs.py
-~/.copilot/rag/search.py
-```
-
-DB名を質問で明示した場合は一覧取得0回、検索1回です。DB名がない場合は一覧を
-1回取得し、title、query hint、content summary、公開Source表示情報から1つだけ
-明確に選べる場合に検索を1回実行します。曖昧なら検索せず利用者へ確認します。
+installerはLocal RAGのファイルを`~/.copilot/`へ配置しますが、完全な新規
+インストールでは検索用Python環境を作りません。通常は、インストール後に
+Copilotへ`ローカルRAGの初期設定をして`と依頼します。手動で行う場合は次を
+実行します。
 
 macOS/Linux:
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python \
-  ~/.copilot/rag/list_dbs.py --format json
-
-~/.copilot/rag/query/.venv/bin/python \
-  ~/.copilot/rag/search.py \
-  --db <db-name>-rag \
-  --include-db-hint \
-  --compact-json \
-  --result-delivery file \
-  --format json \
-  "<question>"
+python3 ~/.copilot/rag/setup.py --format human
 ```
 
 Windows PowerShell:
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
-  --format json
-
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  "$env:USERPROFILE\.copilot\rag\search.py" `
-  --db <db-name>-rag `
-  --include-db-hint `
-  --compact-json `
-  --result-delivery file `
-  --format json `
-  "<question>"
+python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
-Windowsでは`cmd.exe /c`、nested PowerShell、batch wrapper、PATH上の
-`python`探索、JSON stdin pipelineを通常検索に使いません。
+Windowsで`python`が見つからない場合は、同じコマンドを`py -3`で1回試せます。
 
-検索結果の`database_freshness.status`が`stale`の場合、Copilotは内容更新時点が
-古いことを示す警告を同じchatで1回だけ表示します。参照先が解決できた項目には
-`source_url`が付き、
-固定リンクが有効なら`source_permalink`も付きます。
-回答本文では`[E1]`のようなIDだけを引用し、末尾の`References`でfile名へ
-リンクします。URLがない場合でも根拠のauthorityや検索順位は変わりません。
+既存のCopilot instructions、作成済みDB、Python環境、検索daemonの状態、
+端末固有のnetwork設定、Source接続設定はinstallerで不用意に上書きしません。
 
-## Local RAG Manager
+## 管理者：Local RAG Managerを使う
 
-作成、追加、更新、修復、配布、管理PC引っ越し、Source設定はCopilotの通常検索
-では行いません。人間がManagerを起動します。
+DB作成、Source追加、更新、再開、DBコピー、検索修復、配布は、人間が
+対話式のManagerから行います。Copilotの通常検索はこれらを自動実行しません。
 
 macOS/Linux:
 
@@ -135,114 +174,155 @@ Windows PowerShell:
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
-トップメニュー:
+![Local RAG Managerのメインメニュー](docs/images/manage-main-menu.svg)
 
-1. 新しいDBを作る
-2. DBを選んで管理する
-3. 全DBの全Sourceを更新・再開する
-4. 配布・管理PCの引っ越し
-5. この端末の設定・動作確認
-0. 終了
+### 初めてDBとSourceを作る
 
-選択DBメニュー:
+1. メインメニューで`1. 新しいDBを作る`を選びます。
+2. `-rag`で終わるDB名、一覧表示名、Copilot向け検索ヒントを入力します。
+3. メインメニューへ戻り、`2. DBを選んで管理する`から作ったDBを開きます。
+4. `2. 新しいSourceを追加する`を選び、取得元と条件を入力します。
+5. 内容を確認して`保存して取得を開始`を選びます。
+6. 取得後に表示される対象件数と時間目安を確認し、検索への反映を開始します。
 
-1. Sourceを見る・更新する
-2. 新しいSourceを追加する
-3. このDBの全Sourceを更新・再開する
-4. DBの名前・説明を変更する
-5. 問題があるとき
-6. このDBを削除する
-0. 戻る
+![DB作成からSource追加までの画面例](docs/images/manage-create-source.svg)
 
-詳しい操作は
+画面例は流れを見やすくするため、入力欄の説明と長いラベルの一部を省略しています。
+検索への反映前に`1文書あたり1～5分`で計算した時間目安が表示され、もう一度
+確認を求められます。ここで開始しなくてもSource設定と再開情報は残るため、
+Source詳細の`更新・再開する`から続けられます。
+
+選べる取得元は次の6種類です。
+
+| 取得元 | 取り込み方 |
+|---|---|
+| GitHub | repository全体を取得し、remoteの既定branchを使う |
+| SVN | 再帰／直下のみと、fileの最終更新日で検索への新規取り込み対象を絞れる |
+| Redmine | projectのIssueを1件ずつ取得し、5件ごとに検索へ反映する |
+| SharePoint | OneDriveで同期済みのfolderを使う。追加・更新はWindowsのみ |
+| Teams | SharePoint同期root内のTeams共有folderを使う。追加・更新はWindowsのみ |
+| Other | 手元のfileまたはfolderを一度だけ取り込む |
+
+GitHub、SVN、SharePoint、Teams、Otherでは、`対応する全ファイル`または
+`文書のみ取得`を選べます。文書のみ取得にはOffice、PDF、テキスト、
+Markdown（`.md`）、Astah（`.asta`）、PlantUML（`.pu`、`.puml`）が含まれます。
+`.plantuml`も文書のみ取得の対象です。
+
+SharePointとTeamsの同期root、Redmine API keyは
+`5. この端末の設定・動作確認` → `3. Source接続設定`へ登録します。秘密値や
+端末固有のabsolute pathはDBへ保存しません。
+
+### Sourceを更新する・中断した処理を再開する
+
+用途に応じて次の入口を使います。
+
+| 更新範囲 | メニューの進み方 |
+|---|---|
+| 1つのSource | `2. DBを選んで管理` → DB → `1. Sourceを見る・更新` → Source → `1. 更新・再開` |
+| 1つのDBすべて | `2. DBを選んで管理` → DB → `3. このDBの全Sourceを更新・再開` |
+| 全DBすべて | メインメニューの`3. 全DBの全Sourceを更新・再開` |
+
+![Sourceの更新と再開の画面例](docs/images/manage-resume-source.svg)
+
+取得と検索反映は進捗、処理件数、現在のfile、経過時間を表示します。中断や失敗が
+起きても、保存済みcheckpointから同じ`更新・再開する`で続けられます。
+
+### DBをコピーする
+
+`2. DBを選んで管理する` → DB → `5. このDBのコピーを作る`と進みます。
+初期状態では全Sourceがコピー対象です。番号を入力すると、コピーしないSourceへ
+切り替わり、端末上では取り消し線付きで表示されます。コピー先は元DBから独立し、
+以後のSource更新や削除も別々に行えます。Sourceの取得設定も引き継ぐため、
+コピー先でも元DBと同じ取得元を更新できます。
+
+### そのほかの主な操作
+
+| やりたいこと | 入口 |
+|---|---|
+| DBの表示名・検索ヒントを変える | DBメニューの`4` |
+| 検索を試す・検索索引を修復する | DBメニューの`6. 問題があるとき` |
+| 利用者用packageを作る | メインメニューの`4. 配布・管理PCの引っ越し` |
+| 管理PCを引っ越す | メインメニューの`4. 配布・管理PCの引っ越し` |
+| 端末の接続設定や動作を確認する | メインメニューの`5` |
+| 検索daemonを終了する | メインメニューの`6` |
+
+検索daemonを終了すると、次回検索時に自動起動します。待機中または実行中の検索が
+失敗する可能性があるため、検索している人がいないことを確認してから使います。
+
+Manager共通の入力方法:
+
+- `【必須】`: 空欄では進みません
+- `【任意】`: 空欄で未設定です
+- `:q`: 保存せず前の画面へ戻ります
+- Enter: 編集画面では現在値を維持します
+- `-`: 任意項目の現在値を消します
+- `Ctrl+C`: 未保存の変更を破棄します
+
+全画面とProviderごとの詳しい入力項目は
 [Local RAG Manager 日本語操作ガイド](.copilot/rag/docs/local-rag-manager-guide-ja.md)
 を参照してください。
 
-## Source Manager
-
-Sourceは、同じ取得元、同じ更新方法、同じURL生成設定を共有する文書の単位です。
-新しいSourceはManagerの追加操作で作り、索引登録に成功した後に検索対象へ
-現れます。Source IDは後から変更しません。
-
-対応する取得元:
-
-- GitHub repository
-- SVN
-- Redmine project
-- SharePoint同期folder
-- 手元のfile/folderを一度だけ取り込むOther
-
-SharePoint Sourceの追加・更新はWindowsだけで行います。Windowsの同期rootを
-直接検索へ反映し、同期実体をDB内へcopyしません。作成済みDBをpackageでmacOSへ
-移した後は、macOSでも通常検索できます。macOSではSharePoint Sourceの更新を
-行いません。
-
-Source MetadataはDB直下の`source-links.json`へ保存します。物理file名は互換性の
-ため維持していますが、canonical schemaは`rag-source-metadata-v1`です。
-1 Sourceは最大1 Provider、最大1 Linkです。利用者がstored path prefixを
-入力する仕様はありません。現在有効な文書からobserved stored rootを自動導出し、
-Source-relative pathでURLを生成します。
-
-## Packageと管理PCの引っ越し
+## 配布と管理PCの引っ越し
 
 Managerは用途の異なる2種類を作成します。
 
-### 利用者向け検索package
+| 種類 | 用途 | 形式 |
+|---|---|---|
+| 利用者向け検索package | 現在の全DBを別PCで検索する | ZIP |
+| 管理PC引っ越しpackage | 現在の全DBとSource再開情報を含めて管理を移す | 再開可能なfolder |
 
-選択DBと検索runtimeを含むZIPです。検索専用computerへ配布します。管理用の
-Source取得stateや管理画面は含めません。
+利用者向けpackageの受取側は、ZIPを展開し、中の`.copilot` folderを自分の
+home directoryへcopyします。その端末で初期設定がまだなら、Copilotへ
+`ローカルRAGの初期設定をして`と依頼します。また、
+`~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
+追加します。管理PC引っ越しpackageは、Managerの
+`パッケージを取り込む・検証する`から取り込みます。
 
-### 管理PC引っ越しpackage
+packageには検索資料と内部URLが含まれる場合があります。機密資料として安全に
+扱ってください。credential、端末固有設定、実行中の一時fileは含めません。
 
-Source取得state、checkpoint、管理用codeを含むfolderです。作成を中断しても
-同じ出力先で再開できます。
+## 直接CLIで確認する場合
 
-package作成はLocal RAG全体をlockしません。copy前後でfileのsize、timestamp、
-hashを確認し、途中で変化した場合は成功を偽装せず中断します。manifestは
-relative pathとSHA-256を持ちます。venv、daemon state、lock、temporary file、
-credential、backup sidecarは含めません。activeなSource Metadataには内部URLが
-含まれ得るため、package自体を機密dataとして扱ってください。
-作成日時は`packaged_at`へ別記し、copyや再packageで
-`content_snapshot_at`（内容更新時点）を進めません。
+通常の利用者はこの節を使いません。Copilotを介さず、人間がDB一覧や検索結果
+（直接根拠、背景、関連文書候補）を確認したい場合の入口です。手動検索は
+最終回答を作文しません。
 
-## 保存pathとscan範囲
+### macOS/Linux
 
-stored pathは常に次の形式です。
+```bash
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/list_dbs.py --format text
 
-```text
-<root-name>/<path-relative-to-logical-root>
+~/.copilot/rag/query/.venv/bin/python \
+  ~/.copilot/rag/search.py \
+  --db project-rag \
+  --include-db-hint \
+  --result-delivery stdout \
+  --format prompt \
+  "A2Lの目的と採用理由を教えて"
 ```
 
-`scan subdirectory`を指定しても、stored pathの基準は元のlogical rootです。
-root名を含まない旧DBとはpath由来document IDが変わるため、その方式を採用する
-古いDBは一度だけ再構築が必要です。
+### Windows PowerShell
 
-## 検索結果
+```powershell
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
+  --format text
 
-主な公開field:
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\search.py" `
+  --db project-rag `
+  --include-db-hint `
+  --result-delivery stdout `
+  --format prompt `
+  "A2Lの目的と採用理由を教えて"
+```
 
-- `evidence`: 直接根拠
-- `background_context`: 直接根拠を補うcontext
-- `related_context`: 参考情報。直接根拠ではない
-- `document_results`: 多様な関連文書card
-- `warnings`: table header不足などの制約
-- `coverage`: 取得範囲の要約
-- `database_freshness`: `rag-wrapper.json`に記録された内容更新時点からの経過
-- `source_url`: 解決済みの通常参照先
-- `source_permalink`: 設定時だけ返る固定参照先
-- `source_provider`: URLを生成したSource種別
-
-初回file deliveryはOS temporary directoryへUTF-8 JSON bundleを原子的に公開し、
-小さいpointerをstdoutへ返します。「もっと詳しく」のfollow-upは同じ
-result-setを読み、検索をやり直しません。
-
-## Networkとproxy
-
-通常検索、daemon、SQLite、local Chromaは外部networkへ接続しません。setupと
-Source取得だけがnetworkを利用します。proxy/CAはmachine-local
-`~/.copilot/rag/config/network.json`へ保存でき、installerは実fileを配布せず、
-既存設定を維持します。proxy URLにusername/passwordが含まれる設定は保存対象に
-しません。
+Copilotが内部で利用する公開入口は`~/.copilot/rag/list_dbs.py`と
+`~/.copilot/rag/search.py`の2つです。検索の内部構造、結果JSON、Source Metadata、
+path規則、network/proxy、package検証については
+[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を
+参照してください。
 
 ## License
 

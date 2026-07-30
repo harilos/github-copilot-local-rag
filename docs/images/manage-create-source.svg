@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720" role="img" aria-labelledby="title desc">
+  <title id="title">DB作成からSource追加までの画面例</title>
+  <desc id="desc">新しいDBを作成し、続けて取り込み元を選ぶ擬似端末画面</desc>
+  <rect width="1000" height="720" rx="14" fill="#0d1117"/>
+  <rect width="1000" height="44" rx="14" fill="#21262d"/>
+  <rect y="30" width="1000" height="14" fill="#21262d"/>
+  <circle cx="24" cy="22" r="7" fill="#ff5f56"/>
+  <circle cx="47" cy="22" r="7" fill="#ffbd2e"/>
+  <circle cx="70" cy="22" r="7" fill="#27c93f"/>
+  <text x="500" y="28" text-anchor="middle" fill="#c9d1d9"
+        font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+        font-size="15">manage.py — 新しいDBとSource（説明は一部省略）</text>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+     font-size="17" fill="#e6edf3">
+    <text x="36" y="78" fill="#8b949e">============================================================</text>
+    <text x="36" y="108" font-weight="700">Local RAG Manager</text>
+    <text x="36" y="138">画面: 新しいDBを作成</text>
+    <text x="36" y="168" fill="#8b949e">============================================================</text>
+    <text x="36" y="206">DB名【必須】: <tspan fill="#a5d6ff">product-rag</tspan></text>
+    <text x="36" y="236">表示名【任意】: <tspan fill="#a5d6ff">製品開発資料</tspan></text>
+    <text x="36" y="266">検索ヒント【任意】: <tspan fill="#a5d6ff">製品仕様、設計、障害、運用手順</tspan></text>
+    <text x="36" y="306">この内容で作成しますか？ [y/N]: <tspan fill="#3fb950" font-weight="700">y</tspan></text>
+    <text x="36" y="340" fill="#3fb950">[成功] DB「product-rag」を作成しました。</text>
+    <text x="36" y="372" fill="#58a6ff">[情報] DBを選んで管理する → product-rag → 新しいSourceを追加する</text>
+
+    <text x="36" y="414" fill="#8b949e">============================================================</text>
+    <text x="36" y="444" font-weight="700">Local RAG Manager</text>
+    <text x="36" y="474">データベース: product-rag</text>
+    <text x="36" y="504">画面: 新しいSourceを追加する</text>
+    <text x="36" y="534" fill="#8b949e">============================================================</text>
+    <text x="36" y="570" font-weight="700">種類を選択してください</text>
+    <text x="36" y="600"><tspan fill="#79c0ff">1.</tspan> GitHub　 <tspan fill="#79c0ff">2.</tspan> SVN　 <tspan fill="#79c0ff">3.</tspan> Redmine</text>
+    <text x="36" y="630"><tspan fill="#79c0ff">4.</tspan> SharePoint　 <tspan fill="#79c0ff">5.</tspan> Teams　 <tspan fill="#79c0ff">6.</tspan> Other</text>
+    <text x="36" y="664">番号を入力してください: <tspan fill="#3fb950" font-weight="700">2</tspan></text>
+    <text x="36" y="696" fill="#d2a8ff">次に、取得範囲・更新期間・取り込むファイル種類を画面に沿って選びます。</text>
+  </g>
+</svg>

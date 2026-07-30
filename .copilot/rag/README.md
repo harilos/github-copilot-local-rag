@@ -1,8 +1,34 @@
 # Copilot Local RAG Pack
 
-This directory is installed under `~/.copilot/rag`. Use the repository
-installers; an overlay install preserves machine-local runtime state and
-removes only explicitly retired product files.
+This directory is installed under `~/.copilot/rag`. From a repository clone,
+use the repository installers; an overlay install preserves machine-local
+runtime state and removes only explicitly retired product files. From a
+Manager-generated package, extract it and copy the contained `.copilot`
+directory into the user's home directory.
+
+On a clean installation, prepare the runtime before lookup or Manager use:
+
+```bash
+python3 ~/.copilot/rag/setup.py --format human
+```
+
+Windows PowerShell:
+
+```powershell
+python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
+```
+
+If `python` is unavailable on Windows, try the same command once with `py -3`.
+
+The receiving user's `~/.copilot/copilot-instructions.md` must contain:
+
+<!-- markdownlint-disable MD013 -->
+
+```text
+For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
+```
+
+<!-- markdownlint-enable MD013 -->
 
 ## Public lookup boundary
 
@@ -24,6 +50,7 @@ macOS/Linux:
 ~/.copilot/rag/query/.venv/bin/python \
   ~/.copilot/rag/search.py \
   --db <db-name>-rag \
+  --include-db-hint \
   --compact-json \
   --result-delivery file \
   --format json \
@@ -40,6 +67,7 @@ Windows PowerShell:
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
   "$env:USERPROFILE\.copilot\rag\search.py" `
   --db <db-name>-rag `
+  --include-db-hint `
   --compact-json `
   --result-delivery file `
   --format json `
@@ -47,12 +75,13 @@ Windows PowerShell:
 ```
 
 The database list returns a bounded public content summary and Source display
-metadata. It does not disclose raw Source IDs. Search delegates to the
-installed retrieval runtime once, then adds optional public `source_url` and
-`source_permalink` values plus database freshness metadata derived only from
-`rag-wrapper.json.content_snapshot_at`. A stale database may include one
-Japanese conversation notice under `database_freshness.chat_notice`.
-Packaging time is recorded separately and never advances content freshness.
+metadata. It does not disclose raw Source IDs. Each public search invocation
+delegates to the installed retrieval runtime once, then adds optional public
+`source_url` and `source_permalink` values plus database freshness metadata
+derived only from `rag-wrapper.json.content_snapshot_at`. A stale database may
+include one Japanese conversation notice under
+`database_freshness.chat_notice`. Packaging time is recorded separately and
+never advances content freshness.
 
 File delivery returns a small JSON pointer. The referenced summary is
 self-contained. Cached follow-up detail is read through the same public
@@ -85,34 +114,42 @@ other secret values are rejected.
 
 Top-level menu:
 
+```text
 1. Create a new database.
 2. Select and manage a database.
 3. Update or resume every Source in every database.
 4. Create or import a distribution/management-PC package.
 5. Verify this computer's setup.
+6. Stop the authenticated search daemon.
 0. Exit.
+```
 
 Selected-database menu:
 
+```text
 1. View or update Sources.
 2. Add a new Source.
 3. Update or resume every Source in this database.
 4. Edit the database title and query hint.
-5. Diagnose and repair problems.
-6. Delete this database with explicit confirmation.
+5. Copy this database, optionally excluding selected Sources.
+6. Diagnose and repair problems.
+7. Delete this database with explicit confirmation.
 0. Return.
+```
 
 A Source is the unit of acquisition and URL generation. The Source Manager
-supports GitHub, SVN, Redmine, SharePoint synchronized folders, and a local
-one-time import. It stores provider configuration and resumable checkpoints
-outside indexed document identity. A Source becomes searchable only after
-successful ingestion.
+supports GitHub, SVN, Redmine, SharePoint synchronized folders, Teams shared
+folders synchronized through OneDrive, and a local one-time import. File-based
+Sources can ingest all supported files or documents only; Markdown is included
+in the documents-only selection. It stores provider configuration and
+resumable checkpoints outside indexed document identity. A Source becomes
+searchable only after successful ingestion.
 
 SharePoint Source acquisition and update are intentionally Windows-only. They
-read a synchronized root selected by environment configuration directly and
-do not copy the synchronized tree into the DB. A packaged database can be
-copied to macOS and searched there; macOS does not update that SharePoint
-Source.
+read the synchronized root registered in this computer's Source connection
+settings and do not copy the synchronized tree into the DB. Teams uses the
+same root. A packaged database can be copied to macOS and searched there;
+macOS does not update either Source type.
 
 See [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja.md).
 
@@ -121,10 +158,11 @@ See [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja
 The Manager provides two distinct package types:
 
 - Distribution package: a ZIP for read-only search clients. It contains the
-  public wrappers, runtime code, selected searchable databases, and model
+  public wrappers, runtime code, all current databases, and model
   assets needed by the selected package contract.
 - Management-PC transfer: a resumable folder for another management computer.
-  It also carries administration code and Source acquisition state.
+  It also carries all current databases, administration code, and Source
+  acquisition state.
 
 Package creation takes no global Local RAG lock. It reads files defensively
 and aborts if a source file changes during the copy. The validated manifest

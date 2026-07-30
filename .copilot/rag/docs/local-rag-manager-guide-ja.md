@@ -4,8 +4,9 @@
 
 Local RAG Managerは、人間がDBとSourceを管理する対話画面です。
 
-- DB作成、表示名・検索ヒント変更、削除
+- DB作成、コピー、表示名・検索ヒント変更、削除
 - Source追加、更新、再開、状態確認
+- 取り込むfile種類の選択
 - Source MetadataとSource Link設定
 - 検索確認
 - 検索索引の診断・修復
@@ -17,6 +18,27 @@ Copilotの通常検索は読み取り専用です。管理依頼をした場合�
 利用を案内するだけで、Managerを自動起動しません。
 
 ## 2. 起動
+
+完全な新規インストールでは、先に検索用Python環境を準備します。Copilotへ
+`ローカルRAGの初期設定をして`と依頼するか、公開`setup.py`をsystem Pythonで
+実行してください。初期設定は依存packageと検索modelの取得を含むため、通常は
+10分程度かかります。network速度や端末性能により前後します。
+
+macOS/Linux:
+
+```bash
+python3 ~/.copilot/rag/setup.py --format human
+```
+
+Windows PowerShell:
+
+```powershell
+python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
+```
+
+`python`が見つからない場合は、同じコマンドを`py -3`で1回試せます。
+
+初期設定後、Managerを起動します。
 
 macOS/Linux:
 
@@ -38,9 +60,6 @@ Windows Git Bash:
 "$HOME/.copilot/rag/manage.py"
 ```
 
-初回セットアップは、依存パッケージと検索モデルの取得を含むため、通常は
-10分程度かかります。ネットワーク速度や端末性能により前後します。
-
 共通入力:
 
 - `【必須】`: 空欄では進みません。
@@ -61,7 +80,7 @@ Windows Git Bash:
 同様に警告し、ほかの正常項目は利用します。password、token、credential入り
 URLなどの秘密値は入力例設定へ保存できません。
 
-## 3. 最終メニュー
+## 3. メニューとよく使う流れ
 
 トップメニュー:
 
@@ -82,10 +101,35 @@ URLなどの秘密値は入力例設定へ保存できません。
 2. 新しいSourceを追加する
 3. このDBの全Sourceを更新・再開する
 4. DBの名前・説明を変更する
-5. 問題があるとき
-6. このDBを削除する【危険】
+5. このDBのコピーを作る
+6. 問題があるとき
+7. このDBを削除する【危険】
 0. 戻る
 ```
+
+初めてDBを準備する流れ:
+
+```text
+1. 新しいDBを作る
+→ 2. DBを選んで管理する
+→ 作成したDBを選択
+→ 2. 新しいSourceを追加する
+→ 保存して取得を開始
+```
+
+1つのSourceを更新または再開する流れ:
+
+```text
+2. DBを選んで管理する
+→ DBを選択
+→ 1. Sourceを見る・更新する
+→ Sourceを選択
+→ 1. 更新・再開する
+```
+
+DB内の全Sourceは選択DBメニューの`3`、全DBの全Sourceはメインメニューの`3`で
+まとめて更新できます。処理が中断した場合も同じ入口を使い、保存済みcheckpoint
+から再開します。
 
 Source一覧では、検索へ反映済みの資料と、登録後まだ取得途中のSourceを1つの
 一覧にまとめます。種類と「最新」「更新途中・再開可能」「既存データ」などの
@@ -111,8 +155,9 @@ Source削除では、選択したSourceの検索済み文書、検索結果リ�
 しません。Source名の完全入力と、既定Noの最終確認が必要です。途中で失敗した
 場合は削除済みの範囲を表示し、同じ操作を再実行すると残りから再開します。
 
-「問題があるとき」では診断結果を見て、全文・識別子索引、vector索引、または
-全検索索引を再作成します。元文書の再取得を伴う操作とは分離されています。
+「問題があるとき」では検索を試し、必要なら検索用索引全体を再作成します。
+元文書の再取得を伴う操作とは分離されています。個別Sourceの状態、取得・反映
+件数、最後の再開位置は、Source詳細の`4. 進捗・ログを見る`から確認します。
 
 ## 4. DB作成
 
@@ -125,6 +170,16 @@ DB名は半角英数字で始め、`-rag`で終わらせます。
 titleとquery hintはCopilotが一覧からDBを選ぶための公開情報です。機密情報を
 書かず、収録分野を短く示してください。DB作成直後にはSourceはありません。
 
+### DBをコピーする
+
+選択DBメニューの`5. このDBのコピーを作る`を使います。初期状態では全Sourceが
+コピー対象です。Source番号を入力すると「コピーしない」へ切り替わり、対応端末
+では取り消し線付きで表示されます。
+
+コピー先のDB名、表示名、検索ヒントを確認して作成します。除外したSourceは
+コピー先のvector、catalog、clean、取得設定から削除されます。元DBは変更せず、
+コピー先は独立したDBとして更新・削除できます。
+
 ## 5. Sourceの管理
 
 Sourceは、同じ取得元、同じ更新方法、同じURL生成設定を共有する単位です。
@@ -134,11 +189,17 @@ Source追加画面では次から選びます。
 2. SVN
 3. Redmine project
 4. SharePoint同期folder
-5. 手元の資料を一度だけ取り込むOther
+5. Teams共有folder
+6. 手元の資料を一度だけ取り込むOther
 
 Sourceの安定IDは索引と更新stateを結びます。後から変更しません。新しいSourceは
 登録だけでは検索対象にならず、取得・索引登録が成功した後にSource inventoryへ
 現れます。
+
+`保存して取得を開始`を選ぶと、Providerからの取得後に対象件数と
+`1文書あたり1～5分`で計算した目安時間を表示し、検索反映前にもう一度確認します。
+ここで開始しない場合もSource設定と再開情報は残り、Source詳細の
+`更新・再開する`から続けられます。
 
 Source取得は固定のwork pathへ行い、providerごとのcheckpointを保存します。
 中断後は同じ設定とcheckpointから再開します。credentialやlocal absolute pathを
@@ -176,11 +237,12 @@ projectのIssueを直列に取得し、各Issueを`issues/<issue-id>.md`へ保�
 ### SharePoint
 
 追加・更新はWindowsだけです。SharePoint同期clientが作ったlocal folderを、
-machine-local環境変数で指定したrootから直接検索へ反映します。同期実体をDB内へ
-copyしません。
+この端末へ登録した同期rootから直接検索へ反映します。同期実体をDB内へcopy
+しません。
 
 ```text
-root環境変数: LOCAL_RAG_SHAREPOINT_ROOT
+登録場所: 5. この端末の設定・動作確認
+          → 3. Source接続設定（Redmine API・SharePoint）
 相対folder: <relative-subdirectory>
 ```
 
@@ -188,10 +250,36 @@ Source設定にWindowsのabsolute pathは保存しません。作成済みDBは�
 packageまたは管理PC引っ越しpackageでmacOSへ移せます。macOSではそのDBを検索
 できますが、SharePoint Sourceの追加・更新はできません。
 
+`LOCAL_RAG_SHAREPOINT_ROOT`環境変数は既存環境との互換用fallbackです。通常は
+ManagerのSource接続設定から登録します。
+
+### Teams
+
+追加・更新はWindowsだけです。OneDriveで同期済みのTeams共有folderを、
+SharePointと同じ同期rootから指定します。入力するのはTeamsのチャネル名ではなく、
+端末上の同期rootからの相対folderです。
+
+Teams Sourceもabsolute pathをDBへ保存しません。検索結果のWebリンクは初期設定
+では付けず、stored pathを表示します。リンクがなくても検索順位や検索可否は
+変わりません。
+
 ### Other
 
 人間が選択したlocal file/folderを一度だけcopyして索引化します。継続同期を
 意味しません。
+
+### 取り込むfile種類
+
+GitHub、SVN、SharePoint、Teams、Otherでは、Source追加時と取得設定変更時に
+次から選びます。RedmineはIssueをMarkdownへ変換するため、この選択はありません。
+
+1. 対応する全file
+2. 文書のみ取得
+
+文書のみ取得にはOffice、PDF、テキスト、Markdown（`.md`）、Astah（`.asta`）、
+PlantUML（`.pu`、`.puml`、`.plantuml`）が含まれます。設定を変更すると、
+次回更新時に対象外となったfileは、そのSourceを登録しているDBのvectorと
+catalogから削除されます。
 
 ## 6. root、scan subdirectory、stored path
 
@@ -249,8 +337,9 @@ URL解決は検索順位とevidence分類が終わった後に行われます。
 使います。Manager独自のmtime判定は行わず、既存のcontent hashとchunker設定へ
 委譲します。
 
-処理中または中断時は、対象DB、Source、現在の段階、資料件数、最近のエラー、
-再開可否を確認できます。検索修復の内部対象は診断結果からManagerが決めます。
+処理中は現在の段階、処理件数、対象file、経過時間を画面へ表示します。処理後は
+Source詳細から状態、取得件数、反映件数、未反映件数、最後の再開位置、
+エラーの有無を確認できます。検索修復は検索用索引全体を再作成します。
 
 ## 9. Package
 
@@ -259,18 +348,25 @@ URL解決は検索順位とevidence分類が終わった後に行われます。
 ### 利用者向け検索package
 
 - ZIP
-- 選択した検索可能DB
+- 現在の全DB
 - 公開wrapperと検索runtime
 - 必要なmodel
 - 現行schemaとして検証済みのSource Metadata全体
 - 管理用取得stateは含めない
 
+受取側はZIPを展開し、中の`.copilot` folderをhome directoryへcopyします。
+その端末の検索用Python環境が未設定なら、Copilotへ
+`ローカルRAGの初期設定をして`と依頼します。
+
 ### 管理PC引っ越しpackage
 
 - resumable folder
-- DBと管理用code
+- 現在の全DBと管理用code
 - Source設定とcheckpoint
 - 途中中断後に同じ出力先で再開可能
+
+受取側はManagerの`配布・管理PCの引っ越し`から
+`パッケージを取り込む・検証する`を選びます。
 
 package作成はdaemonやDB全体へglobal lockを取りません。copy元を2回確認し、
 途中変更を検出したら失敗として終了します。出力はrelative pathだけのmanifestと
@@ -291,9 +387,10 @@ activeな`source-links.json`には内部URLが含まれ得ます。packageを機
 
 ## 10. この端末の設定・動作確認
 
-通常画面には、Local RAGを利用できるか、検索を試す、Sourceへの接続が
-「利用可能」か「設定が必要」かだけを表示します。runtime Python、model、
-proxy/CA、credential参照、環境変数名などは「技術情報」だけに表示します。
+この画面では、Local RAGを利用できるか確認する、検索を試す、Source接続設定、
+技術情報の表示を選べます。SharePointとTeamsが共有する同期root、Redmine API key
+はSource接続設定へ登録します。技術情報にはruntime Python、DB root、platform、
+SharePoint設定元、Redmine API keyの登録件数を表示し、秘密値自体は表示しません。
 
 setup completeとlookup readyは別です。runtimeが正常でも健康なDBがなければ
 lookup readyはfalseです。
@@ -325,10 +422,10 @@ package作成はDB管理lockやmaintenance状態を作りません。ただしco
 間に排他lockは作りません。待機中の検索は取り消され、長時間実行中の検索も停止する
 可能性があるため、検索している人がいないことを確認してから使用してください。
 
-### macOSでSharePoint DBを検索できますか？
+### macOSでSharePoint／Teams DBを検索できますか？
 
 できます。Windowsで更新・索引化したDBを移してください。macOSではSharePoint
-同期folderからの更新はできません。
+またはTeams同期folderからの更新はできません。
 
 ### CopilotへDB追加を依頼できますか？
 

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <title id="title">Local RAG Managerのメインメニュー</title>
+  <desc id="desc">Local RAG Managerを起動し、DB管理を選択する擬似端末画面</desc>
+  <rect width="1000" height="520" rx="14" fill="#0d1117"/>
+  <rect width="1000" height="44" rx="14" fill="#21262d"/>
+  <rect y="30" width="1000" height="14" fill="#21262d"/>
+  <circle cx="24" cy="22" r="7" fill="#ff5f56"/>
+  <circle cx="47" cy="22" r="7" fill="#ffbd2e"/>
+  <circle cx="70" cy="22" r="7" fill="#27c93f"/>
+  <text x="500" y="28" text-anchor="middle" fill="#c9d1d9"
+        font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+        font-size="15">manage.py — メインメニュー</text>
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, 'Noto Sans Mono CJK JP', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', Meiryo, monospace"
+     font-size="18" fill="#e6edf3">
+    <text x="36" y="78" fill="#58a6ff" font-size="13">[情報] ヘルプ: https://github.com/harilos/github-copilot-local-rag/blob/main/.copilot/rag/docs/local-rag-manager-guide-ja.md</text>
+    <text x="36" y="116" fill="#8b949e">============================================================</text>
+    <text x="36" y="146" font-weight="700">Local RAG Manager</text>
+    <text x="36" y="176">画面: メインメニュー</text>
+    <text x="36" y="206" fill="#8b949e">============================================================</text>
+    <text x="36" y="246" font-weight="700">操作を選択してください</text>
+    <text x="36" y="278"><tspan fill="#79c0ff">1.</tspan> 新しいDBを作る</text>
+    <text x="36" y="310"><tspan fill="#79c0ff">2.</tspan> DBを選んで管理する</text>
+    <text x="36" y="342"><tspan fill="#79c0ff">3.</tspan> 全DBの全Sourceを更新・再開する</text>
+    <text x="36" y="374"><tspan fill="#79c0ff">4.</tspan> 配布・管理PCの引っ越し</text>
+    <text x="36" y="406"><tspan fill="#79c0ff">5.</tspan> この端末の設定・動作確認</text>
+    <text x="36" y="438"><tspan fill="#79c0ff">6.</tspan> 検索daemonを終了する</text>
+    <text x="36" y="470"><tspan fill="#79c0ff">0.</tspan> 終了</text>
+    <text x="36" y="502">番号を入力してください: <tspan fill="#3fb950" font-weight="700">2</tspan></text>
+  </g>
+</svg>
