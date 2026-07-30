@@ -98,6 +98,7 @@ from .document_filter import (
     FILE_SELECTION_KEY,
     install_document_filter_runtime,
 )
+from .document_filter_counts import install_document_filter_count_runtime
 from .document_filter_packages import install_document_filter_package_contract
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
@@ -121,6 +122,7 @@ install_provisional_source_merge_runtime()
 install_database_copy_runtime()
 install_teams_source_runtime()
 install_document_filter_runtime()
+install_document_filter_count_runtime()
 install_document_filter_package_contract()
 install_copy_only_package_runtime()
 install_manage_custom_hook()
@@ -183,6 +185,7 @@ __all__ = [
     "generated_redmine_link",
     "has_stored_redmine_api_key",
     "install_copy_only_package_runtime",
+    "install_document_filter_count_runtime",
     "install_document_filter_package_contract",
     "install_document_filter_runtime",
     "install_teams_source_runtime",
