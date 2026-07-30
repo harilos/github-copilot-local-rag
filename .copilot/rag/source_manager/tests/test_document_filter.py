@@ -13,6 +13,7 @@ from source_manager.document_filter import (
     FILE_SELECTION_DOCUMENTS,
     FILE_SELECTION_KEY,
 )
+from source_manager.document_filter_counts import count_document_files
 from software_rag_tool import document_extensions, extractors, records
 
 
@@ -68,11 +69,13 @@ class DocumentFilterTests(unittest.TestCase):
                 clear=False,
             ):
                 discovered = [path.name for path in records.iter_input_files(root)]
+            estimated = count_document_files(root)
 
         self.assertEqual(
             ["diagram.pu", "diagram.puml", "guide.md", "model.asta"],
             discovered,
         )
+        self.assertEqual(4, estimated)
 
     def test_astah_fallback_indexes_filename_and_readable_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -110,7 +113,7 @@ class DocumentFilterTests(unittest.TestCase):
 
             return types.SimpleNamespace(
                 returncode=0,
-                stdout="@@LOCAL_RAG_RESULT_V1@@" + json.dumps(summary),
+                stdout="@@LOCAL_RAG_RESULT_V1@@" + json.dumps(summary) + "\n",
                 stderr="",
             )
 
