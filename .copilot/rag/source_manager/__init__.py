@@ -92,6 +92,13 @@ from .database_copy import (
     install_database_copy_runtime,
 )
 from .copy_only_packages import install_copy_only_package_runtime
+from .document_filter import (
+    FILE_SELECTION_ALL,
+    FILE_SELECTION_DOCUMENTS,
+    FILE_SELECTION_KEY,
+    install_document_filter_runtime,
+)
+from .document_filter_packages import install_document_filter_package_contract
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
@@ -113,6 +120,8 @@ install_source_preflight_runtime()
 install_provisional_source_merge_runtime()
 install_database_copy_runtime()
 install_teams_source_runtime()
+install_document_filter_runtime()
+install_document_filter_package_contract()
 install_copy_only_package_runtime()
 install_manage_custom_hook()
 
@@ -135,6 +144,9 @@ validate_provider_config = _providers.validate_provider_config
 __all__ = [
     "CONNECTION_SCHEMA_VERSION",
     "DatabaseCopyError",
+    "FILE_SELECTION_ALL",
+    "FILE_SELECTION_DOCUMENTS",
+    "FILE_SELECTION_KEY",
     "FetchPlan",
     "FetchStep",
     "LEGACY_REDMINE_API_KEY_ENV",
@@ -171,6 +183,8 @@ __all__ = [
     "generated_redmine_link",
     "has_stored_redmine_api_key",
     "install_copy_only_package_runtime",
+    "install_document_filter_package_contract",
+    "install_document_filter_runtime",
     "install_teams_source_runtime",
     "list_redmine_registrations",
     "list_sources",
