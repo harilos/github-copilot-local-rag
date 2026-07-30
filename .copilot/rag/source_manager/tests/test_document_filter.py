@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from source_manager import providers
+from source_manager import providers, runner
 from source_manager.document_filter import (
     FILE_SELECTION_ALL,
     FILE_SELECTION_DOCUMENTS,
     FILE_SELECTION_KEY,
 )
-from software_rag_tool import document_extensions, records
-from software_rag_tool import extractors
+from software_rag_tool import document_extensions, extractors, records
 
 
 class DocumentFilterTests(unittest.TestCase):
@@ -89,6 +89,47 @@ class DocumentFilterTests(unittest.TestCase):
         self.assertIn("system-model.asta", text)
         self.assertIn("OrderService", text)
         self.assertIn("Sequence Diagram", text)
+
+    def test_document_source_uses_document_only_add_entry_point(self) -> None:
+        source_key = "src_docs-0123456789ab"
+        commands: list[list[str]] = []
+
+        def command_runner(arguments: list[str]) -> object:
+            commands.append(list(arguments))
+            summary = {
+                "operation": "add",
+                "source_id": source_key,
+                "file_count": 0,
+                "indexed_files": 0,
+                "skipped_files": 0,
+                "error_files": 0,
+                "upserted_records": 0,
+                "deleted_records": 0,
+            }
+            import json
+
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout="@@LOCAL_RAG_RESULT_V1@@" + json.dumps(summary),
+                stderr="",
+            )
+
+        runner._execute_add(
+            db_root=Path("/tmp/example-rag"),
+            source={
+                "local_source_key": source_key,
+                "fetch": {FILE_SELECTION_KEY: FILE_SELECTION_DOCUMENTS},
+            },
+            work=Path("/tmp/source-work"),
+            python_executable=Path("/usr/bin/python3"),
+            rag_root=Path("/tmp/rag"),
+            command_runner=command_runner,
+            progress_callback=None,
+        )
+
+        self.assertEqual(1, len(commands))
+        self.assertIn("add_data_documents_only.py", commands[0][1])
+        self.assertNotIn("add_data.py", commands[0][1])
 
 
 if __name__ == "__main__":
