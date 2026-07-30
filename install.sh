@@ -27,7 +27,9 @@ fi
   cd "$PAYLOAD_DIR"
   tar \
     --exclude='./rag/config/network.json' \
+    --exclude='./rag/config/manage-custom.json' \
     --exclude='./rag/config/sensitive-terms.local' \
+    --exclude='./rag/config/windows-test-connection.local.json' \
     --exclude='./rag/config/source-connections.json' \
     --exclude='./rag/config/source-connections.secrets.json' \
     --exclude='./rag/config/.source-connections.key' \

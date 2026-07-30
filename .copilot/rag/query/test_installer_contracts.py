@@ -69,6 +69,8 @@ class InstallerExclusionContractTests(unittest.TestCase):
 
         for fragment in (
             "./rag/config/network.json",
+            "./rag/config/manage-custom.json",
+            "./rag/config/windows-test-connection.local.json",
             "./rag/query/run",
             "*/.venv",
             "*/__pycache__",
@@ -80,6 +82,8 @@ class InstallerExclusionContractTests(unittest.TestCase):
         for fragment in (
             "Test-InstallPayloadExcluded",
             r"rag\config\network.json",
+            r"rag\config\manage-custom.json",
+            r"rag\config\windows-test-connection.local.json",
             r"rag\query\run",
             '".venv"',
             '"__pycache__"',
@@ -150,6 +154,18 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 '{"source":"must-not-copy"}\n',
                 encoding="utf-8",
             )
+            (payload / "config" / "manage-custom.json").write_text(
+                '{"source":"must-not-copy"}\n',
+                encoding="utf-8",
+            )
+            (
+                payload
+                / "config"
+                / "windows-test-connection.local.json"
+            ).write_text(
+                '{"source":"must-not-copy"}\n',
+                encoding="utf-8",
+            )
             (query / "run" / "ragd.json").write_text(
                 '{"pid":82059,"source":"stale"}\n',
                 encoding="utf-8",
@@ -175,6 +191,15 @@ class InstallerExclusionContractTests(unittest.TestCase):
             (target_query / "run").mkdir(parents=True)
             (target_query / ".venv" / "bin").mkdir(parents=True)
             target_network = target / "rag" / "config" / "network.json"
+            target_manage_custom = (
+                target / "rag" / "config" / "manage-custom.json"
+            )
+            target_windows_test = (
+                target
+                / "rag"
+                / "config"
+                / "windows-test-connection.local.json"
+            )
             target_state = target_query / "run" / "ragd.json"
             target_python = target_query / ".venv" / "bin" / "python"
             target_marker = (
@@ -202,6 +227,14 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 '{"target":"preserve"}\n',
                 encoding="utf-8",
             )
+            target_manage_custom.write_text(
+                '{"target":"preserve"}\n',
+                encoding="utf-8",
+            )
+            target_windows_test.write_text(
+                '{"target":"preserve"}\n',
+                encoding="utf-8",
+            )
             target_state.write_text(
                 '{"pid":1234,"target":"preserve"}\n',
                 encoding="utf-8",
@@ -225,6 +258,8 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 path: path.read_bytes()
                 for path in (
                     target_network,
+                    target_manage_custom,
+                    target_windows_test,
                     target_state,
                     target_python,
                 )

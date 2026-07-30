@@ -277,6 +277,11 @@ Package creation does not take a global product lock. It detects file changes
 during copying and aborts rather than publishing an inconsistent artifact.
 All manifest paths are relative and checksummed. Runtime locks, virtual
 environments, temporary files, credentials, and backup sidecars are excluded.
+Product runtime, public documentation, and the two Local RAG Skills are
+collected by explicit exclusions, so a new non-test runtime module is packaged
+without another file allowlist update. Machine-local configuration and DB
+contents do not use that broad collector: configuration includes only tracked
+examples, and each package kind keeps a separate restrictive DB contract.
 
 ## 13. Network
 

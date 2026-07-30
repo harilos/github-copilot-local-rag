@@ -33,7 +33,13 @@ function Test-InstallPayloadExcluded {
     if ($Normalized -ieq "rag\config\network.json") {
         return $true
     }
+    if ($Normalized -ieq "rag\config\manage-custom.json") {
+        return $true
+    }
     if ($Normalized -ieq "rag\config\sensitive-terms.local") {
+        return $true
+    }
+    if ($Normalized -ieq "rag\config\windows-test-connection.local.json") {
         return $true
     }
     if (

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,15 @@ class PackageContractTests(unittest.TestCase):
         filtered = _without_bootstrap(entries)
         self.assertEqual(1, len(filtered))
         self.assertEqual(".copilot/rag/search.py", filtered[0].destination)
-        self.assertIn("setup_copy.py", packages._RAG_DISTRIBUTION_FILES)
+        copilot_home = Path(__file__).resolve().parents[2]
+        generated, _databases = packages._distribution_entries(
+            copilot_home,
+            db_names=None,
+        )
+        self.assertIn(
+            ".copilot/rag/setup_copy.py",
+            {entry.destination for entry in generated},
+        )
 
     def test_manager_import_accepts_package_without_bootstrap(self) -> None:
         package = self.root / "package"
@@ -215,7 +224,7 @@ class PackageContractTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True):
             result = restore_copied_installation(rag)
 
         state = json.loads((logs / "state.json").read_text(encoding="utf-8"))

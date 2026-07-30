@@ -98,54 +98,31 @@ _TRANSIENT_SUFFIXES = (
 _PORTABLE_DB_PATH = "__local_rag_db_relative_path__"
 _PORTABLE_SHAREPOINT_SOURCE = "__local_rag_sharepoint_source_key__"
 _PORTABLE_SHAREPOINT_SUFFIX = "source_relative_suffix"
-_QUERY_DISTRIBUTION_FILES = frozenset(
+_PRODUCT_TEST_DIRECTORIES = frozenset({"test", "tests"})
+_PRODUCT_ROOT_DIRECTORIES = frozenset(
     {
-        "list_dbs.py",
-        "prepare_onnx_model.py",
-        "proxy_client.py",
-        "rag_manager.py",
-        "rag_worker.py",
-        "ragd.py",
-        "requirements.txt",
-        "result_bundle.py",
-        "result_detail.py",
-        "search.py",
-        "search_output.py",
-        "setup.py",
-        "setup_contract.py",
-        "setup_verification.py",
-        "source_hygiene.py",
+        "config",
+        "docs",
+        "gen_db",
+        "models",
+        "query",
+        "wrapper",
     }
 )
-_RAG_DISTRIBUTION_FILES = frozenset(
-    {
-        "README.md",
-        "VERSION",
-        "help_links.py",
-        "list_dbs.py",
-        "search.py",
-    }
-)
-_ADMIN_RAG_FILES = frozenset(
+_DISTRIBUTION_ADMIN_ROOT_FILES = frozenset(
     {
         "manage.py",
         "make_admin_transfer_package.py",
         "make_distribution_package.py",
     }
 )
-_ADMIN_GEN_DB_FILES = frozenset(
+_PORTABLE_CONFIG_EXAMPLES = frozenset(
     {
-        "README.md",
-        "add_data.py",
-        "build_db.py",
-        "create_db.py",
-        "delete_source.py",
-        "rebuild_component.py",
-        "requirements.txt",
-        "status.py",
+        "manage-custom.example.json",
+        "network.example.json",
     }
 )
-_ADMIN_TOOL_MODULES = frozenset({"source_delete.py"})
+_PROJECT_SKILLS = ("local-rag", "local-rag-setup")
 _DB_SEARCH_FILES = frozenset(
     {
         "DB_PROFILE.md",
@@ -153,29 +130,6 @@ _DB_SEARCH_FILES = frozenset(
         "catalog.sqlite",
         "db.json",
         "source-links.json",
-    }
-)
-_DISTRIBUTION_TOOL_MODULES = frozenset(
-    {
-        "__init__.py",
-        "catalog.py",
-        "config.py",
-        "db_runtime.py",
-        "dbs.py",
-        "embeddings.py",
-        "env.py",
-        "jsonl.py",
-        "manifest.py",
-        "network.py",
-        "paths.py",
-        "retrieval.py",
-        "search_api.py",
-        "search_request.py",
-        "source_links.py",
-        "source_paths.py",
-        "store.py",
-        "token_budget.py",
-        "tokenize.py",
     }
 )
 _DB_ADMIN_DIRECTORIES = frozenset({"data", "index", "logs", "sources"})
@@ -623,6 +577,7 @@ class _Entry:
     mode: str = "copy"
     database_root: Path | None = None
     content_snapshot_at: str | None = None
+    source_root: Path | None = None
 
 
 def create_distribution_package(
@@ -927,78 +882,7 @@ def _distribution_entries(
     db_names: Sequence[str] | None,
 ) -> tuple[list[_Entry], list[dict[str, Any]]]:
     rag_root = _real_directory(copilot_home / "rag", "rag_root")
-    entries: list[_Entry] = []
-    for name in sorted(_RAG_DISTRIBUTION_FILES):
-        _add_file(
-            entries,
-            rag_root / name,
-            f".copilot/rag/{name}",
-            required=True,
-        )
-    _add_tree(
-        entries,
-        rag_root / "wrapper",
-        ".copilot/rag/wrapper",
-        include=lambda path: path.suffix == ".py",
-    )
-    query_root = rag_root / "query"
-    for name in sorted(_QUERY_DISTRIBUTION_FILES):
-        _add_file(
-            entries,
-            query_root / name,
-            f".copilot/rag/query/{name}",
-            required=True,
-        )
-    tool_root = rag_root / "gen_db" / "software_rag_tool"
-    for name in ("pyproject.toml", "requirements.txt"):
-        _add_file(
-            entries,
-            tool_root / name,
-            f".copilot/rag/gen_db/software_rag_tool/{name}",
-            required=True,
-        )
-    _add_tree(
-        entries,
-        tool_root / "software_rag_tool",
-        ".copilot/rag/gen_db/software_rag_tool/software_rag_tool",
-        include=lambda path: path.name in _DISTRIBUTION_TOOL_MODULES,
-    )
-    _add_file(
-        entries,
-        rag_root / "gen_db" / "requirements.txt",
-        ".copilot/rag/gen_db/requirements.txt",
-        required=False,
-    )
-    _add_file(
-        entries,
-        rag_root / "config" / "network.example.json",
-        ".copilot/rag/config/network.example.json",
-        required=False,
-    )
-    _add_file(
-        entries,
-        rag_root / "config" / "manage-custom.example.json",
-        ".copilot/rag/config/manage-custom.example.json",
-        required=False,
-    )
-    _add_file(
-        entries,
-        copilot_home / "instructions" / "rag.instructions.md",
-        ".copilot/instructions/rag.instructions.md",
-        required=True,
-    )
-    _add_file(
-        entries,
-        copilot_home / "skills" / "local-rag" / "SKILL.md",
-        ".copilot/skills/local-rag/SKILL.md",
-        required=True,
-    )
-    _add_tree(
-        entries,
-        rag_root / "models",
-        ".copilot/rag/models",
-        include=_ordinary_payload_file,
-    )
+    entries = _product_entries(copilot_home, admin=False)
     database_entries, databases = _database_entries(
         rag_root / "dbs",
         db_names=db_names,
@@ -1014,61 +898,8 @@ def _admin_entries(
     *,
     db_names: Sequence[str] | None,
 ) -> tuple[list[_Entry], list[dict[str, Any]]]:
-    entries, _distribution_databases = _distribution_entries(
-        copilot_home,
-        db_names=db_names,
-    )
+    entries = _product_entries(copilot_home, admin=True)
     rag_root = _real_directory(copilot_home / "rag", "rag_root")
-    entries = [
-        entry
-        for entry in entries
-        if entry.destination != "bootstrap.py"
-    ]
-    for name in sorted(_ADMIN_RAG_FILES):
-        _add_file(
-            entries,
-            rag_root / name,
-            f".copilot/rag/{name}",
-            required=name == "manage.py",
-        )
-    _add_tree(
-        entries,
-        rag_root / "source_manager",
-        ".copilot/rag/source_manager",
-        include=lambda path: (
-            path.suffix == ".py"
-            and "tests" not in {
-                part.casefold()
-                for part in path.relative_to(
-                    rag_root / "source_manager"
-                ).parts
-            }
-        ),
-    )
-    tool_package = (
-        rag_root
-        / "gen_db"
-        / "software_rag_tool"
-        / "software_rag_tool"
-    )
-    for name in sorted(_ADMIN_TOOL_MODULES):
-        _add_file(
-            entries,
-            tool_package / name,
-            (
-                ".copilot/rag/gen_db/software_rag_tool/"
-                f"software_rag_tool/{name}"
-            ),
-            required=True,
-        )
-    gen_db = rag_root / "gen_db"
-    for name in sorted(_ADMIN_GEN_DB_FILES):
-        _add_file(
-            entries,
-            gen_db / name,
-            f".copilot/rag/gen_db/{name}",
-            required=name != "README.md",
-        )
     database_entries, databases = _database_entries(
         rag_root / "dbs",
         db_names=db_names,
@@ -1082,6 +913,97 @@ def _admin_entries(
     entries.extend(database_entries)
     entries.append(_Entry(None, "bootstrap.py", mode="bootstrap"))
     return _dedupe_entries(entries), databases
+
+
+def _product_entries(
+    copilot_home: Path,
+    *,
+    admin: bool,
+) -> list[_Entry]:
+    """Collect product files by denylist, outside security-sensitive DBs.
+
+    Product runtime grows frequently. New runtime modules and documentation
+    therefore ship automatically. Machine-local configuration and database
+    contents remain on their separate, restrictive package contracts.
+    """
+
+    rag_root = _real_directory(copilot_home / "rag", "rag_root")
+    entries: list[_Entry] = []
+    required = [
+        "README.md",
+        "VERSION",
+        "list_dbs.py",
+        "search.py",
+        "setup.py",
+        "query/list_dbs.py",
+        "query/reference_contract.py",
+        "query/result_detail.py",
+        "query/search.py",
+        "query/setup.py",
+        "gen_db/software_rag_tool/pyproject.toml",
+        "gen_db/software_rag_tool/software_rag_tool/__init__.py",
+    ]
+    if admin:
+        required.extend(
+            [
+                "manage.py",
+                "gen_db/add_data.py",
+                "source_manager/__init__.py",
+            ]
+        )
+    for relative in required:
+        _add_file(
+            entries,
+            rag_root.joinpath(*PurePosixPath(relative).parts),
+            f".copilot/rag/{relative}",
+            required=True,
+            source_root=rag_root,
+        )
+    _add_tree(
+        entries,
+        rag_root,
+        ".copilot/rag",
+        include=lambda path: _product_payload_file(
+            path,
+            rag_root=rag_root,
+            admin=admin,
+        ),
+        descend=lambda path: _product_payload_directory(
+            path,
+            rag_root=rag_root,
+            admin=admin,
+        ),
+    )
+    instructions_root = _real_directory(
+        copilot_home / "instructions",
+        "instructions_root",
+    )
+    _add_file(
+        entries,
+        instructions_root / "rag.instructions.md",
+        ".copilot/instructions/rag.instructions.md",
+        required=True,
+        source_root=instructions_root,
+    )
+    for skill_name in _PROJECT_SKILLS:
+        skill_root = _real_directory(
+            copilot_home / "skills" / skill_name,
+            f"{skill_name}_skill_root",
+        )
+        _add_file(
+            entries,
+            skill_root / "SKILL.md",
+            f".copilot/skills/{skill_name}/SKILL.md",
+            required=True,
+            source_root=skill_root,
+        )
+        _add_tree(
+            entries,
+            skill_root,
+            f".copilot/skills/{skill_name}",
+            include=_ordinary_payload_file,
+        )
+    return _dedupe_entries(entries)
 
 
 def _database_entries(
@@ -1132,6 +1054,7 @@ def _database_entries(
                 },
                 mode=mode,
                 database_root=db_root,
+                source_root=db_root,
             )
         if distribution:
             entries.append(
@@ -1150,6 +1073,7 @@ def _database_entries(
                 f"{prefix}/{_RAG_WRAPPER_NAME}",
                 required=False,
                 database_root=db_root,
+                source_root=db_root,
             )
         _add_tree(
             entries,
@@ -1242,10 +1166,17 @@ def _stage_package(
         elif entry.source is None:
             raise PackageError("package_source_missing")
         elif entry.mode == "sqlite":
-            _backup_sqlite(entry.source, destination)
+            _backup_sqlite(
+                entry.source,
+                destination,
+                source_root=entry.source_root,
+            )
             source_fingerprint = _sha256(destination)
         else:
-            source_fingerprint, raw = _stable_read(entry.source)
+            source_fingerprint, raw = _stable_read(
+                entry.source,
+                source_root=entry.source_root,
+            )
             if entry.mode == "admin_json":
                 raw = _portable_admin_json(
                     raw,
@@ -1314,10 +1245,17 @@ def _verify_source_fingerprints(
                 raise PackageError("package_source_missing")
             if entry.mode == "sqlite":
                 snapshot = Path(temp) / f"{index}.sqlite"
-                _backup_sqlite(entry.source, snapshot)
+                _backup_sqlite(
+                    entry.source,
+                    snapshot,
+                    source_root=entry.source_root,
+                )
                 after = _sha256(snapshot)
             else:
-                after, _raw = _stable_read(entry.source)
+                after, _raw = _stable_read(
+                    entry.source,
+                    source_root=entry.source_root,
+                )
             if after != before:
                 raise PackageError("package_source_changed")
 
@@ -1684,8 +1622,13 @@ def _validate_source_links_payload(raw: bytes) -> None:
             pass
 
 
-def _backup_sqlite(source: Path, destination: Path) -> None:
-    _assert_regular_source(source)
+def _backup_sqlite(
+    source: Path,
+    destination: Path,
+    *,
+    source_root: Path | None = None,
+) -> None:
+    _assert_regular_source(source, source_root=source_root)
     destination.parent.mkdir(parents=True, exist_ok=True)
     uri = source.resolve().as_uri() + "?mode=ro"
     reader: sqlite3.Connection | None = None
@@ -1711,6 +1654,7 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
             writer.close()
         if reader is not None:
             reader.close()
+    _assert_regular_source(source, source_root=source_root)
     _fsync_file(destination)
 
 
@@ -1861,7 +1805,11 @@ def _selected_database_names(
 
 def _safe_database_root(root: Path, name: str) -> Path:
     candidate = root / name
-    if candidate.is_symlink():
+    try:
+        metadata = os.lstat(candidate)
+    except OSError as exc:
+        raise PackageError("database_missing") from exc
+    if _is_link_or_reparse(candidate, metadata):
         raise PackageError("database_symlink_forbidden")
     try:
         resolved = candidate.resolve(strict=True)
@@ -1880,17 +1828,24 @@ def _add_file(
     required: bool,
     mode: str = "copy",
     database_root: Path | None = None,
+    source_root: Path | None = None,
 ) -> None:
     if not source.exists():
         if required:
             raise PackageError("required_package_source_missing")
         return
-    _assert_regular_source(source)
+    _assert_regular_source(source, source_root=source_root)
     if _is_secret_path(source) or _is_transient_path(Path(source.name)):
         raise PackageError("forbidden_package_source")
     _reject_private_key_material(source)
     entries.append(
-        _Entry(source, _safe_relative(destination).as_posix(), mode, database_root)
+        _Entry(
+            source,
+            _safe_relative(destination).as_posix(),
+            mode,
+            database_root,
+            source_root=source_root,
+        )
     )
 
 
@@ -1900,42 +1855,149 @@ def _add_tree(
     destination_root: str,
     *,
     include: Any,
+    descend: Any | None = None,
     mode_for: Any | None = None,
     database_root: Path | None = None,
 ) -> None:
     if not source_root.exists():
         return
-    if source_root.is_symlink() or not source_root.is_dir():
+    try:
+        root_metadata = os.lstat(source_root)
+    except OSError as exc:
+        raise PackageError("package_source_unreadable") from exc
+    if (
+        _is_link_or_reparse(source_root, root_metadata)
+        or not stat.S_ISDIR(root_metadata.st_mode)
+    ):
         raise PackageError("package_source_tree_invalid")
-    for path in sorted(source_root.rglob("*")):
-        if path.is_symlink():
-            raise PackageError("package_symlink_forbidden")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise PackageError("package_special_file_forbidden")
-        relative = path.relative_to(source_root)
-        if not include(path):
-            continue
-        if _is_secret_path(path):
-            raise PackageError("forbidden_package_source")
-        if _is_transient_path(relative):
-            continue
-        _reject_private_key_material(path)
-        if _git_security_file(path):
-            _validate_git_configuration(path)
-        destination = (
-            PurePosixPath(destination_root)
-            / PurePosixPath(relative.as_posix())
-        ).as_posix()
-        entries.append(
-            _Entry(
-                path,
-                _safe_relative(destination).as_posix(),
-                mode_for(path) if mode_for else "copy",
-                database_root,
+    try:
+        source_root = source_root.resolve(strict=True)
+    except OSError as exc:
+        raise PackageError("package_source_unreadable") from exc
+
+    def visit(directory: Path) -> None:
+        try:
+            children = sorted(directory.iterdir(), key=lambda value: value.name)
+        except OSError as exc:
+            raise PackageError("package_source_unreadable") from exc
+        for path in children:
+            try:
+                metadata = os.lstat(path)
+            except OSError as exc:
+                raise PackageError("package_source_unreadable") from exc
+            if _is_link_or_reparse(path, metadata):
+                raise PackageError("package_symlink_forbidden")
+            relative = path.relative_to(source_root)
+            if stat.S_ISDIR(metadata.st_mode):
+                if _is_transient_path(relative):
+                    continue
+                if descend is not None and not descend(path):
+                    continue
+                visit(path)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise PackageError("package_special_file_forbidden")
+            if not include(path):
+                continue
+            if _is_secret_path(path):
+                raise PackageError("forbidden_package_source")
+            if _is_transient_path(relative):
+                continue
+            _reject_private_key_material(path)
+            if _git_security_file(path):
+                _validate_git_configuration(path)
+            destination = (
+                PurePosixPath(destination_root)
+                / PurePosixPath(relative.as_posix())
+            ).as_posix()
+            entries.append(
+                _Entry(
+                    path,
+                    _safe_relative(destination).as_posix(),
+                    mode_for(path) if mode_for else "copy",
+                    database_root,
+                    source_root=source_root,
+                )
             )
+    visit(source_root)
+
+
+def _product_payload_directory(
+    path: Path,
+    *,
+    rag_root: Path,
+    admin: bool,
+) -> bool:
+    """Return whether a product directory may be traversed."""
+
+    relative = path.relative_to(rag_root)
+    lowered = tuple(part.casefold() for part in relative.parts)
+    if not lowered:
+        return True
+    if lowered[0] == "dbs":
+        return False
+    allowed_roots = set(_PRODUCT_ROOT_DIRECTORIES)
+    if admin:
+        allowed_roots.add("source_manager")
+    if lowered[0] not in allowed_roots:
+        return False
+    if any(part in _PRODUCT_TEST_DIRECTORIES for part in lowered):
+        return False
+    if any(part in {".git", ".github"} for part in lowered):
+        return False
+    if (
+        not admin
+        and lowered[:3] == ("gen_db", "software_rag_tool", "scripts")
+    ):
+        return False
+    return True
+
+
+def _product_payload_file(
+    path: Path,
+    *,
+    rag_root: Path,
+    admin: bool,
+) -> bool:
+    """Select product payload by explicit exclusions, not runtime allowlists."""
+
+    relative = path.relative_to(rag_root)
+    lowered = tuple(part.casefold() for part in relative.parts)
+    if not lowered or lowered[0] == "dbs":
+        return False
+    if any(part in _PRODUCT_TEST_DIRECTORIES for part in lowered[:-1]):
+        return False
+    name = lowered[-1]
+    if (
+        name == "conftest.py"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    ):
+        return False
+    if lowered[0] == "config":
+        return (
+            len(lowered) == 2
+            and name in _PORTABLE_CONFIG_EXAMPLES
         )
+    if len(lowered) == 1:
+        if not admin and name in _DISTRIBUTION_ADMIN_ROOT_FILES:
+            return False
+        return (
+            path.suffix.casefold() in {".md", ".py"}
+            or name == "version"
+        )
+    if not admin:
+        if (
+            len(lowered) == 2
+            and lowered[0] == "gen_db"
+            and path.suffix.casefold() == ".py"
+        ):
+            return False
+        if (
+            lowered[:3] == ("gen_db", "software_rag_tool", "scripts")
+        ):
+            return False
+    return True
 
 
 def _ordinary_payload_file(path: Path) -> bool:
@@ -1997,6 +2059,10 @@ def _validate_git_configuration(path: Path) -> None:
         raw = path.read_bytes()
     except OSError as exc:
         raise PackageError("credential_configuration_detected") from exc
+    _validate_git_configuration_payload(raw)
+
+
+def _validate_git_configuration_payload(raw: bytes) -> None:
     if len(raw) > _MAX_TEXT_CONFIG_BYTES:
         raise PackageError("credential_configuration_detected")
     try:
@@ -2057,38 +2123,82 @@ def _dedupe_entries(entries: Sequence[_Entry]) -> list[_Entry]:
     return [values[key] for key in sorted(values)]
 
 
-def _stable_read(path: Path) -> tuple[str, bytes]:
-    _assert_regular_source(path)
+def _stable_read(
+    path: Path,
+    *,
+    source_root: Path | None = None,
+) -> tuple[str, bytes]:
+    before = _assert_regular_source(path, source_root=source_root)
     try:
-        before = path.stat()
         raw = path.read_bytes()
-        after = path.stat()
     except OSError as exc:
         raise PackageError("package_source_unreadable") from exc
+    after = _assert_regular_source(path, source_root=source_root)
     if (
-        before.st_size != after.st_size
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or len(raw) != after.st_size
     ):
         raise PackageError("package_source_changed")
+    _reject_private_key_payload(raw)
+    if _git_security_file(path):
+        _validate_git_configuration_payload(raw)
     digest = hashlib.sha256(raw).hexdigest()
     return digest, raw
 
 
-def _assert_regular_source(path: Path) -> None:
+def _assert_regular_source(
+    path: Path,
+    *,
+    source_root: Path | None = None,
+) -> os.stat_result:
+    if source_root is not None:
+        root = Path(source_root)
+        try:
+            relative = Path(path).relative_to(root)
+        except ValueError as exc:
+            raise PackageError("package_source_outside_root") from exc
+        try:
+            root_metadata = os.lstat(root)
+        except OSError as exc:
+            raise PackageError("package_source_unreadable") from exc
+        if (
+            _is_link_or_reparse(root, root_metadata)
+            or not stat.S_ISDIR(root_metadata.st_mode)
+        ):
+            raise PackageError("package_symlink_forbidden")
+        current = root
+        for component in relative.parts[:-1]:
+            current = current / component
+            try:
+                parent_metadata = os.lstat(current)
+            except OSError as exc:
+                raise PackageError("package_source_unreadable") from exc
+            if (
+                _is_link_or_reparse(current, parent_metadata)
+                or not stat.S_ISDIR(parent_metadata.st_mode)
+            ):
+                raise PackageError("package_symlink_forbidden")
     try:
         metadata = path.lstat()
     except OSError as exc:
         raise PackageError("package_source_unreadable") from exc
-    if stat.S_ISLNK(metadata.st_mode):
+    if _is_link_or_reparse(path, metadata):
         raise PackageError("package_symlink_forbidden")
     if not stat.S_ISREG(metadata.st_mode):
         raise PackageError("package_source_not_regular")
-    for parent in path.parents:
-        if parent.is_symlink():
-            raise PackageError("package_symlink_forbidden")
-        if parent.name == "rag":
-            break
+    return metadata
+
+
+def _is_link_or_reparse(path: Path, metadata: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(getattr(metadata, "st_file_attributes", 0) & reparse)
+        or (hasattr(path, "is_junction") and path.is_junction())
+    )
 
 
 def _is_secret_path(path: Path) -> bool:
@@ -2096,6 +2206,10 @@ def _is_secret_path(path: Path) -> bool:
     stem = path.stem.casefold()
     return (
         name in _SECRET_FILENAMES
+        or (
+            name.startswith(".env.")
+            and name != ".env.example"
+        )
         or path.suffix.casefold() in _SECRET_SUFFIXES
         or stem
         in {
@@ -2121,6 +2235,11 @@ def _reject_private_key_material(path: Path) -> None:
             prefix = handle.read(16 * 1024)
     except OSError as exc:
         raise PackageError("package_source_unreadable") from exc
+    _reject_private_key_payload(prefix)
+
+
+def _reject_private_key_payload(payload: bytes) -> None:
+    prefix = payload[: 16 * 1024]
     if (
         b"-----BEGIN OPENSSH PRIVATE KEY-----" in prefix
         or re.search(
@@ -2184,14 +2303,19 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
 
 def _real_directory(path: Path, field: str) -> Path:
     candidate = Path(path).expanduser()
-    if candidate.is_symlink():
+    try:
+        metadata = os.lstat(candidate)
+    except OSError as exc:
+        raise PackageError(f"{field}_invalid") from exc
+    if (
+        _is_link_or_reparse(candidate, metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
         raise PackageError(f"{field}_invalid")
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
         raise PackageError(f"{field}_invalid") from exc
-    if not resolved.is_dir():
-        raise PackageError(f"{field}_invalid")
     return resolved
 
 

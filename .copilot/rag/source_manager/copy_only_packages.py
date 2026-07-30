@@ -26,10 +26,6 @@ def install_copy_only_package_runtime() -> None:
     if bool(getattr(packages, _PATCH_MARKER, False)):
         return
 
-    packages._RAG_DISTRIBUTION_FILES = frozenset(
-        set(packages._RAG_DISTRIBUTION_FILES) | {"setup_copy.py"}
-    )
-
     original_distribution_entries = packages._distribution_entries
     original_admin_entries = packages._admin_entries
 
