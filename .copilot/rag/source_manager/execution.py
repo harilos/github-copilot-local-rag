@@ -29,6 +29,11 @@ from .errors import (
     sanitize_diagnostic,
 )
 from .diagnostics import process_diagnostic
+from .gitlab_issues import (
+    fetch_gitlab_issues,
+    gitlab_issues_updated_after,
+)
+from .networking import is_gitlab_token_request, reject_http_redirects
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
 from .security import validate_environment_name
 
@@ -40,6 +45,7 @@ HttpGet = Callable[
 ]
 ProgressCallback = Callable[[int, int], None]
 InventoryCallback = Callable[[list[int]], None]
+InventorySnapshotCallback = Callable[[int, list[int]], None]
 HttpProgressCallback = Callable[[Mapping[str, Any]], None]
 
 
@@ -53,9 +59,12 @@ def execute_fetch_plan(
     environment: Mapping[str, str] | None = None,
     item_callback: ProgressCallback | None = None,
     batch_callback: ProgressCallback | None = None,
+    no_change_callback: ProgressCallback | None = None,
     resume_count: int = 0,
     stable_issue_ids: list[int] | None = None,
+    stable_project_id: int | None = None,
     inventory_callback: InventoryCallback | None = None,
+    inventory_snapshot_callback: InventorySnapshotCallback | None = None,
     clock: Callable[[], datetime] | None = None,
     progress_callback: HttpProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -108,6 +117,41 @@ def execute_fetch_plan(
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=cutoff,
                 progress_callback=progress_callback,
+            )
+        elif provider == "gitlab_issues":
+            updated_after = gitlab_issues_updated_after(
+                parameters.get("updated_within_days"),
+                state,
+                clock=clock,
+            )
+
+            def gitlab_request(
+                url: str,
+                headers: Mapping[str, str],
+            ) -> tuple[int, bytes, Mapping[str, str]]:
+                return _get_with_retry_response(
+                    getter,
+                    url,
+                    headers,
+                    provider="gitlab_issues",
+                    provider_label="GitLab",
+                    progress_callback=progress_callback,
+                )
+
+            result = fetch_gitlab_issues(
+                parameters,
+                work,
+                gitlab_request,
+                env,
+                item_callback=item_callback,
+                batch_callback=batch_callback,
+                resume_count=resume_count,
+                stable_issue_ids=stable_issue_ids,
+                stable_project_id=stable_project_id,
+                inventory_snapshot_callback=inventory_snapshot_callback,
+                updated_after=updated_after,
+                progress_callback=progress_callback,
+                no_change_callback=no_change_callback,
             )
         elif provider == "sharepoint":
             if not _is_windows():
@@ -902,6 +946,28 @@ def _get_with_retry(
     progress_callback: HttpProgressCallback | None = None,
     response_diagnostic: dict[str, Any] | None = None,
 ) -> tuple[int, bytes]:
+    status, body, _headers = _get_with_retry_response(
+        getter,
+        url,
+        headers,
+        provider="redmine",
+        provider_label="Redmine",
+        progress_callback=progress_callback,
+        response_diagnostic=response_diagnostic,
+    )
+    return status, body
+
+
+def _get_with_retry_response(
+    getter: HttpGet,
+    url: str,
+    headers: Mapping[str, str],
+    *,
+    provider: str,
+    provider_label: str,
+    progress_callback: HttpProgressCallback | None = None,
+    response_diagnostic: dict[str, Any] | None = None,
+) -> tuple[int, bytes, Mapping[str, str]]:
     retryable = {429, 502, 503, 504}
     max_attempts = 3
     timeout = 10.0
@@ -917,6 +983,8 @@ def _get_with_retry(
                 attempt=attempt,
                 max_attempts=max_attempts,
                 started=started,
+                provider=provider,
+                provider_label=provider_label,
             )
             status, body = int(response[0]), response[1]
             response_headers = (
@@ -936,6 +1004,7 @@ def _get_with_retry(
             )
             wait = 0.1 * attempt if retry else 0.0
             diagnostic = _http_diagnostic(
+                provider=provider,
                 url=url,
                 request_headers=headers,
                 timeout=timeout,
@@ -949,12 +1018,17 @@ def _get_with_retry(
             )
             _emit_http_progress(progress_callback, diagnostic)
             if not retry:
-                raise _redmine_http_error(diagnostic) from exc
+                raise _provider_http_error(
+                    provider,
+                    provider_label,
+                    diagnostic,
+                ) from exc
             time.sleep(wait)
             continue
         reason = _http_reason(status)
         if status == 200:
             diagnostic = _http_diagnostic(
+                provider=provider,
                 url=url,
                 request_headers=headers,
                 timeout=timeout,
@@ -976,7 +1050,7 @@ def _get_with_retry(
                 progress_callback,
                 diagnostic,
             )
-            return status, body
+            return status, body, dict(response_headers)
         retry_after = _header_value(response_headers, "Retry-After")
         retry = status in retryable and attempt < max_attempts
         retry_after_delay = _retry_after_seconds(retry_after)
@@ -987,6 +1061,7 @@ def _get_with_retry(
         )
         wait = max(0.0, delay) if retry else 0.0
         diagnostic = _http_diagnostic(
+            provider=provider,
             url=url,
             request_headers=headers,
             timeout=timeout,
@@ -1004,16 +1079,21 @@ def _get_with_retry(
         )
         _emit_http_progress(progress_callback, diagnostic)
         if not retry:
-            raise _redmine_http_error(diagnostic)
+            raise _provider_http_error(
+                provider,
+                provider_label,
+                diagnostic,
+            )
         time.sleep(wait)
     raise SourceManagerError(
-        "Redmine HTTP request failed",
-        stage="fetch.redmine",
+        f"{provider_label} HTTP request failed",
+        stage=f"fetch.{provider}",
     )
 
 
 def _http_diagnostic(
     *,
+    provider: str = "redmine",
     url: str,
     request_headers: Mapping[str, Any],
     timeout: float,
@@ -1032,7 +1112,7 @@ def _http_diagnostic(
 ) -> dict[str, Any]:
     response = response_headers or {}
     payload: dict[str, Any] = {
-        "event": "redmine.http_attempt",
+        "event": f"{str(provider or 'provider')}.http_attempt",
         "method": "GET",
         "url": sanitize_diagnostic(url, max_chars=4_096),
         "timeout_seconds": float(timeout),
@@ -1078,6 +1158,8 @@ def _call_http_with_heartbeat(
     attempt: int,
     max_attempts: int,
     started: float,
+    provider: str = "redmine",
+    provider_label: str = "Redmine",
 ) -> Any:
     if progress_callback is None:
         return getter(url, headers, timeout)
@@ -1100,8 +1182,9 @@ def _call_http_with_heartbeat(
             progress_callback,
             {
                 "event": "heartbeat",
-                "phase": "redmine.http",
-                "label_ja": "Redmine応答待ち",
+                "phase": f"{provider}.http",
+                "label_ja": f"{provider_label}応答待ち",
+                "provider": provider,
                 "attempt": attempt,
                 "max_attempts": max_attempts,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
@@ -1213,6 +1296,14 @@ def _redmine_response_error(
 
 
 def _redmine_http_error(diagnostic: Mapping[str, Any]) -> SourceManagerError:
+    return _provider_http_error("redmine", "Redmine", diagnostic)
+
+
+def _provider_http_error(
+    provider: str,
+    provider_label: str,
+    diagnostic: Mapping[str, Any],
+) -> SourceManagerError:
     encoded = json.dumps(
         dict(diagnostic),
         ensure_ascii=False,
@@ -1220,8 +1311,8 @@ def _redmine_http_error(diagnostic: Mapping[str, Any]) -> SourceManagerError:
         separators=(",", ":"),
     )
     error = SourceManagerError(
-        f"Redmine HTTP request failed: {encoded}",
-        stage="fetch.redmine",
+        f"{provider_label} HTTP request failed: {encoded}",
+        stage=f"fetch.{provider}",
     )
     error.diagnostic = dict(diagnostic)
     error.error_kind = str(
@@ -1745,7 +1836,15 @@ def _http_get(
 ) -> tuple[int, bytes, Mapping[str, str]]:
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        if is_gitlab_token_request(headers):
+            opener = reject_http_redirects(urllib.request.build_opener())
+            response_context = opener.open(request, timeout=timeout)
+        else:
+            response_context = urllib.request.urlopen(
+                request,
+                timeout=timeout,
+            )
+        with response_context as response:
             return int(response.status), response.read(), dict(response.headers)
     except urllib.error.HTTPError as exc:
         return int(exc.code), exc.read(), dict(exc.headers or {})

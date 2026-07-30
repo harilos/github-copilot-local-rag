@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
+from .gitlab_issues import (
+    repair_generated_gitlab_issues_link,
+)
 from .redmine import repair_generated_redmine_link
 
 
@@ -161,6 +164,26 @@ def _canonical_source(
             if project_url:
                 repaired = repair_generated_redmine_link(
                     project_url,
+                    link_value,
+                )
+                if repaired is not None:
+                    link_value = repaired
+        elif value["source_type"] == "gitlab_issues":
+            fetch = source.get("fetch")
+            project_url = (
+                fetch.get("project_url")
+                if isinstance(fetch, Mapping)
+                else None
+            )
+            gitlab_url = (
+                fetch.get("gitlab_url")
+                if isinstance(fetch, Mapping)
+                else None
+            )
+            if project_url and gitlab_url:
+                repaired = repair_generated_gitlab_issues_link(
+                    project_url,
+                    gitlab_url,
                     link_value,
                 )
                 if repaired is not None:

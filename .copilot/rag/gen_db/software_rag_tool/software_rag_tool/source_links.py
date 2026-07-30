@@ -53,6 +53,7 @@ _ALLOWED_PROVIDERS = {
     *_GIT_PROVIDER_STRATEGIES,
     "svn",
     "redmine",
+    "gitlab_issues",
     "other",
 }
 ALLOWED_SOURCE_TYPES = frozenset(

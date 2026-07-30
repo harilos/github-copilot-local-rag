@@ -34,6 +34,7 @@ def install_source_preflight_runtime() -> None:
     _install_manager_hook(manager_connections)
     _install_normal_source_preflight(runner)
     _install_redmine_preflight(execution, runner)
+    _install_gitlab_issues_preflight(execution, runner)
     setattr(runner, _RUNTIME_PATCH_MARKER, True)
 
 
@@ -322,6 +323,169 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
             )
 
     runner._update_redmine_source = update_redmine_source
+
+
+def _install_gitlab_issues_preflight(
+    execution: Any,
+    runner: Any,
+) -> None:
+    original_gitlab = execution.fetch_gitlab_issues
+
+    @functools.wraps(original_gitlab)
+    def gitlab_issues(
+        settings: Mapping[str, Any],
+        work: Any,
+        request: Any,
+        environment: Mapping[str, str],
+        *,
+        item_callback: Any,
+        batch_callback: Any,
+        resume_count: int,
+        stable_issue_ids: list[int] | None,
+        stable_project_id: int | None,
+        inventory_snapshot_callback: Any,
+        updated_after: str | None,
+        progress_callback: Any,
+        no_change_callback: Any = None,
+    ) -> dict[str, Any]:
+        required = bool(
+            getattr(progress_callback, _REDMINE_REQUIRED_ATTR, False)
+        )
+        if not required:
+            return original_gitlab(
+                settings,
+                work,
+                request,
+                environment,
+                item_callback=item_callback,
+                batch_callback=batch_callback,
+                resume_count=resume_count,
+                stable_issue_ids=stable_issue_ids,
+                stable_project_id=stable_project_id,
+                inventory_snapshot_callback=inventory_snapshot_callback,
+                updated_after=updated_after,
+                progress_callback=progress_callback,
+                no_change_callback=no_change_callback,
+            )
+
+        if stable_issue_ids is not None:
+            documents = len(stable_issue_ids)
+            confirmed = _request_confirmation(
+                progress_callback,
+                documents,
+            )
+            _record_callback_result(
+                progress_callback,
+                documents,
+                confirmed,
+            )
+            if not confirmed:
+                raise SourceEstimateDeclined(documents)
+            return original_gitlab(
+                settings,
+                work,
+                request,
+                environment,
+                item_callback=item_callback,
+                batch_callback=batch_callback,
+                resume_count=resume_count,
+                stable_issue_ids=stable_issue_ids,
+                stable_project_id=stable_project_id,
+                inventory_snapshot_callback=inventory_snapshot_callback,
+                updated_after=updated_after,
+                progress_callback=progress_callback,
+                no_change_callback=no_change_callback,
+            )
+
+        def confirmed_inventory(
+            project_id: int,
+            issue_iids: list[int],
+        ) -> None:
+            documents = len(issue_iids)
+            confirmed = _request_confirmation(
+                progress_callback,
+                documents,
+            )
+            _record_callback_result(
+                progress_callback,
+                documents,
+                confirmed,
+            )
+            if inventory_snapshot_callback is not None:
+                inventory_snapshot_callback(project_id, issue_iids)
+            if not confirmed:
+                raise SourceEstimateDeclined(documents)
+
+        return original_gitlab(
+            settings,
+            work,
+            request,
+            environment,
+            item_callback=item_callback,
+            batch_callback=batch_callback,
+            resume_count=resume_count,
+            stable_issue_ids=stable_issue_ids,
+            stable_project_id=stable_project_id,
+            inventory_snapshot_callback=confirmed_inventory,
+            updated_after=updated_after,
+            progress_callback=progress_callback,
+            no_change_callback=no_change_callback,
+        )
+
+    execution.fetch_gitlab_issues = gitlab_issues
+
+    original_update = runner._update_gitlab_issues_source
+
+    @functools.wraps(original_update)
+    def update_gitlab_issues_source(
+        store: Any,
+        source: Any,
+        state: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        progress_callback = kwargs.get("progress_callback")
+        required = not bool(source.payload.get("source_id")) and not bool(
+            state.payload.get("preflight_confirmed")
+        )
+        previous_required = _set_optional_attribute(
+            progress_callback,
+            _REDMINE_REQUIRED_ATTR,
+            required,
+        )
+        previous_result = _set_optional_attribute(
+            progress_callback,
+            _RESULT_ATTR,
+            None,
+        )
+        try:
+            return original_update(store, source, state, **kwargs)
+        except SourceEstimateDeclined as exc:
+            return _record_redmine_decline(
+                store,
+                source,
+                runner,
+                exc.documents,
+            )
+        finally:
+            result = getattr(progress_callback, _RESULT_ATTR, None)
+            if isinstance(result, Mapping) and bool(result.get("confirmed")):
+                _persist_redmine_confirmation(
+                    store,
+                    source,
+                    int(result.get("documents") or 0),
+                )
+            _restore_optional_attribute(
+                progress_callback,
+                _RESULT_ATTR,
+                previous_result,
+            )
+            _restore_optional_attribute(
+                progress_callback,
+                _REDMINE_REQUIRED_ATTR,
+                previous_required,
+            )
+
+    runner._update_gitlab_issues_source = update_gitlab_issues_source
 
 
 def _record_redmine_decline(

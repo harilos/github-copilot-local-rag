@@ -30,7 +30,7 @@
     <text x="36" y="534" fill="#8b949e">============================================================</text>
     <text x="36" y="570" font-weight="700">種類を選択してください</text>
     <text x="36" y="600"><tspan fill="#79c0ff">1.</tspan> GitHub　 <tspan fill="#79c0ff">2.</tspan> SVN　 <tspan fill="#79c0ff">3.</tspan> Redmine</text>
-    <text x="36" y="630"><tspan fill="#79c0ff">4.</tspan> SharePoint　 <tspan fill="#79c0ff">5.</tspan> Teams　 <tspan fill="#79c0ff">6.</tspan> Other</text>
+    <text x="36" y="630"><tspan fill="#79c0ff">4.</tspan> SharePoint　 <tspan fill="#79c0ff">5.</tspan> Teams　 <tspan fill="#79c0ff">6.</tspan> GitLab Issue　 <tspan fill="#79c0ff">7.</tspan> Other</text>
     <text x="36" y="664">番号を入力してください: <tspan fill="#3fb950" font-weight="700">2</tspan></text>
     <text x="36" y="696" fill="#d2a8ff">次に、取得範囲・更新期間・取り込むファイル種類を画面に沿って選びます。</text>
   </g>

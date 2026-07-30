@@ -1678,6 +1678,49 @@ class SourceLinksContractTests(unittest.TestCase):
         )
         self.assertNotIn("source_url", unmatched["evidence"][0])
 
+    def test_gitlab_issue_regex_template_resolves_issue_iid(self) -> None:
+        self.save(
+            sidecar(
+                link(
+                    provider="gitlab_issues",
+                    strategy="regex-template",
+                    settings={
+                        "path_pattern": (
+                            r"^issues/(?P<issue_iid>[0-9]+)\.md$"
+                        ),
+                        "url_template": (
+                            "https://gitlab.example.invalid/group/project/"
+                            "-/issues/{issue_iid}"
+                        ),
+                    },
+                )
+            )
+        )
+
+        matched = source_links.enrich_search_payload(
+            search_payload("Root/issues/123.md"),
+            self.db_root,
+            "example-rag",
+        )
+        unmatched = source_links.enrich_search_payload(
+            search_payload("Root/issues/not-an-iid.md"),
+            self.db_root,
+            "example-rag",
+        )
+
+        self.assertEqual(
+            "gitlab_issues",
+            matched["evidence"][0]["source_provider"],
+        )
+        self.assertEqual(
+            (
+                "https://gitlab.example.invalid/group/project/"
+                "-/issues/123"
+            ),
+            matched["evidence"][0]["source_url"],
+        )
+        self.assertNotIn("source_url", unmatched["evidence"][0])
+
     def test_credentials_absolute_paths_and_traversal_are_rejected(self) -> None:
         deeply_encoded = "access_token=synthetic-value"
         for _ in range(12):

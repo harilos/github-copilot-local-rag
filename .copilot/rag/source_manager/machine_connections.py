@@ -9,15 +9,25 @@ import os
 import re
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import SourceManagerError
+from .gitlab_issues import (
+    gitlab_connection_id,
+    gitlab_token_env,
+    parse_gitlab_project,
+)
+from .networking import reject_http_redirects
 from .redmine import parse_redmine_project_url
+from .security import validate_web_url
 
 
 CONNECTION_SCHEMA_VERSION = "local-rag.source-connections.v1"
@@ -32,6 +42,7 @@ _MAX_SECRET_CHARS = 16 * 1024
 _REDMINE_ENV_PREFIX = "LOCAL_RAG_REDMINE_API_KEY_"
 _SAFE_ENV = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _RUNTIME_PATCH_MARKER = "_local_rag_machine_connections_installed"
+_MAX_PROJECT_ID = 9_223_372_036_854_775_807
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,58 @@ class RedmineRegistration:
     api_root: str
     api_key_env: str
     registered: bool
+
+
+@dataclass(frozen=True)
+class GitLabRegistration:
+    connection_id: str
+    gitlab_url: str
+    token_env: str
+    registered: bool
+
+
+@dataclass(frozen=True)
+class GitLabProjectLocation:
+    gitlab_url: str
+    project_url: str
+    project_path: str
+    encoded_project_path: str
+
+    @property
+    def api_base_url(self) -> str:
+        return f"{self.gitlab_url}/api/v4"
+
+    @property
+    def project_api_url(self) -> str:
+        return f"{self.api_base_url}/projects/{self.encoded_project_path}"
+
+    @property
+    def issue_link(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "strategy": "regex-template",
+            "settings": {
+                "path_pattern": (
+                    r"^issues/(?P<issue_iid>[0-9]+)\.md$"
+                ),
+                "url_template": (
+                    f"{self.project_url}/-/issues/{{issue_iid}}"
+                ),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class GitLabProjectCheck:
+    location: GitLabProjectLocation
+    project_id: int
+    name: str
+
+
+GitLabHttpGet = Callable[
+    [str, Mapping[str, str], float],
+    tuple[int, bytes, Mapping[str, str]],
+]
 
 
 def connection_config_path(rag_root: str | Path) -> Path:
@@ -71,6 +134,29 @@ def redmine_api_key_env(project_url: Any) -> str:
     connection_id = redmine_connection_id(project_url)
     suffix = connection_id.removeprefix("redmine-").upper()
     return f"{_REDMINE_ENV_PREFIX}{suffix}"
+
+
+def gitlab_project_location(
+    gitlab_url: Any,
+    project_url: Any,
+) -> GitLabProjectLocation:
+    """Resolve one GitLab web project below an explicit instance root.
+
+    GitLab Self-Managed can live below a path such as ``/gitlab``.  The
+    instance URL therefore remains explicit, while only the relative
+    ``group/subgroup/project`` identity is percent-encoded for the REST path.
+    """
+
+    project = parse_gitlab_project(project_url, gitlab_url)
+    return GitLabProjectLocation(
+        gitlab_url=project.gitlab_url,
+        project_url=project.project_url,
+        project_path=project.project_path,
+        encoded_project_path=urllib.parse.quote(
+            project.project_path,
+            safe="",
+        ),
+    )
 
 
 def sharepoint_root_status(
@@ -124,7 +210,7 @@ def register_redmine_api_key(
     api_key: Any,
 ) -> RedmineRegistration:
     project = parse_redmine_project_url(project_url)
-    secret = _validate_secret(api_key)
+    secret = _validate_secret(api_key, label="Redmine API key")
     connection_id = redmine_connection_id(project.project_url)
     api_key_env = redmine_api_key_env(project.project_url)
 
@@ -156,12 +242,66 @@ def register_redmine_api_key(
     )
 
 
+def register_gitlab_token(
+    rag_root: str | Path,
+    gitlab_url: Any,
+    token: Any,
+) -> GitLabRegistration:
+    instance = _canonical_web_root(gitlab_url, field="GitLab URL")
+    secret = _validate_secret(token, label="GitLab access token")
+    connection_id = gitlab_connection_id(instance)
+    token_env = gitlab_token_env(instance)
+
+    secrets = _load_secrets(rag_root)
+    gitlab_secrets = dict(secrets.get("gitlab") or {})
+    gitlab_secrets[connection_id] = {
+        "ciphertext": _encrypt_secret(rag_root, secret),
+        "updated_at": _now(),
+    }
+    secrets["gitlab"] = gitlab_secrets
+    secrets["updated_at"] = _now()
+    _save_secrets(rag_root, secrets)
+
+    config = _load_connections(rag_root)
+    gitlab = dict(config.get("gitlab") or {})
+    gitlab[connection_id] = {
+        "gitlab_url": instance,
+        "token_env": token_env,
+        "updated_at": _now(),
+    }
+    config["gitlab"] = gitlab
+    config["updated_at"] = _now()
+    _save_connections(rag_root, config)
+    return GitLabRegistration(
+        connection_id=connection_id,
+        gitlab_url=instance,
+        token_env=token_env,
+        registered=True,
+    )
+
+
 def has_stored_redmine_api_key(rag_root: str | Path, project_url: Any) -> bool:
     connection_id = redmine_connection_id(project_url)
     config = _load_connections(rag_root)
     configured = (config.get("redmine") or {}).get(connection_id)
     secrets = _load_secrets(rag_root)
     entry = (secrets.get("redmine") or {}).get(connection_id)
+    return (
+        isinstance(configured, Mapping)
+        and isinstance(entry, Mapping)
+        and bool(entry.get("ciphertext"))
+    )
+
+
+def has_stored_gitlab_token(
+    rag_root: str | Path,
+    gitlab_url: Any,
+) -> bool:
+    connection_id = gitlab_connection_id(gitlab_url)
+    config = _load_connections(rag_root)
+    configured = (config.get("gitlab") or {}).get(connection_id)
+    secrets = _load_secrets(rag_root)
+    entry = (secrets.get("gitlab") or {}).get(connection_id)
     return (
         isinstance(configured, Mapping)
         and isinstance(entry, Mapping)
@@ -199,6 +339,38 @@ def list_redmine_registrations(
     return tuple(values)
 
 
+def list_gitlab_registrations(
+    rag_root: str | Path,
+) -> tuple[GitLabRegistration, ...]:
+    config = _load_connections(rag_root)
+    secrets = _load_secrets(rag_root)
+    secret_entries = secrets.get("gitlab") or {}
+    values: list[GitLabRegistration] = []
+    for connection_id, raw in sorted(
+        (config.get("gitlab") or {}).items(),
+        key=lambda item: str(
+            (item[1] or {}).get("gitlab_url") or ""
+        ).casefold(),
+    ):
+        if not isinstance(raw, Mapping):
+            continue
+        gitlab_url = str(raw.get("gitlab_url") or "").strip()
+        token_env = str(raw.get("token_env") or "").strip()
+        if not gitlab_url or not _SAFE_ENV.fullmatch(token_env):
+            continue
+        secret = secret_entries.get(connection_id)
+        values.append(
+            GitLabRegistration(
+                connection_id=str(connection_id),
+                gitlab_url=gitlab_url,
+                token_env=token_env,
+                registered=isinstance(secret, Mapping)
+                and bool(secret.get("ciphertext")),
+            )
+        )
+    return tuple(values)
+
+
 def resolve_redmine_api_key(
     rag_root: str | Path,
     *,
@@ -228,6 +400,145 @@ def resolve_redmine_api_key(
     return legacy or None
 
 
+def resolve_gitlab_token(
+    rag_root: str | Path,
+    *,
+    gitlab_url: Any,
+    token_env: str | None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    environment = os.environ if environ is None else environ
+    requested_env = str(token_env or "").strip()
+    expected_env = gitlab_token_env(gitlab_url)
+    if requested_env and requested_env != expected_env:
+        raise SourceManagerError(
+            "GitLab token environment does not match the GitLab URL"
+        )
+    connection_id = gitlab_connection_id(gitlab_url)
+    secrets = _load_secrets(rag_root)
+    entry = (secrets.get("gitlab") or {}).get(connection_id)
+    if isinstance(entry, Mapping) and entry.get("ciphertext"):
+        return _decrypt_secret(
+            rag_root,
+            str(entry["ciphertext"]),
+            label="GitLab access token",
+        )
+    inherited = str(environment.get(expected_env) or "").strip()
+    if inherited:
+        return inherited
+    return None
+
+
+def check_gitlab_project(
+    rag_root: str | Path,
+    *,
+    gitlab_url: Any,
+    project_url: Any,
+    token_env: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    http_get: GitLabHttpGet | None = None,
+) -> GitLabProjectCheck:
+    """Resolve a project and verify that its Issues API is readable."""
+
+    location = gitlab_project_location(gitlab_url, project_url)
+    environment = os.environ if environ is None else environ
+    environment_name = str(
+        token_env or gitlab_token_env(location.gitlab_url)
+    ).strip()
+    token = resolve_gitlab_token(
+        rag_root,
+        gitlab_url=location.gitlab_url,
+        token_env=environment_name,
+        environ=environment,
+    )
+    if not token:
+        raise SourceManagerError(
+            "GitLab access token is not registered on this computer"
+        )
+    getter = http_get or _default_http_get
+    headers = {
+        "PRIVATE-TOKEN": token,
+        "Accept": "application/json",
+    }
+    try:
+        response = getter(
+            location.project_api_url,
+            headers,
+            10.0,
+        )
+        status = int(response[0])
+        body = bytes(response[1])
+        if status != 200:
+            raise SourceManagerError(
+                f"GitLab project connection check failed (HTTP {status})"
+            )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SourceManagerError(
+                "GitLab project connection check returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise SourceManagerError(
+                "GitLab project connection check returned an invalid project"
+            )
+        project_id = payload.get("id")
+        if (
+            isinstance(project_id, bool)
+            or not str(project_id).isdigit()
+            or not 1 <= int(project_id) <= _MAX_PROJECT_ID
+        ):
+            raise SourceManagerError(
+                "GitLab project connection check returned an invalid project ID"
+            )
+        returned_web_url = payload.get("web_url")
+        returned = gitlab_project_location(
+            location.gitlab_url,
+            returned_web_url,
+        )
+        if returned.project_path != location.project_path:
+            raise SourceManagerError(
+                "GitLab project connection check returned a different project"
+            )
+        issues_url = (
+            f"{location.api_base_url}/projects/{int(project_id)}/issues"
+            "?scope=all&state=all&per_page=1&page=1"
+        )
+        issues_response = getter(
+            issues_url,
+            headers,
+            10.0,
+        )
+        issues_status = int(issues_response[0])
+        issues_body = bytes(issues_response[1])
+        if issues_status != 200:
+            raise SourceManagerError(
+                "GitLab Issues API connection check failed "
+                f"(HTTP {issues_status})"
+            )
+        try:
+            issues_payload = json.loads(issues_body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SourceManagerError(
+                "GitLab Issues API connection check returned invalid JSON"
+            ) from exc
+        if not isinstance(issues_payload, list):
+            raise SourceManagerError(
+                "GitLab Issues API connection check returned an invalid response"
+            )
+        name = str(
+            payload.get("name_with_namespace") or payload.get("name") or ""
+        )
+        return GitLabProjectCheck(
+            location=returned,
+            project_id=int(project_id),
+            name=name.strip() or returned.project_path,
+        )
+    finally:
+        token = ""
+        headers["PRIVATE-TOKEN"] = ""
+
+
 def source_runtime_environment(
     rag_root: str | Path,
     source_payload: Mapping[str, Any],
@@ -253,6 +564,25 @@ def source_runtime_environment(
                 rag_root,
                 project_url=project_url,
                 api_key_env=name,
+                environ=result,
+            )
+            if secret:
+                result[name] = secret
+    elif source_type == "gitlab_issues":
+        gitlab_url = settings.get("gitlab_url")
+        name = str(
+            settings.get("token_env")
+            or (
+                gitlab_token_env(gitlab_url)
+                if gitlab_url
+                else ""
+            )
+        ).strip()
+        if name and gitlab_url:
+            secret = resolve_gitlab_token(
+                rag_root,
+                gitlab_url=gitlab_url,
+                token_env=name,
                 environ=result,
             )
             if secret:
@@ -301,6 +631,12 @@ def install_machine_connection_runtime() -> None:
                         raise SourceManagerError(
                             "Redmine API key is not registered on this computer"
                         )
+                if source_type == "gitlab_issues":
+                    name = str(fetch.get("token_env") or "")
+                    if not name or not str(effective_environment.get(name) or ""):
+                        raise SourceManagerError(
+                            "GitLab access token is not registered on this computer"
+                        )
                 if source_type == "sharepoint":
                     name = str(fetch.get("root_env") or SHAREPOINT_ROOT_ENV)
                     if not str(effective_environment.get(name) or ""):
@@ -333,6 +669,7 @@ def _default_connections() -> dict[str, Any]:
     return {
         "schema_version": CONNECTION_SCHEMA_VERSION,
         "redmine": {},
+        "gitlab": {},
     }
 
 
@@ -340,6 +677,7 @@ def _default_secrets() -> dict[str, Any]:
     return {
         "schema_version": SECRET_SCHEMA_VERSION,
         "redmine": {},
+        "gitlab": {},
     }
 
 
@@ -363,6 +701,7 @@ def _save_connections(rag_root: str | Path, value: Mapping[str, Any]) -> None:
     payload = copy.deepcopy(dict(value))
     payload["schema_version"] = CONNECTION_SCHEMA_VERSION
     payload.setdefault("redmine", {})
+    payload.setdefault("gitlab", {})
     _atomic_json(connection_config_path(rag_root), payload)
 
 
@@ -370,6 +709,7 @@ def _save_secrets(rag_root: str | Path, value: Mapping[str, Any]) -> None:
     payload = copy.deepcopy(dict(value))
     payload["schema_version"] = SECRET_SCHEMA_VERSION
     payload.setdefault("redmine", {})
+    payload.setdefault("gitlab", {})
     _atomic_json(connection_secret_path(rag_root), payload)
 
 
@@ -463,23 +803,82 @@ def _encrypt_secret(rag_root: str | Path, value: str) -> str:
     return base64.urlsafe_b64encode(token).decode("ascii")
 
 
-def _decrypt_secret(rag_root: str | Path, value: str) -> str:
+def _decrypt_secret(
+    rag_root: str | Path,
+    value: str,
+    *,
+    label: str = "Redmine API key",
+) -> str:
     try:
         token = base64.urlsafe_b64decode(value.encode("ascii"))
         return _fernet(rag_root).decrypt(token).decode("utf-8")
     except (ValueError, UnicodeError, InvalidToken) as exc:
-        raise SourceManagerError("stored Redmine API key cannot be decrypted") from exc
+        raise SourceManagerError(f"stored {label} cannot be decrypted") from exc
 
 
-def _validate_secret(value: Any) -> str:
+def _validate_secret(value: Any, *, label: str) -> str:
     text = str(value or "").strip()
     if (
         not text
         or len(text) > _MAX_SECRET_CHARS
         or any(ord(character) < 0x20 for character in text)
     ):
-        raise SourceManagerError("Redmine API key is invalid")
+        raise SourceManagerError(f"{label} is invalid")
     return text
+
+
+def _canonical_web_root(value: Any, *, field: str) -> str:
+    text = validate_web_url(value, field=field)
+    split = urllib.parse.urlsplit(text)
+    if split.query or split.fragment:
+        raise SourceManagerError(
+            f"{field} cannot contain a query or fragment"
+        )
+    try:
+        _ = split.port
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} port is invalid") from exc
+    path = split.path.rstrip("/")
+    if "\\" in path or any(
+        urllib.parse.unquote(component) in {".", ".."}
+        for component in path.split("/")
+    ):
+        raise SourceManagerError(f"{field} path is invalid")
+    if path.casefold().endswith("/api/v4"):
+        raise SourceManagerError(
+            f"{field} must be the GitLab web root, not the API URL"
+        )
+    return urllib.parse.urlunsplit(
+        (
+            split.scheme.casefold(),
+            split.netloc.casefold(),
+            path,
+            "",
+            "",
+        )
+    ).rstrip("/")
+
+
+def _default_http_get(
+    url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> tuple[int, bytes, Mapping[str, str]]:
+    request = urllib.request.Request(
+        url,
+        headers=dict(headers),
+        method="GET",
+    )
+    opener = reject_http_redirects(urllib.request.build_opener())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return (
+                int(response.status),
+                response.read(),
+                dict(response.headers),
+            )
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), exc.read(), dict(exc.headers or {})
 
 
 def _usable_sharepoint_root(value: str | Path) -> Path | None:

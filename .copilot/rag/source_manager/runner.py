@@ -19,6 +19,14 @@ from .errors import (
 )
 from .execution import execute_fetch_plan, validate_managed_work_tree
 from .diagnostics import exception_diagnostic, process_diagnostic
+from .gitlab_issues import (
+    GITLAB_ISSUE_IDS_STATE_KEY,
+    GITLAB_ISSUES_CUTOFF_STATE_KEY,
+    GITLAB_PROJECT_ID_STATE_KEY,
+    generated_gitlab_issues_link,
+    gitlab_issues_updated_after,
+    repair_generated_gitlab_issues_link,
+)
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
 from .providers import validate_provider_config
@@ -113,6 +121,19 @@ def register_source(
             values.get("project_url"),
             link,
         )
+    elif str(source_type).strip().lower() == "gitlab_issues":
+        effective_link = (
+            generated_gitlab_issues_link(
+                values.get("project_url"),
+                values.get("gitlab_url"),
+            )
+            if link is None
+            else repair_generated_gitlab_issues_link(
+                values.get("project_url"),
+                values.get("gitlab_url"),
+                link,
+            )
+        )
     stored = store.create_source(
         source_type=source_type,
         display_name=display_name,
@@ -201,6 +222,8 @@ def update_source(
         raise SourceManagerError("Source does not exist")
     if source.payload.get("source_type") == "redmine":
         source = _normalize_redmine_source(store, source)
+    elif source.payload.get("source_type") == "gitlab_issues":
+        source = _normalize_gitlab_issues_source(store, source)
     runtime = _validate_registration_runtime(
         str(source.payload["source_type"]),
         runtime_input,
@@ -227,7 +250,7 @@ def update_source(
     if (
         executor is None
         and source.payload.get("source_type")
-        in {"github", "svn", "redmine"}
+        in {"github", "svn", "redmine", "gitlab_issues"}
         and command_runner is None
         and http_get is None
         and rag_root is not None
@@ -247,6 +270,25 @@ def update_source(
         and rag_root is not None
     ):
         return _update_redmine_source(
+            store,
+            source,
+            existing_state,
+            python_executable=Path(python_executable),
+            rag_root=Path(rag_root),
+            command_runner=command_runner,
+            http_get=provider_http_get,
+            environment=provider_environment,
+            metadata_publisher=metadata_publisher,
+            clock=clock,
+            progress_callback=progress_callback,
+        )
+    if (
+        source.payload.get("source_type") == "gitlab_issues"
+        and executor is None
+        and python_executable is not None
+        and rag_root is not None
+    ):
+        return _update_gitlab_issues_source(
             store,
             source,
             existing_state,
@@ -704,6 +746,21 @@ def update_source_configuration(
         raise SourceManagerError(
             "sharepoint_ingestion_root_is_immutable_add_new_source"
         )
+    if (
+        source.payload.get("source_id")
+        and source.payload.get("source_type") == "gitlab_issues"
+    ):
+        current_fetch = validate_provider_config(
+            "gitlab_issues",
+            source.payload.get("fetch") or {},
+        )
+        if any(
+            normalized_fetch.get(key) != current_fetch.get(key)
+            for key in ("gitlab_url", "project_url")
+        ):
+            raise SourceManagerError(
+                "gitlab_issue_project_is_immutable_add_new_source"
+            )
     payload = copy.deepcopy(source.payload)
     payload["fetch"] = normalized_fetch
     if display_name is not None:
@@ -821,6 +878,40 @@ def _normalize_redmine_source(
     )
 
 
+def _normalize_gitlab_issues_source(
+    store: SourceStore,
+    source: StoredJson,
+) -> StoredJson:
+    """Normalize GitLab settings and keep a generated Issue Link current."""
+
+    payload = copy.deepcopy(source.payload)
+    normalized_fetch = validate_provider_config(
+        "gitlab_issues",
+        payload.get("fetch") or {},
+    )
+    changed = normalized_fetch != payload.get("fetch")
+    payload["fetch"] = normalized_fetch
+    pending = payload.get("pending_metadata")
+    if isinstance(pending, dict) and isinstance(pending.get("link"), Mapping):
+        repaired = repair_generated_gitlab_issues_link(
+            normalized_fetch["project_url"],
+            normalized_fetch["gitlab_url"],
+            pending["link"],
+        )
+        if repaired is not None and repaired != pending["link"]:
+            pending = copy.deepcopy(pending)
+            pending["link"] = repaired
+            payload["pending_metadata"] = pending
+            changed = True
+    if not changed:
+        return source
+    return store.save_source(
+        payload,
+        expected_revision=source.revision,
+        expected_etag=source.etag,
+    )
+
+
 def _github_browser_root(fetch_url: str) -> str | None:
     split = urlsplit(fetch_url)
     if (
@@ -912,6 +1003,7 @@ def _execute_add(
         "--source-id",
         key,
         "--include-root-name-in-path",
+        "--retry-errors",
         "--manager-protocol-v1",
     ]
     started = time.monotonic()
@@ -1021,6 +1113,22 @@ def _execute_add(
             "ADD did not return the requested trusted source_id",
             stage="reflect.add",
         )
+    if int(summary.get("error_files") or 0) > 0:
+        error = SourceManagerError(
+            "ADD failed: "
+            f"{int(summary['error_files']):,}件のファイル抽出に失敗しました。"
+            "失敗ファイルは次回の再開時に再試行します。",
+            stage="reflect.add",
+        )
+        error.process_diagnostic = process_diagnostic(
+            arguments=arguments,
+            cwd=rag_root,
+            returncode=returncode,
+            elapsed_seconds=elapsed,
+            stdout=getattr(completed, "stdout", ""),
+            stderr=getattr(completed, "stderr", ""),
+        )
+        raise error
     return {"source_id": reported_source_id, "summary": summary}
 
 
@@ -1407,6 +1515,543 @@ def _update_redmine_source(
         ),
         "state_revision": final_state.revision,
     }
+
+
+def _update_gitlab_issues_source(
+    store: SourceStore,
+    source: StoredJson,
+    state: StoredJson,
+    *,
+    python_executable: Path,
+    rag_root: Path,
+    command_runner: CommandRunner | None,
+    http_get: Callable[..., Any] | None,
+    environment: Mapping[str, str] | None,
+    metadata_publisher: MetadataPublisher | None,
+    clock: Callable[[], datetime] | None,
+    progress_callback: ProgressCallback | None,
+) -> dict[str, Any]:
+    """Fetch GitLab Issues serially and reflect stable batches of five."""
+
+    plan = store.plan(source.payload)
+    if not state.payload or state.payload.get("status") == "complete":
+        initial = new_run_state(plan)
+        cutoff = gitlab_issues_updated_after(
+            source.payload["fetch"].get("updated_within_days"),
+            {},
+            clock=clock,
+        )
+        if cutoff is not None:
+            initial[GITLAB_ISSUES_CUTOFF_STATE_KEY] = cutoff
+        initial["initial_database_reflection"] = (
+            _is_initial_database_reflection(store, source)
+        )
+        current_state = store.save_state(
+            source.payload["local_source_key"],
+            initial,
+            expected_revision=state.revision,
+            expected_etag=state.etag,
+        )
+    else:
+        resumed = copy.deepcopy(state.payload)
+        resumed["plan_etag"] = plan.plan_etag
+        cutoff = gitlab_issues_updated_after(
+            source.payload["fetch"].get("updated_within_days"),
+            resumed,
+            clock=clock,
+        )
+        if cutoff is not None:
+            resumed[GITLAB_ISSUES_CUTOFF_STATE_KEY] = cutoff
+        else:
+            resumed.pop(GITLAB_ISSUES_CUTOFF_STATE_KEY, None)
+        current_state = store.save_state(
+            source.payload["local_source_key"],
+            resumed,
+            expected_revision=state.revision,
+            expected_etag=state.etag,
+        )
+
+    current_source = source
+    if (
+        current_state.payload.get("phase") == "reflect"
+        and int(current_state.payload.get("pending_count") or 0) > 0
+    ):
+        (
+            current_source,
+            current_state,
+            _summary,
+        ) = _gitlab_issues_reflect_batch(
+            store,
+            current_source,
+            current_state,
+            python_executable=python_executable,
+            rag_root=rag_root,
+            command_runner=command_runner,
+            progress_callback=progress_callback,
+        )
+
+    state_holder = [current_state]
+    source_holder = [current_source]
+    progress_total_holder = [
+        len(current_state.payload.get(GITLAB_ISSUE_IDS_STATE_KEY) or [])
+        or None
+    ]
+
+    def inventory_snapshot(
+        project_id: int,
+        issue_iids: list[int],
+    ) -> None:
+        stored = state_holder[0]
+        value = copy.deepcopy(stored.payload)
+        value[GITLAB_PROJECT_ID_STATE_KEY] = int(project_id)
+        value[GITLAB_ISSUE_IDS_STATE_KEY] = [
+            int(item) for item in issue_iids
+        ]
+        state_holder[0] = store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=stored.revision,
+            expected_etag=stored.etag,
+        )
+        progress_total_holder[0] = len(issue_iids)
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "gitlab_issues.inventory",
+                "label_ja": "GitLab Issue更新対象確定",
+                "provider": "gitlab_issues",
+                "completed": len(issue_iids),
+                "total": len(issue_iids),
+                "unit": "件",
+                "total_kind": "exact",
+                "status": "completed",
+                "checkpoint_saved": True,
+            },
+        )
+
+    def item_checkpoint(completed_count: int, issue_iid: int) -> None:
+        stored = state_holder[0]
+        value = copy.deepcopy(stored.payload)
+        confirmed = int(value.get("indexed_confirmed_count") or 0)
+        value.update(
+            {
+                "status": "running",
+                "phase": "fetch",
+                "fetched_count": int(completed_count),
+                "pending_count": int(completed_count) - confirmed,
+                "last_completed_item": int(issue_iid),
+                "can_resume": True,
+                "last_error": None,
+            }
+        )
+        state_holder[0] = store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=stored.revision,
+            expected_etag=stored.etag,
+        )
+        total = progress_total_holder[0]
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "gitlab_issues.detail",
+                "label_ja": "GitLab Issue詳細・コメント取得",
+                "provider": "gitlab_issues",
+                "completed": int(completed_count),
+                "total": total,
+                "unit": "件",
+                "total_kind": "exact" if total is not None else "unknown",
+                "current_item": f"Issue #{int(issue_iid)}",
+                "status": "running",
+                "checkpoint_saved": True,
+            },
+        )
+
+    def no_change_checkpoint(
+        completed_count: int,
+        issue_iid: int,
+    ) -> None:
+        """Advance the frozen queue without ADD when no file changed."""
+
+        stored = state_holder[0]
+        value = copy.deepcopy(stored.payload)
+        value.update(
+            {
+                "status": "running",
+                "phase": "fetch",
+                "fetched_count": int(completed_count),
+                "indexed_confirmed_count": int(completed_count),
+                "pending_count": 0,
+                "last_completed_item": int(issue_iid),
+                "can_resume": True,
+                "last_error": None,
+            }
+        )
+        state_holder[0] = store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=stored.revision,
+            expected_etag=stored.etag,
+        )
+
+    def reflect_batch(completed_count: int, issue_iid: int) -> None:
+        stored = state_holder[0]
+        value = copy.deepcopy(stored.payload)
+        value.update(
+            {
+                "status": "running",
+                "phase": "reflect",
+                "fetched_count": int(completed_count),
+                "pending_count": (
+                    int(completed_count)
+                    - int(value.get("indexed_confirmed_count") or 0)
+                ),
+                "last_completed_item": int(issue_iid),
+                "can_resume": True,
+            }
+        )
+        state_holder[0] = store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=stored.revision,
+            expected_etag=stored.etag,
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "gitlab_issues.reflect",
+                "label_ja": "検索反映",
+                "provider": "gitlab_issues",
+                "completed": int(
+                    value.get("indexed_confirmed_count") or 0
+                ),
+                "total": progress_total_holder[0],
+                "unit": "件",
+                "total_kind": (
+                    "exact"
+                    if progress_total_holder[0] is not None
+                    else "unknown"
+                ),
+                "current_item": f"Issue #{int(issue_iid)}",
+                "status": "running",
+            },
+        )
+        (
+            source_holder[0],
+            state_holder[0],
+            _summary,
+        ) = _gitlab_issues_reflect_batch(
+            store,
+            source_holder[0],
+            state_holder[0],
+            python_executable=python_executable,
+            rag_root=rag_root,
+            command_runner=command_runner,
+            progress_callback=progress_callback,
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "gitlab_issues.reflect",
+                "label_ja": "検索反映",
+                "provider": "gitlab_issues",
+                "completed": int(
+                    state_holder[0].payload.get(
+                        "indexed_confirmed_count"
+                    )
+                    or 0
+                ),
+                "total": progress_total_holder[0],
+                "unit": "件",
+                "total_kind": (
+                    "exact"
+                    if progress_total_holder[0] is not None
+                    else "unknown"
+                ),
+                "status": "completed",
+                "checkpoint_saved": True,
+            },
+        )
+
+    resume_count = int(
+        current_state.payload.get("indexed_confirmed_count") or 0
+    )
+    stable_ids_value = current_state.payload.get(
+        GITLAB_ISSUE_IDS_STATE_KEY
+    )
+    stable_issue_ids = (
+        [int(value) for value in stable_ids_value]
+        if isinstance(stable_ids_value, list)
+        else None
+    )
+    stable_project_value = current_state.payload.get(
+        GITLAB_PROJECT_ID_STATE_KEY
+    )
+    stable_project_id = (
+        int(stable_project_value)
+        if stable_project_value is not None
+        else None
+    )
+
+    def gitlab_progress(event: Mapping[str, Any]) -> None:
+        if event.get("event") == "gitlab_issues.http_attempt":
+            try:
+                store.append_event(
+                    source.payload["local_source_key"],
+                    "gitlab_issues.http_attempt",
+                    _persistable_http_diagnostic(event),
+                )
+            except Exception:
+                pass
+        _emit_progress(progress_callback, event)
+
+    try:
+        outcome = execute_fetch_plan(
+            plan.to_dict(),
+            store.ensure_work_directory(
+                source.payload["local_source_key"]
+            ),
+            current_state.payload,
+            command_runner=command_runner,
+            http_get=http_get,
+            environment=environment,
+            item_callback=item_checkpoint,
+            batch_callback=reflect_batch,
+            no_change_callback=no_change_checkpoint,
+            resume_count=resume_count,
+            stable_issue_ids=stable_issue_ids,
+            stable_project_id=stable_project_id,
+            inventory_snapshot_callback=inventory_snapshot,
+            clock=clock,
+            progress_callback=gitlab_progress,
+        )
+    except Exception as exc:
+        stored = state_holder[0]
+        value = copy.deepcopy(stored.payload)
+        error_detail = exception_summary(exc)
+        value.update(
+            {
+                "status": "interrupted",
+                "can_resume": True,
+                "last_error": error_detail,
+            }
+        )
+        try:
+            state_holder[0] = store.save_state(
+                source.payload["local_source_key"],
+                value,
+                expected_revision=stored.revision,
+                expected_etag=stored.etag,
+            )
+        except Exception:
+            pass
+        details: dict[str, Any] = {"error": error_detail}
+        if isinstance(getattr(exc, "process_diagnostic", None), dict):
+            details["process"] = getattr(exc, "process_diagnostic")
+        if isinstance(getattr(exc, "diagnostic", None), dict):
+            details["diagnostic"] = _persistable_http_diagnostic(
+                getattr(exc, "diagnostic")
+            )
+        try:
+            store.append_event(
+                source.payload["local_source_key"],
+                "gitlab_issues.fetch.interrupted",
+                details,
+            )
+        except Exception:
+            pass
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", "fetch.gitlab_issues")
+        raise
+
+    if not source_holder[0].payload.get("source_id"):
+        completed = complete_run(state_holder[0].payload)
+        completed.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
+        store.save_state(
+            source.payload["local_source_key"],
+            completed,
+            expected_revision=state_holder[0].revision,
+            expected_etag=state_holder[0].etag,
+        )
+        return {
+            **_source_dto(store, source_holder[0]),
+            "status": "no_documents",
+            "fetched_count": 0,
+        }
+
+    if bool(
+        state_holder[0].payload.get("initial_database_reflection")
+    ):
+        _write_initial_snapshot_marker(store.db_root)
+    sync_result = _synchronize_metadata(
+        store,
+        source_holder[0],
+        rag_root=rag_root,
+        metadata_publisher=metadata_publisher,
+    )
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "metadata",
+            "label_ja": "Source Metadata反映",
+            "provider": "gitlab_issues",
+            "completed": (
+                1 if not sync_result.get("metadata_sync_pending") else 0
+            ),
+            "total": 1,
+            "unit": "件",
+            "total_kind": "exact",
+            "status": (
+                "completed"
+                if not sync_result.get("metadata_sync_pending")
+                else "failed"
+            ),
+            "checkpoint_saved": not sync_result.get(
+                "metadata_sync_pending"
+            ),
+        },
+    )
+    stored = state_holder[0]
+    final = copy.deepcopy(stored.payload)
+    final.update(
+        {
+            "fetched_count": int(outcome.get("documents") or 0),
+            "pending_count": 0,
+            "metadata_sync_pending": bool(
+                sync_result.get("metadata_sync_pending")
+            ),
+            "last_error": sync_result.get("metadata_error"),
+        }
+    )
+    if sync_result.get("metadata_sync_pending"):
+        final.update(
+            {
+                "status": "interrupted",
+                "phase": "metadata",
+                "can_resume": True,
+            }
+        )
+    else:
+        final = complete_run(final)
+        final.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
+    final_state = store.save_state(
+        source.payload["local_source_key"],
+        final,
+        expected_revision=stored.revision,
+        expected_etag=stored.etag,
+    )
+    return {
+        **_source_dto(
+            store,
+            store.read_source(source.payload["local_source_key"]),
+        ),
+        **sync_result,
+        "status": (
+            "metadata_sync_pending"
+            if sync_result.get("metadata_sync_pending")
+            else "updated"
+        ),
+        "fetched_count": int(outcome.get("documents") or 0),
+        "indexed_confirmed_count": int(
+            final_state.payload.get("indexed_confirmed_count") or 0
+        ),
+        "state_revision": final_state.revision,
+    }
+
+
+def _gitlab_issues_reflect_batch(
+    store: SourceStore,
+    source: StoredJson,
+    state: StoredJson,
+    *,
+    python_executable: Path,
+    rag_root: Path,
+    command_runner: CommandRunner | None,
+    progress_callback: ProgressCallback | None,
+) -> tuple[StoredJson, StoredJson, dict[str, Any]]:
+    work = store.ensure_work_directory(source.payload["local_source_key"])
+    validate_managed_work_tree(work)
+    try:
+        add_result = _execute_add(
+            db_root=store.db_root,
+            source=source.payload,
+            work=work,
+            python_executable=python_executable,
+            rag_root=rag_root,
+            command_runner=command_runner,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        interrupted = copy.deepcopy(state.payload)
+        error_detail = exception_summary(exc)
+        interrupted.update(
+            {
+                "status": "interrupted",
+                "phase": "reflect",
+                "can_resume": True,
+                "last_error": error_detail,
+            }
+        )
+        try:
+            store.save_state(
+                source.payload["local_source_key"],
+                interrupted,
+                expected_revision=state.revision,
+                expected_etag=state.etag,
+            )
+        except Exception:
+            pass
+        try:
+            store.append_event(
+                source.payload["local_source_key"],
+                "gitlab_issues.reflect.interrupted",
+                {
+                    "error": error_detail,
+                    **(
+                        {"process": getattr(exc, "process_diagnostic")}
+                        if isinstance(
+                            getattr(exc, "process_diagnostic", None),
+                            dict,
+                        )
+                        else {}
+                    ),
+                },
+            )
+        except Exception:
+            pass
+        if getattr(exc, "stage", None) is None:
+            setattr(exc, "stage", "reflect.gitlab_issues_batch")
+        raise
+    if source.payload.get("source_id"):
+        current_source = source
+    else:
+        confirm_add_success(
+            store.db_root,
+            source.payload["local_source_key"],
+            source_id=str(add_result["source_id"]),
+        )
+        current_source = store.read_source(
+            source.payload["local_source_key"]
+        )
+    reflected = copy.deepcopy(state.payload)
+    confirmed_count = int(reflected.get("fetched_count") or 0)
+    reflected.update(
+        {
+            "status": "running",
+            "phase": "fetch",
+            "indexed_confirmed_count": confirmed_count,
+            "pending_count": 0,
+            "can_resume": True,
+            "last_error": None,
+        }
+    )
+    current_state = store.save_state(
+        source.payload["local_source_key"],
+        reflected,
+        expected_revision=state.revision,
+        expected_etag=state.etag,
+    )
+    return current_source, current_state, add_result["summary"]
 
 
 def _redmine_reflect_batch(
@@ -1874,6 +2519,8 @@ def _resume_metadata_sync(
             )
         else:
             updated = complete_run(updated)
+            if source.payload.get("source_type") == "gitlab_issues":
+                updated.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
         store.save_state(
             source.payload["local_source_key"],
             updated,

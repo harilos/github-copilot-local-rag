@@ -11,7 +11,8 @@ _URL_CREDENTIAL = re.compile(
 _NAMED_SECRET = re.compile(
     r"(?i)([\"']?\b(?:"
     r"authorization|proxy-authorization|x-redmine-api-key|"
-    r"api[_-]?key|access[_-]?token|oauth[_-]?token|token|"
+    r"api[_-]?key|access[_-]?token|oauth[_-]?token|"
+    r"private[_-]?token|token|"
     r"credential|private[_-]?key|password|passwd|secret|"
     r"cookie|set-cookie"
     r")\b[\"']?\s*[:=]\s*)([^\r\n,;}&]+)"

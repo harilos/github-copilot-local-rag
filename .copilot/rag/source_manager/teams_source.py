@@ -477,12 +477,14 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         *,
         required: str | None = None,
         redmine_project_url: str | None = None,
+        gitlab_url: str | None = None,
     ) -> bool:
         if required != "teams":
             return original_connections(
                 self,
                 required=required,
                 redmine_project_url=redmine_project_url,
+                gitlab_url=gitlab_url,
             )
         self._print_screen_header("Source接続設定")
         self._show_source_connection_summary()
@@ -571,7 +573,8 @@ def add_source_screen(self: Any, db_name: str) -> None:
             ("3", "Redmineプロジェクト"),
             ("4", "SharePoint同期フォルダ【追加・更新はWindowsのみ】"),
             ("5", "Teams共有フォルダ【OneDrive同期・Windowsのみ】"),
-            ("6", "手元の資料を一度だけ取り込む（Other）"),
+            ("6", "GitLab Issue"),
+            ("7", "手元の資料を一度だけ取り込む（Other）"),
             ("0", "戻る"),
         ),
     )
@@ -584,11 +587,12 @@ def add_source_screen(self: Any, db_name: str) -> None:
         "3": self._prompt_new_redmine_source,
         "4": self._prompt_new_sharepoint_source,
         "5": self._prompt_new_teams_source,
-        "6": self._prompt_new_other_source,
+        "6": self._prompt_new_gitlab_issues_source,
+        "7": self._prompt_new_other_source,
     }
     form = forms.get(choice)
     if form is None:
-        self._invalid_selection("0～6")
+        self._invalid_selection("0～7")
         return
     specification = form()
     if specification is None:

@@ -1161,6 +1161,86 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             value["link"]["settings"]["url_template"],
         )
 
+    def test_metadata_generates_gitlab_issue_link_without_secrets(
+        self,
+    ) -> None:
+        source = {
+            "source_id": "indexed-source",
+            "display_name": "GitLab tickets",
+            "source_type": "gitlab_issues",
+            "fetch": {
+                "project_url": (
+                    "https://gitlab.example.invalid/group/project"
+                ),
+                "gitlab_url": "https://gitlab.example.invalid",
+                "token_env": "LOCAL_RAG_GITLAB_TOKEN_SECRET",
+            },
+            "pending_metadata": {
+                "source_type": "gitlab_issues",
+                "link": {
+                    "enabled": True,
+                    "strategy": "regex-template",
+                    "settings": {
+                        "path_pattern": (
+                            r"^issues/(?P<issue_iid>[0-9]+)\.md$"
+                        ),
+                        "url_template": (
+                            "https://gitlab.example.invalid/group/project/"
+                            "-/issues/{issue_iid}"
+                        ),
+                    },
+                },
+            },
+        }
+
+        value = _canonical_source(source)
+
+        self.assertEqual(
+            {
+                "enabled": True,
+                "strategy": "regex-template",
+                "settings": {
+                    "path_pattern": (
+                        r"^issues/(?P<issue_iid>[0-9]+)\.md$"
+                    ),
+                    "url_template": (
+                        "https://gitlab.example.invalid/group/project/"
+                        "-/issues/{issue_iid}"
+                    ),
+                },
+            },
+            value["link"],
+        )
+        encoded = json.dumps(value, ensure_ascii=False)
+        self.assertNotIn("api/v4", encoded)
+        self.assertNotIn("TOKEN_SECRET", encoded)
+        self.assertNotIn("project_id", encoded)
+
+    def test_metadata_does_not_restore_a_removed_gitlab_issue_link(
+        self,
+    ) -> None:
+        source = {
+            "source_id": "indexed-source",
+            "display_name": "GitLab tickets",
+            "source_type": "gitlab_issues",
+            "fetch": {
+                "project_url": (
+                    "https://gitlab.example.invalid/group/project"
+                ),
+                "gitlab_url": "https://gitlab.example.invalid",
+                "token_env": "LOCAL_RAG_GITLAB_TOKEN_SECRET",
+            },
+        }
+        current = {
+            "source_id": "indexed-source",
+            "display_name": "GitLab tickets",
+            "source_type": "gitlab_issues",
+        }
+
+        value = _canonical_source(source, current_source=current)
+
+        self.assertNotIn("link", value)
+
     def test_pending_metadata_publishes_to_canonical_sidecar(self) -> None:
         stored = SourceStore(self.db_root).create_source(
             source_type="github",

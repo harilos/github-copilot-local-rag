@@ -21,6 +21,7 @@ _PROVIDER_LABELS = {
     "github": "GitHub",
     "svn": "SVN",
     "redmine": "Redmine",
+    "gitlab_issues": "GitLab Issue",
     "sharepoint": "SharePoint",
     "other": "Other",
 }
@@ -103,7 +104,7 @@ class ProgressRenderer:
             or status in _IMMEDIATE_STATUSES
             or event.get("event") == "heartbeat"
             or bool(event.get("retry"))
-            or event.get("event") == "redmine.http_attempt"
+            or event_kind.endswith(".http_attempt")
         )
         minimum_interval = 0.25 if self._is_tty else 1.0
         if not immediate and now - self._last_rendered_at < minimum_interval:
@@ -235,12 +236,12 @@ class ProgressRenderer:
             detail += "（再試行）"
 
         message = f"{prefix} {detail}"
-        if event.get("event") == "redmine.http_attempt":
+        if event_kind.endswith(".http_attempt"):
             message = _render_http_attempt(prefix, event)
         if self._is_tty and self._output is print:
             final_line = (
                 status in _IMMEDIATE_STATUSES
-                or event.get("event") == "redmine.http_attempt"
+                or event_kind.endswith(".http_attempt")
             )
             print(
                 "\r" + message + "\033[K",

@@ -190,7 +190,8 @@ Source追加画面では次から選びます。
 3. Redmine project
 4. SharePoint同期folder
 5. Teams共有folder
-6. 手元の資料を一度だけ取り込むOther
+6. GitLab Issue
+7. 手元の資料を一度だけ取り込むOther
 
 Sourceの安定IDは索引と更新stateを結びます。後から変更しません。新しいSourceは
 登録だけでは検索対象にならず、取得・索引登録が成功した後にSource inventoryへ
@@ -234,6 +235,25 @@ projectのIssueを直列に取得し、各Issueを`issues/<issue-id>.md`へ保�
 反映します。中断時にやり直すのは最後に反映確認できていない最大5件です。
 一時的なHTTP失敗だけを上限付きでretryし、`Retry-After`があれば従います。
 
+### GitLab Issue
+
+GitLab本体のURL、Issueを取得するprojectのトップURL、Source名、更新日時の
+取得期間を入力します。GitLab.comでは本体URLに`https://gitlab.com`を指定します。
+社内GitLabがサブパス配下にある場合は、本体URLへそのサブパスまで含めます。
+
+初回登録時に、`read_api`権限を持つPersonal Access Tokenを端末へ登録します。
+tokenは暗号化したmachine-local設定として保持し、DB、画面、ログへ値を出しません。
+接続時はproject URLをAPIで照合し、数値project IDはSource設定やMarkdownへ保存
+しません。中断中だけは、同じprojectから安全に再開するためcheckpointへ保持します。
+
+open／closed両方のIssue本文、担当者、label、Discussion、システム履歴を
+`issues/<issue-iid>.md`へ保存します。Issueを1件ずつ直列取得し、5件ごとに検索へ
+反映します。中断時は反映確認済みの位置から再開します。GitLab上で削除された、
+または取得用アカウントから見えなくなったIssueも、RAG内の既存文書は削除せず
+保持します。次回以降は、取得用アカウントから見えるIssueだけを新規作成または
+上書きします。初回取込後はGitLab本体URLとproject URLを変更できません。別の
+projectへ切り替える場合は、新しいSourceとして追加します。
+
 ### SharePoint
 
 追加・更新はWindowsだけです。SharePoint同期clientが作ったlocal folderを、
@@ -242,7 +262,7 @@ projectのIssueを直列に取得し、各Issueを`issues/<issue-id>.md`へ保�
 
 ```text
 登録場所: 5. この端末の設定・動作確認
-          → 3. Source接続設定（Redmine API・SharePoint）
+          → 3. Source接続設定（Redmine API・GitLab API・SharePoint）
 相対folder: <relative-subdirectory>
 ```
 
@@ -271,7 +291,8 @@ Teams Sourceもabsolute pathをDBへ保存しません。検索結果のWebリ�
 ### 取り込むfile種類
 
 GitHub、SVN、SharePoint、Teams、Otherでは、Source追加時と取得設定変更時に
-次から選びます。RedmineはIssueをMarkdownへ変換するため、この選択はありません。
+次から選びます。RedmineとGitLab IssueはIssueをMarkdownへ変換するため、この
+選択はありません。
 
 1. 対応する全file
 2. 文書のみ取得
@@ -389,8 +410,9 @@ activeな`source-links.json`には内部URLが含まれ得ます。packageを機
 
 この画面では、Local RAGを利用できるか確認する、検索を試す、Source接続設定、
 技術情報の表示を選べます。SharePointとTeamsが共有する同期root、Redmine API key
-はSource接続設定へ登録します。技術情報にはruntime Python、DB root、platform、
-SharePoint設定元、Redmine API keyの登録件数を表示し、秘密値自体は表示しません。
+とGitLab access tokenはSource接続設定へ登録します。技術情報にはruntime Python、
+DB root、platform、SharePoint設定元、Redmine API keyとGitLab tokenの登録件数を
+表示し、秘密値自体は表示しません。
 
 setup completeとlookup readyは別です。runtimeが正常でも健康なDBがなければ
 lookup readyはfalseです。

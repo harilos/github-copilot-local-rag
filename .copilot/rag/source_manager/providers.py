@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .errors import SourceManagerError
+from .gitlab_issues import gitlab_token_env, parse_gitlab_project
 from .redmine import parse_redmine_project_url
 from .security import (
     validate_environment_name,
@@ -20,10 +21,12 @@ from .security import (
 
 
 SUPPORTED_PROVIDERS = frozenset(
-    {"github", "svn", "redmine", "sharepoint", "other"}
+    {"github", "svn", "redmine", "gitlab_issues", "sharepoint", "other"}
 )
 REDMINE_BATCH_SIZE = 5
 REDMINE_MAX_ATTEMPTS = 3
+GITLAB_ISSUES_BATCH_SIZE = 5
+GITLAB_ISSUES_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,8 @@ def validate_provider_config(
         return _validate_svn(supplied)
     if kind == "redmine":
         return _validate_redmine(supplied)
+    if kind == "gitlab_issues":
+        return _validate_gitlab_issues(supplied)
     if kind == "sharepoint":
         return _validate_environment_source(
             supplied,
@@ -158,6 +163,22 @@ def build_fetch_plan(
                 },
             },
             "redmine_issue_cursor",
+        )
+    elif kind == "gitlab_issues":
+        step = FetchStep(
+            "issues",
+            "gitlab_fetch_issues",
+            True,
+            destination,
+            {
+                **normalized,
+                "batch_size": GITLAB_ISSUES_BATCH_SIZE,
+                "retry": {
+                    "max_attempts": GITLAB_ISSUES_MAX_ATTEMPTS,
+                    "retry_statuses": [429, 502, 503, 504],
+                },
+            },
+            "gitlab_issue_cursor",
         )
     else:
         step = FetchStep(
@@ -302,6 +323,49 @@ def _validate_redmine(settings: dict[str, Any]) -> dict[str, Any]:
     # Legacy base_url/project_id values are derived caches, never authorities.
     # Normalization deliberately replaces stale values from project_url.
     return output
+
+
+def _validate_gitlab_issues(settings: dict[str, Any]) -> dict[str, Any]:
+    _only_keys(
+        settings,
+        {
+            "project_url",
+            "gitlab_url",
+            "updated_within_days",
+            "token_env",
+        },
+    )
+    project = parse_gitlab_project(
+        settings.get("project_url"),
+        settings.get("gitlab_url"),
+    )
+    days = settings.get("updated_within_days")
+    if days is not None:
+        if (
+            isinstance(days, bool)
+            or not str(days).isdigit()
+            or not 1 <= int(days) <= 3650
+        ):
+            raise SourceManagerError(
+                "updated_within_days must be null or between 1 and 3650"
+            )
+    expected_token_env = gitlab_token_env(project.gitlab_url)
+    supplied_token_env = settings.get("token_env")
+    if supplied_token_env is not None:
+        normalized_token_env = validate_environment_name(
+            supplied_token_env,
+            field="token_env",
+        )
+        if normalized_token_env != expected_token_env:
+            raise SourceManagerError(
+                "token_env must match the GitLab installation"
+            )
+    return {
+        "project_url": project.project_url,
+        "gitlab_url": project.gitlab_url,
+        "updated_within_days": int(days) if days is not None else None,
+        "token_env": expected_token_env,
+    }
 
 
 def _validate_environment_source(

@@ -11,6 +11,54 @@ from .errors import SourceManagerError
 from .subprocess_stream import ProgressCallback, run_streaming_process
 
 
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Turn redirects into ordinary HTTP responses without a second request."""
+
+    handler_order = urllib.request.HTTPRedirectHandler.handler_order - 1
+
+    def http_error_302(
+        self,
+        request: urllib.request.Request,
+        response: BinaryIO,
+        code: int,
+        message: str,
+        headers: Any,
+    ) -> Any:
+        raise urllib.error.HTTPError(
+            request.full_url,
+            int(code),
+            message,
+            headers,
+            response,
+        )
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302
+
+
+def reject_http_redirects(
+    opener: urllib.request.OpenerDirector,
+) -> urllib.request.OpenerDirector:
+    """Install a fail-closed redirect handler on an existing configured opener."""
+
+    marker = "_local_rag_redirects_rejected"
+    if not bool(getattr(opener, marker, False)):
+        opener.add_handler(_RejectRedirectHandler())
+        setattr(opener, marker, True)
+    return opener
+
+
+def is_gitlab_token_request(headers: Mapping[str, Any]) -> bool:
+    """Return whether an HTTP request carries GitLab's private token header."""
+
+    return any(
+        str(name).casefold() == "private-token"
+        for name in headers
+    )
+
+
 @dataclass(frozen=True)
 class SourceNetworkRoute:
     environment: dict[str, str]
@@ -37,6 +85,7 @@ def resolve_source_network_route(
         ) from exc
     effective_environment = dict(resolution.environment)
     opener = resolution.build_url_opener()
+    gitlab_opener: urllib.request.OpenerDirector | None = None
 
     def command_runner(
         arguments: list[str],
@@ -58,13 +107,24 @@ def resolve_source_network_route(
         headers: Mapping[str, str],
         timeout: float,
     ):
+        nonlocal gitlab_opener
+        request_opener = opener
+        if is_gitlab_token_request(headers):
+            if gitlab_opener is None:
+                isolated_opener = resolution.build_url_opener()
+                if isolated_opener is opener:
+                    raise SourceManagerError(
+                        "GitLab HTTP request requires an isolated network opener"
+                    )
+                gitlab_opener = reject_http_redirects(isolated_opener)
+            request_opener = gitlab_opener
         request = urllib.request.Request(
             url,
             headers=dict(headers),
             method="GET",
         )
         try:
-            with opener.open(request, timeout=timeout) as response:
+            with request_opener.open(request, timeout=timeout) as response:
                 return (
                     int(response.status),
                     response.read(),

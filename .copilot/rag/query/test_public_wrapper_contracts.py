@@ -290,6 +290,58 @@ class PublicDatabaseListWrapperTests(unittest.TestCase):
         self.assertEqual("complete", summary["content_summary_status"])
         self.assertNotIn("private-1", json.dumps(summary, ensure_ascii=False))
 
+    def test_gitlab_issue_label_never_exposes_link_settings(self) -> None:
+        private_project_url = (
+            "https://gitlab.example.invalid/private/group/project"
+        )
+        (self.db / "source-links.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-metadata-v1",
+                    "revision": 1,
+                    "sources": [
+                        {
+                            "source_id": "private-1",
+                            "display_name": "障害チケット",
+                            "source_type": "gitlab_issues",
+                            "link": {
+                                "enabled": True,
+                                "strategy": "regex-template",
+                                "settings": {
+                                    "path_pattern": (
+                                        r"^issues/(?P<issue_iid>[0-9]+)"
+                                        r"\.md$"
+                                    ),
+                                    "url_template": (
+                                        f"{private_project_url}/-/issues/"
+                                        "{issue_iid}"
+                                    ),
+                                },
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        summary = database_list._content_summary(
+            self.db,
+            "example-rag",
+        )
+
+        configured = next(
+            source
+            for source in summary["sources"]
+            if source["name"] == "障害チケット"
+        )
+        self.assertEqual("gitlab_issues", configured["type"])
+        self.assertEqual("GitLab Issue", configured["label"])
+        encoded = json.dumps(summary, ensure_ascii=False)
+        self.assertNotIn(private_project_url, encoded)
+        self.assertNotIn("issue_iid", encoded)
+        self.assertNotIn("private-1", encoded)
+
     def test_text_output_is_rendered_from_one_lower_json_call(self) -> None:
         lower = {
             "databases": [

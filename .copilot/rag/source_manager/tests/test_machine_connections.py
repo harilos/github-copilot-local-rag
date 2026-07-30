@@ -5,16 +5,24 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from source_manager.errors import SourceManagerError
 from source_manager.machine_connections import (
     SHAREPOINT_ROOT_ENV,
+    check_gitlab_project,
     clear_sharepoint_root,
     connection_config_path,
     connection_secret_path,
+    gitlab_project_location,
+    gitlab_token_env,
+    list_gitlab_registrations,
     list_redmine_registrations,
     redmine_api_key_env,
+    register_gitlab_token,
     register_redmine_api_key,
+    resolve_gitlab_token,
     resolve_redmine_api_key,
     set_sharepoint_root,
     sharepoint_root_status,
@@ -192,6 +200,258 @@ class MachineConnectionStoreTests(unittest.TestCase):
             sharepoint_environment[SHAREPOINT_ROOT_ENV],
         )
 
+    def test_gitlab_project_path_is_encoded_below_self_managed_root(
+        self,
+    ) -> None:
+        location = gitlab_project_location(
+            "https://git.example.test/tools/gitlab/",
+            "https://git.example.test/tools/gitlab/"
+            "group/sub%20group/project/",
+        )
+        self.assertEqual(
+            "https://git.example.test/tools/gitlab",
+            location.gitlab_url,
+        )
+        self.assertEqual("group/sub group/project", location.project_path)
+        self.assertEqual(
+            "group%2Fsub%20group%2Fproject",
+            location.encoded_project_path,
+        )
+        self.assertEqual(
+            "https://git.example.test/tools/gitlab/api/v4/projects/"
+            "group%2Fsub%20group%2Fproject",
+            location.project_api_url,
+        )
+
+    def test_gitlab_token_is_machine_local_and_injected_by_instance(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        secret = "GITLAB-WRITE-ONLY-SECRET"
+        registration = register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            secret,
+        )
+        self.assertEqual(
+            secret,
+            resolve_gitlab_token(
+                self.rag_root,
+                gitlab_url=gitlab_url,
+                token_env=registration.token_env,
+                environ={},
+            ),
+        )
+        environment = source_runtime_environment(
+            self.rag_root,
+            {
+                "source_type": "gitlab_issues",
+                "fetch": {
+                    "gitlab_url": gitlab_url,
+                    "project_url": (
+                        f"{gitlab_url}/group/subgroup/project"
+                    ),
+                    "updated_within_days": 30,
+                    "token_env": registration.token_env,
+                },
+            },
+            environ={},
+        )
+        self.assertEqual(secret, environment[registration.token_env])
+        persisted = (
+            connection_config_path(self.rag_root).read_text(encoding="utf-8")
+            + connection_secret_path(self.rag_root).read_text(encoding="utf-8")
+        )
+        self.assertNotIn(secret, persisted)
+        registrations = list_gitlab_registrations(self.rag_root)
+        self.assertEqual(1, len(registrations))
+        self.assertNotIn(secret, repr(registrations))
+
+    def test_gitlab_token_environment_is_bound_to_the_instance(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        expected_env = gitlab_token_env(gitlab_url)
+        self.assertEqual(
+            "EXPECTED-GITLAB-TOKEN",
+            resolve_gitlab_token(
+                self.rag_root,
+                gitlab_url=gitlab_url,
+                token_env=expected_env,
+                environ={expected_env: "EXPECTED-GITLAB-TOKEN"},
+            ),
+        )
+        with self.assertRaises(SourceManagerError):
+            source_runtime_environment(
+                self.rag_root,
+                {
+                    "source_type": "gitlab_issues",
+                    "fetch": {
+                        "gitlab_url": gitlab_url,
+                        "project_url": f"{gitlab_url}/group/project",
+                        "updated_within_days": 30,
+                        "token_env": "AWS_SECRET_ACCESS_KEY",
+                    },
+                },
+                environ={
+                    "AWS_SECRET_ACCESS_KEY": "UNRELATED-SECRET",
+                },
+            )
+
+    def test_gitlab_connection_check_uses_encoded_project_path(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        project_url = (
+            f"{gitlab_url}/group/subgroup/project"
+        )
+        token = "CHECK-ONLY-SECRET"
+        registration = register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            token,
+        )
+        calls: list[tuple[str, dict[str, str], float]] = []
+
+        def getter(url, headers, timeout):
+            calls.append((url, dict(headers), float(timeout)))
+            if "/projects/42/issues?" in url:
+                return 200, b"[]", {}
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": 42,
+                        "name_with_namespace": (
+                            "Group / Subgroup / Project"
+                        ),
+                        "web_url": project_url,
+                    }
+                ).encode(),
+                {},
+            )
+
+        checked = check_gitlab_project(
+            self.rag_root,
+            gitlab_url=gitlab_url,
+            project_url=project_url,
+            token_env=registration.token_env,
+            environ={},
+            http_get=getter,
+        )
+        self.assertEqual(42, checked.project_id)
+        self.assertEqual("Group / Subgroup / Project", checked.name)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(
+            calls[0][0].endswith(
+                "/api/v4/projects/group%2Fsubgroup%2Fproject"
+            )
+        )
+        self.assertTrue(
+            calls[1][0].endswith(
+                "/api/v4/projects/42/issues"
+                "?scope=all&state=all&per_page=1&page=1"
+            )
+        )
+        self.assertEqual(token, calls[0][1]["PRIVATE-TOKEN"])
+        self.assertEqual(token, calls[1][1]["PRIVATE-TOKEN"])
+        self.assertNotIn(token, repr(checked))
+
+    def test_gitlab_connection_check_requires_issues_api_access(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test"
+        project_url = f"{gitlab_url}/group/project"
+        token = "CHECK-ONLY-SECRET"
+        registration = register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            token,
+        )
+
+        def getter(url, _headers, _timeout):
+            if "/projects/42/issues?" in url:
+                return 403, b'{"message":"forbidden"}', {}
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": 42,
+                        "name": "Project",
+                        "web_url": project_url,
+                    }
+                ).encode(),
+                {},
+            )
+
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            r"GitLab Issues API connection check failed \(HTTP 403\)",
+        ) as raised:
+            check_gitlab_project(
+                self.rag_root,
+                gitlab_url=gitlab_url,
+                project_url=project_url,
+                token_env=registration.token_env,
+                environ={},
+                http_get=getter,
+            )
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_gitlab_connection_check_requires_issues_json_array(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test"
+        project_url = f"{gitlab_url}/group/project"
+        registration = register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            "CHECK-ONLY-SECRET",
+        )
+
+        def getter(url, _headers, _timeout):
+            if "/projects/42/issues?" in url:
+                return 200, b'{"message":"unexpected"}', {}
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": 42,
+                        "name": "Project",
+                        "web_url": project_url,
+                    }
+                ).encode(),
+                {},
+            )
+
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "GitLab Issues API connection check returned an invalid response",
+        ):
+            check_gitlab_project(
+                self.rag_root,
+                gitlab_url=gitlab_url,
+                project_url=project_url,
+                token_env=registration.token_env,
+                environ={},
+                http_get=getter,
+            )
+
+    def test_gitlab_project_url_rejects_other_origin_and_non_top_page(
+        self,
+    ) -> None:
+        for project_url in (
+            "https://other.example.test/group/project",
+            "https://git.example.test/group/project/-/issues",
+        ):
+            with self.subTest(project_url=project_url), self.assertRaises(
+                SourceManagerError
+            ):
+                gitlab_project_location(
+                    "https://git.example.test",
+                    project_url,
+                )
+
 
 class ManagerMachineConnectionUiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -277,6 +537,204 @@ class ManagerMachineConnectionUiTests(unittest.TestCase):
             connection_secret_path(self.rag_root).read_text(encoding="utf-8")
         )
         self.assertNotIn("NEVER-ECHO-THIS", json.dumps(secret_file))
+
+    def test_gitlab_token_registration_never_echoes_secret(self) -> None:
+        manager = self.manager()
+        with mock.patch.object(
+            manager_connections.getpass,
+            "getpass",
+            return_value="NEVER-ECHO-GITLAB-TOKEN",
+        ):
+            self.assertTrue(
+                manager._register_gitlab_token_setting(
+                    gitlab_url=(
+                        "https://git.example.test/tools/gitlab"
+                    ),
+                )
+            )
+        output = "\n".join(self.output)
+        self.assertNotIn("NEVER-ECHO-GITLAB-TOKEN", output)
+        self.assertIn("再表示できません", output)
+        secret_file = json.loads(
+            connection_secret_path(self.rag_root).read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            "NEVER-ECHO-GITLAB-TOKEN",
+            json.dumps(secret_file),
+        )
+
+    def test_common_connection_menu_routes_gitlab_project_check(
+        self,
+    ) -> None:
+        manager = self.manager(["7", "0"])
+        calls: list[bool] = []
+        manager._check_gitlab_project_setting = (
+            lambda: calls.append(True) or True
+        )
+
+        self.assertTrue(manager._source_connection_settings_screen())
+
+        self.assertEqual([True], calls)
+        self.assertIn(
+            "GitLabプロジェクトへの接続を確認する",
+            "\n".join(self.output),
+        )
+
+    def test_gitlab_source_form_uses_confirmed_canonical_settings(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        project_url = (
+            f"{gitlab_url}/group/subgroup/project"
+        )
+        manager = self.manager(
+            [
+                gitlab_url,
+                project_url,
+                "Project issues",
+                "",
+            ]
+        )
+        location = gitlab_project_location(gitlab_url, project_url)
+        manager._confirm_gitlab_project_connection = (
+            lambda **_kwargs: SimpleNamespace(
+                location=location,
+                project_id=42,
+                name="Group / Subgroup / Project",
+            )
+        )
+
+        value = manager._prompt_new_gitlab_issues_source()
+
+        assert value is not None
+        self.assertEqual("gitlab_issues", value["source_type"])
+        self.assertEqual(
+            {
+                "gitlab_url": gitlab_url,
+                "project_url": project_url,
+                "updated_within_days": 365,
+                "token_env": gitlab_token_env(gitlab_url),
+            },
+            value["fetch"],
+        )
+        self.assertNotIn("project_id", value["fetch"])
+        self.assertNotIn("api_base_url", value["fetch"])
+        self.assertEqual(
+            f"{project_url}/-/issues/{{issue_iid}}",
+            value["link"]["settings"]["url_template"],
+        )
+        self.assertEqual(
+            "open／closed両方",
+            dict(value["summary"])["Issue状態"],
+        )
+        self.assertEqual(
+            "削除・閲覧不可になった既存Issueも保持",
+            dict(value["summary"])["履歴保持"],
+        )
+        self.assertEqual(
+            "初回反映後は不可（別Sourceとして追加）",
+            dict(value["summary"])["project変更"],
+        )
+
+    def test_manager_gitlab_connection_confirmation_uses_stored_token(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        project_url = f"{gitlab_url}/group/project"
+        register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            "CONNECTION-CHECK-TOKEN",
+        )
+        manager = self.manager()
+
+        def getter(url, _headers, _timeout):
+            if "/projects/7/issues?" in url:
+                return 200, b"[]", {}
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": 7,
+                        "name_with_namespace": "Group / Project",
+                        "web_url": project_url,
+                    }
+                ).encode(),
+                {},
+            )
+
+        route = SimpleNamespace(environment={}, http_get=getter)
+        with mock.patch(
+            "source_manager.networking.resolve_source_network_route",
+            return_value=route,
+        ):
+            checked = manager._confirm_gitlab_project_connection(
+                gitlab_url=gitlab_url,
+                project_url=project_url,
+            )
+        assert checked is not None
+        self.assertEqual(7, checked.project_id)
+        rendered = "\n".join(self.output)
+        self.assertIn("access tokenで接続できました", rendered)
+        self.assertNotIn("CONNECTION-CHECK-TOKEN", rendered)
+
+    def test_gitlab_fetch_settings_are_displayed_and_editable(
+        self,
+    ) -> None:
+        gitlab_url = "https://git.example.test/tools/gitlab"
+        project_url = f"{gitlab_url}/group/project"
+        token_env = gitlab_token_env(gitlab_url)
+        source = {
+            "source_type": "gitlab_issues",
+            "display_name": "Project issues",
+            "source_id": "src_project-0123456789ab",
+            "_local_source_key": "src_project-0123456789ab",
+            "fetch": {
+                "gitlab_url": gitlab_url,
+                "project_url": project_url,
+                "updated_within_days": 365,
+                "token_env": token_env,
+                "api_base_url": f"{gitlab_url}/api/v4",
+                "project_id": 7,
+                "legacy_option": "remove-me",
+            },
+        }
+        (self.rag_root / "dbs" / "example-rag").mkdir()
+        manager = self.manager(["90", "y"])
+        manager._confirm_gitlab_project_connection = mock.Mock(
+            side_effect=AssertionError(
+                "indexed GitLab project identity must not be reselected"
+            )
+        )
+        with mock.patch(
+            "source_manager.runner.update_source_configuration"
+        ) as update:
+            manager._edit_source_fetch_settings(
+                "example-rag",
+                source,
+            )
+        update.assert_called_once()
+        kwargs = update.call_args.kwargs
+        self.assertEqual(
+            {
+                "gitlab_url",
+                "project_url",
+                "updated_within_days",
+                "token_env",
+            },
+            set(kwargs["fetch"]),
+        )
+        self.assertEqual(gitlab_url, kwargs["fetch"]["gitlab_url"])
+        self.assertEqual(project_url, kwargs["fetch"]["project_url"])
+        self.assertEqual(90, kwargs["fetch"]["updated_within_days"])
+        self.assertEqual(token_env, kwargs["fetch"]["token_env"])
+        self.assertNotIn("pending_link", kwargs)
+        manager._confirm_gitlab_project_connection.assert_not_called()
+        rendered = "\n".join(self.output)
+        self.assertIn("プロジェクトを変更できません", rendered)
+        self.assertIn(f"GitLab本体URL: {gitlab_url}", rendered)
+        self.assertIn(f"プロジェクトURL: {project_url}", rendered)
+        self.assertNotIn("token_env", rendered)
 
 
 if __name__ == "__main__":

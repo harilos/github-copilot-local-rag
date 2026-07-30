@@ -141,6 +141,7 @@ _PROVIDER_JA = {
     "svn": "Subversion（SVN）",
     "sharepoint": "SharePoint",
     "redmine": "Redmine",
+    "gitlab_issues": "GitLab Issue",
     "other": "その他のWebサイト",
 }
 _STRATEGY_JA = {
@@ -987,6 +988,8 @@ class LocalRagManager:
             return "SVNからの取得"
         if stage.startswith("fetch.redmine"):
             return "Redmineからの取得"
+        if stage.startswith("fetch.gitlab_issues"):
+            return "GitLab Issueの取得"
         if stage.startswith("fetch.sharepoint"):
             return "SharePointフォルダの確認"
         if stage.startswith("fetch.other"):
@@ -1323,6 +1326,7 @@ class LocalRagManager:
                 ("3", "Redmineプロジェクト"),
                 ("4", "SharePoint同期フォルダ【追加・更新はWindowsのみ】"),
                 ("5", "手元の資料を一度だけ取り込む（Other）"),
+                ("6", "GitLab Issue"),
                 ("0", "戻る"),
             ),
         )
@@ -1335,10 +1339,11 @@ class LocalRagManager:
             "3": self._prompt_new_redmine_source,
             "4": self._prompt_new_sharepoint_source,
             "5": self._prompt_new_other_source,
+            "6": self._prompt_new_gitlab_issues_source,
         }
         form = forms.get(choice)
         if form is None:
-            self._invalid_selection("0～5")
+            self._invalid_selection("0～6")
             return
         specification = form()
         if specification is None:
@@ -2694,7 +2699,15 @@ class LocalRagManager:
         normalized = str(value or "").strip().lower()
         return (
             normalized
-            if normalized in {"github", "svn", "redmine", "sharepoint", "other"}
+            if normalized
+            in {
+                "github",
+                "svn",
+                "redmine",
+                "gitlab_issues",
+                "sharepoint",
+                "other",
+            }
             else "other"
         )
 
@@ -3114,6 +3127,7 @@ class LocalRagManager:
             fetch = {**fetch, "updated_within_days": None}
         public_labels = {
             "repository_url": "取得URL",
+            "gitlab_url": "GitLab本体URL",
             "project_url": "プロジェクトURL",
             "relative_path": "同期ルートからの相対フォルダ",
             "recursive": "配下フォルダ",
@@ -3315,6 +3329,116 @@ class LocalRagManager:
                     ),
                 )
             )
+        elif source_type == "gitlab_issues":
+            from source_manager.machine_connections import (
+                gitlab_project_location,
+                gitlab_token_env,
+            )
+
+            if source.get("source_id"):
+                self._print_warning(
+                    "検索へ反映済みのGitLab Issue Sourceでは、"
+                    "GitLab本体とプロジェクトを変更できません。"
+                )
+                self._print_info(
+                    "別のプロジェクトを取り込む場合は、"
+                    "「新しいSourceを追加する」から登録してください。"
+                )
+                try:
+                    location = gitlab_project_location(
+                        fetch.get("gitlab_url"),
+                        fetch.get("project_url"),
+                    )
+                except Exception as exc:
+                    self._print_internal_diagnostic(
+                        exc,
+                        operation="GitLab取得設定の確認",
+                        stage="source_config.gitlab.validate",
+                        db_name=db_name,
+                        source_name=str(source.get("display_name") or ""),
+                        source_key=local_key,
+                        provider=source_type,
+                        can_resume=True,
+                    )
+                    return
+            else:
+                gitlab_url = self._prompt_preserving_value(
+                    "GitLab本体のURL",
+                    str(fetch.get("gitlab_url") or ""),
+                    required=True,
+                    description=(
+                        "社内GitLabがサブパス配下なら、"
+                        "そのサブパスまで含めます。"
+                    ),
+                )
+                project_url = self._prompt_preserving_value(
+                    "GitLabプロジェクトのURL",
+                    str(fetch.get("project_url") or ""),
+                    required=True,
+                    description=(
+                        "Issueを取得するプロジェクトのトップURLです。"
+                        "/-/issues 以降は付けません。"
+                    ),
+                    examples=self._examples("gitlab_repository_web_url"),
+                )
+                if gitlab_url is None or project_url is None:
+                    return
+                checked = self._confirm_gitlab_project_connection(
+                    gitlab_url=gitlab_url,
+                    project_url=project_url,
+                )
+                if checked is None:
+                    return
+                location = checked.location
+            current_days = fetch.get("updated_within_days")
+            days = self._prompt_preserving_value(
+                "取得期間（日）",
+                "" if current_days is None else str(current_days),
+                required=False,
+                description=(
+                    "Issueの更新日時を基準にします。"
+                    "空欄は現在値を維持し、- は制限なしです。"
+                ),
+                examples=self._examples("redmine_days"),
+                empty_help="制限なし",
+            )
+            if days is None:
+                return
+            if days:
+                try:
+                    parsed_days = int(days)
+                except ValueError:
+                    self._print_error(
+                        "取得期間は1～3650の整数で入力してください。"
+                    )
+                    return
+                if not 1 <= parsed_days <= 3650:
+                    self._print_error(
+                        "取得期間は1～3650の整数で入力してください。"
+                    )
+                    return
+                updated["updated_within_days"] = parsed_days
+            else:
+                updated["updated_within_days"] = None
+            updated = {
+                "gitlab_url": location.gitlab_url,
+                "project_url": location.project_url,
+                "updated_within_days": updated["updated_within_days"],
+                "token_env": gitlab_token_env(location.gitlab_url),
+            }
+            summary.extend(
+                (
+                    ("GitLab本体のURL", location.gitlab_url),
+                    ("GitLabプロジェクトのURL", location.project_url),
+                    (
+                        "取得期間",
+                        "制限なし"
+                        if updated["updated_within_days"] is None
+                        else f"{updated['updated_within_days']}日",
+                    ),
+                    ("access token", "この端末に登録済み（値は非表示）"),
+                )
+            )
         elif source_type == "sharepoint":
             relative = self._prompt_preserving_value(
                 "SharePoint rootからの相対フォルダ",
@@ -3464,6 +3588,7 @@ class LocalRagManager:
             "sharepoint",
             "redmine",
             "other",
+            "gitlab_issues",
         ]
         current_type = str(current.get("source_type") or "unspecified")
         source_type = self._prompt_choice_preserving(
@@ -4217,6 +4342,7 @@ class LocalRagManager:
             "redmine",
             "other",
             "svn",
+            "gitlab_issues",
         ]
         if existing is not None:
             provider_category = self._prompt_choice_preserving(
@@ -4250,6 +4376,9 @@ class LocalRagManager:
         if provider == "sharepoint":
             strategy = "append-relative-path"
             choices: list[str] = []
+        elif provider == "gitlab_issues":
+            strategy = "regex-template"
+            choices = []
         elif provider in _GIT_PROVIDERS:
             strategy = _GIT_STRATEGIES[provider]
             choices = []
@@ -4257,7 +4386,11 @@ class LocalRagManager:
             choices = ["svn-http", "svn-web-root"]
         else:
             choices = ["home-only", "append-relative-path", "regex-template"]
-        if provider not in {"sharepoint", *_GIT_PROVIDERS}:
+        if provider not in {
+            "sharepoint",
+            "gitlab_issues",
+            *_GIT_PROVIDERS,
+        }:
             if existing is not None and provider == current_provider:
                 current_strategy = self._infer_source_link_strategy(
                     str(current.get("provider") or ""),
@@ -4314,6 +4447,38 @@ class LocalRagManager:
             if svn_settings is None:
                 return None
             settings = svn_settings
+        elif provider == "gitlab_issues":
+            suffix = "/-/issues/{issue_iid}"
+            prior_template = str(prior.get("url_template") or "")
+            prior_project_url = (
+                prior_template[: -len(suffix)]
+                if prior_template.endswith(suffix)
+                else ""
+            )
+            self.output(
+                "\nGitLab Issueではリンク方式を自動設定します。\n"
+                "issues/123.md の番号から、対応するIssue画面を開きます。"
+            )
+            project_url = self._prompt_preserving_value(
+                "GitLabプロジェクトのトップURL",
+                prior_project_url,
+                required=True,
+                description=(
+                    "検索結果からIssueを開くためのURLです。"
+                    "/-/issues 以降は付けません。"
+                ),
+                examples=self._examples("gitlab_repository_web_url"),
+            )
+            if project_url is None:
+                return None
+            settings = {
+                "path_pattern": (
+                    r"^issues/(?P<issue_iid>[0-9]+)\.md$"
+                ),
+                "url_template": (
+                    f"{project_url.rstrip('/')}{suffix}"
+                ),
+            }
         elif strategy == "home-only":
             value = self._prompt_preserving_value(
                 "SourceトップURL",
@@ -5422,6 +5587,9 @@ class LocalRagManager:
                 ),
                 "github": "GitHubリポジトリ内のファイルへリンクします。",
                 "gitlab": "GitLabリポジトリ内のファイルへリンクします。",
+                "gitlab_issues": (
+                    "GitLab Issue番号からIssue画面へのリンクを作ります。"
+                ),
                 "azure_devops": (
                     "Azure DevOps Repos内のファイルへリンクします。"
                 ),

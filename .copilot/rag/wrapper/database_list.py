@@ -24,6 +24,7 @@ TYPE_LABELS = {
     "svn": "Subversion",
     "sharepoint": "SharePoint",
     "redmine": "Redmine",
+    "gitlab_issues": "GitLab Issue",
     "other": "Other",
 }
 

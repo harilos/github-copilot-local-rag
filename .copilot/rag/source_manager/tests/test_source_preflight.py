@@ -7,6 +7,7 @@ from typing import Any
 
 from source_manager.source_preflight import (
     _confirm_and_store,
+    _install_gitlab_issues_preflight,
     _install_manager_confirmation,
     _install_redmine_preflight,
     estimate_minutes_range,
@@ -335,6 +336,183 @@ class SourcePreflightTests(unittest.TestCase):
         assert store.current is not None
         self.assertTrue(store.current.payload["preflight_confirmed"])
         self.assertEqual(2, store.current.payload["preflight_estimated_documents"])
+        self.assertEqual("source.preflight.confirmed", store.events[-1][1])
+
+    def test_gitlab_decline_freezes_project_inventory_before_details(
+        self,
+    ) -> None:
+        detail_started: list[bool] = []
+        snapshots: list[tuple[int, list[int]]] = []
+        execution = types.SimpleNamespace()
+
+        def base_gitlab(
+            settings: dict[str, Any],
+            work: Any,
+            request: Any,
+            environment: dict[str, str],
+            *,
+            item_callback: Any,
+            batch_callback: Any,
+            resume_count: int,
+            stable_issue_ids: list[int] | None,
+            stable_project_id: int | None,
+            inventory_snapshot_callback: Any,
+            updated_after: str | None,
+            progress_callback: Any,
+            no_change_callback: Any = None,
+        ) -> dict[str, Any]:
+            if stable_issue_ids is None:
+                inventory_snapshot_callback(101, [11, 12, 13])
+            detail_started.append(True)
+            return {"status": "ok", "documents": 3}
+
+        execution.fetch_gitlab_issues = base_gitlab
+        source = types.SimpleNamespace(
+            payload={
+                "local_source_key": "src_gitlab_issues-0123456789ab",
+                "source_id": None,
+            }
+        )
+        state = _Stored(
+            {
+                "schema_version": "local-rag-source-state-v1",
+                "local_source_key": "src_gitlab_issues-0123456789ab",
+                "status": "planned",
+                "phase": "fetch",
+            }
+        )
+        store = _Store(state)
+        runner = types.SimpleNamespace()
+
+        def base_update(
+            store_value: _Store,
+            source_value: Any,
+            state_value: _Stored,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return execution.fetch_gitlab_issues(
+                {},
+                None,
+                None,
+                {},
+                item_callback=None,
+                batch_callback=None,
+                resume_count=0,
+                stable_issue_ids=None,
+                stable_project_id=None,
+                inventory_snapshot_callback=(
+                    lambda project_id, issue_ids: snapshots.append(
+                        (project_id, list(issue_ids))
+                    )
+                ),
+                updated_after=None,
+                progress_callback=kwargs.get("progress_callback"),
+            )
+
+        runner._update_gitlab_issues_source = base_update
+        runner._source_dto = lambda store_value, source_value: {
+            "local_source_key": source_value.payload["local_source_key"],
+            "source_id": source_value.payload.get("source_id"),
+        }
+        _install_gitlab_issues_preflight(execution, runner)
+        callback = _Callback(False)
+
+        result = runner._update_gitlab_issues_source(
+            store,
+            source,
+            state,
+            progress_callback=callback,
+        )
+
+        self.assertEqual("confirmation_declined", result["status"])
+        self.assertEqual([3], callback.counts)
+        self.assertEqual([(101, [11, 12, 13])], snapshots)
+        self.assertEqual([], detail_started)
+        assert store.current is not None
+        self.assertTrue(store.current.payload["can_resume"])
+        self.assertFalse(store.current.payload["preflight_confirmed"])
+
+    def test_gitlab_confirmation_is_persisted_for_resume(self) -> None:
+        execution = types.SimpleNamespace()
+
+        def base_gitlab(
+            settings: dict[str, Any],
+            work: Any,
+            request: Any,
+            environment: dict[str, str],
+            *,
+            item_callback: Any,
+            batch_callback: Any,
+            resume_count: int,
+            stable_issue_ids: list[int] | None,
+            stable_project_id: int | None,
+            inventory_snapshot_callback: Any,
+            updated_after: str | None,
+            progress_callback: Any,
+            no_change_callback: Any = None,
+        ) -> dict[str, Any]:
+            inventory_snapshot_callback(101, [1, 2])
+            return {"status": "ok", "documents": 2}
+
+        execution.fetch_gitlab_issues = base_gitlab
+        source = types.SimpleNamespace(
+            payload={
+                "local_source_key": "src_gitlab_issues-abcdef012345",
+                "source_id": None,
+            }
+        )
+        state = _Stored(
+            {
+                "schema_version": "local-rag-source-state-v1",
+                "local_source_key": "src_gitlab_issues-abcdef012345",
+                "status": "planned",
+                "phase": "fetch",
+            }
+        )
+        store = _Store(state)
+        runner = types.SimpleNamespace()
+
+        def base_update(
+            store_value: _Store,
+            source_value: Any,
+            state_value: _Stored,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            return execution.fetch_gitlab_issues(
+                {},
+                None,
+                None,
+                {},
+                item_callback=None,
+                batch_callback=None,
+                resume_count=0,
+                stable_issue_ids=None,
+                stable_project_id=None,
+                inventory_snapshot_callback=lambda *_args: None,
+                updated_after=None,
+                progress_callback=kwargs.get("progress_callback"),
+            )
+
+        runner._update_gitlab_issues_source = base_update
+        runner._source_dto = lambda store_value, source_value: {}
+        _install_gitlab_issues_preflight(execution, runner)
+        callback = _Callback(True)
+
+        result = runner._update_gitlab_issues_source(
+            store,
+            source,
+            state,
+            progress_callback=callback,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([2], callback.counts)
+        assert store.current is not None
+        self.assertTrue(store.current.payload["preflight_confirmed"])
+        self.assertEqual(
+            2,
+            store.current.payload["preflight_estimated_documents"],
+        )
         self.assertEqual("source.preflight.confirmed", store.events[-1][1])
 
 

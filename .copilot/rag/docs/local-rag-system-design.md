@@ -209,14 +209,31 @@ The Source Manager package is separate from search presentation. It provides:
 - Source-local state;
 - package creation and validation.
 
-Supported acquisition sources are GitHub, SVN, Redmine, SharePoint synchronized
-folders, and one-time local input. New Sources are introduced only through a
+Supported acquisition sources are GitHub, SVN, Redmine, GitLab Issues,
+SharePoint synchronized folders, Teams shared folders synchronized through
+OneDrive, and one-time local input. New Sources are introduced only through a
 successful add/ingestion flow.
 
 SharePoint acquisition/update is Windows-only and resolves a synchronized
 root from machine-local environment configuration. The synchronized tree is
 used directly and is not copied into the DB. The resulting database is
 portable and searchable on macOS. macOS does not perform SharePoint updates.
+Teams uses the same Windows-only machine root.
+
+GitLab Issue acquisition covers open and closed Issues, resolves a project URL
+through the REST API on every run, then serially materializes Issue details and
+Discussions as Markdown.
+The access token is encrypted in machine-local configuration, bound to an
+environment name derived from the GitLab installation URL, and never stored
+in the database. Search reflection occurs after each stable batch of five.
+The numeric project ID is absent from Source configuration and generated
+Markdown. While a run is resumable, its checkpoint records the resolved ID so
+a recreated project cannot be mixed into the frozen Issue queue.
+Issues deleted from GitLab or no longer visible to the acquisition account
+do not remove existing RAG documents. Subsequent runs only create or overwrite
+Issues that remain visible to that account.
+After initial ingestion, the GitLab installation and project URLs are
+immutable; a different project requires a new Source.
 
 ## 11. Source Metadata
 
@@ -274,6 +291,7 @@ Setup and provider acquisition resolve proxy/CA configuration once per
 top-level operation. Machine-local configuration is optional and never
 affects offline search. Embedded proxy credentials are rejected for persisted
 configuration.
+GitLab API requests carrying `PRIVATE-TOKEN` do not follow redirects.
 
 ## 14. Security invariants
 

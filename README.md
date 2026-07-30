@@ -192,7 +192,7 @@ Windows PowerShell:
 確認を求められます。ここで開始しなくてもSource設定と再開情報は残るため、
 Source詳細の`更新・再開する`から続けられます。
 
-選べる取得元は次の6種類です。
+選べる取得元は次の7種類です。
 
 | 取得元 | 取り込み方 |
 |---|---|
@@ -201,6 +201,7 @@ Source詳細の`更新・再開する`から続けられます。
 | Redmine | projectのIssueを1件ずつ取得し、5件ごとに検索へ反映する |
 | SharePoint | OneDriveで同期済みのfolderを使う。追加・更新はWindowsのみ |
 | Teams | SharePoint同期root内のTeams共有folderを使う。追加・更新はWindowsのみ |
+| GitLab Issue | projectのIssue本文・Discussionを取得し、5件ごとに検索へ反映する |
 | Other | 手元のfileまたはfolderを一度だけ取り込む |
 
 GitHub、SVN、SharePoint、Teams、Otherでは、`対応する全ファイル`または
@@ -208,9 +209,17 @@ GitHub、SVN、SharePoint、Teams、Otherでは、`対応する全ファイル`�
 Markdown（`.md`）、Astah（`.asta`）、PlantUML（`.pu`、`.puml`）が含まれます。
 `.plantuml`も文書のみ取得の対象です。
 
-SharePointとTeamsの同期root、Redmine API keyは
+SharePointとTeamsの同期root、Redmine API key、GitLab access tokenは
 `5. この端末の設定・動作確認` → `3. Source接続設定`へ登録します。秘密値や
 端末固有のabsolute pathはDBへ保存しません。
+
+GitLab Issueでは、GitLab本体のURLとprojectのトップURLを入力し、open／closed
+両方のIssueとDiscussionを取得します。tokenには`read_api`権限が必要です。
+GitLab上で削除された、または取得用アカウントから見えなくなったIssueは、
+RAG内の既存文書を削除せず、そのまま保持します。次回以降の更新では、取得用
+アカウントから見えるIssueだけを新規作成または上書きします。初回取込後は
+GitLab本体URLとproject URLを変更できません。別のprojectへ切り替える場合は、
+新しいSourceとして追加します。
 
 ### Sourceを更新する・中断した処理を再開する
 

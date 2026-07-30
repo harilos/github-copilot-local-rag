@@ -139,11 +139,22 @@ Selected-database menu:
 
 A Source is the unit of acquisition and URL generation. The Source Manager
 supports GitHub, SVN, Redmine, SharePoint synchronized folders, Teams shared
-folders synchronized through OneDrive, and a local one-time import. File-based
-Sources can ingest all supported files or documents only; Markdown is included
-in the documents-only selection. It stores provider configuration and
-resumable checkpoints outside indexed document identity. A Source becomes
-searchable only after successful ingestion.
+folders synchronized through OneDrive, GitLab Issues, and a local one-time
+import. File-based Sources can ingest all supported files or documents only;
+Markdown is included in the documents-only selection. It stores provider
+configuration and resumable checkpoints outside indexed document identity. A
+Source becomes searchable only after successful ingestion.
+
+GitLab Issue Sources use a machine-local access token with `read_api`
+permission. GitLab fetch settings stored in the DB contain only the
+GitLab/project URLs, an instance-derived environment name, and the update
+window. Open and closed Issues plus Discussions are materialized as Markdown
+and reflected in batches of five.
+If an Issue is deleted or becomes invisible to the acquisition account, its
+existing RAG document is retained. Later updates only create or overwrite
+Issues visible to that account. After the first successful ingestion, the
+GitLab installation and project URLs are immutable; add another Source to
+collect a different project.
 
 SharePoint Source acquisition and update are intentionally Windows-only. They
 read the synchronized root registered in this computer's Source connection
