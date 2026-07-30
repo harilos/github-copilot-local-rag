@@ -26,6 +26,7 @@ from source_manager.progress import ProgressRenderer
 from source_manager.subprocess_stream import (
     ResultExtractionError,
     extract_json_result,
+    run_streaming_process,
 )
 from source_manager.diagnostics import (
     append_diagnostic_event,
@@ -2915,6 +2916,10 @@ class LocalRagManager:
         indexed_deleted = not source_id
         metadata_removed = not source_id
         management_removed = not local_key
+        progress = self._progress_callback(
+            "Source削除",
+            provider=source_type,
+        )
         if source_id:
             try:
                 from source_manager.metadata import remove_source_metadata
@@ -2941,22 +2946,101 @@ class LocalRagManager:
                     "設定の問題を修正後、Source削除を再実行してください。"
                 )
                 return False
-            result = self._invoke(
-                "gen_db/delete_source.py",
-                ["--db", db_name, "--source-id", source_id],
-                capture_output=True,
-                report_nonzero=False,
-            )
-            if result is None or int(result.returncode) != 0:
-                if result is not None:
+            argv = [
+                str(self._runtime_python()),
+                str(self.rag_root / "gen_db" / "delete_source.py"),
+                "--db",
+                db_name,
+                "--source-id",
+                source_id,
+                "--manager-protocol-v1",
+            ]
+            started = time.monotonic()
+            try:
+                if self.runner is subprocess.run:
+                    result = run_streaming_process(
+                        argv,
+                        progress_callback=progress,
+                        timeout=None,
+                        heartbeat_interval=5.0,
+                        cwd=str(self.rag_root),
+                        env={
+                            **os.environ,
+                            "PYTHONIOENCODING": "utf-8",
+                            "PYTHONUTF8": "1",
+                            "RAG_DBS_ROOT": str(self.dbs_root),
+                        },
+                    )
+                else:
+                    # Test/custom runner compatibility; production always uses
+                    # the shared streaming boundary above.
+                    result = self.runner(
+                        argv,
+                        shell=False,
+                        check=False,
+                        cwd=str(self.rag_root),
+                        env={
+                            **os.environ,
+                            "PYTHONIOENCODING": "utf-8",
+                            "PYTHONUTF8": "1",
+                            "RAG_DBS_ROOT": str(self.dbs_root),
+                        },
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+            except KeyboardInterrupt:
+                self._print_warning(
+                    "Source削除を中断しました。途中まで削除済みの可能性が"
+                    "あります。同じSource削除を再実行すると収束します。"
+                )
+                return False
+            except Exception as exc:
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="Source削除",
+                    stage="source_delete.indexed_documents",
+                    db_name=db_name,
+                    source_name=display_name,
+                    source_key=local_key,
+                    provider=source_type,
+                    can_resume=True,
+                )
+                result = None
+            payload: dict[str, Any] | None = None
+            if result is not None and int(result.returncode) == 0:
+                try:
+                    payload = extract_json_result(
+                        result,
+                        validator=lambda value: (
+                            isinstance(value, dict)
+                            and value.get("status") == "deleted"
+                            and value.get("source_id") == source_id
+                        ),
+                    )
+                except (ResultExtractionError, ValueError) as exc:
+                    self._print_internal_diagnostic(
+                        exc,
+                        operation="Source削除",
+                        stage="source_delete.result",
+                        db_name=db_name,
+                        source_name=display_name,
+                        source_key=local_key,
+                        provider=source_type,
+                        can_resume=True,
+                    )
+            if result is None or int(result.returncode) != 0 or payload is None:
+                if result is not None and int(result.returncode) != 0:
                     error = ManagerError(
                         "検索済み文書の削除子プロセスが失敗しました"
                     )
                     process = process_diagnostic(
-                        arguments=getattr(result, "args", ()),
+                        arguments=getattr(result, "args", argv),
                         cwd=self.rag_root,
                         returncode=int(result.returncode),
-                        elapsed_seconds=0.0,
+                        elapsed_seconds=time.monotonic() - started,
                         stdout=getattr(result, "stdout", ""),
                         stderr=getattr(result, "stderr", ""),
                     )
@@ -2971,19 +3055,14 @@ class LocalRagManager:
                         can_resume=True,
                         process=process,
                     )
-                else:
-                    self._print_error(
-                        "検索済み文書の削除を開始できませんでした。"
-                    )
                 if metadata_removed:
                     self._print_warning(
                         "検索結果リンク設定は削除済みです。"
-                        "検索済み文書は残っているため、"
-                        "再実行すると削除を続けます。"
+                        "検索データは途中まで削除済みの可能性があります。"
                     )
                 self._print_info(
                     "取得設定と作業ファイルは削除していません。"
-                    "原因を修正後、同じSourceの削除を再実行できます。"
+                    "原因を修正後、同じSourceの削除を再実行すると収束します。"
                 )
                 return False
             indexed_deleted = True
@@ -2991,6 +3070,13 @@ class LocalRagManager:
             try:
                 from source_manager.store import SourceStore
 
+                progress(
+                    {
+                        "phase": "delete.management",
+                        "label_ja": "取得設定・作業ファイル削除",
+                        "total_kind": "unknown",
+                    }
+                )
                 store = SourceStore(self._validated_database_root(db_name))
                 loaded = store.read_source(local_key)
                 store.delete_source(
@@ -2999,6 +3085,18 @@ class LocalRagManager:
                     expected_etag=loaded.etag,
                 )
                 management_removed = True
+                progress(
+                    {
+                        "phase": "delete.management",
+                        "label_ja": "取得設定・作業ファイル削除",
+                        "completed": 1,
+                        "total": 1,
+                        "unit": "Source",
+                        "total_kind": "exact",
+                        "status": "completed",
+                        "checkpoint_saved": True,
+                    }
+                )
             except Exception as exc:
                 self._print_internal_diagnostic(
                     exc,
@@ -3019,7 +3117,9 @@ class LocalRagManager:
             self._print_success(
                 f"Source「{display_name}」を削除しました。"
             )
-            self._print_info("DBとほかのSourceは変更していません。")
+            self._print_info(
+                "ほかのSourceの文書・取得設定は削除していません。"
+            )
             return True
         return False
 

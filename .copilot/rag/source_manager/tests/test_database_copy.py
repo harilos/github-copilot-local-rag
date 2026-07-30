@@ -14,7 +14,14 @@ from source_manager.database_copy import (
     strike_text,
 )
 from source_manager.database_copy_core import copy_database
-from source_manager.database_copy_storage import delete_excluded_sources
+from source_manager.database_copy_core import (
+    DatabaseCopyError,
+    validate_copied_database,
+)
+from source_manager.database_copy_storage import (
+    delete_excluded_sources,
+    validate_excluded_vectors,
+)
 
 
 class DatabaseCopyTests(unittest.TestCase):
@@ -161,17 +168,22 @@ class DatabaseCopyTests(unittest.TestCase):
         source_dir = staging / "sources" / "src_secret-abcdef012345"
         source_dir.mkdir(parents=True)
         (source_dir / "source.json").write_text("{}", encoding="utf-8")
-        delete_calls: list[tuple[str, str, str]] = []
+        (staging / "source-links.json.bak").write_text(
+            json.dumps({"sources": [{"source_id": "secret-source"}]}),
+            encoding="utf-8",
+        )
+        delete_calls: list[tuple[str, str, str, str]] = []
         source_delete = types.ModuleType("software_rag_tool.source_delete")
         source_delete.delete_source_data = lambda source_id: (
             delete_calls.append(
                 (
                     source_id,
                     os.environ["RAG_OUTPUT_ROOT"],
+                    os.environ["CHROMA_DIR_V2"],
                     os.environ["CHROMA_COLLECTION"],
                 )
             )
-            or {"status": "deleted"}
+            or {"status": "deleted", "source_id": source_id}
         )
         package = types.ModuleType("software_rag_tool")
         package.__path__ = []
@@ -228,6 +240,7 @@ class DatabaseCopyTests(unittest.TestCase):
                 (
                     "secret-source",
                     str(staging),
+                    str(staging / "index" / "chroma"),
                     "copy_rag_ruri3_30m_int8_v1",
                 )
             ],
@@ -235,6 +248,226 @@ class DatabaseCopyTests(unittest.TestCase):
         )
         metadata_remove.assert_called_once()
         self.assertFalse(source_dir.exists())
+        self.assertFalse((staging / "source-links.json.bak").exists())
+
+    def test_excluded_source_metadata_failure_precedes_index_delete(self) -> None:
+        staging = self.root / "copy-rag"
+        staging.mkdir()
+        delete_calls: list[str] = []
+        source_delete = types.ModuleType("software_rag_tool.source_delete")
+        source_delete.delete_source_data = lambda source_id: (
+            delete_calls.append(source_id)
+            or {"status": "deleted", "source_id": source_id}
+        )
+        package = types.ModuleType("software_rag_tool")
+        package.__path__ = []
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "software_rag_tool": package,
+                    "software_rag_tool.source_delete": source_delete,
+                },
+            ),
+            mock.patch(
+                "source_manager.database_copy_storage.remove_source_metadata",
+                side_effect=RuntimeError("synthetic metadata failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "failed to remove copied Source Metadata",
+            ):
+                delete_excluded_sources(
+                    staging,
+                    [{"source_id": "secret-source"}],
+                    destination_name="copy-rag",
+                    collection="copy_rag_ruri3_30m_int8_v1",
+                    rag_root=self.root,
+                    progress_callback=None,
+                    error_type=RuntimeError,
+                )
+        self.assertEqual([], delete_calls)
+
+    def test_copy_validation_checks_every_portable_exclusion_layer(self) -> None:
+        excluded = [
+            {
+                "source_id": "secret-source",
+                "_local_source_key": "src_secret-abcdef012345",
+            }
+        ]
+
+        def make_root(name: str) -> Path:
+            root = self.root / name
+            (root / "data" / "clean").mkdir(parents=True)
+            (root / "logs").mkdir()
+            (root / "sources").mkdir()
+            (root / "db.json").write_text(
+                json.dumps(
+                    {
+                        "db_name": "copy-rag",
+                        "collection": "copy_collection",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return root
+
+        def validate(root: Path) -> None:
+            with mock.patch(
+                "source_manager.database_copy_core.validate_excluded_vectors"
+            ) as vector_check:
+                validate_copied_database(
+                    root,
+                    destination_name="copy-rag",
+                    collection="copy_collection",
+                    excluded_sources=excluded,
+                )
+            vector_check.assert_called_once_with(
+                root,
+                collection="copy_collection",
+                source_ids={"secret-source"},
+                error_type=DatabaseCopyError,
+            )
+
+        clean_root = make_root("clean-layer")
+        (clean_root / "data" / "clean" / "secret.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "secret-record",
+                    "metadata": {"source_id": "secret-source"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(DatabaseCopyError, "clean records"):
+            validate(clean_root)
+
+        state_root = make_root("state-layer")
+        (state_root / "logs" / "index_state.json").write_text(
+            json.dumps(
+                {
+                    "files": {
+                        "secret": {
+                            "source_id": "secret-source",
+                            "record_ids": ["secret-record"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(DatabaseCopyError, "ADD state"):
+            validate(state_root)
+
+        metadata_root = make_root("metadata-layer")
+        (metadata_root / "source-links.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-metadata-v1",
+                    "revision": 1,
+                    "sources": [{"source_id": "secret-source"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(DatabaseCopyError, "Source Metadata"):
+            validate(metadata_root)
+
+        backup_root = make_root("metadata-backup-layer")
+        (backup_root / "source-links.json.bak").write_text(
+            json.dumps(
+                {
+                    "schema_version": "rag-source-metadata-v1",
+                    "revision": 1,
+                    "sources": [{"source_id": "secret-source"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            DatabaseCopyError,
+            "Source Metadata backup",
+        ):
+            validate(backup_root)
+
+        management_root = make_root("management-layer")
+        (
+            management_root
+            / "sources"
+            / "src_secret-abcdef012345"
+        ).mkdir()
+        with self.assertRaisesRegex(DatabaseCopyError, "management directory"):
+            validate(management_root)
+
+        catalog_root = make_root("catalog-layer")
+        import sqlite3
+
+        connection = sqlite3.connect(catalog_root / "catalog.sqlite")
+        try:
+            connection.execute(
+                "CREATE TABLE document (doc_id TEXT PRIMARY KEY, source_id TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO document(doc_id, source_id) VALUES (?, ?)",
+                ("secret-doc", "secret-source"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(DatabaseCopyError, "copied catalog"):
+            validate(catalog_root)
+
+        valid_root = make_root("all-clear")
+        validate(valid_root)
+
+    def test_vector_exclusion_validation_uses_copied_collection(self) -> None:
+        vector_root = self.root / "vector-copy"
+        (vector_root / "index" / "chroma").mkdir(parents=True)
+        observed: list[tuple[str, dict[str, str], int, list[str]]] = []
+
+        class Collection:
+            def get(self, *, where, limit, include):
+                observed.append(("copy_collection", where, limit, include))
+                return {"ids": ["secret-record"]}
+
+        class Client:
+            _system = None
+
+            def get_collection(self, *, name):
+                self.name = name
+                return Collection()
+
+        chromadb = types.ModuleType("chromadb")
+        chromadb.PersistentClient = lambda **_kwargs: Client()
+        config = types.ModuleType("chromadb.config")
+        config.Settings = lambda **_kwargs: object()
+        with mock.patch.dict(
+            sys.modules,
+            {"chromadb": chromadb, "chromadb.config": config},
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "copied Chroma collection",
+            ):
+                validate_excluded_vectors(
+                    vector_root,
+                    collection="copy_collection",
+                    source_ids={"secret-source"},
+                    error_type=RuntimeError,
+                )
+        self.assertEqual(
+            [
+                (
+                    "copy_collection",
+                    {"source_id": "secret-source"},
+                    1,
+                    [],
+                )
+            ],
+            observed,
+        )
 
     def test_excluded_label_has_strikethrough_fallback(self) -> None:
         plain = types.SimpleNamespace(use_color=False)

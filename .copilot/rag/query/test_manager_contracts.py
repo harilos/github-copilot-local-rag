@@ -844,6 +844,7 @@ class ManagerContractTests(unittest.TestCase):
             stdout=json.dumps(
                 {
                     "status": "deleted",
+                    "source_id": "source-a",
                     "documents_deleted": 2,
                     "chunks_deleted": 5,
                 }
@@ -863,8 +864,14 @@ class ManagerContractTests(unittest.TestCase):
         argv = self.runner.calls[-1][0]
         self.assertEqual("delete_source.py", Path(argv[1]).name)
         self.assertEqual(
-            argv[-4:],
-            ["--db", "example-rag", "--source-id", "source-a"],
+            argv[-5:],
+            [
+                "--db",
+                "example-rag",
+                "--source-id",
+                "source-a",
+                "--manager-protocol-v1",
+            ],
         )
         remove_metadata.assert_called_once()
         rendered = "\n".join(self.output)
@@ -937,6 +944,52 @@ class ManagerContractTests(unittest.TestCase):
             rendered,
         )
         self.assertIn("synthetic metadata failure", rendered)
+
+    def test_manager_tty_progress_clears_tail_and_finishes_line(self) -> None:
+        with mock.patch("builtins.print") as printer:
+            manager = manage.LocalRagManager(
+                rag_root=self.rag_root,
+                dbs_root=self.dbs_root,
+                runtime_python=self.runtime,
+                input_fn=lambda _prompt: "",
+                output_fn=print,
+                runner=self.runner,
+            )
+            with mock.patch.object(
+                manager,
+                "_supports_color",
+                return_value=True,
+            ):
+                renderer = manager._progress_callback("Source削除")
+                renderer(
+                    {
+                        "phase": "delete.vector",
+                        "label_ja": "長いベクトル削除表示",
+                        "completed": 1,
+                        "total": 2,
+                        "total_kind": "exact",
+                    }
+                )
+                renderer(
+                    {
+                        "phase": "delete.vector",
+                        "label_ja": "完了",
+                        "completed": 2,
+                        "total": 2,
+                        "total_kind": "exact",
+                        "status": "completed",
+                        "checkpoint_saved": True,
+                    }
+                )
+        messages = [
+            str(call.args[0])
+            for call in printer.call_args_list
+            if call.args and str(call.args[0]).startswith("\r")
+        ]
+        self.assertEqual(2, len(messages))
+        self.assertTrue(all("\033[K" in value for value in messages))
+        self.assertFalse(messages[0].endswith("\n"))
+        self.assertTrue(messages[1].endswith("\n"))
 
     def test_source_link_add_uses_sidecar_api_only(self) -> None:
         self.make_db()

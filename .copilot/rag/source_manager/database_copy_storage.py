@@ -138,6 +138,7 @@ def delete_excluded_sources(
             {
                 "RAG_DB_NAME": destination_name,
                 "RAG_OUTPUT_ROOT": str(staging),
+                "CHROMA_DIR_V2": str(staging / "index" / "chroma"),
                 "CHROMA_COLLECTION": collection,
             }
         ):
@@ -149,7 +150,6 @@ def delete_excluded_sources(
                 )
                 indexed_result: dict[str, Any] | None = None
                 if source_id:
-                    indexed_result = dict(delete_source_data(source_id))
                     try:
                         remove_source_metadata(staging, source_id, rag_root)
                     except Exception as exc:
@@ -157,6 +157,15 @@ def delete_excluded_sources(
                             "failed to remove copied Source Metadata: "
                             f"{display_name}"
                         ) from exc
+                    indexed_result = dict(delete_source_data(source_id))
+                    if (
+                        indexed_result.get("status") != "deleted"
+                        or indexed_result.get("source_id") != source_id
+                    ):
+                        raise error_type(
+                            "copied Source deletion returned an invalid result: "
+                            f"{display_name}"
+                        )
                 if local_key:
                     delete_management_source(
                         staging,
@@ -179,6 +188,7 @@ def delete_excluded_sources(
                     len(excluded_sources),
                     current_item=display_name,
                 )
+            _remove_copied_metadata_backup(staging, error_type=error_type)
         return results
     finally:
         _release_chroma_runtime()
@@ -197,6 +207,63 @@ def delete_management_source(
             expected_revision=loaded.revision,
             expected_etag=loaded.etag,
         )
+
+
+def _remove_copied_metadata_backup(
+    db_root: Path,
+    *,
+    error_type: type[Exception],
+) -> None:
+    """Never retain a pre-exclusion Source Metadata snapshot in a DB copy."""
+    backup = Path(db_root) / "source-links.json.bak"
+    if not backup.exists() and not backup.is_symlink():
+        return
+    if backup.is_symlink() or not backup.is_file():
+        raise error_type("copied Source Metadata backup is unsafe")
+    backup.unlink()
+
+
+def validate_excluded_vectors(
+    db_root: Path,
+    *,
+    collection: str,
+    source_ids: set[str],
+    error_type: type[Exception],
+) -> None:
+    """Verify that excluded Source metadata is absent from copied Chroma."""
+    vector_root = Path(db_root) / "index" / "chroma"
+    if not source_ids or not vector_root.is_dir():
+        return
+    try:
+        import chromadb
+        from chromadb.config import Settings
+    except ModuleNotFoundError as exc:
+        raise error_type(
+            "ChromaDB runtime is required to validate copied exclusions"
+        ) from exc
+    client = chromadb.PersistentClient(
+        path=str(vector_root),
+        settings=Settings(anonymized_telemetry=False),
+    )
+    try:
+        try:
+            copied = client.get_collection(name=collection)
+        except Exception as exc:
+            raise error_type(
+                f"copied Chroma collection is unavailable: {collection}"
+            ) from exc
+        for source_id in sorted(source_ids):
+            result = copied.get(
+                where={"source_id": source_id},
+                limit=1,
+                include=[],
+            )
+            if result.get("ids"):
+                raise error_type(
+                    "excluded Source remains in copied Chroma collection"
+                )
+    finally:
+        _release_chroma_runtime(client)
 
 
 def _release_chroma_runtime(*clients: Any) -> None:

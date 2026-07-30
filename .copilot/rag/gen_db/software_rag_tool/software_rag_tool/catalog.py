@@ -225,6 +225,7 @@ def init_catalog(conn: sqlite3.Connection | None = None) -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_document_source ON document(source);
+            CREATE INDEX IF NOT EXISTS idx_document_source_id ON document(source_id);
             CREATE INDEX IF NOT EXISTS idx_document_path ON document(path);
             CREATE INDEX IF NOT EXISTS idx_document_hash ON document(content_hash);
             CREATE INDEX IF NOT EXISTS idx_chunk_doc_pk ON chunk(doc_pk);
@@ -304,45 +305,133 @@ def source_chunk_ids(source_id: str) -> list[str]:
     return [str(row["chunk_uid"]) for row in rows]
 
 
+def ensure_source_delete_index() -> None:
+    """Install the additive Source lookup index before the read-only plan."""
+    if not catalog_path().is_file():
+        return
+    with connect():
+        pass
+
+
 def delete_source_documents(source_id: str) -> dict[str, int]:
-    """Delete catalog rows for one exact Source without touching siblings."""
+    """Delete one exact Source with a fixed number of set-based SQL statements."""
     value = str(source_id or "")
     if not value:
         raise ValueError("source_id is required")
     if not catalog_path().is_file():
         return {"documents": 0, "chunks": 0}
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT doc_pk FROM document WHERE source_id = ?",
-            (value,),
-        ).fetchall()
-        document_ids = [int(row["doc_pk"]) for row in rows]
-        if not document_ids:
-            return {"documents": 0, "chunks": 0}
-        placeholders = ",".join("?" for _ in document_ids)
-        chunk_rows = conn.execute(
-            f"SELECT chunk_uid FROM chunk WHERE doc_pk IN ({placeholders})",
-            document_ids,
-        ).fetchall()
-        chunk_ids = [str(row["chunk_uid"]) for row in chunk_rows]
-        _delete_chunks(conn, chunk_ids)
-        # Remove inconsistent zero-chunk documents as well.  Normal ingestion
-        # never leaves these behind, but deletion must converge if it does.
-        remaining = conn.execute(
-            "SELECT doc_pk FROM document WHERE source_id = ?",
-            (value,),
-        ).fetchall()
-        _delete_orphan_documents(
-            conn,
-            [int(row["doc_pk"]) for row in remaining],
+        conn.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS source_delete_documents (
+              doc_pk INTEGER PRIMARY KEY
+            )
+            """
         )
+        conn.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS source_delete_chunks (
+              chunk_pk INTEGER PRIMARY KEY
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS source_delete_terms (
+              term_id INTEGER PRIMARY KEY
+            )
+            """
+        )
+        conn.execute("DELETE FROM source_delete_documents")
+        conn.execute("DELETE FROM source_delete_chunks")
+        conn.execute("DELETE FROM source_delete_terms")
+        conn.execute(
+            """
+            INSERT INTO source_delete_documents(doc_pk)
+            SELECT doc_pk FROM document WHERE source_id = ?
+            """,
+            (value,),
+        )
+        document_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM source_delete_documents"
+            ).fetchone()[0]
+        )
+        if not document_count:
+            return {"documents": 0, "chunks": 0}
+        conn.execute(
+            """
+            INSERT INTO source_delete_chunks(chunk_pk)
+            SELECT c.chunk_pk
+            FROM chunk c
+            JOIN source_delete_documents d ON d.doc_pk = c.doc_pk
+            """
+        )
+        chunk_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM source_delete_chunks"
+            ).fetchone()[0]
+        )
+        conn.execute(
+            """
+            INSERT INTO source_delete_terms(term_id)
+            SELECT DISTINCT p.term_id
+            FROM identifier_posting p
+            JOIN source_delete_chunks c ON c.chunk_pk = p.chunk_pk
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM identifier_posting
+            WHERE chunk_pk IN (SELECT chunk_pk FROM source_delete_chunks)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM fts_word
+            WHERE rowid IN (SELECT chunk_pk FROM source_delete_chunks)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM chunk
+            WHERE chunk_pk IN (SELECT chunk_pk FROM source_delete_chunks)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM document_lookup
+            WHERE doc_pk IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM file_fts
+            WHERE rowid IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM document
+            WHERE doc_pk IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        _refresh_identifier_stats_for_source_delete(conn)
         _delete_orphan_identifier_terms(conn)
-        _refresh_identifier_stats(conn)
         _set_meta(conn, "updated_at", datetime.now(timezone.utc).isoformat())
         return {
-            "documents": len(document_ids),
-            "chunks": len(chunk_ids),
+            "documents": document_count,
+            "chunks": chunk_count,
         }
+
+
+def chunk_count(path: Path | None = None) -> int:
+    """Return only the manifest count needed after a Source deletion."""
+    path = path or catalog_path()
+    if not path.is_file():
+        return 0
+    with connect_readonly(path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM chunk").fetchone()[0])
 
 
 def rebuild_from_clean(reset: bool = True) -> int:
@@ -835,6 +924,58 @@ def _refresh_identifier_stats(conn: sqlite3.Connection) -> None:
         (threshold,),
     )
     _delete_orphan_identifier_terms(conn)
+
+
+def _refresh_identifier_stats_for_source_delete(
+    conn: sqlite3.Connection,
+) -> None:
+    """Refresh changed identifier terms and reapply the global weak threshold."""
+    conn.execute(
+        """
+        UPDATE identifier_term
+        SET document_frequency = COALESCE((
+          SELECT COUNT(DISTINCT c.doc_pk)
+          FROM identifier_posting p
+          JOIN chunk c ON c.chunk_pk = p.chunk_pk
+          WHERE p.term_id = identifier_term.term_id
+        ), 0)
+        WHERE term_id IN (SELECT term_id FROM source_delete_terms)
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE term_id IN (SELECT term_id FROM source_delete_terms)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM identifier_posting p
+            WHERE p.term_id = identifier_term.term_id
+          )
+        """
+    )
+    chunk_total = _count(conn, "chunk")
+    threshold = max(8, int(chunk_total * 0.02))
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO identifier_suppressed(
+          canonical_value, kind, suppressed_at
+        )
+        SELECT canonical_value, kind, ?
+        FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (now, threshold),
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (threshold,),
+    )
 
 
 def _document_lookup_search(conn: sqlite3.Connection, values: list[str], *, top_k: int, source: str) -> list[sqlite3.Row]:

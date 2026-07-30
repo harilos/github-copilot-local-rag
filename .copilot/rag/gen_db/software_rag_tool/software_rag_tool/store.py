@@ -104,13 +104,30 @@ def upsert_records(records: list[dict[str, Any]], progress_callback: Callable[[i
     return total
 
 
-def delete_ids(ids: list[str]) -> int:
-    ids = [value for value in ids if value]
-    if not ids:
+def delete_ids(
+    ids: list[str],
+    progress_callback: Callable[[int, int], None] | None = None,
+    *,
+    batch_size: int = 2_000,
+) -> int:
+    unique_ids = list(dict.fromkeys(str(value) for value in ids if value))
+    if not unique_ids:
         return 0
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
     collection = _get_or_create_collection()
-    collection.delete(ids=ids)
-    return len(ids)
+    deleted = 0
+    for start in range(0, len(unique_ids), batch_size):
+        batch = unique_ids[start : start + batch_size]
+        collection.delete(ids=batch)
+        deleted += len(batch)
+        if progress_callback is not None:
+            try:
+                progress_callback(deleted, len(unique_ids))
+            except Exception:
+                # Progress reporting is observational.
+                pass
+    return deleted
 
 
 def collection_count() -> int:

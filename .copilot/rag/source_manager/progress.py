@@ -238,11 +238,11 @@ class ProgressRenderer:
         message = f"{prefix} {detail}"
         if event_kind.endswith(".http_attempt"):
             message = _render_http_attempt(prefix, event)
+        final_line = (
+            status in _IMMEDIATE_STATUSES
+            or event_kind.endswith(".http_attempt")
+        )
         if self._is_tty and self._output is print:
-            final_line = (
-                status in _IMMEDIATE_STATUSES
-                or event_kind.endswith(".http_attempt")
-            )
             print(
                 "\r" + message + "\033[K",
                 end="\n" if final_line else "",
@@ -250,7 +250,12 @@ class ProgressRenderer:
             )
         else:
             if self._is_tty:
-                message = "\r" + message
+                message = (
+                    "\r"
+                    + message
+                    + "\033[K"
+                    + ("\n" if final_line else "")
+                )
             self._output(message)
         self._last_rendered_at = now
         self._last_phase = phase

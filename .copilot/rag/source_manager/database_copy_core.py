@@ -16,6 +16,7 @@ from .database_copy_storage import (
     copy_catalog_snapshot,
     copy_chroma_snapshot,
     delete_excluded_sources,
+    validate_excluded_vectors,
 )
 
 _DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
@@ -86,7 +87,7 @@ def copy_database(
         )
         rewrite_db_local_paths(
             staging,
-            source_root=source,
+            source_root=Path(source_root),
             destination_root=destination,
         )
         deletion_results = delete_excluded_sources(
@@ -224,7 +225,14 @@ def rewrite_db_local_paths(
     source_root: Path,
     destination_root: Path,
 ) -> None:
-    source_text = str(source_root.resolve())
+    source_texts = tuple(
+        dict.fromkeys(
+            (
+                str(source_root.expanduser().absolute()),
+                str(source_root.resolve()),
+            )
+        )
+    )
     destination_text = str(destination_root.expanduser().absolute())
     for path in (
         root / "logs" / "index_state.json",
@@ -232,7 +240,13 @@ def rewrite_db_local_paths(
     ):
         if path.is_file():
             payload = read_json_object(path, required=True)
-            atomic_json(path, replace_path_prefix(payload, source_text, destination_text))
+            for source_text in source_texts:
+                payload = replace_path_prefix(
+                    payload,
+                    source_text,
+                    destination_text,
+                )
+            atomic_json(path, payload)
 
 
 def replace_path_prefix(value: Any, source: str, destination: str) -> Any:
@@ -269,31 +283,127 @@ def validate_copied_database(
     config = read_json_object(root / "db.json", required=True)
     if config.get("db_name") != destination_name or config.get("collection") != collection:
         raise DatabaseCopyError("copied DB identity is invalid")
+    excluded_ids = {
+        str(source.get("source_id") or "").strip()
+        for source in excluded_sources
+        if str(source.get("source_id") or "").strip()
+    }
+    excluded_keys = {
+        str(source.get("_local_source_key") or "").strip()
+        for source in excluded_sources
+        if str(source.get("_local_source_key") or "").strip()
+    }
     catalog_path = root / "catalog.sqlite"
-    if not catalog_path.is_file():
-        return
-    import sqlite3
+    if catalog_path.is_file():
+        import sqlite3
 
-    connection = sqlite3.connect(catalog_path)
-    try:
-        result = connection.execute("PRAGMA integrity_check").fetchone()
-        if not result or str(result[0]).casefold() != "ok":
-            raise DatabaseCopyError("copied catalog is invalid")
-        columns = {
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(document)")
-        }
-        if "source_id" not in columns:
-            return
-        for source in excluded_sources:
-            source_id = str(source.get("source_id") or "").strip()
-            if source_id and connection.execute(
-                "SELECT 1 FROM document WHERE source_id = ? LIMIT 1",
-                (source_id,),
-            ).fetchone() is not None:
-                raise DatabaseCopyError("excluded Source remains in copied catalog")
-    finally:
-        connection.close()
+        connection = sqlite3.connect(catalog_path)
+        try:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or str(result[0]).casefold() != "ok":
+                raise DatabaseCopyError("copied catalog is invalid")
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(document)")
+            }
+            if "source_id" in columns:
+                for source_id in excluded_ids:
+                    if connection.execute(
+                        "SELECT 1 FROM document WHERE source_id = ? LIMIT 1",
+                        (source_id,),
+                    ).fetchone() is not None:
+                        raise DatabaseCopyError(
+                            "excluded Source remains in copied catalog"
+                        )
+        finally:
+            connection.close()
+
+    _validate_excluded_clean_records(root, excluded_ids)
+    _validate_excluded_json(
+        root / "logs" / "index_state.json",
+        excluded_ids,
+        label="ADD state",
+    )
+    _validate_excluded_json(
+        root / "source-links.json",
+        excluded_ids,
+        label="Source Metadata",
+    )
+    _validate_excluded_json(
+        root / "source-links.json.bak",
+        excluded_ids,
+        label="Source Metadata backup",
+    )
+    for local_key in excluded_keys:
+        if (root / "sources" / local_key).exists():
+            raise DatabaseCopyError(
+                "excluded Source management directory remains in copied DB"
+            )
+    validate_excluded_vectors(
+        root,
+        collection=collection,
+        source_ids=excluded_ids,
+        error_type=DatabaseCopyError,
+    )
+
+
+def _validate_excluded_clean_records(
+    root: Path,
+    excluded_ids: set[str],
+) -> None:
+    if not excluded_ids:
+        return
+    clean_root = root / "data" / "clean"
+    if not clean_root.is_dir():
+        return
+    for path in sorted(clean_root.rglob("*.jsonl")):
+        if path.is_symlink() or not path.is_file():
+            raise DatabaseCopyError("copied clean storage is unsafe")
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    value = json.loads(line)
+                    if (
+                        isinstance(value, dict)
+                        and _source_id_from_record(value) in excluded_ids
+                    ):
+                        raise DatabaseCopyError(
+                            "excluded Source remains in copied clean records"
+                        )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DatabaseCopyError("copied clean records are invalid") from exc
+
+
+def _source_id_from_record(value: Mapping[str, Any]) -> str:
+    metadata = value.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("source_id") is not None:
+        return str(metadata.get("source_id") or "")
+    return str(value.get("source_id") or "")
+
+
+def _validate_excluded_json(
+    path: Path,
+    excluded_ids: set[str],
+    *,
+    label: str,
+) -> None:
+    if not excluded_ids or not path.is_file():
+        return
+    payload = read_json_object(path, required=True)
+    if _contains_source_id(payload, excluded_ids):
+        raise DatabaseCopyError(f"excluded Source remains in copied {label}")
+
+
+def _contains_source_id(value: Any, excluded_ids: set[str]) -> bool:
+    if isinstance(value, dict):
+        if str(value.get("source_id") or "") in excluded_ids:
+            return True
+        return any(_contains_source_id(item, excluded_ids) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_source_id(item, excluded_ids) for item in value)
+    return False
 
 
 def configured_collection(root: Path, db_name: str) -> str:

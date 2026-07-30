@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from source_manager.subprocess_stream import (
     CAPTURE_HEAD_BYTES,
@@ -298,6 +300,7 @@ class AddIntegrationTests(unittest.TestCase):
         self.assertIn("--manager-protocol-v1", cli)
         self.assertIn("@@LOCAL_RAG_PROGRESS_V1@@", cli)
         self.assertIn("@@LOCAL_RAG_RESULT_V1@@", cli)
+        self.assertIn('reconfigure(encoding="utf-8", errors="strict")', cli)
 
     def test_default_add_route_uses_frames_and_reports_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -371,6 +374,67 @@ class AddIntegrationTests(unittest.TestCase):
                     command_runner=lambda _arguments: completed,
                     progress_callback=None,
                 )
+
+    def test_streaming_add_forces_utf8_under_cp932_ambient_environment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rag_root = root / "rag"
+            script = rag_root / "gen_db" / "add_data.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(
+                "import json,os,sys\n"
+                "key=sys.argv[sys.argv.index('--source-id')+1]\n"
+                f"print('{PROGRESS_FRAME}' + json.dumps("
+                "{'phase':'reflect','current_item':'ソース資料.md'},"
+                "ensure_ascii=False), file=sys.stderr, flush=True)\n"
+                f"print('{RESULT_FRAME}' + json.dumps("
+                "{'operation':'add','source_id':key,'file_count':1,"
+                "'indexed_files':1,'skipped_files':0,'error_files':0,"
+                "'upserted_records':1,'deleted_records':0,"
+                "'display_name':'日本語ソース',"
+                "'pythonioencoding':os.environ.get('PYTHONIOENCODING'),"
+                "'pythonutf8':os.environ.get('PYTHONUTF8'),"
+                "'sentinel':os.environ.get('LOCAL_RAG_SENTINEL')},"
+                "ensure_ascii=False))\n",
+                encoding="utf-8",
+            )
+            work = root / "db-rag" / "sources" / "src_key" / "work"
+            work.mkdir(parents=True)
+            observed: list[dict] = []
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PYTHONIOENCODING": "cp932",
+                    "PYTHONUTF8": "0",
+                    "LOCAL_RAG_SENTINEL": "kept",
+                },
+            ):
+                result = _execute_add(
+                    db_root=root / "db-rag",
+                    source={"local_source_key": "src_key"},
+                    work=work,
+                    python_executable=Path(sys.executable),
+                    rag_root=rag_root,
+                    command_runner=None,
+                    progress_callback=lambda event: observed.append(
+                        dict(event)
+                    ),
+                )
+                self.assertEqual("cp932", os.environ["PYTHONIOENCODING"])
+                self.assertEqual("0", os.environ["PYTHONUTF8"])
+
+        summary = result["summary"]
+        self.assertEqual("日本語ソース", summary["display_name"])
+        self.assertEqual("utf-8", summary["pythonioencoding"])
+        self.assertEqual("1", summary["pythonutf8"])
+        self.assertEqual("kept", summary["sentinel"])
+        self.assertEqual(
+            "ソース資料.md",
+            observed[0]["payload"]["current_item"],
+        )
+        self.assertNotIn("�", json.dumps(summary, ensure_ascii=False))
 
 
 if __name__ == "__main__":

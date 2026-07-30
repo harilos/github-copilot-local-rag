@@ -324,6 +324,10 @@ def _non_negative_int(value: Any) -> int:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
     load_env()
     parser = argparse.ArgumentParser(
         epilog=MANAGER_HELP_EPILOG,

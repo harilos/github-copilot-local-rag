@@ -156,6 +156,53 @@ class ProgressRendererTests(unittest.TestCase):
             self.assertEqual("\n", completed.kwargs["end"])
             self.assertTrue(completed.kwargs["flush"])
 
+    def test_tty_wrapped_output_clears_tail_and_finishes_line(self) -> None:
+        output: list[str] = []
+        now = [10.0]
+        renderer = ProgressRenderer(
+            output.append,
+            operation="Source削除",
+            is_tty=True,
+            clock=lambda: now[0],
+        )
+        renderer(
+            {
+                "phase": "delete.vector",
+                "label_ja": "とても長いベクトル削除工程",
+                "completed": 1,
+                "total": 100,
+                "total_kind": "exact",
+            }
+        )
+        now[0] += 0.3
+        renderer(
+            {
+                "phase": "delete.vector",
+                "label_ja": "短い工程",
+                "completed": 2,
+                "total": 100,
+                "total_kind": "exact",
+            }
+        )
+        renderer(
+            {
+                "phase": "delete.vector",
+                "label_ja": "短い工程",
+                "completed": 100,
+                "total": 100,
+                "total_kind": "exact",
+                "status": "completed",
+                "checkpoint_saved": True,
+            }
+        )
+
+        self.assertEqual(3, len(output))
+        self.assertTrue(all(value.startswith("\r") for value in output))
+        self.assertTrue(all("\033[K" in value for value in output))
+        self.assertFalse(output[0].endswith("\n"))
+        self.assertFalse(output[1].endswith("\n"))
+        self.assertTrue(output[2].endswith("\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

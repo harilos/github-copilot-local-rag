@@ -244,6 +244,11 @@ def run_streaming_process(
     argv = tuple(str(item) for item in arguments)
     if not argv:
         raise ValueError("arguments must not be empty")
+    child_environment = (
+        dict(env) if env is not None else dict(os.environ)
+    )
+    child_environment["PYTHONIOENCODING"] = "utf-8"
+    child_environment["PYTHONUTF8"] = "1"
     process = subprocess.Popen(
         list(argv),
         shell=False,
@@ -251,7 +256,7 @@ def run_streaming_process(
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         cwd=cwd,
-        env=dict(env) if env is not None else None,
+        env=child_environment,
         start_new_session=(os.name != "nt"),
     )
     if process.stdout is None or process.stderr is None:
