@@ -10,8 +10,21 @@
     ContactText = "連絡先：XXX"
     FinishTextLines = @(
         "Local RAGのインストールが完了しました。"
-        "同封した初期辞書は、同名の辞書がまだ存在しない場合だけ配置されています。"
+        "次の画面例を参考に、VS CodeまたはCopilot CLIから社内文書を検索してください。"
     )
+
+    # The finish guidance page can show arbitrary explanatory text and two screenshots.
+    FinishCustomTextLines = @(
+        "質問例：ローカルRAGで、○○の仕様と関連資料を根拠付きで教えて"
+        "利用できる辞書が分からない場合は、先に『使えるローカルRAGのDBを教えて』と依頼してください。"
+    )
+    ManualUrl = "https://example.invalid/local-rag-manual"
+    ManualLinkText = "使い方マニュアルを開く"
+
+    # Empty image paths generate placeholder screenshots. PNG, JPEG, GIF, or BMP can be specified.
+    # Relative paths are resolved from this folder.
+    VSCodeImagePath = ""
+    CopilotCliImagePath = ""
 
     # Empty means that build_setup.ps1 generates the bundled default image.
     # PNG, JPEG, GIF, or BMP can be specified. Relative paths are resolved from this folder.
