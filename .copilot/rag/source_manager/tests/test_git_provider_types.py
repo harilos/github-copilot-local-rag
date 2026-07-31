@@ -6,15 +6,28 @@ import unittest
 from pathlib import Path
 
 from source_manager import providers
-from source_manager.git_provider_types import (
+from source_manager.git_host_runtime import _ProgressProxy
+from source_manager.git_host_urls import (
     GIT_SOURCE_TYPES,
-    _provider_progress_proxy,
+    derive_repository_web_url,
+    make_repository_link,
 )
 from source_manager.runner import register_source
 from source_manager.store import SourceStore
 
 
 class GitProviderTypeTests(unittest.TestCase):
+    def test_requested_source_type_names_are_canonical(self) -> None:
+        self.assertEqual(
+            {
+                "github",
+                "gitlab",
+                "azure-devops",
+                "other-git",
+            },
+            set(GIT_SOURCE_TYPES),
+        )
+
     def test_distinct_git_source_types_share_fetch_contract(self) -> None:
         urls = {
             "github": "https://github.com/example/project.git",
@@ -41,18 +54,14 @@ class GitProviderTypeTests(unittest.TestCase):
                     "documents_only",
                     normalized["file_selection"],
                 )
+                key = f"src_{source_type}-000000000000"
+                work = f"sources/{key}/work/ingest/{key}"
                 plan = providers.build_fetch_plan(
-                    source_key=f"src_{source_type}-000000000000",
+                    source_key=key,
                     provider=source_type,
                     settings=normalized,
-                    logical_root=(
-                        f"sources/src_{source_type}-000000000000/"
-                        f"work/ingest/src_{source_type}-000000000000"
-                    ),
-                    work_path=(
-                        f"sources/src_{source_type}-000000000000/"
-                        f"work/ingest/src_{source_type}-000000000000"
-                    ),
+                    logical_root=work,
+                    work_path=work,
                 )
                 self.assertEqual(source_type, plan.provider)
                 self.assertEqual("git_fetch", plan.steps[0].operation)
@@ -84,17 +93,45 @@ class GitProviderTypeTests(unittest.TestCase):
                         stored.payload["source_type"],
                     )
 
-    def test_progress_proxy_preserves_distinct_provider(self) -> None:
-        events: list[dict[str, object]] = []
-        proxy = _provider_progress_proxy(
-            events.append,
-            source_type="azure-devops",
-        )
-        proxy({"provider": "github", "phase": "fetch.github"})
-        self.assertEqual("azure-devops", events[0]["provider"])
-        self.assertEqual("fetch.github", events[0]["phase"])
+    def test_progress_proxy_preserves_provider_and_callback_state(self) -> None:
+        class Callback:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
 
-    def test_source_metadata_accepts_new_type_names(self) -> None:
+            def __call__(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        callback = Callback()
+        proxy = _ProgressProxy(callback, "azure-devops")
+        proxy.preflight_confirmed = True
+        proxy({"provider": "github", "phase": "github.fetch"})
+        self.assertTrue(callback.preflight_confirmed)
+        self.assertEqual(
+            "azure-devops",
+            callback.events[0]["provider"],
+        )
+        self.assertEqual(
+            "azure-devops.fetch",
+            callback.events[0]["phase"],
+        )
+
+    def test_provider_specific_link_contracts(self) -> None:
+        self.assertEqual(
+            "https://dev.azure.com/example/project/_git/repository",
+            derive_repository_web_url(
+                "azure-devops",
+                "git@ssh.dev.azure.com:v3/example/project/repository",
+            ),
+        )
+        self.assertIsNone(
+            make_repository_link(
+                "other-git",
+                "https://git.example/group/project",
+                ref="main",
+            )
+        )
+
+    def test_source_metadata_accepts_exact_type_names(self) -> None:
         rag_root = Path(__file__).resolve().parents[2]
         tool_root = rag_root / "gen_db" / "software_rag_tool"
         if str(tool_root) not in sys.path:
