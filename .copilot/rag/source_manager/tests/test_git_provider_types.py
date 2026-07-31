@@ -4,8 +4,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from source_manager import providers
+from source_manager import git_host_sources, providers
 from source_manager.git_host_runtime import _ProgressProxy
 from source_manager.git_host_urls import (
     GIT_SOURCE_TYPES,
@@ -114,6 +115,60 @@ class GitProviderTypeTests(unittest.TestCase):
             "azure-devops.fetch",
             callback.events[0]["phase"],
         )
+
+    def test_registration_form_persists_selected_service(self) -> None:
+        class Manager:
+            def __init__(self, source_type: str) -> None:
+                self.source_type = source_type
+
+            def _select_value(self, *_args, **_kwargs):
+                return self.source_type
+
+            def _print_info(self, _message: str) -> None:
+                return None
+
+            def _print_error(self, message: str) -> None:
+                raise AssertionError(message)
+
+            def _prompt_preserving_value(self, *_args, **_kwargs):
+                return (
+                    "https://dev.azure.com/example/project/_git/repository"
+                )
+
+            def _examples(self, _name: str):
+                return ()
+
+        base = {
+            "source_type": "github",
+            "label": "Gitリポジトリ",
+            "display_name": "repository",
+            "fetch": {
+                "repository_url": (
+                    "https://dev.azure.com/example/project/_git/repository"
+                ),
+                "include_paths": ["docs"],
+                "updated_within_days": 90,
+            },
+            "summary": (),
+        }
+        with mock.patch.object(
+            git_host_sources._common,
+            "prompt_new_git_source",
+            return_value=base,
+        ):
+            azure = git_host_sources.prompt_new_git_host_source(
+                Manager("azure-devops")
+            )
+            other = git_host_sources.prompt_new_git_host_source(
+                Manager("other-git")
+            )
+        self.assertEqual("azure-devops", azure["source_type"])
+        self.assertEqual(
+            "azure-devops-item",
+            azure["link"]["strategy"],
+        )
+        self.assertEqual("other-git", other["source_type"])
+        self.assertIsNone(other["link"])
 
     def test_provider_specific_link_contracts(self) -> None:
         self.assertEqual(
