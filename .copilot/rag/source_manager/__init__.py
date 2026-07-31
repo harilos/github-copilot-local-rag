@@ -49,6 +49,20 @@ from .gitlab_issues import (
     parse_gitlab_project,
     repair_generated_gitlab_issues_link,
 )
+from .gitlab_issue_fixes import (
+    install_gitlab_issue_fixes,
+    parse_gitlab_api_project_web_url,
+)
+from .gitlab_wiki import (
+    GitLabWikiInventoryItem,
+    decode_gitlab_wiki_page_relative_path,
+    fetch_gitlab_wiki,
+    generated_gitlab_wiki_link,
+    gitlab_wiki_page_relative_path,
+    gitlab_wiki_page_url,
+    repair_generated_gitlab_wiki_link,
+    validate_gitlab_wiki_work_tree,
+)
 from .security import (
     redact_runtime_path,
     redact_runtime_paths,
@@ -124,6 +138,7 @@ from .document_filter import (
 )
 from .document_filter_counts import install_document_filter_count_runtime
 from .document_filter_packages import install_document_filter_package_contract
+from .gitlab_wiki_runtime import install_gitlab_wiki_runtime
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
@@ -139,6 +154,7 @@ def _remove_default_source_operation_timeout() -> None:
 
 
 _remove_default_source_operation_timeout()
+install_gitlab_issue_fixes()
 install_redmine_incremental_refresh()
 install_machine_connection_runtime()
 install_source_preflight_runtime()
@@ -149,6 +165,7 @@ install_document_filter_runtime()
 install_document_filter_count_runtime()
 install_document_filter_package_contract()
 install_copy_only_package_runtime()
+install_gitlab_wiki_runtime()
 install_manage_custom_hook()
 
 # Runtime installers wrap several module functions. Keep package-level exports
@@ -159,7 +176,9 @@ from . import providers as _providers
 from . import runner as _runner
 
 SUPPORTED_PROVIDERS = _providers.SUPPORTED_PROVIDERS
+build_fetch_plan = _providers.build_fetch_plan
 execute_fetch_plan = _execution.execute_fetch_plan
+register_source = _runner.register_source
 resolve_environment_root = _providers.resolve_environment_root
 source_runtime_environment = _machine_connections.source_runtime_environment
 update_all_sources = _runner.update_all_sources
@@ -184,6 +203,7 @@ __all__ = [
     "GitLabProjectCheck",
     "GitLabProjectLocation",
     "GitLabRegistration",
+    "GitLabWikiInventoryItem",
     "LEGACY_REDMINE_API_KEY_ENV",
     "PROGRESS_FRAME",
     "REDMINE_BATCH_SIZE",
@@ -214,26 +234,34 @@ __all__ = [
     "connection_config_path",
     "connection_secret_path",
     "copy_database",
+    "decode_gitlab_wiki_page_relative_path",
     "execute_fetch_plan",
     "extract_json_result",
     "fetch_gitlab_issues",
+    "fetch_gitlab_wiki",
     "generated_gitlab_issues_link",
+    "generated_gitlab_wiki_link",
     "generated_redmine_link",
     "gitlab_connection_id",
     "gitlab_issues_updated_after",
     "gitlab_project_location",
     "gitlab_token_env",
+    "gitlab_wiki_page_relative_path",
+    "gitlab_wiki_page_url",
     "has_stored_gitlab_token",
     "has_stored_redmine_api_key",
     "install_copy_only_package_runtime",
     "install_document_filter_count_runtime",
     "install_document_filter_package_contract",
     "install_document_filter_runtime",
+    "install_gitlab_issue_fixes",
+    "install_gitlab_wiki_runtime",
     "install_teams_source_runtime",
     "list_gitlab_registrations",
     "list_redmine_registrations",
     "list_sources",
     "new_run_state",
+    "parse_gitlab_api_project_web_url",
     "parse_gitlab_project",
     "parse_redmine_project_url",
     "record_retry",
@@ -248,6 +276,7 @@ __all__ = [
     "register_source",
     "remove_source_metadata",
     "repair_generated_gitlab_issues_link",
+    "repair_generated_gitlab_wiki_link",
     "repair_generated_redmine_link",
     "resolve_environment_root",
     "resolve_gitlab_token",
@@ -260,6 +289,7 @@ __all__ = [
     "update_all_sources",
     "update_source",
     "update_source_configuration",
+    "validate_gitlab_wiki_work_tree",
     "validate_local_source_key",
     "validate_persistable",
     "validate_provider_config",
