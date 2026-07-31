@@ -29,6 +29,9 @@ class GitLabWikiInventoryItem:
     title: str
 
 
+InventoryCallback = Callable[[list[GitLabWikiInventoryItem]], None]
+
+
 def generated_gitlab_wiki_link(project_url: Any, gitlab_url: Any) -> dict[str, Any]:
     project = parse_gitlab_project(project_url, gitlab_url)
     return {
@@ -79,22 +82,17 @@ def decode_gitlab_wiki_page_relative_path(value: Any) -> str:
     if len(parts) < 4 or parts[:2] != ["wikis", "v1"] or parts[-1] != "page.md":
         raise SourceManagerError("GitLab Wiki page path is invalid")
     chunks: list[str] = []
-    middle = parts[2:-1]
-    for index, component in enumerate(middle):
+    for index, component in enumerate(parts[2:-1]):
         match = _CHUNK.fullmatch(component)
         if match is None:
             raise SourceManagerError("GitLab Wiki page path is invalid")
         chunk = match.group(1)
-        if index < len(middle) - 1 and len(chunk) != 120:
+        if index < len(parts[2:-1]) - 1 and len(chunk) != 120:
             raise SourceManagerError("GitLab Wiki page path is invalid")
         chunks.append(chunk)
     encoded = "".join(chunks)
     try:
-        raw = base64.b64decode(
-            encoded + "=" * ((4 - len(encoded) % 4) % 4),
-            altchars=b"-_",
-            validate=True,
-        )
+        raw = base64.b64decode(encoded + "=" * ((4 - len(encoded) % 4) % 4), altchars=b"-_", validate=True)
         slug = raw.decode("utf-8")
     except (UnicodeError, ValueError, binascii.Error) as exc:
         raise SourceManagerError("GitLab Wiki page path is invalid") from exc
@@ -131,6 +129,7 @@ def fetch_gitlab_wiki(
     request: HttpRequest,
     environment: Mapping[str, str],
     *,
+    inventory_callback: InventoryCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     project = parse_gitlab_project(settings.get("project_url"), settings.get("gitlab_url"))
@@ -149,6 +148,8 @@ def fetch_gitlab_wiki(
     headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
     project = _project_identity(project, request, headers)
     inventory = _inventory(project, request, headers, progress_callback)
+    if inventory_callback is not None:
+        inventory_callback(list(inventory))
     root = _wiki_root(Path(work), create=True)
     fingerprint = _fingerprint(project)
     existing = _owned_pages(Path(work), fingerprint)
@@ -207,11 +208,7 @@ def _project_identity(project: GitLabProject, request: HttpRequest, headers: Map
     project_id = _positive(payload.get("id"), "GitLab project ID")
     verified = parse_gitlab_api_project_web_url(payload.get("web_url"), project.gitlab_url)
     response_path = str(payload.get("path_with_namespace") or "").strip()
-    if (
-        not response_path
-        or response_path.casefold() != project.project_path.casefold()
-        or verified.project_path.casefold() != project.project_path.casefold()
-    ):
+    if not response_path or response_path.casefold() != project.project_path.casefold() or verified.project_path.casefold() != project.project_path.casefold():
         raise SourceManagerError("GitLab project response has the wrong path identity", stage="fetch.gitlab_wiki")
     return GitLabProject(project.gitlab_url, project.api_base_url, project.project_url, project.project_path, project_id)
 
@@ -223,9 +220,7 @@ def _inventory(project: GitLabProject, request: HttpRequest, headers: Mapping[st
     seen: set[str] = set()
     while page <= _MAX_PAGES:
         query = urlencode({"with_content": "0", "per_page": 100, "page": page})
-        status, body, response_headers = request(
-            f"{project.api_base_url}/projects/{project.project_id}/wikis?{query}", headers
-        )
+        status, body, response_headers = request(f"{project.api_base_url}/projects/{project.project_id}/wikis?{query}", headers)
         if status != 200:
             raise _http("GitLab Wiki inventory request failed", status)
         payload = _json(body, "GitLab Wiki inventory")
@@ -249,16 +244,11 @@ def _inventory(project: GitLabProject, request: HttpRequest, headers: Mapping[st
             elif expected != total:
                 raise SourceManagerError("gitlab_wiki_inventory_changed", stage="fetch.gitlab_wiki")
         _emit(progress, {
-            "event": "provider.page",
-            "provider": "gitlab_wiki",
-            "phase": "gitlab_wiki.inventory",
-            "label_ja": "GitLab Wiki一覧取得",
-            "completed": len(output),
-            "total": expected,
-            "unit": "ページ",
+            "event": "provider.page", "provider": "gitlab_wiki",
+            "phase": "gitlab_wiki.inventory", "label_ja": "GitLab Wiki一覧取得",
+            "completed": len(output), "total": expected, "unit": "ページ",
             "total_kind": "exact" if expected is not None else "unknown",
-            "current_item": f"page={page}",
-            "status": "running",
+            "current_item": f"page={page}", "status": "running",
         })
         next_page = _header(response_headers, "X-Next-Page")
         if next_page:
@@ -283,9 +273,7 @@ def _inventory(project: GitLabProject, request: HttpRequest, headers: Mapping[st
 
 def _page(project: GitLabProject, slug: str, request: HttpRequest, headers: Mapping[str, str]) -> dict[str, Any]:
     encoded = quote(slug, safe="")
-    status, body, _ = request(
-        f"{project.api_base_url}/projects/{project.project_id}/wikis/{encoded}", headers
-    )
+    status, body, _ = request(f"{project.api_base_url}/projects/{project.project_id}/wikis/{encoded}", headers)
     if status != 200:
         raise _http("GitLab Wiki detail request failed", status)
     payload = _json(body, "GitLab Wiki detail")
@@ -300,9 +288,7 @@ def _markdown(project: GitLabProject, page: Mapping[str, Any], fingerprint: str)
     content = str(page.get("content") or "").strip()
     metadata = json.dumps(
         {"schema_version": "local-rag-gitlab-wiki-v1", "slug": slug, "project_fingerprint": fingerprint},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
     structured = json.dumps(dict(page), ensure_ascii=False, sort_keys=True, indent=2)
     return "\n".join([
@@ -368,42 +354,27 @@ def _atomic_if_changed(path: Path, text: str) -> bool:
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
+            handle.write(encoded); handle.flush(); os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
-        try:
-            Path(temporary).unlink(missing_ok=True)
-        except OSError:
-            pass
+        try: Path(temporary).unlink(missing_ok=True)
+        except OSError: pass
     return True
 
 
 def _remove_empty(root: Path) -> None:
     for path in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
-        try:
-            path.rmdir()
-        except OSError:
-            pass
+        try: path.rmdir()
+        except OSError: pass
 
 
 def _fingerprint(project: GitLabProject) -> str:
-    identity = f"local-rag-gitlab-wiki-project-v1\0{project.gitlab_url}\0{project.project_path}"
-    return hashlib.sha256(identity.encode()).hexdigest()
+    return hashlib.sha256(f"local-rag-gitlab-wiki-project-v1\0{project.gitlab_url}\0{project.project_path}".encode()).hexdigest()
 
 
 def _slug(value: Any) -> str:
     text = str(value or "")
-    if (
-        not text
-        or len(text) > 4096
-        or text.startswith("/")
-        or text.endswith("/")
-        or "\\" in text
-        or any(part in {"", ".", ".."} for part in text.split("/"))
-        or any(ord(character) < 0x20 for character in text)
-    ):
+    if not text or len(text) > 4096 or text.startswith("/") or text.endswith("/") or "\\" in text or any(part in {"", ".", ".."} for part in text.split("/")) or any(ord(c) < 0x20 for c in text):
         raise SourceManagerError("GitLab Wiki slug is invalid")
     return text
 
@@ -415,8 +386,7 @@ def _positive(value: Any, field: str) -> int:
 
 
 def _json(body: bytes, field: str) -> Any:
-    try:
-        return json.loads(body.decode("utf-8"))
+    try: return json.loads(body.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise SourceManagerError(f"{field} response is invalid JSON", stage="fetch.gitlab_wiki") from exc
 
@@ -430,14 +400,11 @@ def _http(message: str, status: Any) -> SourceManagerError:
 def _header(headers: Mapping[str, Any], name: str) -> str:
     expected = name.casefold()
     for key, value in headers.items():
-        if str(key).casefold() == expected:
-            return str(value or "").strip()
+        if str(key).casefold() == expected: return str(value or "").strip()
     return ""
 
 
 def _emit(callback: ProgressCallback | None, event: Mapping[str, Any]) -> None:
     if callback is not None:
-        try:
-            callback(dict(event))
-        except Exception:
-            pass
+        try: callback(dict(event))
+        except Exception: pass
