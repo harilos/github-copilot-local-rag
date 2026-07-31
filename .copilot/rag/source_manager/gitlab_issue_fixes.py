@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -7,6 +8,12 @@ from .errors import SourceManagerError
 from . import gitlab_issues as _issues
 
 _MARKER = "_local_rag_gitlab_issue_fixes_installed"
+_ORIGINAL_GITLAB_ISSUE_MARKDOWN = _issues.gitlab_issue_markdown
+_ORIGINAL_CHANGED_ISSUE_IIDS = _issues._changed_issue_iids
+
+
+class _PartialDiscussions(list[Mapping[str, Any]]):
+    """Valid discussions collected before GitLab pagination headers drifted."""
 
 
 def parse_gitlab_api_project_web_url(web_url: Any, gitlab_url: Any) -> _issues.GitLabProject:
@@ -121,6 +128,7 @@ def _fetch_discussions(
     values: list[Mapping[str, Any]] = []
     seen: set[str] = set()
     expected_total: int | None = None
+    pagination_incomplete = False
     while page <= _issues._MAX_PAGES:
         query = urlencode({"per_page": 100, "page": page})
         status, body, response_headers = request(
@@ -203,6 +211,7 @@ def _fetch_discussions(
                 expected_total=expected_total,
                 reason=fallback_reason,
             )
+            pagination_incomplete = True
             break
 
         if next_page:
@@ -219,6 +228,7 @@ def _fetch_discussions(
                     expected_total=expected_total,
                     reason="invalid_next_page",
                 )
+                pagination_incomplete = True
                 break
             if not payload:
                 _emit_discussion_pagination_fallback(
@@ -229,6 +239,7 @@ def _fetch_discussions(
                     expected_total=expected_total,
                     reason="empty_page_with_next_page",
                 )
+                pagination_incomplete = True
                 break
             page = int(next_page)
             continue
@@ -243,6 +254,7 @@ def _fetch_discussions(
                     expected_total=expected_total,
                     reason="no_next_page_before_total",
                 )
+                pagination_incomplete = True
             break
         if len(payload) < 100:
             break
@@ -256,7 +268,84 @@ def _fetch_discussions(
             expected_total=expected_total,
             reason="safety_limit_reached",
         )
-    return values
+        pagination_incomplete = True
+    return _PartialDiscussions(values) if pagination_incomplete else values
+
+
+def _gitlab_issue_markdown(
+    project: _issues.GitLabProject,
+    issue: Mapping[str, Any],
+    discussions: list[Mapping[str, Any]],
+) -> str:
+    text = _ORIGINAL_GITLAB_ISSUE_MARKDOWN(project, issue, discussions)
+    if not isinstance(discussions, _PartialDiscussions):
+        return text
+    match = _issues._LOCAL_METADATA.search(text)
+    if match is None:
+        raise SourceManagerError(
+            "GitLab Issue Markdown metadata marker is missing",
+            stage="fetch.gitlab_issues",
+        )
+    try:
+        marker = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise SourceManagerError(
+            "GitLab Issue Markdown metadata marker is invalid",
+            stage="fetch.gitlab_issues",
+        ) from exc
+    if not isinstance(marker, dict):
+        raise SourceManagerError(
+            "GitLab Issue Markdown metadata marker is invalid",
+            stage="fetch.gitlab_issues",
+        )
+    marker["discussions_complete"] = False
+    encoded = json.dumps(
+        marker,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    text = text[: match.start(1)] + encoded + text[match.end(1) :]
+    updated_match = _issues._LOCAL_METADATA.search(text)
+    if updated_match is None:
+        raise SourceManagerError(
+            "GitLab Issue Markdown metadata marker is missing",
+            stage="fetch.gitlab_issues",
+        )
+    notice = (
+        "\n\n> 注: GitLabのページング情報が不整合だったため、"
+        "取得できたコメントのみ収録しています。次回更新時に再取得します。"
+    )
+    return (
+        text[: updated_match.end()]
+        + notice
+        + text[updated_match.end() :]
+    )
+
+
+def _changed_issue_iids(
+    inventory: list[_issues.GitLabIssueInventoryItem],
+    issues_directory: Any,
+    *,
+    updated_after: str | None,
+) -> list[int]:
+    changed = set(
+        _ORIGINAL_CHANGED_ISSUE_IIDS(
+            inventory,
+            issues_directory,
+            updated_after=updated_after,
+        )
+    )
+    for item in inventory:
+        local = _issues._local_issue_metadata(
+            issues_directory / f"{item.iid}.md"
+        )
+        if (
+            isinstance(local, Mapping)
+            and local.get("discussions_complete") is False
+        ):
+            changed.add(item.iid)
+    return [item.iid for item in inventory if item.iid in changed]
 
 
 def install_gitlab_issue_fixes() -> None:
@@ -265,6 +354,8 @@ def install_gitlab_issue_fixes() -> None:
     _issues.parse_gitlab_api_project_web_url = parse_gitlab_api_project_web_url
     _issues._fetch_project_identity = _fetch_project_identity
     _issues._fetch_discussions = _fetch_discussions
+    _issues.gitlab_issue_markdown = _gitlab_issue_markdown
+    _issues._changed_issue_iids = _changed_issue_iids
     setattr(_issues, _MARKER, True)
 
 
