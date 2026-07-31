@@ -138,6 +138,9 @@ from .document_filter import (
 )
 from .document_filter_counts import install_document_filter_count_runtime
 from .document_filter_packages import install_document_filter_package_contract
+from .gitlab_wiki_registration import (
+    install_gitlab_wiki_registration_runtime,
+)
 from .gitlab_wiki_runtime import install_gitlab_wiki_runtime
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
@@ -166,6 +169,7 @@ install_document_filter_count_runtime()
 install_document_filter_package_contract()
 install_copy_only_package_runtime()
 install_gitlab_wiki_runtime()
+install_gitlab_wiki_registration_runtime()
 install_manage_custom_hook()
 
 # Runtime installers wrap several module functions. Keep package-level exports
@@ -255,6 +259,7 @@ __all__ = [
     "install_document_filter_package_contract",
     "install_document_filter_runtime",
     "install_gitlab_issue_fixes",
+    "install_gitlab_wiki_registration_runtime",
     "install_gitlab_wiki_runtime",
     "install_teams_source_runtime",
     "list_gitlab_registrations",
