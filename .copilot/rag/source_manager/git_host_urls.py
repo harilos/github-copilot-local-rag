@@ -6,24 +6,28 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .errors import SourceManagerError
 
-GIT_SOURCE_TYPES = frozenset({"github", "gitlab", "azure_devops", "git"})
-HOSTED_GIT_SOURCE_TYPES = frozenset({"github", "gitlab", "azure_devops"})
+GIT_SOURCE_TYPES = frozenset(
+    {"github", "gitlab", "azure-devops", "other-git"}
+)
+HOSTED_GIT_SOURCE_TYPES = frozenset(
+    {"github", "gitlab", "azure-devops"}
+)
 SOURCE_LABELS = {
     "github": "GitHub",
     "gitlab": "GitLab",
-    "azure_devops": "Azure DevOps",
-    "git": "その他のGit",
+    "azure-devops": "Azure DevOps",
+    "other-git": "その他のGit",
 }
 SOURCE_MENU_LABELS = {
     "github": "GitHub",
     "gitlab": "GitLab",
-    "azure_devops": "Azure DevOps",
-    "git": "その他のGitサーバー（Webリンク自動生成なし）",
+    "azure-devops": "Azure DevOps",
+    "other-git": "その他のGitサーバー（Webリンク自動生成なし）",
 }
 LINK_STRATEGIES = {
     "github": "github-blob",
     "gitlab": "gitlab-blob",
-    "azure_devops": "azure-devops-item",
+    "azure-devops": "azure-devops-item",
 }
 
 
@@ -34,19 +38,24 @@ def make_repository_link(
     ref: str,
 ) -> dict[str, Any] | None:
     kind = str(source_type or "").strip().lower()
-    if kind == "git":
+    if kind == "other-git":
         return None
     if kind not in HOSTED_GIT_SOURCE_TYPES:
         raise SourceManagerError("unsupported Git Source type")
     branch = str(ref or "").strip()
-    if not branch or len(branch) > 300 or any(ord(char) < 32 for char in branch):
+    if (
+        not branch
+        or len(branch) > 300
+        or any(ord(char) < 32 for char in branch)
+    ):
         raise SourceManagerError("Git branch/ref is invalid")
     return {
         "enabled": True,
         "strategy": LINK_STRATEGIES[kind],
         "settings": {
             "repository_url": normalize_repository_web_url(
-                kind, repository_web_url
+                kind,
+                repository_web_url,
             ),
             "ref": branch,
             "permalink_enabled": False,
@@ -57,7 +66,9 @@ def make_repository_link(
 def normalize_repository_web_url(source_type: str, value: Any) -> str:
     kind = str(source_type or "").strip().lower()
     if kind not in HOSTED_GIT_SOURCE_TYPES:
-        raise SourceManagerError("Git provider does not support automatic links")
+        raise SourceManagerError(
+            "Git provider does not support automatic links"
+        )
     text = str(value or "").strip()
     split = urlsplit(text)
     if (
@@ -75,9 +86,16 @@ def normalize_repository_web_url(source_type: str, value: Any) -> str:
             "リポジトリのWeb URLは認証情報なしのHTTP(S) URLで入力してください。"
         )
     decoded_path = unquote(split.path)
-    components = [part for part in decoded_path.strip("/").split("/") if part]
-    if any(part in {".", ".."} or "\\" in part for part in components):
-        raise SourceManagerError("リポジトリのWeb URLに不正なパスがあります。")
+    components = [
+        part for part in decoded_path.strip("/").split("/") if part
+    ]
+    if any(
+        part in {".", ".."} or "\\" in part
+        for part in components
+    ):
+        raise SourceManagerError(
+            "リポジトリのWeb URLに不正なパスがあります。"
+        )
     path = split.path.rstrip("/")
     if path.casefold().endswith(".git"):
         path = path[:-4]
@@ -109,7 +127,10 @@ def normalize_repository_web_url(source_type: str, value: Any) -> str:
     ).rstrip("/")
 
 
-def _validate_azure_web_root(hostname: str, components: list[str]) -> None:
+def _validate_azure_web_root(
+    hostname: str,
+    components: list[str],
+) -> None:
     host = hostname.casefold()
     parts = [part.casefold() for part in components]
     valid = (
@@ -139,14 +160,17 @@ def _validate_azure_web_root(hostname: str, components: list[str]) -> None:
 def normalize_clone_url(source_type: str, value: Any) -> str:
     kind = str(source_type or "").strip().lower()
     text = str(value or "").strip()
-    if kind == "azure_devops":
+    if kind == "azure-devops":
         split = urlsplit(text)
         host = str(split.hostname or "").casefold()
         if (
             split.scheme.casefold() in {"http", "https"}
             and split.username is not None
             and split.password is None
-            and (host == "dev.azure.com" or host.endswith(".visualstudio.com"))
+            and (
+                host == "dev.azure.com"
+                or host.endswith(".visualstudio.com")
+            )
         ):
             text = urlunsplit(
                 (
@@ -172,7 +196,9 @@ def propose_repository_web_url(source_type: str, clone_url: Any) -> str:
 def derive_repository_web_url(source_type: str, clone_url: Any) -> str:
     kind = str(source_type or "").strip().lower()
     if kind not in HOSTED_GIT_SOURCE_TYPES:
-        raise SourceManagerError("Git provider does not support automatic links")
+        raise SourceManagerError(
+            "Git provider does not support automatic links"
+        )
     text = str(clone_url or "").strip()
     split = urlsplit(text)
     host = ""
@@ -185,21 +211,30 @@ def derive_repository_web_url(source_type: str, clone_url: Any) -> str:
     else:
         match = re.fullmatch(r"[^@\s]+@([^:\s]+):(.+)", text)
         if not match:
-            raise SourceManagerError("clone URLからWeb URLを推定できません。")
+            raise SourceManagerError(
+                "clone URLからWeb URLを推定できません。"
+            )
         host, path = match.groups()
     path = path.rstrip("/")
     if path.casefold().endswith(".git"):
         path = path[:-4]
-    if kind == "azure_devops" and host.casefold() == "ssh.dev.azure.com":
+    if (
+        kind == "azure-devops"
+        and host.casefold() == "ssh.dev.azure.com"
+    ):
         parts = [part for part in path.split("/") if part]
         if len(parts) != 4 or parts[0].casefold() != "v3":
-            raise SourceManagerError("Azure DevOps SSH clone URLが不正です。")
+            raise SourceManagerError(
+                "Azure DevOps SSH clone URLが不正です。"
+            )
         candidate = "https://dev.azure.com/" + "/".join(
             (parts[1], parts[2], "_git", parts[3])
         )
     else:
         if not host or not path:
-            raise SourceManagerError("clone URLからWeb URLを推定できません。")
+            raise SourceManagerError(
+                "clone URLからWeb URLを推定できません。"
+            )
         candidate = urlunsplit(
             ("https", _host_netloc(host, port), "/" + path, "", "")
         )
