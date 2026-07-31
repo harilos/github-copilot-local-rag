@@ -15,8 +15,10 @@ def install_document_filter_package_contract() -> None:
 
     from . import packages
     from .git_host_sources import install_git_host_source_runtime
+    from .git_host_ui_fix import install_git_host_ui_fix_runtime
 
     install_git_host_source_runtime()
+    install_git_host_ui_fix_runtime()
     if bool(getattr(packages, _MARKER, False)):
         return
     setattr(packages, _MARKER, True)
