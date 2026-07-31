@@ -2,6 +2,8 @@
 param(
     [string]$DictionaryPath,
     [string]$WelcomeImagePath,
+    [string]$VSCodeImagePath,
+    [string]$CopilotCliImagePath,
     [string]$BuildPythonPath,
     [switch]$KeepWork
 )
@@ -37,6 +39,7 @@ $ExcludedDistributionNames = @(
 $LibraryRoot = Join-Path $ScriptRoot "lib"
 . (Join-Path $LibraryRoot "build-helpers.ps1")
 . (Join-Path $LibraryRoot "build-runtime.ps1")
+. (Join-Path $LibraryRoot "build-finish-page.ps1")
 . (Join-Path $LibraryRoot "build-nsis.ps1")
 
 if ($env:OS -ne "Windows_NT") {
@@ -112,7 +115,7 @@ try {
         }
     }
 
-    Write-Step 8 $TotalSteps "初期画面の画像と文言を生成"
+    Write-Step 8 $TotalSteps "初期画面と完了案内の画像・文言を生成"
     $configuredImage = if (-not [string]::IsNullOrWhiteSpace($WelcomeImagePath)) {
         Resolve-ConfiguredPath $WelcomeImagePath
     } else {
@@ -123,6 +126,25 @@ try {
     }
     $WelcomeBitmap = Join-Path $GeneratedRoot "welcome.bmp"
     New-WelcomeBitmap -SourceImage $configuredImage -Destination $WelcomeBitmap
+
+    $resolvedVSCodeImage = Resolve-OptionalInstallerImage `
+        -CommandLineValue $VSCodeImagePath `
+        -ConfiguredValue ([string]$Config.VSCodeImagePath) `
+        -Label "VS Code"
+    $resolvedCopilotCliImage = Resolve-OptionalInstallerImage `
+        -CommandLineValue $CopilotCliImagePath `
+        -ConfiguredValue ([string]$Config.CopilotCliImagePath) `
+        -Label "Copilot CLI"
+    $VSCodeBitmap = Join-Path $GeneratedRoot "finish-vscode.bmp"
+    $CopilotCliBitmap = Join-Path $GeneratedRoot "finish-copilot-cli.bmp"
+    New-FinishScreenshotBitmap `
+        -SourceImage $resolvedVSCodeImage `
+        -Destination $VSCodeBitmap `
+        -FallbackTitle "VS Code"
+    New-FinishScreenshotBitmap `
+        -SourceImage $resolvedCopilotCliImage `
+        -Destination $CopilotCliBitmap `
+        -FallbackTitle "Copilot CLI"
 
     $outputName = ([string]$Config.OutputFileName).Replace("{version}", $Version)
     if ([string]::IsNullOrWhiteSpace($outputName) -or [System.IO.Path]::GetFileName($outputName) -ne $outputName) {
@@ -140,7 +162,9 @@ try {
         -AppCopilotRoot $AppCopilotRoot `
         -DictionaryRoot $DictionaryRoot `
         -DictionaryName $DictionaryDirectory.Name `
-        -WelcomeBitmap $WelcomeBitmap
+        -WelcomeBitmap $WelcomeBitmap `
+        -VSCodeBitmap $VSCodeBitmap `
+        -CopilotCliBitmap $CopilotCliBitmap
 
     Write-Step 9 $TotalSteps "NSISで単一Setup.exeを作成"
     $sourceBytes = (Get-DirectoryBytes $AppCopilotRoot) + (Get-DirectoryBytes $DictionaryRoot)
