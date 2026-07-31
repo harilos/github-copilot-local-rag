@@ -273,8 +273,10 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         if isinstance(provider_labels, dict):
             provider_labels.update(_SOURCE_LABELS)
         git_providers = tuple(getattr(module, "_GIT_PROVIDERS", ()))
-        if "azure-devops" not in git_providers:
-            module._GIT_PROVIDERS = (*git_providers, "azure-devops")
+        module._GIT_PROVIDERS = tuple(
+            "azure-devops" if value == "azure_devops" else value
+            for value in git_providers
+        )
         git_strategies = getattr(module, "_GIT_STRATEGIES", None)
         if isinstance(git_strategies, dict):
             git_strategies["azure-devops"] = "azure-devops-item"
