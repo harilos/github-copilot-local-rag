@@ -4,6 +4,7 @@ import copy
 import functools
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -35,7 +36,11 @@ def install_git_host_runtime(
         progress._PROVIDER_LABELS[source_type] = label
 
 
-def _install_provider_contract(providers: Any, runner: Any, store: Any) -> None:
+def _install_provider_contract(
+    providers: Any,
+    runner: Any,
+    store: Any,
+) -> None:
     if bool(getattr(providers, _PROVIDER_MARKER, False)):
         return
     original_validate = providers.validate_provider_config
@@ -53,7 +58,8 @@ def _install_provider_contract(providers: Any, runner: Any, store: Any) -> None:
             raise SourceManagerError("provider settings must be an object")
         supplied = dict(settings)
         supplied["repository_url"] = normalize_clone_url(
-            kind, supplied.get("repository_url")
+            kind,
+            supplied.get("repository_url"),
         )
         return dict(original_validate("github", supplied))
 
@@ -77,10 +83,14 @@ def _install_provider_contract(providers: Any, runner: Any, store: Any) -> None:
             )
         normalized = validate_provider_config(kind, settings)
         root = providers.validate_relative_path(
-            logical_root, field="logical_root", allow_empty=False
+            logical_root,
+            field="logical_root",
+            allow_empty=False,
         )
         work = providers.validate_relative_path(
-            work_path, field="work_path", allow_empty=False
+            work_path,
+            field="work_path",
+            allow_empty=False,
         )
         if root != work:
             raise SourceManagerError(
@@ -151,9 +161,17 @@ def _install_execution_contract(execution: Any, runner: Any) -> None:
         delegated["provider"] = "github"
         options = dict(kwargs)
         options["progress_callback"] = _ProgressProxy(
-            kwargs.get("progress_callback"), kind
+            kwargs.get("progress_callback"),
+            kind,
         )
-        return dict(original(delegated, work_directory, state, **options))
+        return dict(
+            original(
+                delegated,
+                work_directory,
+                state,
+                **options,
+            )
+        )
 
     execution.execute_fetch_plan = execute_fetch_plan
     runner.execute_fetch_plan = execute_fetch_plan
@@ -204,16 +222,23 @@ class _ProgressProxy:
 def _install_runner_contract(runner: Any) -> None:
     if bool(getattr(runner, _RUNNER_MARKER, False)):
         return
-    original = runner._apply_fetch_metadata
+    original_apply = runner._apply_fetch_metadata
+    original_update = runner.update_source
 
-    @functools.wraps(original)
-    def apply_fetch_metadata(store: Any, source: Any, outcome: Mapping[str, Any]):
-        kind = str(source.payload.get("source_type") or "").strip().lower()
+    @functools.wraps(original_apply)
+    def apply_fetch_metadata(
+        store: Any,
+        source: Any,
+        outcome: Mapping[str, Any],
+    ) -> tuple[Any, bool]:
+        kind = str(
+            source.payload.get("source_type") or ""
+        ).strip().lower()
         if kind not in GIT_SOURCE_TYPES:
-            return original(store, source, outcome)
+            return original_apply(store, source, outcome)
         if source.payload.get("source_id"):
             return source, False
-        if kind == "git":
+        if kind == "other-git":
             if "pending_metadata" not in source.payload:
                 return source, False
             payload = copy.deepcopy(source.payload)
@@ -261,7 +286,39 @@ def _install_runner_contract(runner: Any) -> None:
             False,
         )
 
+    @functools.wraps(original_update)
+    def update_source(
+        db_root: Path,
+        local_source_key: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        store = runner.SourceStore(Path(db_root))
+        source = store.read_source(local_source_key)
+        kind = str(
+            source.payload.get("source_type") or ""
+        ).strip().lower()
+        if (
+            kind in GIT_SOURCE_TYPES - {"github"}
+            and kwargs.get("executor") is None
+            and kwargs.get("command_runner") is None
+            and kwargs.get("http_get") is None
+            and kwargs.get("rag_root") is not None
+        ):
+            route = runner.resolve_source_network_route(
+                Path(kwargs["rag_root"]),
+                environment=kwargs.get("environment"),
+                progress_callback=kwargs.get("progress_callback"),
+            )
+            kwargs["command_runner"] = route.command_runner
+            kwargs["http_get"] = route.http_get
+            kwargs["environment"] = route.environment
+        return dict(original_update(db_root, local_source_key, **kwargs))
+
     runner._apply_fetch_metadata = apply_fetch_metadata
+    runner.update_source = update_source
+    package = sys.modules.get(__package__)
+    if package is not None:
+        setattr(package, "update_source", update_source)
     setattr(runner, _RUNNER_MARKER, True)
 
 
