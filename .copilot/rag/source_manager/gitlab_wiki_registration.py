@@ -5,7 +5,6 @@ import json
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
-from .git_host_sources import install_git_host_source_runtime
 from .gitlab_issue_fixes import parse_gitlab_api_project_web_url
 from .gitlab_issues import gitlab_token_env, parse_gitlab_project
 from .gitlab_wiki import generated_gitlab_wiki_link
@@ -25,10 +24,6 @@ def install_gitlab_wiki_registration_runtime() -> None:
 
     from . import machine_connections, manager_connections
 
-    # Install the provider-specific Git Source layer late in the runtime chain.
-    # This preserves the shared sparse/date-filter implementation while making
-    # GitHub, GitLab, Azure DevOps, and generic Git distinct Source types.
-    install_git_host_source_runtime()
     install_gitlab_wiki_path_fix()
     _install_connection_identity_fix(machine_connections, manager_connections)
     if bool(getattr(manager_connections, _HOOK_MARKER, False)):
@@ -40,7 +35,9 @@ def install_gitlab_wiki_registration_runtime() -> None:
         original(manager_class)
         _install_manager_ui(manager_class)
 
-    manager_connections.install_manager_connection_ui = install_manager_connection_ui
+    manager_connections.install_manager_connection_ui = (
+        install_manager_connection_ui
+    )
     setattr(manager_connections, _HOOK_MARKER, True)
 
 
@@ -166,7 +163,9 @@ def _install_connection_identity_fix(
 def _install_manager_ui(manager_class: type[Any]) -> None:
     if bool(getattr(manager_class, _CLASS_MARKER, False)):
         return
-    manager_class._prompt_new_gitlab_wiki_source = prompt_new_gitlab_wiki_source
+    manager_class._prompt_new_gitlab_wiki_source = (
+        prompt_new_gitlab_wiki_source
+    )
     setattr(manager_class, _CLASS_MARKER, True)
 
 
