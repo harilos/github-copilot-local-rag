@@ -9,7 +9,7 @@ _MARKER = "_local_rag_git_provider_link_types_installed"
 
 
 def install_git_provider_link_runtime(source_links: Any) -> None:
-    """Accept persisted Git Source types while reusing Azure's link engine."""
+    """Add exact Git Source type names to the Source Link contract."""
 
     if bool(getattr(source_links, _MARKER, False)):
         return
@@ -19,36 +19,26 @@ def install_git_provider_link_runtime(source_links: Any) -> None:
         | {"azure-devops", "other-git"}
     )
     source_links._ALLOWED_PROVIDERS.add("azure-devops")
-    original = source_links.validate_source_link
+    source_links._GIT_PROVIDER_STRATEGIES[
+        "azure-devops"
+    ] = "azure-devops-item"
+    original_generate = source_links._generate_provider_urls
 
-    @functools.wraps(original)
-    def validate_source_link(
-        link: Any,
-        *,
-        allow_legacy_provider_settings: bool = False,
-    ) -> dict[str, Any]:
-        translated = copy.deepcopy(link)
-        if isinstance(translated, dict):
-            if (
-                str(translated.get("provider") or "").strip().lower()
-                == "azure-devops"
-            ):
-                translated["provider"] = "azure_devops"
-            if (
-                str(translated.get("source_type") or "").strip().lower()
-                == "azure-devops"
-            ):
-                translated["source_type"] = "azure_devops"
-        return dict(
-            original(
-                translated,
-                allow_legacy_provider_settings=(
-                    allow_legacy_provider_settings
-                ),
-            )
-        )
+    @functools.wraps(original_generate)
+    def generate_provider_urls(
+        source_link: dict[str, Any],
+        stored_path: str,
+    ) -> dict[str, str]:
+        value = copy.deepcopy(source_link)
+        if (
+            isinstance(value, dict)
+            and str(value.get("provider") or "").strip().lower()
+            == "azure-devops"
+        ):
+            value["provider"] = "azure_devops"
+        return dict(original_generate(value, stored_path))
 
-    source_links.validate_source_link = validate_source_link
+    source_links._generate_provider_urls = generate_provider_urls
     setattr(source_links, _MARKER, True)
 
 
