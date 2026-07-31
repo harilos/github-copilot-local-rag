@@ -5,6 +5,7 @@ from typing import Any
 
 from .gitlab_issues import gitlab_token_env, parse_gitlab_project
 from .gitlab_wiki import generated_gitlab_wiki_link
+from .gitlab_wiki_path_fix import install_gitlab_wiki_path_fix
 from .machine_connections import (
     gitlab_project_location,
     has_stored_gitlab_token,
@@ -19,6 +20,7 @@ def install_gitlab_wiki_registration_runtime() -> None:
 
     from . import manager_connections
 
+    install_gitlab_wiki_path_fix()
     if bool(getattr(manager_connections, _HOOK_MARKER, False)):
         return
     original = manager_connections.install_manager_connection_ui
