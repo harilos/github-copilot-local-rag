@@ -138,6 +138,7 @@ from .document_filter import (
 )
 from .document_filter_counts import install_document_filter_count_runtime
 from .document_filter_packages import install_document_filter_package_contract
+from .git_source import install_git_source_runtime
 from .gitlab_wiki_registration import (
     install_gitlab_wiki_registration_runtime,
 )
@@ -157,6 +158,7 @@ def _remove_default_source_operation_timeout() -> None:
 
 
 _remove_default_source_operation_timeout()
+install_git_source_runtime()
 install_gitlab_issue_fixes()
 install_redmine_incremental_refresh()
 install_machine_connection_runtime()
@@ -258,6 +260,7 @@ __all__ = [
     "install_document_filter_count_runtime",
     "install_document_filter_package_contract",
     "install_document_filter_runtime",
+    "install_git_source_runtime",
     "install_gitlab_issue_fixes",
     "install_gitlab_wiki_registration_runtime",
     "install_gitlab_wiki_runtime",
