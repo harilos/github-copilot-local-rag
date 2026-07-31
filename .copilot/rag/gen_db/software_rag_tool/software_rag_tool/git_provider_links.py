@@ -22,7 +22,17 @@ def install_git_provider_link_runtime(source_links: Any) -> None:
     source_links._GIT_PROVIDER_STRATEGIES[
         "azure-devops"
     ] = "azure-devops-item"
+    original_normalize = source_links._normalize_repository_url
     original_generate = source_links._generate_provider_urls
+
+    @functools.wraps(original_normalize)
+    def normalize_repository_url(value: Any, *, provider: str) -> str:
+        normalized = (
+            "azure_devops"
+            if str(provider or "").strip().lower() == "azure-devops"
+            else provider
+        )
+        return str(original_normalize(value, provider=normalized))
 
     @functools.wraps(original_generate)
     def generate_provider_urls(
@@ -38,6 +48,7 @@ def install_git_provider_link_runtime(source_links: Any) -> None:
             value["provider"] = "azure_devops"
         return dict(original_generate(value, stored_path))
 
+    source_links._normalize_repository_url = normalize_repository_url
     source_links._generate_provider_urls = generate_provider_urls
     setattr(source_links, _MARKER, True)
 
