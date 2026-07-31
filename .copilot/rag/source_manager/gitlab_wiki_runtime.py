@@ -26,17 +26,21 @@ _RUNNER_MARKER = "_local_rag_gitlab_wiki_runner_installed"
 _MANAGER_HOOK_MARKER = "_local_rag_gitlab_wiki_manager_hook_installed"
 _MANAGER_CLASS_MARKER = "_local_rag_gitlab_wiki_manager_installed"
 _PACKAGE_MARKER = "_local_rag_gitlab_wiki_package_installed"
+_PREFLIGHT_MARKER = "_local_rag_gitlab_wiki_preflight_bridge_installed"
 
 
 def install_gitlab_wiki_runtime() -> None:
     """Install GitLab Wiki acquisition while sharing the GitLab token registry."""
+
     from . import execution, machine_connections, manager_connections
-    from . import packages, progress, providers, runner, store as store_module
+    from . import packages, progress, providers, runner, source_preflight
+    from . import store as store_module
 
     _install_provider_contract(providers, runner, store_module)
     _install_machine_environment(machine_connections)
-    _install_execution(execution, runner)
-    _install_runner(runner, providers)
+    _install_preflight_bridge(source_preflight)
+    _install_execution(execution, runner, source_preflight)
+    _install_runner(runner, providers, source_preflight)
     _install_package_contract(packages)
     progress._PROVIDER_LABELS["gitlab_wiki"] = "GitLab Wiki"
     _install_manager_hook(manager_connections)
@@ -193,7 +197,38 @@ def _install_machine_environment(machine_connections: Any) -> None:
     setattr(machine_connections, _MACHINE_MARKER, True)
 
 
-def _install_execution(execution: Any, runner: Any) -> None:
+def _install_preflight_bridge(source_preflight: Any) -> None:
+    """Reuse one Wiki inventory decision at the later generic ADD gate."""
+
+    if bool(getattr(source_preflight, _PREFLIGHT_MARKER, False)):
+        return
+    original = source_preflight._request_confirmation
+
+    @functools.wraps(original)
+    def request_confirmation(progress_callback: Any, documents: int) -> bool:
+        cached = getattr(
+            progress_callback,
+            source_preflight._RESULT_ATTR,
+            None,
+        )
+        count = max(0, int(documents))
+        if (
+            isinstance(cached, Mapping)
+            and int(cached.get("documents") or -1) == count
+            and "confirmed" in cached
+        ):
+            return bool(cached.get("confirmed"))
+        return original(progress_callback, count)
+
+    source_preflight._request_confirmation = request_confirmation
+    setattr(source_preflight, _PREFLIGHT_MARKER, True)
+
+
+def _install_execution(
+    execution: Any,
+    runner: Any,
+    source_preflight: Any,
+) -> None:
     if bool(getattr(execution, _EXECUTION_MARKER, False)):
         return
     original = execution.execute_fetch_plan
@@ -217,7 +252,18 @@ def _install_execution(execution: Any, runner: Any) -> None:
         environment = kwargs.get("environment")
         env = execution.os.environ if environment is None else environment
         progress_callback = kwargs.get("progress_callback")
-        execution._emit_provider_progress(progress_callback, "gitlab_wiki", "started")
+        preflight_required = bool(
+            getattr(
+                progress_callback,
+                source_preflight._REDMINE_REQUIRED_ATTR,
+                False,
+            )
+        )
+        execution._emit_provider_progress(
+            progress_callback,
+            "gitlab_wiki",
+            "started",
+        )
 
         def request(
             url: str,
@@ -232,12 +278,29 @@ def _install_execution(execution: Any, runner: Any) -> None:
                 progress_callback=progress_callback,
             )
 
+        def inventory_confirmation(items: list[Any]) -> None:
+            if not preflight_required:
+                return
+            documents = len(items)
+            confirmed = source_preflight._request_confirmation(
+                progress_callback,
+                documents,
+            )
+            source_preflight._record_callback_result(
+                progress_callback,
+                documents,
+                confirmed,
+            )
+            if not confirmed:
+                raise source_preflight.SourceEstimateDeclined(documents)
+
         try:
             result = fetch_gitlab_wiki(
                 parameters,
                 work,
                 request,
                 env,
+                inventory_callback=inventory_confirmation,
                 progress_callback=progress_callback,
             )
         except Exception as exc:
@@ -261,7 +324,11 @@ def _install_execution(execution: Any, runner: Any) -> None:
     setattr(execution, _EXECUTION_MARKER, True)
 
 
-def _install_runner(runner: Any, providers: Any) -> None:
+def _install_runner(
+    runner: Any,
+    providers: Any,
+    source_preflight: Any,
+) -> None:
     if bool(getattr(runner, _RUNNER_MARKER, False)):
         return
     original_register = runner.register_source
@@ -336,21 +403,65 @@ def _install_runner(runner: Any, providers: Any) -> None:
                 store.paths(local_source_key).work_directory,
                 expected_documents=int(state.payload.get("fetched_count") or 0),
             )
-        if (
-            kwargs.get("executor") is None
-            and kwargs.get("command_runner") is None
-            and kwargs.get("http_get") is None
-            and kwargs.get("rag_root") is not None
-        ):
-            route = runner.resolve_source_network_route(
-                Path(kwargs["rag_root"]),
-                environment=kwargs.get("environment"),
-                progress_callback=kwargs.get("progress_callback"),
+        progress_callback = kwargs.get("progress_callback")
+        required = not bool(source.payload.get("source_id")) and not bool(
+            state.payload.get("preflight_confirmed")
+        )
+        previous_required = source_preflight._set_optional_attribute(
+            progress_callback,
+            source_preflight._REDMINE_REQUIRED_ATTR,
+            required,
+        )
+        previous_result = source_preflight._set_optional_attribute(
+            progress_callback,
+            source_preflight._RESULT_ATTR,
+            None,
+        )
+        try:
+            if (
+                kwargs.get("executor") is None
+                and kwargs.get("command_runner") is None
+                and kwargs.get("http_get") is None
+                and kwargs.get("rag_root") is not None
+            ):
+                route = runner.resolve_source_network_route(
+                    Path(kwargs["rag_root"]),
+                    environment=kwargs.get("environment"),
+                    progress_callback=progress_callback,
+                )
+                kwargs["command_runner"] = route.command_runner
+                kwargs["http_get"] = route.http_get
+                kwargs["environment"] = route.environment
+            return original_update(db_root, local_source_key, **kwargs)
+        except source_preflight.SourceEstimateDeclined as exc:
+            return source_preflight._record_redmine_decline(
+                store,
+                source,
+                runner,
+                exc.documents,
             )
-            kwargs["command_runner"] = route.command_runner
-            kwargs["http_get"] = route.http_get
-            kwargs["environment"] = route.environment
-        return original_update(db_root, local_source_key, **kwargs)
+        finally:
+            result = getattr(
+                progress_callback,
+                source_preflight._RESULT_ATTR,
+                None,
+            )
+            if isinstance(result, Mapping) and bool(result.get("confirmed")):
+                source_preflight._persist_redmine_confirmation(
+                    store,
+                    source,
+                    int(result.get("documents") or 0),
+                )
+            source_preflight._restore_optional_attribute(
+                progress_callback,
+                source_preflight._RESULT_ATTR,
+                previous_result,
+            )
+            source_preflight._restore_optional_attribute(
+                progress_callback,
+                source_preflight._REDMINE_REQUIRED_ATTR,
+                previous_required,
+            )
 
     @functools.wraps(original_update_configuration)
     def update_source_configuration(
@@ -424,9 +535,13 @@ def _install_runner(runner: Any, providers: Any) -> None:
 def _install_package_contract(packages: Any) -> None:
     if bool(getattr(packages, _PACKAGE_MARKER, False)):
         return
-    packages._DISTRIBUTION_TOOL_MODULES = frozenset(
-        set(packages._DISTRIBUTION_TOOL_MODULES) | {"gitlab_wiki_links.py"}
-    )
+    legacy_modules = getattr(packages, "_DISTRIBUTION_TOOL_MODULES", None)
+    if legacy_modules is not None:
+        packages._DISTRIBUTION_TOOL_MODULES = frozenset(
+            set(legacy_modules) | {"gitlab_wiki_links.py"}
+        )
+    # Current package collection is denylist-based and includes new runtime
+    # modules automatically; there is no allowlist constant to mutate.
     setattr(packages, _PACKAGE_MARKER, True)
 
 
