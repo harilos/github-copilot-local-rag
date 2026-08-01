@@ -24,5 +24,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Install Subversion integration tools
+        run: choco install subversion -y --no-progress
       - name: Run every Local RAG regression file
         run: python .copilot/rag/docs/tests/run_required_regressions.py
