@@ -327,7 +327,9 @@ class CompletionMarkerRepairContractTests(unittest.TestCase):
     def test_public_search_projects_reason_and_temporary_repair(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             query_root = Path(temporary) / "query"
-            python = query_root / ".venv" / "bin" / "python"
+            python = query_root / ".venv" / (
+                "Scripts/python.exe" if sys.platform.startswith("win") else "bin/python"
+            )
             python.parent.mkdir(parents=True)
             python.touch()
             with (

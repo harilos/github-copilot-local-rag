@@ -16,10 +16,14 @@ python3 ~/.copilot/rag/setup.py --format human
 Windows PowerShell:
 
 ```powershell
-python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
-If `python` is unavailable on Windows, try the same command once with `py -3`.
+The official Windows x64 package embeds its fixed Python, locked dependencies,
+and ONNX model. Packaged setup is offline and never falls back to system
+Python. In VS Code Copilot Chat, use Agent mode and enable `runInTerminal` in
+Configure Tools; also enable `readFile` for file result delivery.
 
 The receiving user's `~/.copilot/copilot-instructions.md` must contain:
 

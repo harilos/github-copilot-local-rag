@@ -266,11 +266,18 @@ The Manager creates two different artifacts:
 
 ### Distribution ZIP
 
-Contains read-only public entry points, runtime, selected databases, and
-required search assets. It also contains package-root `install.sh` and
-`install.ps1` helpers that overlay-copy only the packaged `.copilot` payload
-into the receiving user's Copilot home. It excludes management acquisition
-state.
+The official Windows artifact is
+`local-rag-windows-x64-<version>.zip`. It contains CPython x64, an exact
+dependency profile, the prepared ONNX model, selected databases, package and
+runtime manifests, SHA-256 sums, notices, and an SPDX SBOM. `search-only` is the
+default profile; `admin-full` is explicit.
+
+Windows setup validates the immutable runtime offline, performs a read-only DB
+health check, merges only scoped VS Code terminal rules, and atomically writes
+the completion marker. It never creates a venv, runs pip, downloads or converts
+a model, resolves a network route, or falls back to system Python. Runtime and
+model updates are staged and swapped by the package-root PowerShell bootstrap,
+outside the running embedded Python process.
 
 ### Management-PC transfer folder
 
@@ -280,8 +287,8 @@ resumable.
 
 Package creation does not take a global product lock. It detects file changes
 during copying and aborts rather than publishing an inconsistent artifact.
-All manifest paths are relative and checksummed. Runtime locks, virtual
-environments, temporary files, credentials, and backup sidecars are excluded.
+All manifest paths are relative and checksummed. Build caches, temporary files,
+credentials, completion markers, run state, and backup sidecars are excluded.
 Product runtime, public documentation, and the two Local RAG Skills are
 collected by explicit exclusions, so a new non-test runtime module is packaged
 without another file allowlist update. Machine-local configuration and DB

@@ -25,9 +25,12 @@ Initial runtime setup is the only management exception. When Local RAG is not
 installed completely, its virtual-environment interpreter is missing, or a
 public lookup returns `setup_required`, activate the `local-rag-setup` Skill and
 run the public `~/.copilot/rag/setup.py` entry point directly. Do not redirect
-the human to Local RAG Manager for initial runtime setup. Setup may install
-Python dependencies and prepare the local embedding model, so report meaningful
-progress and preserve any network/proxy/CA error details needed by the human.
+the human to Local RAG Manager for initial runtime setup. On Windows, invoke
+`%USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe` directly with the
+public setup script. Do not use PATH-based Python or `py -3`; the packaged
+runtime is verified offline and does not run pip or prepare a model. On
+macOS/Linux, preserve the existing setup behavior. Report meaningful progress
+and sanitized diagnostics.
 
 If the human asks to create or change a database, Source, retrieval setting,
 repair, distribution package, or management-PC transfer, say:

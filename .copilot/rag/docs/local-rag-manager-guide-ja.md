@@ -19,10 +19,10 @@ Copilotの通常検索は読み取り専用です。管理依頼をした場合�
 
 ## 2. 起動
 
-完全な新規インストールでは、先に検索用Python環境を準備します。Copilotへ
-`ローカルRAGの初期設定をして`と依頼するか、公開`setup.py`をsystem Pythonで
-実行してください。初期設定は依存packageと検索modelの取得を含むため、通常は
-10分程度かかります。network速度や端末性能により前後します。
+完全な新規インストールでは、先に検索runtimeを検証します。Windows x64の
+公式ZIPには固定Python、依存package、ONNX modelが含まれ、初期設定はofflineで
+動作します。macOS/Linuxでは従来どおりsystem Pythonから環境を準備します。
+Copilotへ`ローカルRAGの初期設定をして`と依頼することもできます。
 
 macOS/Linux:
 
@@ -33,10 +33,11 @@ python3 ~/.copilot/rag/setup.py --format human
 Windows PowerShell:
 
 ```powershell
-python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
-`python`が見つからない場合は、同じコマンドを`py -3`で1回試せます。
+system Python、`py` launcher、PATH変更、管理者権限は不要です。
 
 初期設定後、Managerを起動します。
 

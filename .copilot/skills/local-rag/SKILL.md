@@ -117,8 +117,9 @@ listing or searching.
 ## Runtime
 
 Use the installed virtual-environment interpreter directly. Do not probe
-`python`, `python3`, or `py` during ordinary lookup. The dedicated
-`local-rag-setup` Skill owns the PATH-based bootstrap exception.
+`python`, `python3`, or `py` during ordinary lookup. On Windows, the dedicated
+`local-rag-setup` Skill uses the same fixed packaged interpreter and never
+falls back to PATH-based Python.
 
 ### macOS/Linux
 

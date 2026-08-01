@@ -42,6 +42,6 @@ windows_ac_rag_job/
 # Machine-local Windows test connection
 .copilot/rag/config/windows-test-connection.local.json
 
-# Generated NSIS installer and build workspace
-/setup_exe_build/work/
-/setup_exe_build/*.exe
+# Generated Windows portable package workspace and release artifacts
+/tools/windows_portable/work/
+/dist/windows-portable/

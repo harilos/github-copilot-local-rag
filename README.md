@@ -103,10 +103,12 @@ DBの内容更新から30日以上たっている場合は、同じチャット�
 
 ### 必要なもの
 
-- Python 3.10以上
-- macOS、Linux、またはWindows
+- macOS、Linux、またはWindows x64
+- macOS/Linuxと管理用build端末ではPython 3.10以上
+- Windows一般利用者向けZIPではsystem Python、`py` launcher、PATH変更は不要
 - ローカルコマンドを実行できるGitHub Copilot環境
-- 初期設定時に依存packageとmodelを取得できるnetwork
+- macOS/Linuxの初期設定時に依存packageとmodelを取得できるnetwork
+- Windows一般利用者向けZIPの初期設定はofflineでnetwork requestを行わない
 - DB、model、索引用のdisk容量
 - 旧`.doc`や`.ppt`を扱う場合のみLibreOffice
 
@@ -148,10 +150,15 @@ python3 ~/.copilot/rag/setup.py --format human
 Windows PowerShell:
 
 ```powershell
-python "$env:USERPROFILE\.copilot\rag\setup.py" --format human
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
-Windowsで`python`が見つからない場合は、同じコマンドを`py -3`で1回試せます。
+Windows x64の公式copy-ready ZIPには固定Python、依存package、ONNX modelが
+含まれます。初期設定はvenv作成、pip、model download／変換、system Pythonへの
+fallbackを行いません。VS Code Copilot ChatをAgentにし、Configure Toolsで
+`runInTerminal`をONにしてください。file deliveryを使う場合は`readFile`も
+ONにします。global auto-approve、Bypass Approvals、Autopilotは前提ではありません。
 
 既存のCopilot instructions、作成済みDB、Python環境、検索daemonの状態、
 端末固有のnetwork設定、Source接続設定はinstallerで不用意に上書きしません。

@@ -36,7 +36,9 @@ class CopilotSetupRoutingContracts(unittest.TestCase):
         text = (
             COPILOT_ROOT / "skills" / "local-rag-setup" / "SKILL.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("Initial setup is performed by Copilot", text)
+        self.assertIn("fixed, verified Python runtime", text)
+        self.assertIn(".venv\\Scripts\\python.exe", text)
+        self.assertIn("packaged setup is offline", text.casefold())
         self.assertIn("~/.copilot/rag/setup.py", text)
         self.assertIn("Do not invoke `query/setup.py` directly", text)
 

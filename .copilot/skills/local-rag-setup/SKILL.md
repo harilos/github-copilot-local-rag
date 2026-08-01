@@ -1,61 +1,52 @@
 ---
 name: local-rag-setup
-description: Performs the Local RAG runtime initial setup directly when lookup reports setup_required or the installed virtual environment is missing.
+description: Performs the Local RAG runtime initial setup directly when lookup reports setup_required or the installed runtime is missing.
 ---
 
 # Local RAG Initial Setup
 
 Use this Skill only for initial runtime setup or when a public Local RAG command
-returns `setup_required`. Initial setup is performed by Copilot, not by Local RAG
-Manager.
+returns `setup_required`. Use only the public `~/.copilot/rag/setup.py`
+entry point. Do not invoke `query/setup.py` directly and do not redirect the
+human to Local RAG Manager.
 
-Use only the public setup entry point:
+Do not create databases, update Sources, rebuild indexes, or change network
+configuration as part of initial setup.
 
-- `~/.copilot/rag/setup.py`
+## Windows PowerShell
 
-Do not invoke `query/setup.py` directly. Do not open or redirect the human to
-Local RAG Manager for this operation.
+The official Windows x64 package contains a fixed, verified Python runtime,
+dependencies, and ONNX model. Run exactly one direct command:
 
-Initial setup may create the Local RAG virtual environment, install pinned Python
-dependencies, download or prepare the embedding model, verify databases, and
-write the machine-verifiable completion marker. It normally takes several
-minutes. Show meaningful progress from the command output. Do not claim success
-until the command exits successfully and reports `setup_complete=true`.
+```powershell
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  "$env:USERPROFILE\.copilot\rag\setup.py" --format json
+```
+
+Do not use PATH-based `python`, `py -3`, `cmd.exe /c`,
+`Start-Process`, a batch wrapper, nested PowerShell, or an stdin pipeline.
+Windows packaged setup is offline: it must not create a venv, run pip, download
+or convert a model, or fall back to system Python.
+
+After setup, tell the human to use VS Code Copilot Chat in Agent mode and open
+Configure Tools. `runInTerminal` is required. `readFile` is also required
+for file result delivery. Global auto-approve, Bypass Approvals, and Autopilot
+are not Local RAG requirements.
 
 ## macOS/Linux
 
-Run:
+The existing setup contract remains unchanged:
 
 ```bash
 python3 ~/.copilot/rag/setup.py --format json
 ```
 
-If `python3` is unavailable, try `python` once. Do not probe unrelated Python
+If `python3` is unavailable, try `python` once. Do not probe unrelated
 installations.
 
-## Windows PowerShell
+## Success and failure
 
-Run one direct process:
-
-```powershell
-python "$env:USERPROFILE\.copilot\rag\setup.py" --format json
-```
-
-If `python` is unavailable, try this once:
-
-```powershell
-py -3 "$env:USERPROFILE\.copilot\rag\setup.py" --format json
-```
-
-Do not use `cmd.exe /c`, `Start-Process`, a batch wrapper, nested PowerShell, or
-an stdin pipeline.
-
-## Failure handling
-
-If setup fails, report the failed phase and sanitized error details. For network,
-proxy, CA, package-index, or model-download failures, ask only for the missing
-machine-local network information needed to rerun setup. Do not send the human
-to Manager as a generic fallback.
-
-Do not create databases or add Sources as part of initial setup. Those remain
-human Manager operations.
+Do not claim success until the command exits successfully and reports
+`setup_complete=true`. Report the failed phase and sanitized diagnostics on
+failure. A VS Code integration warning does not change the meaning of
+`setup_complete` or `lookup_ready`.

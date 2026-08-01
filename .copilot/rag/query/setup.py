@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import argparse
 import json
 import os
@@ -33,6 +34,11 @@ from setup_contract import (
     completion_contract_valid,
     requirements_fingerprint,
 )
+from portable_runtime import (
+    PortableRuntimeError,
+    load_and_verify_runtime,
+    manifest_path_for,
+)
 
 
 TEMPORARY_REPAIR_LABEL_JA = "検索利用判定を修復する（一時的）"
@@ -42,9 +48,17 @@ TEMPORARY_REPAIR_ARGUMENTS = (
     "--format",
     "json",
 )
+def _configure_utf8_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 
 
 def main() -> int:
+    _configure_utf8_streams()
     parser = argparse.ArgumentParser(
         epilog=MANAGER_HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -134,8 +148,49 @@ def main() -> int:
             "completion-marker maintenance cannot install or prepare components"
         )
 
+    here, venv, python, marker = _setup_paths()
+    packaged_runtime = None
+    packaged_manifest = manifest_path_for(here)
+    if packaged_manifest.is_file():
+        try:
+            packaged_runtime = load_and_verify_runtime(packaged_manifest)
+        except PortableRuntimeError as exc:
+            _emit(
+                _error_payload(
+                    failed_check="packaged_runtime",
+                    error_kind="packaged_runtime_invalid",
+                    message=str(exc),
+                ),
+                args.format,
+            )
+            return 1
+        try:
+            _acquire_setup_lock(here)
+        except SetupLockError as exc:
+            _emit(
+                _error_payload(
+                    failed_check="setup_lock",
+                    error_kind="setup_already_running",
+                    message=str(exc),
+                ),
+                args.format,
+            )
+            return 1
+
+        if any(
+            (
+                args.proxy,
+                args.ca_bundle,
+                args.no_proxy,
+                args.network_config,
+                args.force_model,
+                args.prepare_model,
+                args.no_prepare_model,
+            )
+        ):
+            parser.error("packaged runtime setup is offline and immutable")
     try:
-        network = resolve_network_configuration(
+        network = (_packaged_network() if packaged_runtime is not None else resolve_network_configuration(
             cli_proxy=args.proxy,
             cli_ca_bundle=args.ca_bundle,
             cli_no_proxy=args.no_proxy,
@@ -147,7 +202,7 @@ def main() -> int:
                 or args.refresh_completion_marker
                 or args.repair_completion_marker
             ),
-        )
+        ))
     except NetworkConfigError as exc:
         payload = _error_payload(
             failed_check="network_configuration",
@@ -157,7 +212,6 @@ def main() -> int:
         _emit(payload, args.format)
         return 2
 
-    here, venv, python, marker = _setup_paths()
     if args.migrate_legacy_marker and not _is_legacy_completion_marker(marker):
         payload = _error_payload(
             failed_check="completion_marker",
@@ -189,7 +243,7 @@ def main() -> int:
     network_child_environment["PIP_CONFIG_FILE"] = os.devnull
     network_child_environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
 
-    if not (
+    if packaged_runtime is None and not (
         args.verify_only
         or args.migrate_legacy_marker
         or args.refresh_completion_marker
@@ -282,6 +336,36 @@ def main() -> int:
         *network.warnings,
         *(verification.get("warnings") or []),
     ]
+    if (
+        packaged_runtime is not None
+        and verification.get("setup_complete")
+        and not args.verify_only
+    ):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            try:
+                from vscode_settings import configure_vscode
+
+                vscode = configure_vscode(
+                    RAG_ROOT.parent, Path(appdata).expanduser()
+                )
+            except Exception as exc:
+                vscode = {
+                    "status": "error",
+                    "targets_checked": 0,
+                    "targets_changed": 0,
+                    "policy_effectiveness": "unknown",
+                    "error_kinds": [type(exc).__name__],
+                }
+        else:
+
+            vscode = {
+                "status": "manual_action_required",
+                "targets_checked": 0,
+                "targets_changed": 0,
+                "policy_effectiveness": "unknown",
+            }
+        verification["integrations"] = {"vscode": vscode}
 
     requirements_after: str | None = None
     if marker_maintenance:
@@ -553,6 +637,19 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             pass
 
 
+def _packaged_network() -> NetworkResolution:
+    return NetworkResolution(
+        environment=_offline_child_environment(os.environ),
+        details={
+            "mode": "off",
+            "selected_route": "offline",
+            "external_operation": False,
+            "packaged_runtime": True,
+        },
+        warnings=[],
+    )
+
+
 def _setup_paths() -> tuple[Path, Path, Path, Path]:
     here = Path(__file__).resolve().parent
     venv = here / ".venv"
@@ -562,7 +659,65 @@ def _setup_paths() -> tuple[Path, Path, Path, Path]:
     return here, venv, python, venv / ".rag-deps-installed"
 
 
+_SETUP_LOCK_HANDLE = None
+
+
+class SetupLockError(RuntimeError):
+    pass
+
+
+def _acquire_setup_lock(query_root: Path) -> None:
+    global _SETUP_LOCK_HANDLE
+    if _SETUP_LOCK_HANDLE is not None:
+        return
+    lock_path = query_root / ".setup.lock"
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise SetupLockError("another Local RAG setup is already running") from exc
+    _SETUP_LOCK_HANDLE = handle
+    atexit.register(_release_setup_lock)
+
+
+def _release_setup_lock() -> None:
+    global _SETUP_LOCK_HANDLE
+    handle = _SETUP_LOCK_HANDLE
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+        _SETUP_LOCK_HANDLE = None
+
+
+
 class SetupStepError(RuntimeError):
+
     def __init__(self, phase: str, returncode: int, output: str) -> None:
         self.phase = phase
         safe = redact_text(output).strip()
@@ -787,6 +942,14 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
             print("Runtime ready; no healthy database is currently available")
         if payload.get("next_action"):
             print(str(payload["next_action"]))
+        vscode = (payload.get("integrations") or {}).get("vscode")
+        if vscode is not None:
+            print(
+                "VS Code: use Copilot Chat in Agent mode; in Configure Tools "
+                "enable runInTerminal and enable readFile for file delivery."
+            )
+            print("Global auto-approve, Bypass Approvals, and Autopilot are not required.")
+
         return
     print(
         f"Setup verification failed: {payload.get('failed_check')} "

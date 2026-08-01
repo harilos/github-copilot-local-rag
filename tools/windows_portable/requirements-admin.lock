@@ -1,0 +1,10 @@
+# Direct runtime capability lock for the admin-full profile.
+# The package manifest additionally hashes every installed transitive file.
+-r requirements-search.lock
+sentence-transformers==5.1.0
+optimum[onnxruntime]==1.27.0
+pypdf==6.0.0
+cryptography==45.0.6
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5

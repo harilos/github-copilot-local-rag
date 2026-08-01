@@ -61,12 +61,17 @@ class LightweightRoutingContractTests(unittest.TestCase):
             lookup,
         )
 
-    def test_missing_setup_is_reported_as_about_ten_minutes(self) -> None:
+    def test_windows_setup_uses_the_fixed_offline_runtime(self) -> None:
         for path in (ROUTER, LOOKUP):
             text = path.read_text(encoding="utf-8")
-            self.assertRegex(text, r"(?:about|normally takes)\s+10 minutes")
             self.assertIn("Local RAG Manager", text)
-            self.assertRegex(text, r"Do not (?:attempt|run) setup")
+        combined = ROUTER.read_text(encoding="utf-8") + LOOKUP.read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(r".venv\Scripts\python.exe", combined)
+        self.assertIn("offline", combined.casefold())
+        self.assertIn("PATH-based Python", combined)
+
 
     def test_lookup_contract_is_bounded_to_four_retrieval_searches(self) -> None:
         text = LOOKUP.read_text(encoding="utf-8")

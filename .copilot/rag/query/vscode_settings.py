@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import secrets
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -90,10 +92,11 @@ def _object_bounds(text: str, start: int = 0) -> tuple[int, int]:
 
 def _find_property(text: str, object_start: int, object_end: int, key: str):
     index = object_start + 1
+    found = None
     while True:
         index = _skip_ws_comments(text, index)
         if index >= object_end:
-            return None
+            return found
         if text[index] == ",":
             index += 1
             continue
@@ -101,14 +104,21 @@ def _find_property(text: str, object_start: int, object_end: int, key: str):
             raise ValueError("object key must be quoted")
         key_start = index
         key_end = _scan_string(text, index)
-        raw_key = text[key_start + 1 : key_end - 1]
+        quoted_key = text[key_start:key_end]
+        raw_key = (
+            json.loads(quoted_key)
+            if quoted_key.startswith('"')
+            else quoted_key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+        )
         index = _skip_ws_comments(text, key_end)
         if index >= object_end or text[index] != ":":
             raise ValueError("missing property colon")
         value_start = _skip_ws_comments(text, index + 1)
         value_end = _scan_value(text, value_start)
         if raw_key == key:
-            return value_start, value_end
+            if found is not None:
+                raise ValueError(f"duplicate target key: {key}")
+            found = (value_start, value_end)
         index = value_end
 
 
@@ -132,10 +142,27 @@ def _upsert_object_entry(text: str, object_start: int, object_end: int, key: str
     return _insert_property(text, object_end, f'"{escaped_key}": {value}')
 
 
-def patch_settings(text: str, python_path: str) -> str:
+def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
+    query = copilot_home / "rag" / "query"
+    python = query / ".venv" / "Scripts" / "python.exe"
+    return (
+        f'"{python}" "{query / "list_dbs.py"}"',
+        f'"{python}" "{query / "search.py"}"',
+    )
+
+
+def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
     if not text.strip():
         text = "{}\n"
     root_start, root_end = _object_bounds(text)
+    enable = _find_property(
+        text, root_start, root_end, "chat.tools.terminal.enableAutoApprove"
+    )
+    if enable is not None:
+        start, end = enable
+        if text[start:end].strip().casefold() == "false":
+            return text
+
     text = _upsert_object_entry(
         text,
         root_start,
@@ -145,19 +172,32 @@ def patch_settings(text: str, python_path: str) -> str:
     )
     root_start, root_end = _object_bounds(text)
     found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
-    escaped_path = python_path.replace("\\", "\\\\").replace('"', '\\"')
+    rendered_rules = ",\n".join(
+        "    \"" + rule.replace("\\", "\\\\").replace('"', '\\"') + "\": true"
+        for rule in command_rules
+    )
     if found is None:
         return _insert_property(
             text,
             root_end,
-            f'"chat.tools.terminal.autoApprove": {{\n    "{escaped_path}": true\n  }}',
+            f'"chat.tools.terminal.autoApprove": {{\n{rendered_rules}\n  }}',
         )
     value_start, value_end = found
     container_start = _skip_ws_comments(text, value_start)
     if text[container_start] != "{":
         raise ValueError("chat.tools.terminal.autoApprove exists but is not an object")
     container_end = _scan_value(text, container_start) - 1
-    return _upsert_object_entry(text, container_start, container_end, python_path, "true")
+    for command in command_rules:
+        root_start, root_end = _object_bounds(text)
+        found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
+        value_start, value_end = found
+        container_start = _skip_ws_comments(text, value_start)
+        container_end = _scan_value(text, container_start) - 1
+        existing = _find_property(text, container_start, container_end, command)
+        if existing is not None:
+            continue
+        text = _upsert_object_entry(text, container_start, container_end, command, "true")
+    return text
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -194,6 +234,83 @@ def candidate_settings(appdata: Path) -> list[Path]:
             output.append(value)
     return output
 
+def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
+    command_rules = scoped_command_rules(copilot_home)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    checked = 0
+    changed = 0
+    manual = False
+    errors: list[str] = []
+    for path in candidate_settings(appdata):
+        checked += 1
+        try:
+            if path.exists() and _is_reparse(path):
+                raise ValueError("settings target is a symlink or reparse point")
+            original_bytes = path.read_bytes() if path.is_file() else b"{}\n"
+            if original_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+                raise ValueError("unsupported settings encoding")
+            had_bom = original_bytes.startswith(b"\xef\xbb\xbf")
+            original = original_bytes.decode("utf-8-sig")
+            patched = patch_settings(original, command_rules)
+            if patched == original:
+                if "chat.tools.terminal.enableAutoApprove" in original and (
+                    "false" in original.casefold()
+                ):
+                    manual = True
+                continue
+            if path.is_file():
+                backup = path.with_name(
+                    path.name
+                    + f".local-rag-backup-{timestamp}-{secrets.token_hex(4)}"
+                )
+                shutil.copy2(path, backup)
+            encoded = patched.encode("utf-8")
+            if had_bom:
+                encoded = b"\xef\xbb\xbf" + encoded
+            _atomic_write_bytes(path, encoded)
+            changed += 1
+        except (OSError, UnicodeError, ValueError) as exc:
+            errors.append(type(exc).__name__)
+    status = (
+        "error"
+        if errors
+        else "manual_action_required"
+        if manual
+        else "configured"
+        if changed
+        else "already_configured"
+    )
+    return {
+        "status": status,
+        "targets_checked": checked,
+        "targets_changed": changed,
+        "policy_effectiveness": "unknown",
+        "error_kinds": sorted(set(errors)),
+    }
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+    finally:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _is_reparse(path: Path) -> bool:
+    attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    return path.is_symlink() or bool(attributes & 0x400)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -202,26 +319,9 @@ def main() -> int:
     appdata = os.environ.get("APPDATA")
     if not appdata:
         raise SystemExit("APPDATA is unavailable")
-    python_path = str(
-        Path(args.copilot_home)
-        / "rag"
-        / "query"
-        / ".venv"
-        / "Scripts"
-        / "python.exe"
-    )
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    for path in candidate_settings(Path(appdata)):
-        original = path.read_text(encoding="utf-8-sig") if path.is_file() else "{}\n"
-        patched = patch_settings(original, python_path)
-        if patched == original:
-            continue
-        if path.is_file():
-            backup = path.with_name(path.name + f".local-rag-backup-{timestamp}")
-            shutil.copy2(path, backup)
-        _atomic_write(path, patched)
-        print(f"Updated VS Code settings: {path}")
-    return 0
+    result = configure_vscode(Path(args.copilot_home), Path(appdata))
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 1 if result["status"] == "error" else 0
 
 
 if __name__ == "__main__":
