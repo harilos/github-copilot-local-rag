@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from portable_runtime import PortableRuntimeError, manifest_path_for
+
 
 COMPLETION_SCHEMA = "local-rag.setup-completion.v1"
 REQUIRED_RUNTIME_PASSES = (
@@ -28,6 +30,14 @@ _COPY_RESTORE_SKIP_ARGUMENTS = frozenset(
     }
 )
 COPY_RESTORE_RESULT: dict[str, Any] | None = None
+
+
+def completion_marker_for(query_root: Path) -> Path:
+    """Resolve mutable completion state without weakening runtime closed-set."""
+
+    if manifest_path_for(query_root).is_file():
+        return query_root / ".rag-deps-installed"
+    return query_root / ".venv" / ".rag-deps-installed"
 
 
 def _restore_copy_only_installation_for_setup() -> None:
@@ -121,7 +131,13 @@ def completion_contract_valid(
             }
             if any(packaged.get(key) != value for key, value in expected.items()):
                 return False, "completion_marker_packaged_runtime_fingerprint"
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        PortableRuntimeError,
+    ):
         return False, "completion_marker_unreadable"
     return True, None
 

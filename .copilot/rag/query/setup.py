@@ -30,6 +30,7 @@ from software_rag_tool.network import (
     resolve_network_configuration,
 )
 from setup_contract import (
+    completion_marker_for,
     completion_contract_payload,
     completion_contract_valid,
     requirements_fingerprint,
@@ -164,18 +165,19 @@ def main() -> int:
                 args.format,
             )
             return 1
-        try:
-            _acquire_setup_lock(here)
-        except SetupLockError as exc:
-            _emit(
-                _error_payload(
-                    failed_check="setup_lock",
-                    error_kind="setup_already_running",
-                    message=str(exc),
-                ),
-                args.format,
-            )
-            return 1
+        if not args.verify_only:
+            try:
+                _acquire_setup_lock(here)
+            except SetupLockError as exc:
+                _emit(
+                    _error_payload(
+                        failed_check="setup_lock",
+                        error_kind="setup_already_running",
+                        message=str(exc),
+                    ),
+                    args.format,
+                )
+                return 1
 
         if any(
             (
@@ -392,6 +394,21 @@ def main() -> int:
                 network=network,
             )
 
+    normal_previous_marker: bytes | None = None
+    normal_marker_previously_valid = False
+    if (
+        verification.get("setup_complete")
+        and not args.verify_only
+        and not marker_maintenance
+        and marker.is_file()
+    ):
+        previous_valid, _previous_reason = completion_contract_valid(
+            marker, RAG_ROOT
+        )
+        if previous_valid:
+            normal_previous_marker = _read_optional_bytes(marker)
+            normal_marker_previously_valid = normal_previous_marker is not None
+
     if verification.get("setup_complete") and not args.verify_only:
         try:
             _write_completion_marker(
@@ -420,6 +437,30 @@ def main() -> int:
                     marker_previously_existed=repair_marker_previously_existed,
                     network=network,
                 )
+            else:
+                valid, reason = completion_contract_valid(marker, RAG_ROOT)
+                if not valid:
+                    discard_error = _restore_previous_marker(
+                        marker,
+                        previous_marker=normal_previous_marker,
+                        marker_previously_existed=normal_marker_previously_valid,
+                        repair_temporarily=True,
+                    )
+                    message = (
+                        "The completion marker failed post-write validation: "
+                        f"{reason}"
+                    )
+                    if discard_error:
+                        message += (
+                            "; the invalid marker could not be removed: "
+                            f"{discard_error}"
+                        )
+                    verification = _error_payload(
+                        failed_check="completion_marker",
+                        error_kind="completion_marker_postvalidation_failed",
+                        message=message,
+                        network=network,
+                    )
     elif args.verify_only:
         _attach_completion_marker_diagnostics(
             verification,
@@ -656,7 +697,7 @@ def _setup_paths() -> tuple[Path, Path, Path, Path]:
     python = venv / (
         "Scripts/python.exe" if sys.platform.startswith("win") else "bin/python"
     )
-    return here, venv, python, venv / ".rag-deps-installed"
+    return here, venv, python, completion_marker_for(here)
 
 
 _SETUP_LOCK_HANDLE = None

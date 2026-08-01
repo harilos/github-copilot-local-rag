@@ -691,6 +691,9 @@ class SetupNetworkContractTests(unittest.TestCase):
                 side_effect=AssertionError("installer must not run"),
             ),
             mock.patch.object(SETUP, "_write_completion_marker") as write,
+            mock.patch.object(
+                SETUP, "completion_contract_valid", return_value=(True, None)
+            ),
             contextlib.redirect_stdout(stdout),
         ):
             code = SETUP.main()
@@ -752,6 +755,9 @@ class SetupNetworkContractTests(unittest.TestCase):
                 return_value=verification,
             ),
             mock.patch.object(SETUP, "_write_completion_marker"),
+            mock.patch.object(
+                SETUP, "completion_contract_valid", return_value=(True, None)
+            ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(0, SETUP.main())

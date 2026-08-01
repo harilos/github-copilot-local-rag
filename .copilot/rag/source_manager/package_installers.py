@@ -15,8 +15,13 @@ fi
 
 mkdir -p "$TARGET_DIR"
 
-RUNTIME_PYTHON="$TARGET_DIR/rag/query/.venv/bin/python"
-COMPLETION_MARKER="$TARGET_DIR/rag/query/.venv/.rag-deps-installed"
+QUERY_ROOT="$TARGET_DIR/rag/query"
+RUNTIME_PYTHON="$QUERY_ROOT/.venv/bin/python"
+if [ -f "$QUERY_ROOT/.packaged-runtime.json" ]; then
+  COMPLETION_MARKER="$QUERY_ROOT/.rag-deps-installed"
+else
+  COMPLETION_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"
+fi
 PRE_UPDATE_MARKER=""
 if [ -f "$COMPLETION_MARKER" ]; then
   PRE_UPDATE_MARKER="${COMPLETION_MARKER}.pre-update.$$"
@@ -69,8 +74,13 @@ if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
 
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
-$RuntimePython = Join-Path $Target "rag\query\.venv\Scripts\python.exe"
-$CompletionMarker = Join-Path $Target "rag\query\.venv\.rag-deps-installed"
+$QueryRoot = Join-Path $Target "rag\query"
+$RuntimePython = Join-Path $QueryRoot ".venv\Scripts\python.exe"
+if (Test-Path -LiteralPath (Join-Path $QueryRoot ".packaged-runtime.json") -PathType Leaf) {
+    $CompletionMarker = Join-Path $QueryRoot ".rag-deps-installed"
+} else {
+    $CompletionMarker = Join-Path $QueryRoot ".venv\.rag-deps-installed"
+}
 $PreUpdateMarker = $null
 if (Test-Path -LiteralPath $CompletionMarker -PathType Leaf) {
     $PreUpdateMarker = (

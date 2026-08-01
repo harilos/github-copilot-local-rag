@@ -18,7 +18,10 @@ from reference_contract import (  # noqa: E402
     install_result_bundle_reference_contract,
     install_search_command_reference_contract,
 )
-from setup_contract import completion_contract_valid  # noqa: E402
+from setup_contract import (  # noqa: E402
+    completion_contract_valid,
+    completion_marker_for,
+)
 from wrapper import search_command  # noqa: E402
 
 
@@ -43,7 +46,7 @@ def _venv_python() -> Path:
 
 
 def _completion_marker() -> Path:
-    return _QUERY_ROOT / ".venv" / ".rag-deps-installed"
+    return completion_marker_for(_QUERY_ROOT)
 
 
 def _truthy_environment(name: str) -> bool:

@@ -32,7 +32,7 @@ from software_rag_tool.search_request import (
     request_to_cli_arguments,
 )
 from result_bundle import cleanup_result_spool, publish_result_bundle
-from setup_contract import completion_contract_valid
+from setup_contract import completion_contract_valid, completion_marker_for
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
 STATE_FILE = RUN_DIR / "ragd.json"
@@ -187,7 +187,7 @@ def main() -> None:
         return
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
-    marker = Path(__file__).resolve().parent / ".venv" / ".rag-deps-installed"
+    marker = completion_marker_for(Path(__file__).resolve().parent)
     marker_valid, _marker_reason = completion_contract_valid(
         marker,
         RAG_ROOT,

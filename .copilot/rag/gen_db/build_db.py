@@ -14,7 +14,7 @@ sys.path.insert(0, str(QUERY_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
-from setup_contract import completion_contract_valid
+from setup_contract import completion_contract_valid, completion_marker_for
 from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 
 
@@ -110,7 +110,7 @@ def main() -> None:
 def _runtime_python_or_exit() -> str:
     query_root = RAG_ROOT / "query"
     venv_python = query_root / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
-    marker = query_root / ".venv" / ".rag-deps-installed"
+    marker = completion_marker_for(query_root)
     marker_valid, _marker_reason = completion_contract_valid(
         marker,
         RAG_ROOT,
