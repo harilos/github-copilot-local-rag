@@ -111,6 +111,8 @@ def validate_svn_fetch_url(value: Any, *, field: str) -> str:
         raise SourceManagerError(f"{field} contains an invalid port")
     if split.username is not None or split.password is not None:
         raise SourceManagerError(f"{field} must not contain credentials")
+    if "%" in split.netloc:
+        raise SourceManagerError(f"{field} contains an invalid host")
     if not split.path or not split.path.strip("/"):
         raise SourceManagerError(f"{field} must include a repository path")
     if any(character.isspace() for character in text):
@@ -130,6 +132,8 @@ def validate_svn_fetch_url(value: Any, *, field: str) -> str:
     except ValueError as exc:
         raise SourceManagerError(f"{field} contains an invalid URL") from exc
     if decoded_split.username is not None or decoded_split.password is not None:
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if _CREDENTIAL_ASSIGNMENT.search(decoded):
         raise SourceManagerError(f"{field} must not contain credentials")
     if "\\" in decoded_split.path or any(
         component in {".", ".."}
