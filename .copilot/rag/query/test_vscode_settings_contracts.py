@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from vscode_settings import (
+    configure_vscode,
     candidate_settings,
     patch_settings,
     scoped_command_rules,
@@ -18,8 +19,9 @@ class VSCodeSettingsContractTests(unittest.TestCase):
 
     def test_rules_are_scoped_to_public_read_only_scripts(self) -> None:
         rendered = "\n".join(self.rules)
-        self.assertIn("list_dbs.py", rendered)
-        self.assertIn("search.py", rendered)
+        self.assertIn(r"list_dbs\.py", rendered)
+        self.assertIn(r"search\.py", rendered)
+        self.assertTrue(all(rule.startswith("/^") and rule.endswith("$/") for rule in self.rules))
         for forbidden in (
             "setup.py",
             "manage.py",
@@ -30,7 +32,8 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             "pwsh",
         ):
             self.assertNotIn(forbidden, rendered.casefold())
-        self.assertNotIn(str(self.home / "rag" / "query" / ".venv" / "Scripts" / "python.exe"), self.rules)
+        self.assertNotIn(r"query\\list_dbs\.py", rendered)
+        self.assertNotIn(r"query\\search\.py", rendered)
 
     def test_jsonc_comments_crlf_and_unrelated_values_are_preserved(self) -> None:
         original = (
@@ -42,7 +45,22 @@ class VSCodeSettingsContractTests(unittest.TestCase):
         patched = patch_settings(original, self.rules)
         self.assertIn("// keep this comment\r\n", patched)
         self.assertIn('"editor.fontSize": 15', patched)
-        self.assertIn("list_dbs.py", patched)
+        self.assertIn(r"list_dbs\\.py", patched)
+        self.assertIn(
+            '{"approve":true,"matchCommandLine":true}',
+            patched,
+        )
+        self.assertEqual(patched, patch_settings(patched, self.rules))
+
+    def test_inline_comment_receives_comma_after_value_token(self) -> None:
+        original = (
+            "{\n"
+            '  "editor.fontSize": 15 // keep\n'
+            "}\n"
+        )
+        patched = patch_settings(original, self.rules)
+        self.assertIn('"editor.fontSize": 15, // keep\n', patched)
+        self.assertNotIn("// keep,", patched)
         self.assertEqual(patched, patch_settings(patched, self.rules))
 
     def test_explicit_false_is_preserved(self) -> None:
@@ -72,6 +90,7 @@ class VSCodeSettingsContractTests(unittest.TestCase):
     def test_candidate_paths_do_not_create_absent_insiders_or_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             appdata = Path(directory)
+            self.assertEqual([], candidate_settings(appdata))
             stable = appdata / "Code" / "User"
             profile = stable / "profiles" / "one"
             profile.mkdir(parents=True)
@@ -80,6 +99,15 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             self.assertIn(stable / "settings.json", paths)
             self.assertIn(profile / "settings.json", paths)
             self.assertFalse(any("Insiders" in str(path) for path in paths))
+
+    def test_configuration_does_not_create_vscode_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("not_detected", result["status"])
+            self.assertEqual(0, result["targets_checked"])
+            self.assertFalse((appdata / "Code").exists())
+            self.assertFalse((appdata / "Code - Insiders").exists())
 
     def test_existing_command_deny_is_preserved(self) -> None:
         denied = self.rules[0].replace("\\", "\\\\").replace('"', '\\"')
@@ -92,7 +120,7 @@ class VSCodeSettingsContractTests(unittest.TestCase):
         patched = patch_settings(original, self.rules)
         self.assertIn(f'"{denied}": false', patched)
         self.assertNotIn(f'"{denied}": true', patched)
-        self.assertIn("search.py", patched)
+        self.assertIn(r"search\\.py", patched)
 
 
 if __name__ == "__main__":

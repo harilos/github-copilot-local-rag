@@ -103,6 +103,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--configure-vscode-auto-approve",
+        action="store_true",
+        help=(
+            "Explicitly opt in to narrowly scoped VS Code terminal "
+            "auto-approval rules after packaged runtime verification"
+        ),
+    )
+    parser.add_argument(
         "--prepare-model",
         action="store_true",
         help="Deprecated: model preparation is now the default",
@@ -137,6 +145,10 @@ def main() -> int:
             "--verify-only, --migrate-legacy-marker, "
             "--refresh-completion-marker, and --repair-completion-marker "
             "are mutually exclusive"
+        )
+    if args.configure_vscode_auto_approve and offline_modes:
+        parser.error(
+            "--configure-vscode-auto-approve requires a normal setup run"
         )
     if (
         args.migrate_legacy_marker
@@ -343,30 +355,37 @@ def main() -> int:
         and verification.get("setup_complete")
         and not args.verify_only
     ):
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            try:
-                from vscode_settings import configure_vscode
+        if not args.configure_vscode_auto_approve:
+            vscode = {
+                "status": "skipped_default_off",
+                "targets_checked": 0,
+                "targets_changed": 0,
+                "policy_effectiveness": "not_requested",
+            }
+        else:
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                try:
+                    from vscode_settings import configure_vscode
 
-                vscode = configure_vscode(
-                    RAG_ROOT.parent, Path(appdata).expanduser()
-                )
-            except Exception as exc:
+                    vscode = configure_vscode(
+                        RAG_ROOT.parent, Path(appdata).expanduser()
+                    )
+                except Exception as exc:
+                    vscode = {
+                        "status": "error",
+                        "targets_checked": 0,
+                        "targets_changed": 0,
+                        "policy_effectiveness": "unknown",
+                        "error_kinds": [type(exc).__name__],
+                    }
+            else:
                 vscode = {
-                    "status": "error",
+                    "status": "manual_action_required",
                     "targets_checked": 0,
                     "targets_changed": 0,
                     "policy_effectiveness": "unknown",
-                    "error_kinds": [type(exc).__name__],
                 }
-        else:
-
-            vscode = {
-                "status": "manual_action_required",
-                "targets_checked": 0,
-                "targets_changed": 0,
-                "policy_effectiveness": "unknown",
-            }
         verification["integrations"] = {"vscode": vscode}
 
     requirements_after: str | None = None

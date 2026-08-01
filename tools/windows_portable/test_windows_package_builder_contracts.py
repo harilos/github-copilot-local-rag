@@ -100,6 +100,8 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("PACKAGE-MANIFEST.json", installer)
                 self.assertIn("source-connections.secrets.json", installer)
                 self.assertIn("rag\\dbs\\", installer)
+                self.assertIn("[switch]$ConfigureVSCodeAutoApprove", installer)
+                self.assertIn("--configure-vscode-auto-approve", installer)
                 self.assertNotIn("Stop-Process", installer)
                 self.assertNotIn("taskkill", installer.casefold())
 

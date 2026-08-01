@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -75,8 +76,13 @@ def _scan_value(text: str, index: int) -> int:
                     return index + 1
             index += 1
         raise ValueError("unterminated container")
+    primitive_start = index
     while index < len(text) and text[index] not in ",}\n\r":
+        if text.startswith("//", index) or text.startswith("/*", index):
+            break
         index += 1
+    while index > primitive_start and text[index - 1].isspace():
+        index -= 1
     return index
 
 
@@ -122,15 +128,47 @@ def _find_property(text: str, object_start: int, object_end: int, key: str):
         index = value_end
 
 
-def _insert_property(text: str, object_end: int, rendered: str) -> str:
+def _last_property_value_end(
+    text: str, object_start: int, object_end: int
+) -> int | None:
+    index = object_start + 1
+    last = None
+    while True:
+        index = _skip_ws_comments(text, index)
+        if index >= object_end:
+            return last
+        if text[index] == ",":
+            index += 1
+            continue
+        if text[index] not in {'"', "'"}:
+            raise ValueError("object key must be quoted")
+        key_end = _scan_string(text, index)
+        index = _skip_ws_comments(text, key_end)
+        if index >= object_end or text[index] != ":":
+            raise ValueError("missing property colon")
+        value_start = _skip_ws_comments(text, index + 1)
+        last = _scan_value(text, value_start)
+        index = last
+
+
+def _insert_property(
+    text: str,
+    object_start: int,
+    object_end: int,
+    rendered: str,
+) -> str:
+    value_end = _last_property_value_end(text, object_start, object_end)
+    if value_end is not None:
+        following = _skip_ws_comments(text, value_end)
+        if following >= object_end or text[following] != ",":
+            text = text[:value_end] + "," + text[value_end:]
+            object_end += 1
     before = text[:object_end]
     tail = text[object_end:]
     stripped = before.rstrip()
     indent = "  "
-    needs_comma = not stripped.endswith("{") and not stripped.endswith(",")
-    separator = "," if needs_comma else ""
     newline = "\r\n" if "\r\n" in text else "\n"
-    return stripped + separator + newline + indent + rendered + newline + tail
+    return stripped + newline + indent + rendered + newline + tail
 
 
 def _upsert_object_entry(text: str, object_start: int, object_end: int, key: str, value: str) -> str:
@@ -139,15 +177,25 @@ def _upsert_object_entry(text: str, object_start: int, object_end: int, key: str
         start, end = found
         return text[:start] + value + text[end:]
     escaped_key = key.replace("\\", "\\\\").replace('"', '\\"')
-    return _insert_property(text, object_end, f'"{escaped_key}": {value}')
+    return _insert_property(
+        text, object_start, object_end, f'"{escaped_key}": {value}'
+    )
 
 
 def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
     query = copilot_home / "rag" / "query"
     python = query / ".venv" / "Scripts" / "python.exe"
+    list_script = copilot_home / "rag" / "list_dbs.py"
+    search_script = copilot_home / "rag" / "search.py"
+    safe_argument = r'(?:"[^"\r\n;&|<>\x60$()]*"|[^\s;&|<>\x60$()]+)'
+
+    def command(script: Path) -> str:
+        prefix = re.escape(f'"{python}" "{script}"')
+        return f"/^{prefix}(?: {safe_argument})*$/"
+
     return (
-        f'"{python}" "{query / "list_dbs.py"}"',
-        f'"{python}" "{query / "search.py"}"',
+        command(list_script),
+        command(search_script),
     )
 
 
@@ -158,27 +206,24 @@ def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
     enable = _find_property(
         text, root_start, root_end, "chat.tools.terminal.enableAutoApprove"
     )
-    if enable is not None:
-        start, end = enable
-        if text[start:end].strip().casefold() == "false":
-            return text
-
-    text = _upsert_object_entry(
-        text,
-        root_start,
-        root_end,
-        "chat.tools.terminal.enableAutoApprove",
-        "true",
-    )
+    if (
+        enable is not None
+        and text[enable[0] : enable[1]].strip().casefold() == "false"
+    ):
+        return text
     root_start, root_end = _object_bounds(text)
     found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
+    rule_value = json.dumps(
+        {"approve": True, "matchCommandLine": True}, separators=(",", ":")
+    )
     rendered_rules = ",\n".join(
-        "    \"" + rule.replace("\\", "\\\\").replace('"', '\\"') + "\": true"
+        "    \"" + rule.replace("\\", "\\\\").replace('"', '\\"') + "\": " + rule_value
         for rule in command_rules
     )
     if found is None:
         return _insert_property(
             text,
+            root_start,
             root_end,
             f'"chat.tools.terminal.autoApprove": {{\n{rendered_rules}\n  }}',
         )
@@ -196,7 +241,9 @@ def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
         existing = _find_property(text, container_start, container_end, command)
         if existing is not None:
             continue
-        text = _upsert_object_entry(text, container_start, container_end, command, "true")
+        text = _upsert_object_entry(
+            text, container_start, container_end, command, rule_value
+        )
     return text
 
 
@@ -217,11 +264,13 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def candidate_settings(appdata: Path) -> list[Path]:
-    values = [appdata / "Code" / "User" / "settings.json"]
+    values: list[Path] = []
+    stable = appdata / "Code" / "User"
     insiders = appdata / "Code - Insiders" / "User"
-    if insiders.exists():
-        values.append(insiders / "settings.json")
-    for base in (appdata / "Code" / "User", insiders):
+    for base in (stable, insiders):
+        if not base.is_dir() or _is_reparse(base):
+            continue
+        values.append(base / "settings.json")
         profiles = base / "profiles"
         if profiles.is_dir():
             values.extend(sorted(profiles.glob("*/settings.json")))
@@ -271,15 +320,18 @@ def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
             changed += 1
         except (OSError, UnicodeError, ValueError) as exc:
             errors.append(type(exc).__name__)
-    status = (
-        "error"
-        if errors
-        else "manual_action_required"
-        if manual
-        else "configured"
-        if changed
-        else "already_configured"
-    )
+    if checked == 0:
+        status = "not_detected"
+    elif errors and changed:
+        status = "partial_failure"
+    elif errors:
+        status = "error"
+    elif manual:
+        status = "manual_action_required"
+    elif changed:
+        status = "configured_on_disk"
+    else:
+        status = "already_configured"
     return {
         "status": status,
         "targets_checked": checked,

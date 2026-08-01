@@ -210,6 +210,10 @@ class PortableRuntimeContractTests(unittest.TestCase):
 
                 self.assertTrue(payload["setup_complete"])
                 self.assertEqual("off", payload["network"]["mode"])
+                self.assertEqual(
+                    "skipped_default_off",
+                    payload["integrations"]["vscode"]["status"],
+                )
             finally:
                 SETUP._release_setup_lock()
 

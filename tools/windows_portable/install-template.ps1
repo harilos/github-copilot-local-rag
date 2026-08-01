@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$ConfigureVSCodeAutoApprove
+)
 
 $ErrorActionPreference = "Stop"
 $PackageRoot = [System.IO.Path]::GetFullPath(
@@ -158,7 +160,15 @@ try {
     [System.IO.Directory]::Move($StageModel, $TargetModel)
 
     $TargetPython = Join-Path $TargetRuntime "Scripts\python.exe"
-    & $TargetPython (Join-Path $Target "rag\setup.py") --format json | Out-Null
+    $SetupArguments = @(
+        (Join-Path $Target "rag\setup.py"),
+        "--format",
+        "json"
+    )
+    if ($ConfigureVSCodeAutoApprove) {
+        $SetupArguments += "--configure-vscode-auto-approve"
+    }
+    & $TargetPython @SetupArguments | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "installed runtime verification failed"
     }
