@@ -12,6 +12,10 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .machine_connections import configured_sharepoint_root
 from .setup_copy_bridge import restore_portable_database
+from .persistent_paths import (
+    create_persistent_directory,
+    create_persistent_staging_directory,
+)
 
 
 _PATCH_MARKER = "_local_rag_copy_only_packages_installed"
@@ -124,7 +128,11 @@ def _import_package(package_path: Path, copilot_home: Path) -> dict[str, Any]:
     target = Path(copilot_home).expanduser()
     if target.is_symlink():
         raise packages.PackageError("install_target_symlink_forbidden")
-    target.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        create_persistent_directory(
+            target,
+            trusted_root=target.parent,
+        )
     target = target.resolve(strict=True)
 
     with tempfile.TemporaryDirectory(prefix="local-rag-package-import.") as temp:
@@ -156,8 +164,9 @@ def _publish_copy_tree(
 ) -> None:
     database_names = _database_names(manifest, packages)
     database_parent = _safe_directory(target, PurePosixPath("rag/dbs"), packages)
-    staging_parent = Path(
-        tempfile.mkdtemp(prefix=".local-rag-import.", dir=str(database_parent))
+    staging_parent = create_persistent_staging_directory(
+        database_parent,
+        prefix=".local-rag-import-",
     )
     database_stages = {
         name: staging_parent / name
@@ -241,7 +250,11 @@ def _safe_directory(target: Path, relative: PurePosixPath, packages: Any) -> Pat
             raise packages.PackageError("install_target_symlink_forbidden")
         if current.exists() and not current.is_dir():
             raise packages.PackageError("install_target_path_invalid")
-        current.mkdir(exist_ok=True)
+        create_persistent_directory(
+            current,
+            trusted_root=target,
+            exist_ok=True,
+        )
         resolved = current.resolve(strict=True)
         if resolved != resolved_target and resolved_target not in resolved.parents:
             raise packages.PackageError("install_target_escape")
@@ -251,7 +264,11 @@ def _safe_directory(target: Path, relative: PurePosixPath, packages: Any) -> Pat
 def _safe_destination(target: Path, relative: PurePosixPath, packages: Any) -> Path:
     if not relative.parts:
         raise packages.PackageError("install_target_path_invalid")
-    target.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        create_persistent_directory(
+            target,
+            trusted_root=target.parent,
+        )
     current = target
     resolved_target = target.resolve(strict=True)
     for part in relative.parts[:-1]:
@@ -260,7 +277,11 @@ def _safe_destination(target: Path, relative: PurePosixPath, packages: Any) -> P
             raise packages.PackageError("install_target_symlink_forbidden")
         if current.exists() and not current.is_dir():
             raise packages.PackageError("install_target_path_invalid")
-        current.mkdir(exist_ok=True)
+        create_persistent_directory(
+            current,
+            trusted_root=target,
+            exist_ok=True,
+        )
         resolved = current.resolve(strict=True)
         if resolved != resolved_target and resolved_target not in resolved.parents:
             raise packages.PackageError("install_target_escape")

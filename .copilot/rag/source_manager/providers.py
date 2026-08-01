@@ -17,6 +17,7 @@ from .security import (
     validate_environment_name,
     validate_persistable,
     validate_relative_path,
+    validate_svn_fetch_url,
     validate_web_url,
 )
 
@@ -311,15 +312,10 @@ def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:
         settings,
         {"repository_url", "recursive", "updated_within_days"},
     )
-    repository = validate_web_url(
+    repository = validate_svn_fetch_url(
         settings.get("repository_url"),
         field="repository_url",
     )
-    split = urlsplit(repository)
-    if split.query or split.fragment:
-        raise SourceManagerError(
-            "repository_url cannot contain query or fragment"
-        )
     output: dict[str, Any] = {
         "repository_url": repository.rstrip("/"),
     }

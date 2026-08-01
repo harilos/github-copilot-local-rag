@@ -4,7 +4,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,10 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from .errors import SourceManagerError
+from .persistent_paths import (
+    create_persistent_directory,
+    create_persistent_staging_directory,
+)
 
 
 CommandRunner = Callable[[list[str]], Any]
@@ -117,15 +120,16 @@ def fetch_github_issues(
     issues = _gh_api_pages(repository, endpoint, command_runner)
     issues = [item for item in issues if "pull_request" not in item]
     numbers: set[int] = set()
-    stage = Path(
-        tempfile.mkdtemp(
-            prefix=".github-issues-stage-",
-            dir=str(work_directory.parent),
-        )
+    stage = create_persistent_staging_directory(
+        work_directory.parent,
+        prefix=".github-issues-stage-",
     )
     try:
         issue_root = stage / "issues"
-        issue_root.mkdir()
+        create_persistent_directory(
+            issue_root,
+            trusted_root=stage,
+        )
         total = len(issues)
         for index, issue in enumerate(issues, 1):
             number = _positive_integer(issue.get("number"), "issue number")

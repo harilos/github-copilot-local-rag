@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,10 +9,7 @@ from typing import Any, Mapping
 from .errors import SourceManagerError
 from .redmine import parse_redmine_project_url
 
-_UPDATED_ON_JSON = re.compile(r'"updated_on"\s*:\s*"([^"]+)"')
-_UPDATED_ON_LINE = re.compile(
-    r"(?im)^\s*(?:updated[_ ]on|更新日時)\s*[:：]\s*(\S.*?)\s*$"
-)
+_STRUCTURED_METADATA_HEADING = "## Structured issue metadata"
 _INSTALLED = False
 
 
@@ -35,16 +31,57 @@ def _local_issue_timestamp(path: Path) -> datetime | None:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    for pattern in (_UPDATED_ON_JSON, _UPDATED_ON_LINE):
-        match = pattern.search(text)
-        if match:
-            parsed = _parse_timestamp(match.group(1))
-            if parsed is not None:
-                return parsed
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    except OSError:
+        if not path.stem.isdecimal():
+            return None
+        issue_id = int(path.stem)
+    except ValueError:
         return None
+    payload = _structured_issue_payload(text)
+    if payload is None:
+        return None
+    stored_id = payload.get("id")
+    if (
+        isinstance(stored_id, bool)
+        or not isinstance(stored_id, int)
+        or stored_id != issue_id
+    ):
+        return None
+    return _parse_timestamp(payload.get("updated_on"))
+
+
+def _structured_issue_payload(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return _json_object(stripped)
+
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        if line.strip() != _STRUCTURED_METADATA_HEADING:
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and not lines[cursor].strip():
+            cursor += 1
+        if cursor >= len(lines) or lines[cursor].strip() != "```json":
+            return None
+        cursor += 1
+        encoded: list[str] = []
+        while cursor < len(lines) and lines[cursor].strip() != "```":
+            encoded.append(lines[cursor])
+            cursor += 1
+        if cursor >= len(lines):
+            return None
+        return _json_object("\n".join(encoded))
+    return None
+
+
+def _json_object(value: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _inventory(
@@ -64,6 +101,7 @@ def _inventory(
     project = parse_redmine_project_url(settings.get("project_url"))
     offset = 0
     result: list[tuple[int, datetime | None]] = []
+    seen_issue_ids: set[int] = set()
     expected_total: int | None = None
     while True:
         parameters: dict[str, Any] = {
@@ -102,14 +140,17 @@ def _inventory(
                 "Redmine issue inventory response has no issues",
                 stage="fetch.redmine",
             )
-        for issue in issues:
-            if not isinstance(issue, dict) or not isinstance(issue.get("id"), int):
-                continue
-            result.append(
-                (int(issue["id"]), _parse_timestamp(issue.get("updated_on")))
+        total_value = payload.get("total_count")
+        if (
+            isinstance(total_value, bool)
+            or not isinstance(total_value, int)
+            or total_value < 0
+        ):
+            raise SourceManagerError(
+                "redmine_inventory_changed",
+                stage="fetch.redmine",
             )
-        offset += len(issues)
-        total = int(payload.get("total_count") or offset)
+        total = total_value
         if expected_total is None:
             expected_total = total
         elif expected_total != total:
@@ -117,6 +158,27 @@ def _inventory(
                 "redmine_inventory_changed",
                 stage="fetch.redmine",
             )
+        if offset > total or offset + len(issues) > total:
+            raise SourceManagerError(
+                "redmine_inventory_changed",
+                stage="fetch.redmine",
+            )
+        for issue in issues:
+            issue_id = issue.get("id") if isinstance(issue, dict) else None
+            if (
+                isinstance(issue_id, bool)
+                or not isinstance(issue_id, int)
+                or issue_id in seen_issue_ids
+            ):
+                raise SourceManagerError(
+                    "redmine_inventory_changed",
+                    stage="fetch.redmine",
+                )
+            seen_issue_ids.add(issue_id)
+            result.append(
+                (issue_id, _parse_timestamp(issue.get("updated_on")))
+            )
+        offset += len(issues)
         execution._emit_http_progress(
             progress_callback,
             {

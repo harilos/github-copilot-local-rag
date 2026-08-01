@@ -4,7 +4,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .errors import SourceManagerError
 
@@ -56,9 +56,21 @@ def validate_persistable(value: Any, *, field: str = "payload") -> None:
 
 def validate_web_url(value: Any, *, field: str) -> str:
     text = _bounded_text(value, field=field, limit=4096)
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+        hostname = split.hostname
+        port = split.port
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
     if split.scheme.casefold() not in {"http", "https"} or not split.netloc:
         raise SourceManagerError(f"{field} must be an HTTP or HTTPS URL")
+    if not hostname:
+        raise SourceManagerError(f"{field} must include a host")
+    host_port = split.netloc.rsplit("@", 1)[-1]
+    if host_port.endswith(":") or (
+        port is not None and not 1 <= port <= 65535
+    ):
+        raise SourceManagerError(f"{field} contains an invalid port")
     if split.username is not None or split.password is not None:
         raise SourceManagerError(f"{field} must not contain credentials")
     for name, _query_value in parse_qsl(split.query, keep_blank_values=True):
@@ -68,6 +80,83 @@ def validate_web_url(value: Any, *, field: str) -> str:
     if _CREDENTIAL_ASSIGNMENT.search(text):
         raise SourceManagerError(f"{field} must not contain credentials")
     return text
+
+
+def validate_svn_fetch_url(value: Any, *, field: str) -> str:
+    """Validate a credential-free URL that is safe to pass to svn checkout."""
+    text = _bounded_text(value, field=field, limit=4096)
+    try:
+        split = urlsplit(text)
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
+    if split.scheme.casefold() not in {"http", "https", "svn"}:
+        raise SourceManagerError(
+            f"{field} must use HTTP, HTTPS, or SVN"
+        )
+    if not split.netloc:
+        raise SourceManagerError(f"{field} must include a host")
+    try:
+        hostname = split.hostname
+        port = split.port
+    except ValueError as exc:
+        raise SourceManagerError(
+            f"{field} contains an invalid host or port"
+        ) from exc
+    if not hostname:
+        raise SourceManagerError(f"{field} must include a host")
+    host_port = split.netloc.rsplit("@", 1)[-1]
+    if host_port.endswith(":"):
+        raise SourceManagerError(f"{field} contains an invalid port")
+    if port is not None and not 1 <= port <= 65535:
+        raise SourceManagerError(f"{field} contains an invalid port")
+    if split.username is not None or split.password is not None:
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if "%" in split.netloc:
+        raise SourceManagerError(f"{field} contains an invalid host")
+    if not split.path or not split.path.strip("/"):
+        raise SourceManagerError(f"{field} must include a repository path")
+    if any(character.isspace() for character in text):
+        raise SourceManagerError(f"{field} must not contain whitespace")
+    if re.search(r"%(?![0-9A-Fa-f]{2})", text):
+        raise SourceManagerError(f"{field} contains invalid URL encoding")
+    decoded = _fully_unquote(text, field=field)
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for character in decoded
+    ):
+        raise SourceManagerError(f"{field} contains control characters")
+    if any(character.isspace() for character in decoded):
+        raise SourceManagerError(f"{field} must not contain whitespace")
+    try:
+        decoded_split = urlsplit(decoded)
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
+    if decoded_split.username is not None or decoded_split.password is not None:
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if _CREDENTIAL_ASSIGNMENT.search(decoded):
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if "\\" in decoded_split.path or any(
+        component in {".", ".."}
+        for component in decoded_split.path.split("/")
+    ):
+        raise SourceManagerError(f"{field} contains an unsafe path")
+    if "?" in text or "#" in text:
+        raise SourceManagerError(
+            f"{field} cannot contain query or fragment"
+        )
+    if _CREDENTIAL_ASSIGNMENT.search(text):
+        raise SourceManagerError(f"{field} must not contain credentials")
+    return text
+
+
+def _fully_unquote(value: str, *, field: str) -> str:
+    decoded = value
+    for _ in range(len(decoded) + 1):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    raise SourceManagerError(f"{field} URL encoding is too deeply nested")
 
 
 def validate_environment_name(value: Any, *, field: str) -> str:
@@ -170,7 +259,10 @@ def _validate_persistable(value: Any, *, field: str, depth: int) -> None:
             )
         if _CREDENTIAL_ASSIGNMENT.search(value):
             raise SourceManagerError(f"{field} must not store credentials")
-        split = urlsplit(value)
+        try:
+            split = urlsplit(value)
+        except ValueError as exc:
+            raise SourceManagerError(f"{field} contains an invalid URL") from exc
         if split.scheme.casefold() in {"http", "https"}:
             validate_web_url(value, field=field)
         return
@@ -208,7 +300,10 @@ def _looks_absolute_path(value: str) -> bool:
     text = str(value).strip()
     if not text:
         return False
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+    except ValueError:
+        return False
     if split.scheme.casefold() in {"http", "https"} and split.netloc:
         return False
     return (

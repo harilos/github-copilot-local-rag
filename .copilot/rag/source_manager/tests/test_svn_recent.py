@@ -45,6 +45,62 @@ def _svn_info_xml(
 
 
 class SvnRecentValidationTests(unittest.TestCase):
+    def test_svn_transport_url_is_preserved_and_planned(self) -> None:
+        repository_url = "svn://127.0.0.1:3690/hogehoge-republic"
+        normalized = validate_provider_config(
+            "svn",
+            {"repository_url": repository_url},
+        )
+        self.assertEqual(repository_url, normalized["repository_url"])
+        plan = build_fetch_plan(
+            source_key="src_svn-0123456789ab",
+            provider="svn",
+            settings=normalized,
+            logical_root="sources/src_svn-0123456789ab/work/ingest/src_svn-0123456789ab",
+            work_path="sources/src_svn-0123456789ab/work/ingest/src_svn-0123456789ab",
+        )
+        self.assertEqual("svn_checkout_or_update", plan.steps[0].operation)
+        self.assertEqual(
+            repository_url,
+            plan.steps[0].parameters["repository_url"],
+        )
+
+    def test_svn_fetch_url_rejects_unsafe_or_unsupported_values(self) -> None:
+        invalid = (
+            "svn://user:password@example.com/repository",
+            "svn://example.com/repository?token=value",
+            "svn://example.com/repository#fragment",
+            "svn:///repository",
+            "svn://example.com:99999/repository",
+            "svn://example.com:/repository",
+            "svn://example.com:0/repository",
+            "svn://[invalid/repository",
+            "svn://exa mple.com/repository",
+            "svn://example.com/repository name",
+            "svn://example.com/repository%ZZ",
+            "svn://example.com/%0Arepository",
+            "svn://user%3Apassword%40example.com/repository",
+            "svn://example.com%3A0/repository",
+            "svn://example.com/repository/%74oken=secret",
+            "svn://example.com/repository/%70assword=secret",
+            "svn://example.com/../repository",
+            "svn://example.com/%2e%2e/repository",
+            "svn://example.com/repository%5Coutside",
+            "svn://example.com",
+            "file:///repository",
+            "svn+ssh://example.com/repository",
+            "svn://example.com/repository\nnext",
+            "svn://example.com/repository?",
+            "svn://example.com/repository#",
+        )
+        for repository_url in invalid:
+            with self.subTest(repository_url=repository_url):
+                with self.assertRaises(SourceManagerError):
+                    validate_provider_config(
+                        "svn",
+                        {"repository_url": repository_url},
+                    )
+
     def test_recent_window_is_normalized_and_optional(self) -> None:
         base = {
             "repository_url": "https://svn.example.invalid/project",
@@ -156,12 +212,13 @@ class SvnRecentFetchTests(unittest.TestCase):
         *,
         recursive: bool,
         updated_within_days: int | None = 30,
+        repository_url: str = "https://svn.example.invalid/project",
     ) -> dict:
         return build_fetch_plan(
             source_key=self.source_key,
             provider="svn",
             settings={
-                "repository_url": "https://svn.example.invalid/project",
+                "repository_url": repository_url,
                 "recursive": recursive,
                 "updated_within_days": updated_within_days,
             },
@@ -206,6 +263,27 @@ class SvnRecentFetchTests(unittest.TestCase):
             )
 
         return runner
+
+    def test_checkout_receives_complete_svn_transport_url(self) -> None:
+        repository_url = "svn://127.0.0.1:3690/hogehoge-republic"
+        commands: list[list[str]] = []
+        execute_fetch_plan(
+            self._plan(
+                recursive=True,
+                updated_within_days=None,
+                repository_url=repository_url,
+            ),
+            self.work,
+            {"started_at": "2026-07-30T12:00:00Z"},
+            command_runner=self._runner(
+                [("README.md", "fixture", "2026-07-30T12:00:00Z")],
+                commands=commands,
+            ),
+        )
+        checkout = next(
+            command for command in commands if "checkout" in command
+        )
+        self.assertIn(repository_url, checkout)
 
     def test_recursive_filter_copies_boundary_and_recent_files(self) -> None:
         (self.work / "old.md").write_text(

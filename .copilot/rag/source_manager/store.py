@@ -16,6 +16,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from .errors import SourceManagerError
+from .persistent_paths import (
+    create_persistent_directory,
+    persistent_access_error,
+)
 from .providers import build_fetch_plan, validate_provider_config
 from .security import redact_runtime_paths, validate_persistable
 
@@ -148,19 +152,32 @@ class SourceStore:
 
     def list_keys(self) -> list[str]:
         sources = self.db_root / "sources"
-        if not sources.exists():
-            return []
-        _reject_linked_components(self.db_root, sources)
-        keys: list[str] = []
-        for entry in sources.iterdir():
+        access_path = sources
+        try:
             try:
-                key = validate_local_source_key(entry.name)
-                _reject_linked_components(self.db_root, entry)
-                if entry.is_dir() and (entry / "source.json").is_file():
-                    keys.append(key)
-            except (OSError, SourceManagerError):
-                continue
-        return sorted(keys)
+                metadata = os.lstat(sources)
+            except FileNotFoundError:
+                return []
+            if _is_link(metadata, sources) or not stat.S_ISDIR(metadata.st_mode):
+                raise SourceManagerError("Source path is not a real directory")
+            _reject_linked_components(self.db_root, sources)
+            keys: list[str] = []
+            for entry in sources.iterdir():
+                access_path = entry
+                try:
+                    key = validate_local_source_key(entry.name)
+                    _reject_linked_components(self.db_root, entry)
+                    if entry.is_dir() and (entry / "source.json").is_file():
+                        keys.append(key)
+                except PermissionError:
+                    raise
+                except (OSError, SourceManagerError):
+                    continue
+            return sorted(keys)
+        except PermissionError as exc:
+            raise persistent_access_error(
+                self.db_root, access_path, database_identifier=self.db_root.name
+            ) from exc
 
     def ensure_work_directory(self, local_source_key: str) -> Path:
         paths = self.paths(local_source_key)
@@ -173,7 +190,10 @@ class SourceStore:
                 if not current.is_dir():
                     raise SourceManagerError("Source work path is not a directory")
             else:
-                current.mkdir(mode=0o700)
+                create_persistent_directory(
+                    current,
+                    trusted_root=self.db_root,
+                )
                 _reject_linked_components(self.db_root, current)
         return target
 

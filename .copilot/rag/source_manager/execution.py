@@ -28,6 +28,10 @@ from .errors import (
     exception_summary,
     sanitize_diagnostic,
 )
+from .persistent_paths import (
+    create_persistent_directory,
+    create_persistent_staging_directory,
+)
 from .diagnostics import process_diagnostic
 from .gitlab_issues import (
     fetch_gitlab_issues,
@@ -1496,7 +1500,13 @@ def _copy_tree(
         child_names[:] = retained
         relative_directory = directory_path.relative_to(source)
         target_directory = destination / relative_directory
-        target_directory.mkdir(parents=True, exist_ok=True)
+        if target_directory != destination:
+            create_persistent_directory(
+                target_directory,
+                trusted_root=destination,
+                parents=True,
+                exist_ok=True,
+            )
         for name in sorted(file_names):
             candidate = directory_path / name
             target = target_directory / name
@@ -1525,9 +1535,11 @@ def _materialize_snapshot(
     """Publish a fully validated local snapshot without merge-only leftovers."""
     parent = destination.parent
     _ensure_real_directory(parent)
-    staging = parent / f".incoming-{uuid.uuid4().hex}"
+    staging = create_persistent_staging_directory(
+        parent,
+        prefix=".incoming-",
+    )
     backup = parent / f".previous-{uuid.uuid4().hex}"
-    staging.mkdir(mode=0o700)
     try:
         outcome = _copy_tree(
             source,
@@ -1762,7 +1774,10 @@ def _ensure_real_directory(path: Path) -> None:
     parent = current.parent
     if parent != current:
         _ensure_real_directory(parent)
-    current.mkdir(mode=0o700)
+    create_persistent_directory(
+        current,
+        trusted_root=parent,
+    )
 
 
 def _is_link_or_reparse(path: Path, metadata: os.stat_result) -> bool:
