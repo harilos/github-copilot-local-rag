@@ -147,7 +147,8 @@
       "manuals/ja"
     ],
     "svn_repository_url": [
-      "https://<svn-host>/repos/<project>/trunk"
+      "https://<svn-host>/repos/<project>/trunk",
+      "svn://<svn-host>:3690/<repository>"
     ],
     "svn_revision": [
       "1234"

@@ -1457,6 +1457,22 @@ class SourceLinksContractTests(unittest.TestCase):
                 "docs",
             ),
             (
+                "https://svn.example.invalid:99999/repos/project",
+                "docs",
+            ),
+            (
+                "https://[invalid/repos/project",
+                "docs",
+            ),
+            (
+                "https://svn.example.invalid/repos/project with spaces",
+                "docs",
+            ),
+            (
+                "https://svn.example.invalid/repos/project%ZZ",
+                "docs",
+            ),
+            (
                 "https://user:password@svn.example.invalid/repos/project",
                 "docs",
             ),
@@ -1591,6 +1607,10 @@ class SourceLinksContractTests(unittest.TestCase):
             "svn://svn.example.invalid/repos/project",
             "svn+ssh://svn.example.invalid/repos/project",
             "file:///repos/project",
+            "https://svn-web.example.invalid:99999/project",
+            "https://[invalid/project",
+            "https://svn-web.example.invalid/project with spaces",
+            "https://svn-web.example.invalid/project%ZZ",
             "https://svn-web.example.invalid/project%0d%0aInjected",
         )
         for repository_url in invalid_urls:

@@ -15,12 +15,14 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit
 
 _MODULE_ROOT = Path(__file__).resolve().parent
 if str(_MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULE_ROOT))
 from help_links import MANAGER_HELP_EPILOG, MANAGER_HELP_URL
-from source_manager.errors import sanitize_diagnostic
+from source_manager.errors import SourceManagerError, sanitize_diagnostic
+from source_manager.security import validate_svn_fetch_url, validate_web_url
 from source_manager.manage_custom import load_manage_custom
 from source_manager.progress import ProgressRenderer
 from source_manager.subprocess_stream import (
@@ -1474,15 +1476,25 @@ class LocalRagManager:
         }
 
     def _prompt_new_svn_source(self) -> dict[str, Any] | None:
-        url = self._prompt_preserving_value(
-            "SVNのURL",
-            "",
-            required=True,
-            description=(
-                "HTTP(S)のSVN URLからDB内の専用作業場所へ取得します。"
-            ),
-            examples=self._examples("svn_repository_url"),
-        )
+        while True:
+            url = self._prompt_preserving_value(
+                "SVNのURL",
+                "",
+                required=True,
+                description=(
+                    "HTTP(S)またはsvn://のSVN URLから、"
+                    "DB内の専用作業場所へ取得します。"
+                ),
+                examples=self._examples("svn_repository_url"),
+            )
+            if url is None:
+                return None
+            try:
+                url = validate_svn_fetch_url(url, field="SVNのURL")
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
+                continue
+            break
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
@@ -1538,17 +1550,22 @@ class LocalRagManager:
                     "日数は1～3650の整数で入力してください。"
                 )
                 return None
+        fetch_scheme = urlsplit(url).scheme.casefold()
         link_strategy = self._select_value(
             "検索結果リンクの形式",
             (
                 ("svn-http", "Apache HTTP(S)互換の各ファイル直リンク"),
                 ("svn-web-root", "その他のSVN Web画面のトップページ"),
+                ("none", "検索結果リンクを設定しない"),
             ),
-            default="1",
+            default="none" if fetch_scheme == "svn" else "svn-http",
         )
         if link_strategy is None:
             return None
-        if link_strategy == "svn-web-root":
+        link_settings: dict[str, Any] | None
+        if link_strategy == "none":
+            link_settings = None
+        elif link_strategy == "svn-web-root":
             top_url = self._prompt_preserving_value(
                 "SVN Web画面のトップURL",
                 "",
@@ -1561,13 +1578,57 @@ class LocalRagManager:
             )
             if top_url is None:
                 return None
+            try:
+                top_url = validate_web_url(
+                    top_url,
+                    field="SVN Web画面のトップURL",
+                )
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
+                return None
             link_settings = {"repository_url": top_url}
         else:
+            initial_link_url = url if fetch_scheme in {"http", "https"} else ""
+            link_url = self._prompt_preserving_value(
+                "SVN Web公開用リポジトリURL",
+                initial_link_url,
+                required=True,
+                description=(
+                    "検索結果からファイルを開くためのHTTP(S) URLです。"
+                    "svn://の取得URLは検索結果リンクへ使用しません。"
+                ),
+                examples=self._examples("svn_link_repository_url"),
+            )
+            if link_url is None:
+                return None
+            try:
+                link_url = validate_web_url(
+                    link_url,
+                    field="SVN Web公開用リポジトリURL",
+                )
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
+                return None
             link_settings = {
-                "repository_url": url,
+                "repository_url": link_url,
                 "permalink_enabled": False,
             }
-        return {
+        if link_settings is not None:
+            try:
+                normalized_link = self._import_source_links().validate_source_link(
+                    {
+                        "provider": "svn",
+                        "enabled": True,
+                        "strategy": link_strategy,
+                        "settings": link_settings,
+                    }
+                )
+            except Exception as exc:
+                self._print_error(str(exc))
+                return None
+            link_strategy = str(normalized_link["strategy"])
+            link_settings = dict(normalized_link["settings"])
+        proposal: dict[str, Any] = {
             "source_type": "svn",
             "label": "SVN",
             "display_name": name,
@@ -1575,11 +1636,6 @@ class LocalRagManager:
                 "repository_url": url,
                 "recursive": scope == "1",
                 "updated_within_days": days,
-            },
-            "link": {
-                "enabled": True,
-                "strategy": link_strategy,
-                "settings": link_settings,
             },
             "summary": (
                 (
@@ -1596,6 +1652,13 @@ class LocalRagManager:
                 ("途中再開", "可能"),
             ),
         }
+        if link_settings is not None:
+            proposal["link"] = {
+                "enabled": True,
+                "strategy": link_strategy,
+                "settings": link_settings,
+            }
+        return proposal
 
     def _prompt_new_redmine_source(self) -> dict[str, Any] | None:
         url = self._prompt_preserving_value(
