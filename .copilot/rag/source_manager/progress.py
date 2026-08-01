@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .redmine_progress import RedmineProgressCadence
+
 
 _IMMEDIATE_STATUSES = frozenset(
     {"completed", "failed", "failure", "retry", "success"}
@@ -67,6 +69,10 @@ class ProgressRenderer:
         self._last_rendered_at = float("-inf")
         self._last_phase = ""
         self._last_add_file_event: dict[str, Any] | None = None
+        self._redmine_cadence = RedmineProgressCadence(
+            output,
+            provider=provider,
+        )
 
     def __call__(self, event: Mapping[str, Any]) -> None:
         try:
@@ -100,6 +106,8 @@ class ProgressRenderer:
 
         now = self._clock()
         phase = str(event.get("phase") or event.get("event") or "processing")
+        if self._redmine_cadence.render(event, now=now):
+            return
         status = str(event.get("status") or "").lower()
         immediate = (
             phase != self._last_phase
@@ -240,6 +248,7 @@ class ProgressRenderer:
         message = f"{prefix} {detail}"
         if event_kind.endswith(".http_attempt"):
             message = _render_http_attempt(prefix, event)
+        message = self._redmine_cadence.prefix_generic(message)
         final_line = (
             status in _IMMEDIATE_STATUSES
             or event_kind.endswith(".http_attempt")
@@ -258,7 +267,10 @@ class ProgressRenderer:
                     + "\033[K"
                     + ("\n" if final_line else "")
                 )
-            self._output(message)
+            if self._output is print:
+                print(message, flush=True)
+            else:
+                self._output(message)
         self._last_rendered_at = now
         self._last_phase = phase
 

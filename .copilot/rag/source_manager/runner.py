@@ -1228,6 +1228,9 @@ def _update_redmine_source(
         len(current_state.payload.get("redmine_issue_ids") or [])
         or None
     ]
+    detail_progress_high_water = [
+        int(current_state.payload.get("fetched_count") or 0)
+    ]
 
     def inventory_checkpoint(issue_ids: list[int]) -> None:
         stored = state_holder[0]
@@ -1258,14 +1261,16 @@ def _update_redmine_source(
 
     def item_checkpoint(completed_count: int, issue_id: int) -> None:
         stored = state_holder[0]
+        completed = int(completed_count)
+        is_new_progress = completed > detail_progress_high_water[0]
         value = copy.deepcopy(stored.payload)
         confirmed = int(value.get("indexed_confirmed_count") or 0)
         value.update(
             {
                 "status": "running",
                 "phase": "fetch",
-                "fetched_count": int(completed_count),
-                "pending_count": int(completed_count) - confirmed,
+                "fetched_count": completed,
+                "pending_count": completed - confirmed,
                 "last_completed_item": int(issue_id),
                 "can_resume": True,
                 "last_error": None,
@@ -1278,18 +1283,20 @@ def _update_redmine_source(
             expected_etag=stored.etag,
         )
         total = progress_total_holder[0]
+        if is_new_progress:
+            detail_progress_high_water[0] = completed
         _emit_progress(
             progress_callback,
             {
                 "phase": "redmine.detail",
                 "label_ja": "Redmine Issue詳細取得",
                 "provider": "redmine",
-                "completed": int(completed_count),
+                "completed": completed,
                 "total": total,
                 "unit": "件",
                 "total_kind": "exact" if total is not None else "unknown",
                 "current_item": f"Issue #{int(issue_id)}",
-                "status": "running",
+                "status": "running" if is_new_progress else "replayed",
                 "checkpoint_saved": True,
             },
         )
@@ -2089,6 +2096,33 @@ def _redmine_reflect_batch(
 ) -> tuple[StoredJson, StoredJson, dict[str, Any]]:
     work = store.ensure_work_directory(source.payload["local_source_key"])
     validate_managed_work_tree(work)
+    fetched_count = int(state.payload.get("fetched_count") or 0)
+    indexed_count = int(state.payload.get("indexed_confirmed_count") or 0)
+    batch_count = fetched_count - indexed_count
+    if batch_count <= 0:
+        raise SourceManagerError(
+            "Redmine ADD batch has no pending Issues",
+            stage="reflect.redmine_batch",
+        )
+    issue_ids = state.payload.get("redmine_issue_ids")
+    total_count = len(issue_ids) if isinstance(issue_ids, list) else None
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "redmine.add_batch",
+            "phase": "redmine.reflect",
+            "label_ja": "検索DB反映",
+            "provider": "redmine",
+            "completed": indexed_count,
+            "current_index": fetched_count,
+            "total": total_count,
+            "unit": "件",
+            "total_kind": "exact" if total_count is not None else "unknown",
+            "current_item": state.payload.get("last_completed_item"),
+            "status": "started",
+        },
+    )
+
     try:
         add_result = _execute_add(
             db_root=store.db_root,
@@ -2167,6 +2201,24 @@ def _redmine_reflect_batch(
         expected_revision=state.revision,
         expected_etag=state.etag,
     )
+    _emit_progress(
+        progress_callback,
+        {
+            "event": "redmine.add_batch",
+            "phase": "redmine.reflect",
+            "label_ja": "検索DB反映",
+            "provider": "redmine",
+            "completed": confirmed_count,
+            "current_index": confirmed_count,
+            "total": total_count,
+            "unit": "件",
+            "total_kind": "exact" if total_count is not None else "unknown",
+            "documents": batch_count,
+            "status": "success",
+            "checkpoint_saved": True,
+        },
+    )
+
     return current_source, current_state, add_result["summary"]
 
 

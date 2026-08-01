@@ -282,7 +282,7 @@ class LocalRagManager:
             self.output(message)
 
         return ProgressRenderer(
-            emit,
+            print if self.output is print else emit,
             operation=operation,
             provider=_PROVIDER_JA.get(str(provider or ""), str(provider or "")),
             is_tty=(
