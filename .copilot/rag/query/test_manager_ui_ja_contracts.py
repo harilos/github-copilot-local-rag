@@ -298,7 +298,7 @@ class ManagerJapaneseUiTests(unittest.TestCase):
                 "1",
                 "4",
                 "45",
-                "2",
+                "1",
                 "",
                 "",
             ]
@@ -348,7 +348,7 @@ class ManagerJapaneseUiTests(unittest.TestCase):
                 "Project",
                 "1",
                 "5",
-                "2",
+                "1",
                 "https://svn.example.com/repos/project",
                 "",
             ]
@@ -360,6 +360,57 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         self.assertEqual(
             "https://svn.example.com/repos/project",
             value["link"]["settings"]["repository_url"],
+        )
+
+    def test_http_svn_source_keeps_legacy_numeric_link_choices(self) -> None:
+        http_manager, _outputs = self.manager(
+            [
+                "https://svn.example.com/repos/project",
+                "Project",
+                "1",
+                "5",
+                "1",
+                "",
+                "",
+            ]
+        )
+        http_value = http_manager._prompt_new_svn_source()
+        assert http_value is not None
+        self.assertEqual("svn-http", http_value["link"]["strategy"])
+
+        web_manager, _outputs = self.manager(
+            [
+                "https://svn.example.com/repos/project",
+                "Project",
+                "1",
+                "5",
+                "2",
+                "https://svn-web.example.com/project",
+                "",
+            ]
+        )
+        web_value = web_manager._prompt_new_svn_source()
+        assert web_value is not None
+        self.assertEqual("svn-web-root", web_value["link"]["strategy"])
+
+    def test_svn_browser_url_rejects_non_http_before_registration(self) -> None:
+        manager, outputs = self.manager(
+            [
+                "svn://127.0.0.1:3690/project",
+                "Project",
+                "1",
+                "5",
+                "1",
+                "svn://example.com/project",
+            ]
+        )
+
+        value = manager._prompt_new_svn_source()
+
+        self.assertIsNone(value)
+        self.assertIn(
+            "must be an HTTP or HTTPS URL",
+            "\n".join(outputs),
         )
 
     def test_svn_strategy_switch_drops_hidden_settings(self) -> None:

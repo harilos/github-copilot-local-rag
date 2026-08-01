@@ -21,7 +21,8 @@ _MODULE_ROOT = Path(__file__).resolve().parent
 if str(_MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(_MODULE_ROOT))
 from help_links import MANAGER_HELP_EPILOG, MANAGER_HELP_URL
-from source_manager.errors import sanitize_diagnostic
+from source_manager.errors import SourceManagerError, sanitize_diagnostic
+from source_manager.security import validate_svn_fetch_url, validate_web_url
 from source_manager.manage_custom import load_manage_custom
 from source_manager.progress import ProgressRenderer
 from source_manager.subprocess_stream import (
@@ -1475,16 +1476,25 @@ class LocalRagManager:
         }
 
     def _prompt_new_svn_source(self) -> dict[str, Any] | None:
-        url = self._prompt_preserving_value(
-            "SVNのURL",
-            "",
-            required=True,
-            description=(
-                "HTTP(S)またはsvn://のSVN URLから、"
-                "DB内の専用作業場所へ取得します。"
-            ),
-            examples=self._examples("svn_repository_url"),
-        )
+        while True:
+            url = self._prompt_preserving_value(
+                "SVNのURL",
+                "",
+                required=True,
+                description=(
+                    "HTTP(S)またはsvn://のSVN URLから、"
+                    "DB内の専用作業場所へ取得します。"
+                ),
+                examples=self._examples("svn_repository_url"),
+            )
+            if url is None:
+                return None
+            try:
+                url = validate_svn_fetch_url(url, field="SVNのURL")
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
+                continue
+            break
         name = self._prompt_preserving_value(
             "Sourceの名前",
             "",
@@ -1544,9 +1554,9 @@ class LocalRagManager:
         link_strategy = self._select_value(
             "検索結果リンクの形式",
             (
-                ("none", "検索結果リンクを設定しない"),
                 ("svn-http", "Apache HTTP(S)互換の各ファイル直リンク"),
                 ("svn-web-root", "その他のSVN Web画面のトップページ"),
+                ("none", "検索結果リンクを設定しない"),
             ),
             default="none" if fetch_scheme == "svn" else "svn-http",
         )
@@ -1568,6 +1578,14 @@ class LocalRagManager:
             )
             if top_url is None:
                 return None
+            try:
+                top_url = validate_web_url(
+                    top_url,
+                    field="SVN Web画面のトップURL",
+                )
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
+                return None
             link_settings = {"repository_url": top_url}
         else:
             initial_link_url = url if fetch_scheme in {"http", "https"} else ""
@@ -1582,6 +1600,14 @@ class LocalRagManager:
                 examples=self._examples("svn_link_repository_url"),
             )
             if link_url is None:
+                return None
+            try:
+                link_url = validate_web_url(
+                    link_url,
+                    field="SVN Web公開用リポジトリURL",
+                )
+            except SourceManagerError as exc:
+                self._print_error(str(exc))
                 return None
             link_settings = {
                 "repository_url": link_url,

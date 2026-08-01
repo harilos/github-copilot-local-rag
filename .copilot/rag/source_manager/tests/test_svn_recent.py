@@ -72,10 +72,15 @@ class SvnRecentValidationTests(unittest.TestCase):
             "svn://example.com/repository#fragment",
             "svn:///repository",
             "svn://example.com:99999/repository",
+            "svn://example.com:/repository",
+            "svn://example.com:0/repository",
+            "svn://[invalid/repository",
             "svn://example.com",
             "file:///repository",
             "svn+ssh://example.com/repository",
             "svn://example.com/repository\nnext",
+            "svn://example.com/repository?",
+            "svn://example.com/repository#",
         )
         for repository_url in invalid:
             with self.subTest(repository_url=repository_url):

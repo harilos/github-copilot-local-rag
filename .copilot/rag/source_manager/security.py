@@ -73,7 +73,10 @@ def validate_web_url(value: Any, *, field: str) -> str:
 def validate_svn_fetch_url(value: Any, *, field: str) -> str:
     """Validate a credential-free URL that is safe to pass to svn checkout."""
     text = _bounded_text(value, field=field, limit=4096)
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
     if split.scheme.casefold() not in {"http", "https", "svn"}:
         raise SourceManagerError(
             f"{field} must use HTTP, HTTPS, or SVN"
@@ -82,18 +85,23 @@ def validate_svn_fetch_url(value: Any, *, field: str) -> str:
         raise SourceManagerError(f"{field} must include a host")
     try:
         hostname = split.hostname
-        split.port
+        port = split.port
     except ValueError as exc:
         raise SourceManagerError(
             f"{field} contains an invalid host or port"
         ) from exc
     if not hostname:
         raise SourceManagerError(f"{field} must include a host")
+    host_port = split.netloc.rsplit("@", 1)[-1]
+    if host_port.endswith(":"):
+        raise SourceManagerError(f"{field} contains an invalid port")
+    if port is not None and not 1 <= port <= 65535:
+        raise SourceManagerError(f"{field} contains an invalid port")
     if split.username is not None or split.password is not None:
         raise SourceManagerError(f"{field} must not contain credentials")
     if not split.path or not split.path.strip("/"):
         raise SourceManagerError(f"{field} must include a repository path")
-    if split.query or split.fragment:
+    if "?" in text or "#" in text:
         raise SourceManagerError(
             f"{field} cannot contain query or fragment"
         )
@@ -202,7 +210,10 @@ def _validate_persistable(value: Any, *, field: str, depth: int) -> None:
             )
         if _CREDENTIAL_ASSIGNMENT.search(value):
             raise SourceManagerError(f"{field} must not store credentials")
-        split = urlsplit(value)
+        try:
+            split = urlsplit(value)
+        except ValueError as exc:
+            raise SourceManagerError(f"{field} contains an invalid URL") from exc
         if split.scheme.casefold() in {"http", "https"}:
             validate_web_url(value, field=field)
         return
@@ -240,7 +251,10 @@ def _looks_absolute_path(value: str) -> bool:
     text = str(value).strip()
     if not text:
         return False
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+    except ValueError:
+        return False
     if split.scheme.casefold() in {"http", "https"} and split.netloc:
         return False
     return (
