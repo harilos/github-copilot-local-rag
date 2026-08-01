@@ -12,16 +12,36 @@ fi
 
 mkdir -p "$TARGET_DIR"
 
-RUNTIME_PYTHON="$TARGET_DIR/rag/query/.venv/bin/python"
-COMPLETION_MARKER="$TARGET_DIR/rag/query/.venv/.rag-deps-installed"
-PRE_UPDATE_MARKER=""
-if [ -f "$COMPLETION_MARKER" ]; then
-  PRE_UPDATE_MARKER="${COMPLETION_MARKER}.pre-update.$$"
-  if ! mv "$COMPLETION_MARKER" "$PRE_UPDATE_MARKER"; then
-    echo "setup_required: could not close the Local RAG lookup gate before update." >&2
-    exit 1
+QUERY_ROOT="$TARGET_DIR/rag/query"
+RUNTIME_PYTHON="$QUERY_ROOT/.venv/bin/python"
+PACKAGED_MANIFEST="$QUERY_ROOT/.packaged-runtime.json"
+ACTIVE_MARKER="$QUERY_ROOT/.rag-deps-installed"
+LEGACY_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"
+ACTIVE_BACKUP=""
+LEGACY_BACKUP=""
+ACTIVE_RESCUE=""
+LEGACY_RESCUE=""
+move_marker() {
+  marker="$1"; label="$2"
+  if [ ! -f "$marker" ]; then return; fi
+  backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$"; suffix=0
+  while [ -e "$backup" ]; do suffix=$((suffix + 1)); backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$.$suffix"; done
+  if ! mv "$marker" "$backup"; then echo "setup_required: could not close the Local RAG lookup gate before update." >&2; exit 1; fi
+  if [ "$label" = "active" ]; then ACTIVE_BACKUP="$backup"; else LEGACY_BACKUP="$backup"; fi
+}
+restore_markers() {
+  status=$?; trap - EXIT
+  if [ "$status" -ne 0 ]; then
+    active_source="$ACTIVE_BACKUP"; [ -f "$active_source" ] || active_source="$ACTIVE_RESCUE"
+    legacy_source="$LEGACY_BACKUP"; [ -f "$legacy_source" ] || legacy_source="$LEGACY_RESCUE"
+    if [ -n "$active_source" ] && [ -f "$active_source" ]; then rm -f -- "$ACTIVE_MARKER"; mkdir -p -- "$(dirname -- "$ACTIVE_MARKER")"; mv "$active_source" "$ACTIVE_MARKER" || true; fi
+    if [ -n "$legacy_source" ] && [ -f "$legacy_source" ]; then rm -f -- "$LEGACY_MARKER"; mkdir -p -- "$(dirname -- "$LEGACY_MARKER")"; mv "$legacy_source" "$LEGACY_MARKER" || true; fi
+    rm -f -- "$ACTIVE_RESCUE" "$LEGACY_RESCUE" || true
   fi
-fi
+  exit "$status"
+}
+trap restore_markers EXIT
+if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_marker "$LEGACY_MARKER" legacy; else move_marker "$LEGACY_MARKER" legacy; fi
 
 (
   cd "$PAYLOAD_DIR"
@@ -67,14 +87,17 @@ if [ -x "$RUNTIME_PYTHON" ]; then
     echo "setup_required: existing RAG runtime verification failed; run Local RAG setup before lookup." >&2
     exit 1
   fi
-elif [ -n "$PRE_UPDATE_MARKER" ]; then
+elif [ -n "$ACTIVE_BACKUP" ] || [ -n "$LEGACY_BACKUP" ]; then
   echo "setup_required: the existing Local RAG runtime Python is missing after update." >&2
   exit 1
 fi
-
-if [ -n "$PRE_UPDATE_MARKER" ]; then
-  rm -f "$PRE_UPDATE_MARKER"
-fi
+if [ -n "$ACTIVE_BACKUP" ]; then ACTIVE_RESCUE="$ACTIVE_BACKUP.cleanup"; cp -p -- "$ACTIVE_BACKUP" "$ACTIVE_RESCUE"; fi
+if [ -n "$LEGACY_BACKUP" ]; then LEGACY_RESCUE="$LEGACY_BACKUP.cleanup"; cp -p -- "$LEGACY_BACKUP" "$LEGACY_RESCUE"; fi
+rm -f -- "$ACTIVE_BACKUP" "$LEGACY_BACKUP"
+ACTIVE_BACKUP=""; LEGACY_BACKUP=""
+trap - EXIT
+rm -f -- "$ACTIVE_RESCUE" "$LEGACY_RESCUE" || true
+ACTIVE_RESCUE=""; LEGACY_RESCUE=""
 
 echo "Installed Copilot Local RAG files to: $TARGET_DIR"
 echo "Existing copilot-instructions.md was not overwritten by this repository."

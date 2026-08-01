@@ -25,6 +25,11 @@ $StageModel = Join-Path (Split-Path -Parent $TargetModel) (
 $BackupModel = Join-Path (Split-Path -Parent $TargetModel) (
     ".ruri-v3-30m-onnx-int8.backup-" + $Transaction
 )
+$PackagedManifest = Join-Path $TargetQuery ".packaged-runtime.json"
+$ActiveMarker = Join-Path $TargetQuery ".rag-deps-installed"
+$LegacyMarker = Join-Path $TargetRuntime ".rag-deps-installed"
+$ActiveMarkerBackup = $null
+$LegacyMarkerBackup = $null
 
 function Assert-ChildPath {
     param([string]$Root, [string]$Candidate)
@@ -47,6 +52,52 @@ function Remove-TransactionDirectory {
     }
     Assert-ChildPath -Root $Target -Candidate $Path
     [System.IO.Directory]::Delete($Path, $true)
+}
+
+function Move-CompletionMarker {
+    param([string]$Marker, [string]$Label)
+    if (-not (Test-Path -LiteralPath $Marker -PathType Leaf)) { return $null }
+    $Backup = Join-Path $TargetQuery (
+        ".rag-deps-installed." + $Label + ".pre-update." +
+        [Guid]::NewGuid().ToString("N")
+    )
+    [System.IO.File]::Move($Marker, $Backup)
+    return $Backup
+}
+
+function Restore-CompletionMarker {
+    param([string]$Backup, [string]$Marker)
+    if (-not $Backup -or -not (Test-Path -LiteralPath $Backup -PathType Leaf)) {
+        return
+    }
+    if (Test-Path -LiteralPath $Marker -PathType Leaf) {
+        [System.IO.File]::Delete($Marker)
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Marker) |
+        Out-Null
+    [System.IO.File]::Move($Backup, $Marker)
+}
+
+function Remove-CompletionMarkerBackups {
+    param([string[]]$Backups)
+    $Snapshots = @{}
+    foreach ($Backup in $Backups) {
+        if ($Backup -and (Test-Path -LiteralPath $Backup -PathType Leaf)) {
+            $Snapshots[$Backup] = [System.IO.File]::ReadAllBytes($Backup)
+        }
+    }
+    try {
+        foreach ($Backup in $Snapshots.Keys) {
+            [System.IO.File]::Delete($Backup)
+        }
+    } catch {
+        foreach ($Backup in $Snapshots.Keys) {
+            if (-not (Test-Path -LiteralPath $Backup -PathType Leaf)) {
+                [System.IO.File]::WriteAllBytes($Backup, $Snapshots[$Backup])
+            }
+        }
+        throw
+    }
 }
 
 function Test-ProtectedRelativePath {
@@ -128,6 +179,14 @@ Assert-ChildPath -Root $Target -Candidate $StageModel
 Assert-ChildPath -Root $Target -Candidate $BackupModel
 
 try {
+$HadPackagedRuntime = Test-Path -LiteralPath $PackagedManifest -PathType Leaf
+if ($HadPackagedRuntime) {
+    $ActiveMarkerBackup = Move-CompletionMarker -Marker $ActiveMarker -Label "active"
+    $LegacyMarkerBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
+} else {
+    $LegacyMarkerBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
+}
+
     Copy-Item -LiteralPath $SourceRuntime -Destination $StageRuntime -Recurse
     Copy-Item -LiteralPath $SourceModel -Destination $StageModel -Recurse
 
@@ -175,13 +234,16 @@ try {
 
     Remove-TransactionDirectory -Path $BackupRuntime
     Remove-TransactionDirectory -Path $BackupModel
+    Remove-CompletionMarkerBackups -Backups @($ActiveMarkerBackup, $LegacyMarkerBackup)
 } catch {
-    if (
-        (Test-Path -LiteralPath $BackupRuntime) -and
-        -not (Test-Path -LiteralPath $TargetRuntime)
-    ) {
+    if (Test-Path -LiteralPath $BackupRuntime -PathType Container) {
+        if (Test-Path -LiteralPath $TargetRuntime) {
+            Remove-TransactionDirectory -Path $TargetRuntime
+        }
         [System.IO.Directory]::Move($BackupRuntime, $TargetRuntime)
     }
+    Restore-CompletionMarker -Backup $ActiveMarkerBackup -Marker $ActiveMarker
+    Restore-CompletionMarker -Backup $LegacyMarkerBackup -Marker $LegacyMarker
     if (
         (Test-Path -LiteralPath $BackupModel) -and
         -not (Test-Path -LiteralPath $TargetModel)

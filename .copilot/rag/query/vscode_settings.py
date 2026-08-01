@@ -10,6 +10,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+class PolicyManualAction(ValueError):
+    """A target policy is valid JSONC but must not be changed automatically."""
+
 
 def _skip_ws_comments(text: str, index: int) -> int:
     size = len(text)
@@ -99,6 +102,7 @@ def _object_bounds(text: str, start: int = 0) -> tuple[int, int]:
 def _find_property(text: str, object_start: int, object_end: int, key: str):
     index = object_start + 1
     found = None
+    seen: set[str] = set()
     while True:
         index = _skip_ws_comments(text, index)
         if index >= object_end:
@@ -116,6 +120,9 @@ def _find_property(text: str, object_start: int, object_end: int, key: str):
             if quoted_key.startswith('"')
             else quoted_key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
         )
+        if raw_key in seen:
+            raise ValueError(f"duplicate object key: {raw_key}")
+        seen.add(raw_key)
         index = _skip_ws_comments(text, key_end)
         if index >= object_end or text[index] != ":":
             raise ValueError("missing property colon")
@@ -126,6 +133,37 @@ def _find_property(text: str, object_start: int, object_end: int, key: str):
                 raise ValueError(f"duplicate target key: {key}")
             found = (value_start, value_end)
         index = value_end
+
+
+def _object_property_keys(
+    text: str, object_start: int, object_end: int
+) -> set[str]:
+    index = object_start + 1
+    keys: set[str] = set()
+    while True:
+        index = _skip_ws_comments(text, index)
+        if index >= object_end:
+            return keys
+        if text[index] == ",":
+            index += 1
+            continue
+        if text[index] not in {'"', "'"}:
+            raise ValueError("object key must be quoted")
+        key_start = index
+        key_end = _scan_string(text, index)
+        quoted_key = text[key_start:key_end]
+        raw_key = (
+            json.loads(quoted_key)
+            if quoted_key.startswith('"')
+            else quoted_key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+        )
+        if raw_key in keys:
+            raise ValueError(f"duplicate object key: {raw_key}")
+        keys.add(raw_key)
+        index = _skip_ws_comments(text, key_end)
+        if index >= object_end or text[index] != ":":
+            raise ValueError("missing property colon")
+        index = _scan_value(text, _skip_ws_comments(text, index + 1))
 
 
 def _last_property_value_end(
@@ -199,18 +237,41 @@ def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
     )
 
 
-def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
+def _is_true(text: str, bounds: tuple[int, int] | None) -> bool:
+    return (
+        bounds is not None
+        and text[bounds[0] : bounds[1]].strip() == "true"
+    )
+
+
+def _rule_is_explicit_allow(text: str, bounds: tuple[int, int]) -> bool:
+    start = _skip_ws_comments(text, bounds[0])
+    if start >= bounds[1] or text[start] != "{":
+        return False
+    end = _scan_value(text, start) - 1
+    if _object_property_keys(text, start, end) != {
+        "approve",
+        "matchCommandLine",
+    }:
+        return False
+    return _is_true(text, _find_property(text, start, end, "approve")) and _is_true(
+        text, _find_property(text, start, end, "matchCommandLine")
+    )
+
+
+def patch_settings_with_status(
+    text: str, command_rules: tuple[str, ...]
+) -> tuple[str, bool]:
     if not text.strip():
         text = "{}\n"
     root_start, root_end = _object_bounds(text)
     enable = _find_property(
         text, root_start, root_end, "chat.tools.terminal.enableAutoApprove"
     )
-    if (
-        enable is not None
-        and text[enable[0] : enable[1]].strip().casefold() == "false"
-    ):
-        return text
+    if enable is not None:
+        enabled = text[enable[0] : enable[1]].strip()
+        if enabled != "true":
+            return text, True
     root_start, root_end = _object_bounds(text)
     found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
     rule_value = json.dumps(
@@ -226,25 +287,43 @@ def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
             root_start,
             root_end,
             f'"chat.tools.terminal.autoApprove": {{\n{rendered_rules}\n  }}',
-        )
+        ), False
     value_start, value_end = found
     container_start = _skip_ws_comments(text, value_start)
     if text[container_start] != "{":
-        raise ValueError("chat.tools.terminal.autoApprove exists but is not an object")
+        raise PolicyManualAction(
+            "chat.tools.terminal.autoApprove exists but is not an object"
+        )
     container_end = _scan_value(text, container_start) - 1
+    manual = False
     for command in command_rules:
         root_start, root_end = _object_bounds(text)
         found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
         value_start, value_end = found
         container_start = _skip_ws_comments(text, value_start)
         container_end = _scan_value(text, container_start) - 1
-        existing = _find_property(text, container_start, container_end, command)
+        try:
+            existing = _find_property(
+                text, container_start, container_end, command
+            )
+            explicit_allow = (
+                existing is not None
+                and _rule_is_explicit_allow(text, existing)
+            )
+        except ValueError as exc:
+            raise PolicyManualAction(str(exc)) from exc
         if existing is not None:
+            if not explicit_allow:
+                manual = True
             continue
         text = _upsert_object_entry(
             text, container_start, container_end, command, rule_value
         )
-    return text
+    return text, manual
+
+
+def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
+    return patch_settings_with_status(text, command_rules)[0]
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -300,12 +379,15 @@ def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
                 raise ValueError("unsupported settings encoding")
             had_bom = original_bytes.startswith(b"\xef\xbb\xbf")
             original = original_bytes.decode("utf-8-sig")
-            patched = patch_settings(original, command_rules)
+            try:
+                patched, target_manual = patch_settings_with_status(
+                    original, command_rules
+                )
+            except PolicyManualAction:
+                manual = True
+                continue
+            manual = manual or target_manual
             if patched == original:
-                if "chat.tools.terminal.enableAutoApprove" in original and (
-                    "false" in original.casefold()
-                ):
-                    manual = True
                 continue
             if path.is_file():
                 backup = path.with_name(
@@ -319,7 +401,10 @@ def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
             _atomic_write_bytes(path, encoded)
             changed += 1
         except (OSError, UnicodeError, ValueError) as exc:
-            errors.append(type(exc).__name__)
+            if isinstance(exc, ValueError) and "duplicate " in str(exc):
+                manual = True
+            else:
+                errors.append(type(exc).__name__)
     if checked == 0:
         status = "not_detected"
     elif errors and changed:

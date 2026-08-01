@@ -123,5 +123,127 @@ class VSCodeSettingsContractTests(unittest.TestCase):
         self.assertIn(r"search\\.py", patched)
 
 
+    def test_global_false_is_manual_and_second_run_is_byte_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            original = b'{"chat.tools.terminal.enableAutoApprove":false}\n'
+            path.write_bytes(original)
+            first = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", first["status"])
+            self.assertEqual(0, first["targets_changed"])
+            before_mtime = path.stat().st_mtime_ns
+            before_backups = list(path.parent.glob("*.local-rag-backup-*"))
+            second = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", second["status"])
+            self.assertEqual(original, path.read_bytes())
+            self.assertEqual(before_mtime, path.stat().st_mtime_ns)
+            self.assertEqual(before_backups, list(path.parent.glob("*.local-rag-backup-*")))
+
+    def test_one_denied_rule_and_one_added_rule_reports_manual_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            denied = self.rules[0].replace("\\", "\\\\").replace('"', '\\"')
+            path.write_text(
+                '{"chat.tools.terminal.autoApprove":{"' + denied + '":false}}\n',
+                encoding="utf-8",
+            )
+            first = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", first["status"])
+            self.assertEqual(1, first["targets_changed"])
+            rendered = path.read_text(encoding="utf-8")
+            self.assertIn(f'"{denied}":false', rendered)
+            self.assertIn(r"search\\.py", rendered)
+            before = path.read_bytes()
+            before_mtime = path.stat().st_mtime_ns
+            backups = list(path.parent.glob("*.local-rag-backup-*"))
+            second = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", second["status"])
+            self.assertEqual(0, second["targets_changed"])
+            self.assertEqual(before, path.read_bytes())
+            self.assertEqual(before_mtime, path.stat().st_mtime_ns)
+            self.assertEqual(backups, list(path.parent.glob("*.local-rag-backup-*")))
+
+    def test_incomplete_allow_object_is_manual_but_unrelated_false_is_not(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            first_rule = self.rules[0].replace("\\", "\\\\").replace('"', '\\"')
+            second_rule = self.rules[1].replace("\\", "\\\\").replace('"', '\\"')
+            path.write_text(
+                '{"unrelated":false,"chat.tools.terminal.autoApprove":{'
+                f'"{first_rule}":{{"approve":true}},'
+                f'"{second_rule}":{{"approve":true,"matchCommandLine":true}}'
+                '}}\n',
+                encoding="utf-8",
+            )
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", result["status"])
+            self.assertEqual(0, result["targets_changed"])
+            path.write_text('{"unrelated":false}\n', encoding="utf-8")
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("configured_on_disk", result["status"])
+            self.assertEqual(1, result["targets_changed"])
+
+    def test_duplicate_target_rule_is_manual_and_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            denied = self.rules[0].replace("\\", "\\\\").replace('"', '\\"')
+            original = (
+                '{"chat.tools.terminal.autoApprove":{'
+                f'"{denied}":false,"{denied}":true'
+                '}}\n'
+            ).encode()
+            path.write_bytes(original)
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", result["status"])
+            self.assertEqual(0, result["targets_changed"])
+            self.assertEqual(original, path.read_bytes())
+
+
+    def test_unknown_global_types_and_approve_false_fail_closed_manual(self) -> None:
+        for value in ('"false"', "null", "{}", "0", "TRUE"):
+            with self.subTest(global_value=value), tempfile.TemporaryDirectory() as directory:
+                appdata = Path(directory)
+                path = appdata / "Code" / "User" / "settings.json"
+                path.parent.mkdir(parents=True)
+                original = (
+                    '{"chat.tools.terminal.enableAutoApprove":' + value + '}\n'
+                ).encode()
+                path.write_bytes(original)
+                result = configure_vscode(self.home, appdata)
+                self.assertEqual("manual_action_required", result["status"])
+                self.assertEqual(0, result["targets_changed"])
+                self.assertEqual(original, path.read_bytes())
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            first_rule = self.rules[0].replace("\\", "\\\\").replace('"', '\\"')
+            second_rule = self.rules[1].replace("\\", "\\\\").replace('"', '\\"')
+            original = (
+                '{"chat.tools.terminal.autoApprove":{'
+                f'"{first_rule}":{{"approve":false,"matchCommandLine":true}},'
+                f'"{second_rule}":{{"approve":true,"matchCommandLine":true,"unknown":1}}'
+                '}}\n'
+            ).encode()
+            path.write_bytes(original)
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", result["status"])
+            self.assertEqual(0, result["targets_changed"])
+            self.assertEqual(original, path.read_bytes())
+            uppercase = original.replace(b"false", b"TRUE", 1)
+            path.write_bytes(uppercase)
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("manual_action_required", result["status"])
+            self.assertEqual(uppercase, path.read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

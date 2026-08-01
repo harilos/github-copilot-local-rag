@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -109,11 +111,12 @@ class InstallerExclusionContractTests(unittest.TestCase):
         )
         self.assertIn(".pre-update.", shell)
         self.assertIn(".pre-update.", powershell)
-        self.assertIn('mv "$COMPLETION_MARKER"', shell)
-        self.assertIn(
-            "[System.IO.File]::Move($CompletionMarker, $PreUpdateMarker)",
-            powershell,
-        )
+        for marker in ('"$ACTIVE_MARKER"', '"$LEGACY_MARKER"'):
+            self.assertIn(marker, shell)
+        self.assertIn("Move-CompletionMarker", powershell)
+        self.assertIn("$ActiveMarker", powershell)
+        self.assertIn("$LegacyMarker", powershell)
+        self.assertIn("Restore-CompletionMarker", powershell)
         for retired in (
             "rag/export_migration.sh",
             "rag/migration_archive.py",
@@ -349,6 +352,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
             target_python.chmod(0o755)
             marker = target_query / ".venv" / ".rag-deps-installed"
             self._write_current_valid_marker(target / "rag", marker)
+            marker_before = marker.read_bytes()
             completed = subprocess.run(
                 ["sh", str(source / "install.sh")],
                 stdout=subprocess.PIPE,
@@ -366,12 +370,13 @@ class InstallerExclusionContractTests(unittest.TestCase):
             )
             self.assertNotEqual(0, completed.returncode)
             self.assertIn("setup_required:", completed.stderr)
-            self.assertFalse(marker.exists())
+            self.assertTrue(marker.exists())
+            self.assertEqual(marker_before, marker.read_bytes())
             self.assertEqual(
-                1,
-                len(list(marker.parent.glob(
-                    ".rag-deps-installed.pre-update.*"
-                ))),
+                [],
+                list(target_query.glob(
+                    ".rag-deps-installed.*.pre-update.*"
+                )),
             )
 
     @unittest.skipIf(
@@ -394,6 +399,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
             (target_query / "search.py").mkdir(parents=True)
             marker = target_query / ".venv" / ".rag-deps-installed"
             self._write_current_valid_marker(target / "rag", marker)
+            marker_before = marker.read_bytes()
             completed = subprocess.run(
                 ["sh", str(source / "install.sh")],
                 stdout=subprocess.PIPE,
@@ -410,12 +416,199 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(0, completed.returncode)
-            self.assertFalse(marker.exists())
+            self.assertTrue(marker.exists())
+            self.assertEqual(marker_before, marker.read_bytes())
             self.assertEqual(
-                1,
-                len(list(marker.parent.glob(
-                    ".rag-deps-installed.pre-update.*"
-                ))),
+                [],
+                list(target_query.glob(
+                    ".rag-deps-installed.*.pre-update.*"
+                )),
+            )
+
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "PowerShell installer execution is Windows-specific",
+    )
+    def test_powershell_packaged_marker_migration_and_failure_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            query = source / ".copilot" / "rag" / "query"
+            query.mkdir(parents=True)
+            shutil.copy2(INSTALL_PS1, source / "install.ps1")
+            (query / "setup.py").write_text(
+                "from pathlib import Path\n"
+                "import os\n"
+                "marker = Path(__file__).parent / '.rag-deps-installed'\n"
+                "marker.write_bytes(b'new-marker')\n"
+                "raise SystemExit(9 if os.environ.get('FAIL_REFRESH') else 0)\n",
+                encoding="utf-8",
+            )
+
+            def run_case(name: str, marker_kind: str, *, fail: bool, runtime: bool):
+                target = root / name
+                target_query = target / "rag" / "query"
+                (target_query / ".venv" / "Scripts").mkdir(parents=True)
+                (target_query / ".packaged-runtime.json").write_text(
+                    '{"schema":"fixture"}\n', encoding="utf-8"
+                )
+                if runtime:
+                    shutil.copy2(
+                        Path(sys.executable),
+                        target_query / ".venv" / "Scripts" / "python.exe",
+                    )
+                marker = (
+                    target_query / ".rag-deps-installed"
+                    if marker_kind == "active"
+                    else target_query / ".venv" / ".rag-deps-installed"
+                )
+                marker.write_bytes(b"old-marker")
+                environment = os.environ.copy()
+                if fail:
+                    environment["FAIL_REFRESH"] = "1"
+                completed = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(source / "install.ps1"),
+                        "-Target",
+                        str(target),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=environment,
+                    timeout=30,
+                    check=False,
+                )
+                return completed, target_query, marker
+
+            completed, target_query, legacy = run_case(
+                "legacy-success", "legacy", fail=False, runtime=True
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertFalse(legacy.exists())
+            self.assertEqual(
+                b"new-marker",
+                (target_query / ".rag-deps-installed").read_bytes(),
+            )
+            self.assertEqual(
+                [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
+            )
+
+            for name, runtime in (("postvalidate-failure", True), ("python-missing", False)):
+                completed, target_query, active = run_case(
+                    name, "active", fail=True, runtime=runtime
+                )
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual(b"old-marker", active.read_bytes())
+                self.assertEqual(
+                    [],
+                    list(target_query.glob(".rag-deps-installed.*.pre-update.*")),
+                )
+
+
+    def test_all_installer_entrypoints_share_packaged_marker_contract(self) -> None:
+        module_path = (
+            REPOSITORY_ROOT
+            / ".copilot"
+            / "rag"
+            / "source_manager"
+            / "package_installers.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "installer_contract_fixture", module_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        portable = (
+            REPOSITORY_ROOT
+            / "tools"
+            / "windows_portable"
+            / "install-template.ps1"
+        ).read_text(encoding="utf-8")
+        shell_entrypoints = (
+            INSTALL_SH.read_text(encoding="utf-8"),
+            module.INSTALL_SH_TEXT,
+        )
+        powershell_entrypoints = (
+            INSTALL_PS1.read_text(encoding="utf-8"),
+            module.INSTALL_PS1_TEXT,
+            portable,
+        )
+        for text in shell_entrypoints:
+            for fragment in (
+                'ACTIVE_MARKER="$QUERY_ROOT/.rag-deps-installed"',
+                'LEGACY_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"',
+                'move_marker "$ACTIVE_MARKER" active',
+                'move_marker "$LEGACY_MARKER" legacy',
+                "restore_markers",
+            ):
+                self.assertIn(fragment, text)
+        for text in powershell_entrypoints:
+            for fragment in (
+                '$ActiveMarker = Join-Path',
+                '$LegacyMarker = Join-Path',
+                'Move-CompletionMarker',
+                'Restore-CompletionMarker',
+                '"active"',
+                '"legacy"',
+            ):
+                self.assertIn(fragment, text)
+
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell execution is Windows-specific")
+    def test_generated_powershell_installer_executes_fixed_packaged_update(self) -> None:
+        module_path = (
+            REPOSITORY_ROOT / ".copilot" / "rag" / "source_manager" / "package_installers.py"
+        )
+        spec = importlib.util.spec_from_file_location("generated_installer_fixture", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            query = source / ".copilot" / "rag" / "query"
+            query.mkdir(parents=True)
+            (source / "install.ps1").write_text(module.INSTALL_PS1_TEXT, encoding="utf-8")
+            (query / "setup.py").write_text(
+                "from pathlib import Path\n"
+                "(Path(__file__).parent / '.rag-deps-installed').write_bytes(b'new')\n",
+                encoding="utf-8",
+            )
+            target = root / "target"
+            target_query = target / "rag" / "query"
+            scripts = target_query / ".venv" / "Scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy2(Path(sys.executable), scripts / "python.exe")
+            (target_query / ".packaged-runtime.json").write_text(
+                '{"schema":"fixture"}\n', encoding="utf-8"
+            )
+            active = target_query / ".rag-deps-installed"
+            active.write_bytes(b"old")
+            completed = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", str(source / "install.ps1"), "-Target", str(target),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(b"new", active.read_bytes())
+            self.assertEqual(
+                [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
             )
 
 

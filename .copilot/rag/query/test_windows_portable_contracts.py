@@ -356,5 +356,20 @@ class PortableRuntimeContractTests(unittest.TestCase):
             self.assertEqual(before, after)
             self.assertFalse((query / ".setup.lock").exists())
 
+    def test_manifest_external_runtime_file_and_legacy_marker_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._fixture(root)
+            runtime = manifest.parent / ".venv"
+            extra = runtime / "operator-extra.txt"
+            extra.write_text("extra\n", encoding="utf-8")
+            with self.assertRaisesRegex(PortableRuntimeError, "unexpected"):
+                load_and_verify_runtime(manifest, check_platform=False)
+            extra.unlink()
+            (runtime / ".rag-deps-installed").write_bytes(b"legacy")
+            with self.assertRaisesRegex(PortableRuntimeError, "unexpected"):
+                load_and_verify_runtime(manifest, check_platform=False)
+
+
 if __name__ == "__main__":
     unittest.main()
