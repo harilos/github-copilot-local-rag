@@ -4,7 +4,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .errors import SourceManagerError
 
@@ -113,6 +113,29 @@ def validate_svn_fetch_url(value: Any, *, field: str) -> str:
         raise SourceManagerError(f"{field} must not contain credentials")
     if not split.path or not split.path.strip("/"):
         raise SourceManagerError(f"{field} must include a repository path")
+    if any(character.isspace() for character in text):
+        raise SourceManagerError(f"{field} must not contain whitespace")
+    if re.search(r"%(?![0-9A-Fa-f]{2})", text):
+        raise SourceManagerError(f"{field} contains invalid URL encoding")
+    decoded = _fully_unquote(text, field=field)
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for character in decoded
+    ):
+        raise SourceManagerError(f"{field} contains control characters")
+    if any(character.isspace() for character in decoded):
+        raise SourceManagerError(f"{field} must not contain whitespace")
+    try:
+        decoded_split = urlsplit(decoded)
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
+    if decoded_split.username is not None or decoded_split.password is not None:
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if "\\" in decoded_split.path or any(
+        component in {".", ".."}
+        for component in decoded_split.path.split("/")
+    ):
+        raise SourceManagerError(f"{field} contains an unsafe path")
     if "?" in text or "#" in text:
         raise SourceManagerError(
             f"{field} cannot contain query or fragment"
@@ -120,6 +143,16 @@ def validate_svn_fetch_url(value: Any, *, field: str) -> str:
     if _CREDENTIAL_ASSIGNMENT.search(text):
         raise SourceManagerError(f"{field} must not contain credentials")
     return text
+
+
+def _fully_unquote(value: str, *, field: str) -> str:
+    decoded = value
+    for _ in range(len(decoded) + 1):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    raise SourceManagerError(f"{field} URL encoding is too deeply nested")
 
 
 def validate_environment_name(value: Any, *, field: str) -> str:
