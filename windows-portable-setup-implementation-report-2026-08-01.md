@@ -1,12 +1,41 @@
 # Windows portable setup replacement implementation report
 
+> **Superseded / release blocked.** This report describes the original
+> `d22e031` implementation and is not release evidence. The fix-forward work
+> on `fix/windows-portable-release-blockers` found release-blocking defects
+> that invalidate the earlier “complete” assessments below. Do not publish a
+> ZIP, create a tag or GitHub Release, or close Issue #8 from this report.
+
 - Date: 2026-08-01
-- Worktree: `C:\Users\harilos\Documents\Codex\2026-08-01\github-copilot-local-rag-windows-portable`
+- Worktree: `<WORKTREE>`
 - Branch: `refactor/windows-portable-setup`
 - Base: `origin/main`
 - Source instruction: `local-rag-windows-portable-setup-replacement-instructions-2026-08-01.md`
-- Release status: **implementation complete enough for review; release gates remain open**
-- Integration target: **direct commit to `main` requested; no PR**
+- Release status: **SUPERSEDED / RELEASE BLOCKED**
+- Integration status: `d22e031` is the fix-forward base; no release approval
+  follows from its presence on `main`
+
+## Fix-forward corrections
+
+The original report did not detect that setup wrote mutable state inside the
+closed-set runtime, package DBs were skipped by the installer, product overlay
+was not transactional, archive verification was not exact-coverage, raw live
+DB input lacked a secret-Source classification proof, VS Code auto-approval
+was default-on and JSONC-unsafe, and the runtime/license/SBOM inputs were
+incomplete.
+
+Fix-forward commits completed so far:
+
+- `f875fe0`: move packaged completion state outside `.venv`, post-validate
+  normal writes, restore a valid previous marker on failure, and keep
+  `--verify-only` from creating the setup lock.
+- `9369427`: make VS Code auto-approval an explicit opt-in, preserve inline
+  JSONC comments, use public script paths and full-command-line rule objects,
+  and avoid creating VS Code paths when VS Code is absent.
+
+All package v2, DB artifact, trust bootstrap, full transaction, provenance,
+license, migration, and Windows acceptance claims remain `NOT RUN` or
+`BLOCKED`.
 
 ## Outcome
 
@@ -92,11 +121,19 @@ All tracked files below `setup_exe_build/`, including the NSIS builder, post-ins
 | Python compilation of changed/new implementation modules | Passed |
 | PowerShell AST parse: new build/install scripts and root installer | Passed |
 | `git diff --check` | Passed |
-| Full query discovery | 432 run; 38 errors, 11 skipped; no assertion failures |
+| Full query discovery | **Invalid as release evidence: collection/import errors present** |
 
-The 38 full-discovery errors are outside the new portable tests. They consist of missing optional package imports and existing source-manager/source-link API mismatches in the current base. The captured run log is:
+The earlier `432 run; 38 errors; no assertion failures` wording was
+incorrect: import/discovery errors mean affected assertions were not
+collected. Another environment also observed a different count, so this was
+not a reproducible baseline. The historical local log location is redacted:
 
-`C:\Users\harilos\AppData\Local\Temp\local-rag-windows-portable-query-tests-final.log`
+`<TEMP>/local-rag-windows-portable-query-tests-final.log`
+
+Real Windows 10/11, PowerShell 5.1/7, MOTW/AllSigned, Defender, network-zero,
+VS Code UI/security, actual CPython/model/DB, and migration acceptance were
+not performed by the original implementation and must be recorded as
+`NOT RUN`, not inferred from unit tests or AST parsing.
 
 ## Build interface
 
@@ -105,6 +142,10 @@ Expected release artifact name:
 `local-rag-windows-x64-<version>.zip`
 
 Builder entry point:
+
+> The following interface is historical and blocked. It accepts caller
+> self-asserted identities and does not implement the required package-v2
+> trust chain. Do not use it to create a release artifact.
 
 ```powershell
 .\tools\windows_portable\build_package.ps1 `
@@ -133,4 +174,7 @@ A release build refuses to overwrite an existing artifact and emits the ZIP SHA-
 
 ## Repository state
 
-The implementation is integrated directly into `main` at the user's request. No GitHub PR or release was created.
+`d22e031` is present on `main` and remains the required fix-forward
+ancestor. No GitHub PR or release was created. Fix-forward branch commits are
+not approved for local-main merge or origin push, and no such operation is
+reported here.
