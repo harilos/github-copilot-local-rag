@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -312,6 +314,98 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
             run()
             self.assertEqual(401, counts["detail"])
             self.assertEqual(81, counts["batch"])
+
+    def test_localhost_http_refresh_keeps_credentials_out_of_output(self) -> None:
+        state = {
+            "details": 0,
+            "headers": [],
+            "updated": {
+                1: "2026-07-29T01:00:00Z",
+                2: "2026-07-29T01:00:00Z",
+            },
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                state["headers"].append(
+                    self.headers.get("X-Redmine-API-Key")
+                )
+                parsed = urlsplit(self.path)
+                tail = parsed.path.rsplit("/", 1)[-1]
+                if tail == "issues.json":
+                    payload = {
+                        "issues": [
+                            {"id": issue_id, "updated_on": updated_on}
+                            for issue_id, updated_on in state["updated"].items()
+                        ],
+                        "total_count": 2,
+                    }
+                else:
+                    state["details"] += 1
+                    issue_id = int(tail.removesuffix(".json"))
+                    payload = {
+                        "issue": {
+                            "description": "fixture",
+                            "id": issue_id,
+                            "journals": [],
+                            "subject": f"Issue {issue_id}",
+                            "updated_on": state["updated"][issue_id],
+                        }
+                    }
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                source_key = "src_redmine-http-0123456789ab"
+                work_path = (
+                    f"sources/{source_key}/work/ingest/{source_key}"
+                )
+                work = Path(temporary) / work_path
+                work.mkdir(parents=True)
+                project_url = (
+                    f"http://127.0.0.1:{server.server_port}/projects/project"
+                )
+                plan = build_fetch_plan(
+                    source_key=source_key,
+                    provider="redmine",
+                    settings={
+                        "project_url": project_url,
+                        "updated_within_days": None,
+                        "api_key_env": "REDMINE_TEST_KEY",
+                    },
+                    logical_root=work_path,
+                    work_path=work_path,
+                ).to_dict()
+                arguments = {
+                    "plan": plan,
+                    "work_directory": work,
+                    "state": {"started_at": "2026-07-29T01:00:00Z"},
+                    "environment": {"REDMINE_TEST_KEY": "[REDACTED]"},
+                }
+                execute_fetch_plan(**arguments)
+                self.assertEqual(2, state["details"])
+                execute_fetch_plan(**arguments)
+                self.assertEqual(2, state["details"])
+                self.assertTrue(state["headers"])
+                self.assertEqual(
+                    {"[REDACTED]"},
+                    set(state["headers"]),
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=10)
 
 
 if __name__ == "__main__":
