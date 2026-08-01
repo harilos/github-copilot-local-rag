@@ -235,6 +235,92 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
                 progress_callback=None,
             )
 
+    def test_inventory_requires_valid_total_count(self) -> None:
+        invalid_totals = (
+            (False, [{"id": 1, "updated_on": "2026-07-29T01:00:00Z"}]),
+            ("1", [{"id": 1, "updated_on": "2026-07-29T01:00:00Z"}]),
+            (-1, []),
+            (0, [{"id": 1, "updated_on": "2026-07-29T01:00:00Z"}]),
+        )
+        payloads = [
+            {"issues": [{"id": 1, "updated_on": "2026-07-29T01:00:00Z"}]},
+            *(
+                {"issues": issues, "total_count": total}
+                for total, issues in invalid_totals
+            ),
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                execution = SimpleNamespace(
+                    _get_with_retry=lambda *_args, **_kwargs: (
+                        200,
+                        json.dumps(payload).encode("utf-8"),
+                    ),
+                    _emit_http_progress=lambda *_args, **_kwargs: None,
+                )
+                with self.assertRaisesRegex(
+                    SourceManagerError,
+                    "redmine_inventory_changed",
+                ):
+                    _inventory(
+                        settings={
+                            "project_url": (
+                                "http://localhost:3000/projects/project"
+                            ),
+                            "api_key_env": "REDMINE_TEST_KEY",
+                        },
+                        getter=object(),
+                        environment={"REDMINE_TEST_KEY": "[REDACTED]"},
+                        updated_on_cutoff=None,
+                        execution=execution,
+                        progress_callback=None,
+                    )
+
+    def test_inventory_total_count_must_stay_constant_across_pages(self) -> None:
+        pages = iter(
+            (
+                {
+                    "issues": [
+                        {
+                            "id": issue_id,
+                            "updated_on": "2026-07-29T01:00:00Z",
+                        }
+                        for issue_id in range(1, 101)
+                    ],
+                    "total_count": 101,
+                },
+                {
+                    "issues": [
+                        {"id": 101, "updated_on": "2026-07-29T01:00:00Z"}
+                    ],
+                    "total_count": 100,
+                },
+            )
+        )
+        execution = SimpleNamespace(
+            _get_with_retry=lambda *_args, **_kwargs: (
+                200,
+                json.dumps(next(pages)).encode("utf-8"),
+            ),
+            _emit_http_progress=lambda *_args, **_kwargs: None,
+        )
+
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "redmine_inventory_changed",
+        ):
+            _inventory(
+                settings={
+                    "project_url": "http://localhost:3000/projects/project",
+                    "api_key_env": "REDMINE_TEST_KEY",
+                },
+                getter=object(),
+                environment={"REDMINE_TEST_KEY": "[REDACTED]"},
+                updated_on_cutoff=None,
+                execution=execution,
+                progress_callback=None,
+            )
+
     def test_four_hundred_issue_fixture_is_stable_after_first_run(self) -> None:
         with tempfile.TemporaryDirectory(prefix="redmine 日本語 ") as temporary:
             root = Path(temporary)

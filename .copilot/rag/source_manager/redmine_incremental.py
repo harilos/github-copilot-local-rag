@@ -140,6 +140,29 @@ def _inventory(
                 "Redmine issue inventory response has no issues",
                 stage="fetch.redmine",
             )
+        total_value = payload.get("total_count")
+        if (
+            isinstance(total_value, bool)
+            or not isinstance(total_value, int)
+            or total_value < 0
+        ):
+            raise SourceManagerError(
+                "redmine_inventory_changed",
+                stage="fetch.redmine",
+            )
+        total = total_value
+        if expected_total is None:
+            expected_total = total
+        elif expected_total != total:
+            raise SourceManagerError(
+                "redmine_inventory_changed",
+                stage="fetch.redmine",
+            )
+        if offset > total or offset + len(issues) > total:
+            raise SourceManagerError(
+                "redmine_inventory_changed",
+                stage="fetch.redmine",
+            )
         for issue in issues:
             issue_id = issue.get("id") if isinstance(issue, dict) else None
             if (
@@ -156,14 +179,6 @@ def _inventory(
                 (issue_id, _parse_timestamp(issue.get("updated_on")))
             )
         offset += len(issues)
-        total = int(payload.get("total_count") or offset)
-        if expected_total is None:
-            expected_total = total
-        elif expected_total != total:
-            raise SourceManagerError(
-                "redmine_inventory_changed",
-                stage="fetch.redmine",
-            )
         execution._emit_http_progress(
             progress_callback,
             {
