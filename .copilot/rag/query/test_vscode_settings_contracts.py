@@ -127,6 +127,9 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             b'{"x":[,]}\n',
             b'{/*comment*/,}\n',
             b'{"x":,}\n',
+            b'{"editor.fontSize":NaN}\n',
+            b'{"editor.fontSize":Infinity}\n',
+            b'{"editor.fontSize":-Infinity}\n',
         )
         for original in malformed_values:
             with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:

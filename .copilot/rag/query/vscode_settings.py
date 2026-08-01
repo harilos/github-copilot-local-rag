@@ -105,9 +105,15 @@ def _validated_jsonc(text: str) -> None:
             ):
                 normalized[index] = " "
         index += 1
+    def reject_nonstandard_constant(value: str) -> None:
+        raise ValueError(f"non-standard JSON constant: {value}")
+
     try:
-        json.loads("".join(normalized))
-    except json.JSONDecodeError as exc:
+        json.loads(
+            "".join(normalized),
+            parse_constant=reject_nonstandard_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError("malformed JSONC") from exc
 
 
