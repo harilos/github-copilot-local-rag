@@ -1241,6 +1241,23 @@ class ProviderAndRunnerContracts(unittest.TestCase):
 
         self.assertNotIn("link", value)
 
+    def test_svn_without_browser_link_publishes_type_only_metadata(
+        self,
+    ) -> None:
+        value = _canonical_source(
+            {
+                "source_id": "indexed-svn-source",
+                "display_name": "SVN repository",
+                "source_type": "svn",
+                "fetch": {
+                    "repository_url": "svn://127.0.0.1:3690/project",
+                },
+            }
+        )
+
+        self.assertEqual("svn", value["source_type"])
+        self.assertNotIn("link", value)
+
     def test_pending_metadata_publishes_to_canonical_sidecar(self) -> None:
         stored = SourceStore(self.db_root).create_source(
             source_type="github",

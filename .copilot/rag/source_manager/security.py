@@ -70,6 +70,38 @@ def validate_web_url(value: Any, *, field: str) -> str:
     return text
 
 
+def validate_svn_fetch_url(value: Any, *, field: str) -> str:
+    """Validate a credential-free URL that is safe to pass to svn checkout."""
+    text = _bounded_text(value, field=field, limit=4096)
+    split = urlsplit(text)
+    if split.scheme.casefold() not in {"http", "https", "svn"}:
+        raise SourceManagerError(
+            f"{field} must use HTTP, HTTPS, or SVN"
+        )
+    if not split.netloc:
+        raise SourceManagerError(f"{field} must include a host")
+    try:
+        hostname = split.hostname
+        split.port
+    except ValueError as exc:
+        raise SourceManagerError(
+            f"{field} contains an invalid host or port"
+        ) from exc
+    if not hostname:
+        raise SourceManagerError(f"{field} must include a host")
+    if split.username is not None or split.password is not None:
+        raise SourceManagerError(f"{field} must not contain credentials")
+    if not split.path or not split.path.strip("/"):
+        raise SourceManagerError(f"{field} must include a repository path")
+    if split.query or split.fragment:
+        raise SourceManagerError(
+            f"{field} cannot contain query or fragment"
+        )
+    if _CREDENTIAL_ASSIGNMENT.search(text):
+        raise SourceManagerError(f"{field} must not contain credentials")
+    return text
+
+
 def validate_environment_name(value: Any, *, field: str) -> str:
     name = _bounded_text(value, field=field, limit=128)
     if not _ENVIRONMENT_NAME.fullmatch(name):

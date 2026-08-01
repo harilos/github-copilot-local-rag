@@ -298,8 +298,9 @@ class ManagerJapaneseUiTests(unittest.TestCase):
                 "1",
                 "4",
                 "45",
-                "1",
-                "1",
+                "2",
+                "",
+                "",
             ]
         )
 
@@ -316,6 +317,50 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         text = "\n".join(outputs)
         self.assertIn("ファイルのSVN最終更新日時", text)
         self.assertIn("制限しない【既定・従来どおり】", text)
+
+    def test_svn_transport_source_defaults_to_no_browser_link(self) -> None:
+        repository_url = "svn://127.0.0.1:3690/hogehoge-republic"
+        manager, outputs = self.manager(
+            [
+                repository_url,
+                "国家資料",
+                "1",
+                "5",
+                "",
+                "",
+            ]
+        )
+
+        value = manager._prompt_new_svn_source()
+
+        assert value is not None
+        self.assertEqual(repository_url, value["fetch"]["repository_url"])
+        self.assertNotIn("link", value)
+        self.assertIn(
+            "検索結果リンクを設定しない",
+            "\n".join(outputs),
+        )
+
+    def test_svn_transport_source_accepts_separate_http_browser_url(self) -> None:
+        manager, _outputs = self.manager(
+            [
+                "svn://127.0.0.1:3690/project",
+                "Project",
+                "1",
+                "5",
+                "2",
+                "https://svn.example.com/repos/project",
+                "",
+            ]
+        )
+
+        value = manager._prompt_new_svn_source()
+
+        assert value is not None
+        self.assertEqual(
+            "https://svn.example.com/repos/project",
+            value["link"]["settings"]["repository_url"],
+        )
 
     def test_svn_strategy_switch_drops_hidden_settings(self) -> None:
         existing = {
