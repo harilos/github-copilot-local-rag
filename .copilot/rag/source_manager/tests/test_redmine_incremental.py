@@ -105,6 +105,31 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
                 _local_issue_timestamp(path),
             )
 
+    def test_last_structured_metadata_heading_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "15.md"
+            canonical = {
+                "id": 15,
+                "updated_on": "2026-07-29T01:00:00Z",
+            }
+            path.write_text(
+                "# Issue 15\n\n"
+                "Description supplied by a user:\n\n"
+                "## Structured issue metadata\n\n"
+                "```json\n"
+                '{"id":15,"updated_on":"1999-01-01T00:00:00Z"}\n'
+                "```\n\n"
+                "## Structured issue metadata\n\n"
+                "```json\n"
+                + json.dumps(canonical)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc),
+                _local_issue_timestamp(path),
+            )
+
     def test_untrusted_local_metadata_fetches_only_that_issue(self) -> None:
         cases = {
             "id-mismatch": (

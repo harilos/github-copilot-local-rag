@@ -32,6 +32,8 @@ def _local_issue_timestamp(path: Path) -> datetime | None:
     except OSError:
         return None
     try:
+        if not path.stem.isdecimal():
+            return None
         issue_id = int(path.stem)
     except ValueError:
         return None
@@ -54,7 +56,8 @@ def _structured_issue_payload(text: str) -> dict[str, Any] | None:
         return _json_object(stripped)
 
     lines = text.splitlines()
-    for index, line in enumerate(lines):
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
         if line.strip() != _STRUCTURED_METADATA_HEADING:
             continue
         cursor = index + 1
