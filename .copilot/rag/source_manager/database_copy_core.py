@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .errors import SourceManagerError
+from .persistent_paths import create_persistent_staging_directory
 from .database_copy_storage import (
     copy_catalog_snapshot,
     copy_chroma_snapshot,
@@ -52,10 +53,10 @@ def copy_database(
     validate_tree_for_copy(source)
 
     excluded = [dict(item) for item in excluded_sources]
-    temporary_parent = Path(
-        tempfile.mkdtemp(prefix=f".copy-{name}-", dir=str(destination.parent))
+    staging = create_persistent_staging_directory(
+        destination.parent,
+        prefix=f".copy-{name}-",
     )
-    staging = temporary_parent / name
     try:
         emit(progress_callback, "copy.files", "DBファイルのコピー", 0, None)
         shutil.copytree(
@@ -63,6 +64,7 @@ def copy_database(
             staging,
             copy_function=shutil.copy2,
             ignore=live_database_ignore(source),
+            dirs_exist_ok=True,
         )
         emit(progress_callback, "copy.files", "DBファイルのコピー", 1, 1)
         copy_catalog_snapshot(source, staging, error_type=DatabaseCopyError)
@@ -122,8 +124,8 @@ def copy_database(
             shutil.rmtree(destination, ignore_errors=True)
         raise
     finally:
-        if temporary_parent.exists() and not temporary_parent.is_symlink():
-            shutil.rmtree(temporary_parent, ignore_errors=True)
+        if staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def live_database_ignore(source_root: Path):
