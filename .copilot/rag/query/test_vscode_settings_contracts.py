@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import re
 from pathlib import Path
 
 from vscode_settings import (
@@ -34,6 +35,30 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered.casefold())
         self.assertNotIn(r"query\\list_dbs\.py", rendered)
         self.assertNotIn(r"query\\search\.py", rendered)
+
+    def test_rules_match_documented_powershell_commands_only(self) -> None:
+        def matches(rule: str, command: str) -> bool:
+            return re.fullmatch(rule[1:-1], command) is not None
+
+        list_command = (
+            '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
+            '"$env:USERPROFILE\\.copilot\\rag\\list_dbs.py" --format prompt'
+        )
+        search_command = (
+            '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
+            '"$env:USERPROFILE\\.copilot\\rag\\search.py" "release blocker"'
+        )
+        multiline = list_command.replace(" --format", " \x60\r\n  --format")
+        self.assertTrue(matches(self.rules[0], list_command))
+        self.assertTrue(matches(self.rules[0], multiline))
+        self.assertTrue(matches(self.rules[1], search_command))
+        for unsafe in (
+            list_command + "; Remove-Item victim",
+            list_command.replace("list_dbs.py", "manage.py"),
+            list_command.replace('" --format prompt', '" -c calc'),
+            list_command.replace("python.exe", "powershell.exe"),
+        ):
+            self.assertFalse(matches(self.rules[0], unsafe), unsafe)
 
     def test_jsonc_comments_crlf_and_unrelated_values_are_preserved(self) -> None:
         original = (
@@ -86,6 +111,21 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             patch_settings("{/* unterminated", self.rules)
+        with self.assertRaisesRegex(ValueError, "missing property comma"):
+            patch_settings('{"editor.fontSize":15 "files.autoSave":"off"}', self.rules)
+
+    def test_missing_comma_is_reported_without_rewriting_original(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            path = appdata / "Code" / "User" / "settings.json"
+            path.parent.mkdir(parents=True)
+            original = b'{"editor.fontSize":15 "files.autoSave":"off"}\n'
+            path.write_bytes(original)
+            result = configure_vscode(self.home, appdata)
+            self.assertEqual("error", result["status"])
+            self.assertEqual(0, result["targets_changed"])
+            self.assertEqual(original, path.read_bytes())
+            self.assertEqual([], list(path.parent.glob("*.local-rag-backup-*")))
 
     def test_candidate_paths_do_not_create_absent_insiders_or_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

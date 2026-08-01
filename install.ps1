@@ -26,13 +26,15 @@ function Move-CompletionMarker {
     [System.IO.File]::Move($Marker, $Backup)
     return $Backup
 }
-function Restore-CompletionMarker {
-    param([string]$Backup, [string]$Marker)
-    if (-not $Backup -or -not (Test-Path -LiteralPath $Backup -PathType Leaf)) { return }
-    if (Test-Path -LiteralPath $Marker -PathType Leaf) { [System.IO.File]::Delete($Marker) }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Marker) | Out-Null
-    [System.IO.File]::Move($Backup, $Marker)
+function Close-CompletionMarkerGate {
+    param([string[]]$Markers)
+    foreach ($Marker in $Markers) {
+        if ($Marker -and (Test-Path -LiteralPath $Marker -PathType Leaf)) {
+            [System.IO.File]::Delete($Marker)
+        }
+    }
 }
+
 function Remove-CompletionMarkerBackups {
     param([string[]]$Backups)
     $Snapshots = @{}
@@ -67,6 +69,15 @@ function Test-InstallPayloadExcluded {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
     $Normalized = $RelativePath.Replace("/", "\").TrimStart("\")
+    if (
+        ($Normalized -ieq "rag\query\.rag-deps-installed") -or
+        $Normalized.StartsWith(
+            "rag\query\.rag-deps-installed.",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
     if ($Normalized -ieq "rag\config\network.json") {
         return $true
     }
@@ -165,8 +176,7 @@ if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
 }
 Remove-CompletionMarkerBackups -Backups @($ActiveBackup, $LegacyBackup)
 } catch {
-    Restore-CompletionMarker -Backup $ActiveBackup -Marker $ActiveMarker
-    Restore-CompletionMarker -Backup $LegacyBackup -Marker $LegacyMarker
+    Close-CompletionMarkerGate -Markers @($ActiveMarker, $LegacyMarker)
     throw
 }
 

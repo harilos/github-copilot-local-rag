@@ -387,6 +387,21 @@ def main() -> int:
                     "policy_effectiveness": "unknown",
                 }
         verification["integrations"] = {"vscode": vscode}
+        if args.configure_vscode_auto_approve and vscode.get("status") not in {
+            "configured_on_disk",
+            "already_configured",
+        }:
+            integration_failure = _error_payload(
+                failed_check="vscode_auto_approve",
+                error_kind=str(vscode.get("status") or "error"),
+                message=(
+                    "Explicit VS Code auto-approve configuration did not "
+                    "complete; settings were left fail-closed."
+                ),
+                network=network,
+            )
+            integration_failure["integrations"] = {"vscode": vscode}
+            verification = integration_failure
 
     requirements_after: str | None = None
     if marker_maintenance:

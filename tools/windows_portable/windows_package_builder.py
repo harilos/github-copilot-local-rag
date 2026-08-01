@@ -181,7 +181,11 @@ def _payload_excluded(relative: Path, is_dir: bool) -> bool:
     if "__pycache__" in parts or ".venv" in parts:
         return True
     name = relative.name.casefold()
-    if name in FORBIDDEN_NAMES or name.startswith(".source-connections."):
+    if (
+        name in FORBIDDEN_NAMES
+        or name.startswith(".source-connections.")
+        or name.startswith(".rag-deps-installed.")
+    ):
         return True
     if name.endswith(FORBIDDEN_SUFFIXES):
         return True
@@ -291,7 +295,9 @@ def _assert_no_forbidden_payload(root: Path) -> None:
             continue
         relative = path.relative_to(root)
         name = path.name.casefold()
-        if name == ".rag-deps-installed":
+        if name == ".rag-deps-installed" or name.startswith(
+            ".rag-deps-installed."
+        ):
             raise ValueError("completion marker must not be packaged")
         if name in FORBIDDEN_NAMES or name.startswith(".source-connections."):
             raise ValueError(f"machine-local configuration must not be packaged: {relative}")

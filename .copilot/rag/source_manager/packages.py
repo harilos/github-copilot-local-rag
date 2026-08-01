@@ -2276,6 +2276,8 @@ def _is_transient_path(path: Path) -> bool:
     name = path.name.casefold()
     return (
         any(part in _TRANSIENT_NAMES for part in lowered)
+        or name == ".rag-deps-installed"
+        or name.startswith(".rag-deps-installed.")
         or name.startswith("._")
         or name == ".ds_store"
         or name.endswith(_TRANSIENT_SUFFIXES)

@@ -48,6 +48,13 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("install.sh", destinations)
         self.assertIn("install.ps1", destinations)
 
+    def test_distribution_excludes_completion_markers_and_backups(self) -> None:
+        for relative in (
+            "rag/query/.rag-deps-installed",
+            "rag/query/.rag-deps-installed.active.pre-update.123",
+        ):
+            self.assertTrue(packages._is_transient_path(Path(relative)))
+
     def test_manager_import_accepts_package_without_bootstrap(self) -> None:
         package = self.root / "package"
         source = self.root / "source"

@@ -113,10 +113,13 @@ def completion_contract_valid(
         ):
             return False, "completion_marker_embedding_dimension"
         packaged = payload.get("packaged_runtime")
+        packaged_manifest = manifest_path_for(rag_root / "query").is_file()
+        if packaged_manifest and packaged is None:
+            return False, "completion_marker_packaged_runtime_required"
         if packaged is not None:
             if not isinstance(packaged, dict):
                 return False, "completion_marker_packaged_runtime"
-            from portable_runtime import load_and_verify_runtime, manifest_path_for
+            from portable_runtime import load_and_verify_runtime
 
             verified = load_and_verify_runtime(
                 manifest_path_for(rag_root / "query")

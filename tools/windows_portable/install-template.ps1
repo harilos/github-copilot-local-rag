@@ -65,17 +65,13 @@ function Move-CompletionMarker {
     return $Backup
 }
 
-function Restore-CompletionMarker {
-    param([string]$Backup, [string]$Marker)
-    if (-not $Backup -or -not (Test-Path -LiteralPath $Backup -PathType Leaf)) {
-        return
+function Close-CompletionMarkerGate {
+    param([string[]]$Markers)
+    foreach ($Marker in $Markers) {
+        if ($Marker -and (Test-Path -LiteralPath $Marker -PathType Leaf)) {
+            [System.IO.File]::Delete($Marker)
+        }
     }
-    if (Test-Path -LiteralPath $Marker -PathType Leaf) {
-        [System.IO.File]::Delete($Marker)
-    }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Marker) |
-        Out-Null
-    [System.IO.File]::Move($Backup, $Marker)
 }
 
 function Remove-CompletionMarkerBackups {
@@ -103,6 +99,15 @@ function Remove-CompletionMarkerBackups {
 function Test-ProtectedRelativePath {
     param([string]$Relative)
     $Normalized = $Relative.Replace("/", "\")
+    if (
+        ($Normalized -ieq "rag\query\.rag-deps-installed") -or
+        $Normalized.StartsWith(
+            "rag\query\.rag-deps-installed.",
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
     if ($Normalized.StartsWith("rag\dbs\", [StringComparison]::OrdinalIgnoreCase)) {
         return $true
     }
@@ -242,8 +247,7 @@ if ($HadPackagedRuntime) {
         }
         [System.IO.Directory]::Move($BackupRuntime, $TargetRuntime)
     }
-    Restore-CompletionMarker -Backup $ActiveMarkerBackup -Marker $ActiveMarker
-    Restore-CompletionMarker -Backup $LegacyMarkerBackup -Marker $LegacyMarker
+    Close-CompletionMarkerGate -Markers @($ActiveMarker, $LegacyMarker)
     if (
         (Test-Path -LiteralPath $BackupModel) -and
         -not (Test-Path -LiteralPath $TargetModel)

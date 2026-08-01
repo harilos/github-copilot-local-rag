@@ -81,6 +81,8 @@ def _scan_value(text: str, index: int) -> int:
         raise ValueError("unterminated container")
     primitive_start = index
     while index < len(text) and text[index] not in ",}\n\r":
+        if text[index].isspace():
+            break
         if text.startswith("//", index) or text.startswith("/*", index):
             break
         index += 1
@@ -132,7 +134,10 @@ def _find_property(text: str, object_start: int, object_end: int, key: str):
             if found is not None:
                 raise ValueError(f"duplicate target key: {key}")
             found = (value_start, value_end)
-        index = value_end
+        following = _skip_ws_comments(text, value_end)
+        if following < object_end and text[following] != ",":
+            raise ValueError("missing property comma")
+        index = following + 1 if following < object_end else following
 
 
 def _object_property_keys(
@@ -163,7 +168,11 @@ def _object_property_keys(
         index = _skip_ws_comments(text, key_end)
         if index >= object_end or text[index] != ":":
             raise ValueError("missing property colon")
-        index = _scan_value(text, _skip_ws_comments(text, index + 1))
+        value_end = _scan_value(text, _skip_ws_comments(text, index + 1))
+        following = _skip_ws_comments(text, value_end)
+        if following < object_end and text[following] != ",":
+            raise ValueError("missing property comma")
+        index = following + 1 if following < object_end else following
 
 
 def _last_property_value_end(
@@ -186,7 +195,10 @@ def _last_property_value_end(
             raise ValueError("missing property colon")
         value_start = _skip_ws_comments(text, index + 1)
         last = _scan_value(text, value_start)
-        index = last
+        following = _skip_ws_comments(text, last)
+        if following < object_end and text[following] != ",":
+            raise ValueError("missing property comma")
+        index = following + 1 if following < object_end else following
 
 
 def _insert_property(
@@ -225,11 +237,20 @@ def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
     python = query / ".venv" / "Scripts" / "python.exe"
     list_script = copilot_home / "rag" / "list_dbs.py"
     search_script = copilot_home / "rag" / "search.py"
-    safe_argument = r'(?:"[^"\r\n;&|<>\x60$()]*"|[^\s;&|<>\x60$()]+)'
+    safe_argument = r'(?!(?:-c|-m)(?=$|[ \t]|\x60))(?:"[^"\r\n;&|<>\x60$()]*"|[^\s;&|<>\x60$()]+)'
+    separator = r'(?:[ \t]+|[ \t]*\x60\r?\n[ \t]*)'
+    formal_python = (
+        r'& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"'
+    )
 
     def command(script: Path) -> str:
-        prefix = re.escape(f'"{python}" "{script}"')
-        return f"/^{prefix}(?: {safe_argument})*$/"
+        absolute = re.escape(f'"{python}"') + separator + re.escape(f'"{script}"')
+        formal_script = (
+            '"$env:USERPROFILE\\.copilot\\rag\\' + script.name + '"'
+        )
+        formal = re.escape(formal_python) + separator + re.escape(formal_script)
+        prefix = f"(?:{absolute}|{formal})"
+        return f"/^{prefix}(?:{separator}{safe_argument})*$/"
 
     return (
         command(list_script),

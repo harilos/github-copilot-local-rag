@@ -18,6 +18,9 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             query.mkdir(parents=True)
             (query / "setup.py").write_text("print('setup')\n", encoding="utf-8")
             (query / ".rag-deps-installed").write_text("forbidden\n", encoding="utf-8")
+            (query / ".rag-deps-installed.active.pre-update.123").write_text(
+                "forbidden-backup\n", encoding="utf-8"
+            )
             (payload / "rag" / "config").mkdir()
             (payload / "rag" / "config" / "network.json").write_text(
                 '{"secret":true}', encoding="utf-8"
@@ -82,6 +85,9 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 )
                 self.assertNotIn(
                     prefix + ".copilot/rag/query/.rag-deps-installed", names
+                )
+                self.assertFalse(
+                    any("/.rag-deps-installed." in name for name in names)
                 )
                 self.assertNotIn(
                     prefix + ".copilot/rag/config/network.json", names

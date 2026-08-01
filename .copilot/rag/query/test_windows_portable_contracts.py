@@ -18,7 +18,11 @@ from portable_runtime import (
     PortableRuntimeError,
     load_and_verify_runtime,
 )
-from setup_contract import completion_marker_for
+from setup_contract import (
+    completion_contract_payload,
+    completion_contract_valid,
+    completion_marker_for,
+)
 _SETUP_SPEC = importlib.util.spec_from_file_location(
     "windows_portable_query_setup", Path(__file__).with_name("setup.py")
 )
@@ -100,6 +104,38 @@ class PortableRuntimeContractTests(unittest.TestCase):
             self.assertEqual(query / ".venv" / ".rag-deps-installed", completion_marker_for(query))
             (query / ".packaged-runtime.json").write_text("{}", encoding="utf-8")
             self.assertEqual(query / ".rag-deps-installed", completion_marker_for(query))
+
+    def test_packaged_manifest_requires_marker_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._fixture(root)
+            self._requirements_fixture(root)
+            runtime = {
+                "venv": "pass",
+                "dependencies": "pass",
+                "requirements": "pass",
+                "pip_check": "pass",
+                "model_files": "pass",
+                "model_manifest": "pass",
+                "model_load": "pass",
+                "list_dbs": "pass",
+                "embedding_dimension": 256,
+            }
+            marker_path = completion_marker_for(manifest.parent)
+            marker_path.write_text(
+                json.dumps(
+                    completion_contract_payload(
+                        runtime=runtime,
+                        rag_root=root,
+                        verified_at="2026-08-01T00:00:00Z",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                (False, "completion_marker_packaged_runtime_required"),
+                completion_contract_valid(marker_path, root),
+            )
 
     def test_valid_manifest_is_verified_without_network_or_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -214,6 +250,71 @@ class PortableRuntimeContractTests(unittest.TestCase):
                     "skipped_default_off",
                     payload["integrations"]["vscode"]["status"],
                 )
+            finally:
+                SETUP._release_setup_lock()
+
+    def test_explicit_vscode_opt_in_failure_is_setup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._fixture(root)
+            query = manifest.parent
+            venv = query / ".venv"
+            python = venv / "Scripts" / "python.exe"
+            marker_path = completion_marker_for(query)
+            verification = {
+                "status": "runtime_ready_no_db",
+                "setup_complete": True,
+                "lookup_ready": False,
+                "runtime": {"packaged_runtime": "pass"},
+                "databases": {"healthy": [], "unhealthy": []},
+                "warnings": [],
+                "next_action": None,
+            }
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "setup.py",
+                            "--configure-vscode-auto-approve",
+                            "--format",
+                            "json",
+                        ],
+                    ),
+                    mock.patch.object(SETUP, "RAG_ROOT", root),
+                    mock.patch.object(
+                        SETUP,
+                        "_setup_paths",
+                        return_value=(query, venv, python, marker_path),
+                    ),
+                    mock.patch("portable_runtime.platform.system", return_value="Windows"),
+                    mock.patch("portable_runtime.platform.machine", return_value="AMD64"),
+                    mock.patch.object(
+                        SETUP, "_run_verification", return_value=verification
+                    ),
+                    mock.patch(
+                        "vscode_settings.configure_vscode",
+                        return_value={
+                            "status": "manual_action_required",
+                            "targets_checked": 1,
+                            "targets_changed": 0,
+                            "policy_effectiveness": "unknown",
+                        },
+                    ),
+                    mock.patch.object(SETUP, "_write_completion_marker") as write_marker,
+                    mock.patch.dict(os.environ, {"APPDATA": str(root / "AppData")}),
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(1, SETUP.main())
+                payload = json.loads(output.getvalue())
+                self.assertEqual("vscode_auto_approve", payload["failed_check"])
+                self.assertEqual(
+                    "manual_action_required",
+                    payload["integrations"]["vscode"]["status"],
+                )
+                write_marker.assert_not_called()
             finally:
                 SETUP._release_setup_lock()
 

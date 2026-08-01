@@ -32,23 +32,25 @@ move_marker() {
   if ! mv "$marker" "$backup"; then echo "setup_required: could not close the Local RAG lookup gate before update." >&2; exit 1; fi
   if [ "$label" = "active" ]; then ACTIVE_BACKUP="$backup"; else LEGACY_BACKUP="$backup"; fi
 }
-restore_markers() {
-  status=$?; trap - EXIT
+close_markers() {
+  status=$?
+  trap - EXIT
   if [ "$status" -ne 0 ]; then
-    active_source="$ACTIVE_BACKUP"; [ -f "$active_source" ] || active_source="$ACTIVE_RESCUE"
-    legacy_source="$LEGACY_BACKUP"; [ -f "$legacy_source" ] || legacy_source="$LEGACY_RESCUE"
-    if [ -n "$active_source" ] && [ -f "$active_source" ]; then rm -f -- "$ACTIVE_MARKER"; mkdir -p -- "$(dirname -- "$ACTIVE_MARKER")"; mv "$active_source" "$ACTIVE_MARKER" || true; fi
-    if [ -n "$legacy_source" ] && [ -f "$legacy_source" ]; then rm -f -- "$LEGACY_MARKER"; mkdir -p -- "$(dirname -- "$LEGACY_MARKER")"; mv "$legacy_source" "$LEGACY_MARKER" || true; fi
-    rm -f -- "$ACTIVE_RESCUE" "$LEGACY_RESCUE" || true
+    if [ -n "$ACTIVE_RESCUE" ] && [ -f "$ACTIVE_RESCUE" ] && [ ! -f "$ACTIVE_BACKUP" ]; then mv "$ACTIVE_RESCUE" "$ACTIVE_BACKUP" || true; fi
+    if [ -n "$LEGACY_RESCUE" ] && [ -f "$LEGACY_RESCUE" ] && [ ! -f "$LEGACY_BACKUP" ]; then mv "$LEGACY_RESCUE" "$LEGACY_BACKUP" || true; fi
+    rm -f -- "$ACTIVE_MARKER" "$LEGACY_MARKER" || true
   fi
   exit "$status"
 }
-trap restore_markers EXIT
+trap close_markers EXIT
 if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_marker "$LEGACY_MARKER" legacy; else move_marker "$LEGACY_MARKER" legacy; fi
 
 (
   cd "$PAYLOAD_DIR"
-  tar -cf - .
+  tar \
+    --exclude='./rag/query/.rag-deps-installed' \
+    --exclude='./rag/query/.rag-deps-installed.*' \
+    -cf - .
 ) | (
   cd "$TARGET_DIR"
   tar -xf -
@@ -106,13 +108,15 @@ function Move-CompletionMarker {
     [System.IO.File]::Move($Marker, $Backup)
     return $Backup
 }
-function Restore-CompletionMarker {
-    param([string]$Backup, [string]$Marker)
-    if (-not $Backup -or -not (Test-Path -LiteralPath $Backup -PathType Leaf)) { return }
-    if (Test-Path -LiteralPath $Marker -PathType Leaf) { [System.IO.File]::Delete($Marker) }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Marker) | Out-Null
-    [System.IO.File]::Move($Backup, $Marker)
+function Close-CompletionMarkerGate {
+    param([string[]]$Markers)
+    foreach ($Marker in $Markers) {
+        if ($Marker -and (Test-Path -LiteralPath $Marker -PathType Leaf)) {
+            [System.IO.File]::Delete($Marker)
+        }
+    }
 }
+
 function Remove-CompletionMarkerBackups {
     param([string[]]$Backups)
     $Snapshots = @{}
@@ -148,6 +152,15 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
+    if (
+        ($Relative -ieq "rag\query\.rag-deps-installed") -or
+        $Relative.StartsWith(
+            "rag\query\.rag-deps-installed.",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return
+    }
     $Destination = Join-Path $Target $Relative
     if ($_.PSIsContainer) {
         New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -168,8 +181,7 @@ if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
 }
 Remove-CompletionMarkerBackups -Backups @($ActiveBackup, $LegacyBackup)
 } catch {
-    Restore-CompletionMarker -Backup $ActiveBackup -Marker $ActiveMarker
-    Restore-CompletionMarker -Backup $LegacyBackup -Marker $LegacyMarker
+    Close-CompletionMarkerGate -Markers @($ActiveMarker, $LegacyMarker)
     throw
 }
 
