@@ -1169,7 +1169,7 @@ def _update_redmine_source(
     clock: Callable[[], datetime] | None,
     progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
-    """Fetch Redmine serially and reflect each stable batch of five."""
+    """Fetch Redmine serially and reflect each stable ADD batch."""
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)

@@ -43,6 +43,7 @@ from .github_content import (
 )
 from .networking import is_gitlab_token_request, reject_http_redirects
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
+from .providers import REDMINE_BATCH_SIZE
 from .security import validate_environment_name
 
 
@@ -938,7 +939,7 @@ def _redmine(
             item_callback(position, issue_id)
         if (
             batch_callback is not None
-            and position - last_reflected_count >= 5
+            and position - last_reflected_count >= REDMINE_BATCH_SIZE
             and position < len(ordered_issue_ids)
         ):
             batch_callback(position, issue_id)
