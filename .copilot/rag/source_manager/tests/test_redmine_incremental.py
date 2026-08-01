@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import threading
@@ -341,12 +343,14 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
             self.assertEqual(81, counts["batch"])
 
     def test_localhost_http_refresh_keeps_credentials_out_of_output(self) -> None:
+        secret = "LOCAL-TEST-SECRET-DO-NOT-LOG-7f2a4c9e"
         state = {
             "details": 0,
             "headers": [],
+            "offsets": [],
             "updated": {
-                1: "2026-07-29T01:00:00Z",
-                2: "2026-07-29T01:00:00Z",
+                issue_id: "2026-07-29T01:00:00Z"
+                for issue_id in range(1, 401)
             },
         }
 
@@ -358,12 +362,17 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
                 parsed = urlsplit(self.path)
                 tail = parsed.path.rsplit("/", 1)[-1]
                 if tail == "issues.json":
+                    query = parse_qs(parsed.query)
+                    offset = int(query.get("offset", ["0"])[0])
+                    limit = int(query.get("limit", ["100"])[0])
+                    state["offsets"].append(offset)
+                    page = list(state["updated"].items())[offset : offset + limit]
                     payload = {
                         "issues": [
                             {"id": issue_id, "updated_on": updated_on}
-                            for issue_id, updated_on in state["updated"].items()
+                            for issue_id, updated_on in page
                         ],
-                        "total_count": 2,
+                        "total_count": 400,
                     }
                 else:
                     state["details"] += 1
@@ -416,17 +425,45 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
                     "plan": plan,
                     "work_directory": work,
                     "state": {"started_at": "2026-07-29T01:00:00Z"},
-                    "environment": {"REDMINE_TEST_KEY": "[REDACTED]"},
+                    "environment": {"REDMINE_TEST_KEY": secret},
                 }
-                execute_fetch_plan(**arguments)
-                self.assertEqual(2, state["details"])
-                execute_fetch_plan(**arguments)
-                self.assertEqual(2, state["details"])
+                progress: list[object] = []
+                captured_out = io.StringIO()
+                captured_err = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(captured_out),
+                    contextlib.redirect_stderr(captured_err),
+                ):
+                    first = execute_fetch_plan(
+                        **arguments,
+                        progress_callback=progress.append,
+                    )
+                    second = execute_fetch_plan(
+                        **arguments,
+                        progress_callback=progress.append,
+                    )
+                self.assertEqual(400, first["documents"])
+                self.assertEqual(400, second["inventory_documents"])
+                self.assertEqual(400, state["details"])
+                self.assertEqual(
+                    [0, 5, 10, 15],
+                    state["offsets"][:4],
+                )
+                self.assertEqual(
+                    [0, 100, 200, 300],
+                    state["offsets"][-4:],
+                )
                 self.assertTrue(state["headers"])
                 self.assertEqual(
-                    {"[REDACTED]"},
+                    {secret},
                     set(state["headers"]),
                 )
+                rendered = (
+                    captured_out.getvalue()
+                    + captured_err.getvalue()
+                    + json.dumps(progress, ensure_ascii=False)
+                )
+                self.assertNotIn(secret, rendered)
         finally:
             server.shutdown()
             server.server_close()
