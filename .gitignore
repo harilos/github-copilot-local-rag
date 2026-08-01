@@ -16,6 +16,17 @@ windows_ac_rag_job/
 !.copilot/rag/dbs/README.md
 !.copilot/rag/dbs/.gitkeep
 
+# Public FizzBuzz sample database (portable index + Source definitions only)
+!.copilot/rag/dbs/fizzbuzz-planet-rag/
+!.copilot/rag/dbs/fizzbuzz-planet-rag/**
+.copilot/rag/dbs/fizzbuzz-planet-rag/sources/*/work/
+.copilot/rag/dbs/fizzbuzz-planet-rag/sources/*/work/**
+.copilot/rag/dbs/fizzbuzz-planet-rag/catalog.sqlite-wal
+.copilot/rag/dbs/fizzbuzz-planet-rag/catalog.sqlite-shm
+.copilot/rag/dbs/fizzbuzz-planet-rag/*.journal
+.copilot/rag/dbs/fizzbuzz-planet-rag/*.lock
+.copilot/rag/dbs/fizzbuzz-planet-rag/source-links.json.bak
+
 # Generated local embedding models
 .copilot/rag/models/*/
 !.copilot/rag/models/

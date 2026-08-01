@@ -1,0 +1,7 @@
+{
+  "db_name": "fizzbuzz-planet-rag",
+  "title": "フィズバス惑星資料",
+  "collection": "fizzbuzz_planet_rag_ruri3_30m_int8_v1",
+  "model": "cl-nagoya/ruri-v3-30m",
+  "profile": "DB_PROFILE.md"
+}

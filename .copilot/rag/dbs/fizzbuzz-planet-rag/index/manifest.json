@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-08-01T09:18:52.268769+00:00",
+  "db_root": ".",
+  "record_count": 434,
+  "collection": "fizzbuzz_planet_rag_ruri3_30m_int8_v1",
+  "chroma_space": "cosine",
+  "chunker_version": "jp-sw-v1",
+  "catalog_schema_version": 2,
+  "tokenizer": "sudachi-a-v1",
+  "retrieval": "hybrid-rrf-v1",
+  "embedding_model": "cl-nagoya/ruri-v3-30m",
+  "embedding_dimension": 256,
+  "embedding_backend": "onnx-int8",
+  "quantization": "dynamic-int8",
+  "document_prefix": "検索文書: ",
+  "query_prefix": "検索クエリ: "
+}
