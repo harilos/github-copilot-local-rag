@@ -413,6 +413,54 @@ class ManagerJapaneseUiTests(unittest.TestCase):
             "\n".join(outputs),
         )
 
+    def test_svn_http_browser_root_uses_formal_link_validation(self) -> None:
+        invalid_roots = (
+            "https://example.com/repository?view=1",
+            "https://example.com:99999/repository",
+            "https://example.com/repository with spaces",
+            "https://example.com/repository%ZZ",
+            "https://[invalid/repository",
+        )
+        for invalid_root in invalid_roots:
+            with self.subTest(root=invalid_root):
+                manager, outputs = self.manager(
+                    [
+                        "svn://127.0.0.1:3690/project",
+                        "Project",
+                        "1",
+                        "5",
+                        "1",
+                        invalid_root,
+                    ]
+                )
+
+                value = manager._prompt_new_svn_source()
+
+                self.assertIsNone(value)
+                self.assertTrue(outputs)
+
+    def test_svn_web_root_preserves_valid_query_and_fragment(self) -> None:
+        browser_url = "https://example.com/project?view=tree#files"
+        manager, _outputs = self.manager(
+            [
+                "svn://127.0.0.1:3690/project",
+                "Project",
+                "1",
+                "5",
+                "2",
+                browser_url,
+                "",
+            ]
+        )
+
+        value = manager._prompt_new_svn_source()
+
+        assert value is not None
+        self.assertEqual(
+            browser_url,
+            value["link"]["settings"]["repository_url"],
+        )
+
     def test_svn_strategy_switch_drops_hidden_settings(self) -> None:
         existing = {
             "provider": "svn",

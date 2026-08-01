@@ -1412,12 +1412,20 @@ def _normalize_sharepoint_root(value: str) -> str:
 
 def _required_url(value: Any) -> str:
     text = _bounded_text(value, "URL", MAX_URL_LENGTH)
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+        hostname = split.hostname
+        port = split.port
+    except ValueError as exc:
+        raise SourceLinkError("URL must contain a valid host and port") from exc
+    host_port = split.netloc.rsplit("@", 1)[-1]
     if (
         split.scheme.casefold() not in {"http", "https"}
-        or not split.hostname
+        or not hostname
         or split.username is not None
         or split.password is not None
+        or host_port.endswith(":")
+        or (port is not None and not 1 <= port <= 65535)
         or any(char.isspace() for char in text)
         or re.search(r"%(?![0-9A-Fa-f]{2})", text)
     ):

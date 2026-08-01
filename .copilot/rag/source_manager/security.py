@@ -56,9 +56,21 @@ def validate_persistable(value: Any, *, field: str = "payload") -> None:
 
 def validate_web_url(value: Any, *, field: str) -> str:
     text = _bounded_text(value, field=field, limit=4096)
-    split = urlsplit(text)
+    try:
+        split = urlsplit(text)
+        hostname = split.hostname
+        port = split.port
+    except ValueError as exc:
+        raise SourceManagerError(f"{field} contains an invalid URL") from exc
     if split.scheme.casefold() not in {"http", "https"} or not split.netloc:
         raise SourceManagerError(f"{field} must be an HTTP or HTTPS URL")
+    if not hostname:
+        raise SourceManagerError(f"{field} must include a host")
+    host_port = split.netloc.rsplit("@", 1)[-1]
+    if host_port.endswith(":") or (
+        port is not None and not 1 <= port <= 65535
+    ):
+        raise SourceManagerError(f"{field} contains an invalid port")
     if split.username is not None or split.password is not None:
         raise SourceManagerError(f"{field} must not contain credentials")
     for name, _query_value in parse_qsl(split.query, keep_blank_values=True):

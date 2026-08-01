@@ -1613,6 +1613,21 @@ class LocalRagManager:
                 "repository_url": link_url,
                 "permalink_enabled": False,
             }
+        if link_settings is not None:
+            try:
+                normalized_link = self._import_source_links().validate_source_link(
+                    {
+                        "provider": "svn",
+                        "enabled": True,
+                        "strategy": link_strategy,
+                        "settings": link_settings,
+                    }
+                )
+            except Exception as exc:
+                self._print_error(str(exc))
+                return None
+            link_strategy = str(normalized_link["strategy"])
+            link_settings = dict(normalized_link["settings"])
         proposal: dict[str, Any] = {
             "source_type": "svn",
             "label": "SVN",
