@@ -54,6 +54,8 @@ _ALLOWED_PROVIDERS = {
     "svn",
     "redmine",
     "gitlab_issues",
+    "github_issues",
+    "github_wiki",
     "other",
 }
 ALLOWED_SOURCE_TYPES = frozenset(

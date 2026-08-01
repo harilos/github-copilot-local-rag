@@ -27,6 +27,10 @@ from .gitlab_issues import (
     gitlab_issues_updated_after,
     repair_generated_gitlab_issues_link,
 )
+from .github_content import (
+    generated_github_issues_link,
+    generated_github_wiki_link,
+)
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
 from .providers import validate_provider_config
@@ -133,6 +137,18 @@ def register_source(
                 values.get("gitlab_url"),
                 link,
             )
+        )
+    elif str(source_type).strip().lower() == "github_issues":
+        effective_link = (
+            generated_github_issues_link(values.get("repository_url"))
+            if link is None
+            else link
+        )
+    elif str(source_type).strip().lower() == "github_wiki":
+        effective_link = (
+            generated_github_wiki_link(values.get("repository_url"))
+            if link is None
+            else link
         )
     stored = store.create_source(
         source_type=source_type,
@@ -250,7 +266,14 @@ def update_source(
     if (
         executor is None
         and source.payload.get("source_type")
-        in {"github", "svn", "redmine", "gitlab_issues"}
+        in {
+            "github",
+            "github_issues",
+            "github_wiki",
+            "svn",
+            "redmine",
+            "gitlab_issues",
+        }
         and command_runner is None
         and http_get is None
         and rag_root is not None

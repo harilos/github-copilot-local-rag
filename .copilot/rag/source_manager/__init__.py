@@ -53,6 +53,13 @@ from .gitlab_issue_fixes import (
     install_gitlab_issue_fixes,
     parse_gitlab_api_project_web_url,
 )
+from .github_content import (
+    GitHubRepository,
+    fetch_github_issues,
+    generated_github_issues_link,
+    generated_github_wiki_link,
+    parse_github_repository_url,
+)
 from .gitlab_wiki import (
     GitLabWikiInventoryItem,
     decode_gitlab_wiki_page_relative_path,
@@ -142,6 +149,9 @@ from .git_source import install_git_source_runtime
 from .gitlab_wiki_registration import (
     install_gitlab_wiki_registration_runtime,
 )
+from .github_content_registration import (
+    install_github_content_registration_runtime,
+)
 from .gitlab_wiki_runtime import install_gitlab_wiki_runtime
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
@@ -172,6 +182,7 @@ install_document_filter_package_contract()
 install_copy_only_package_runtime()
 install_gitlab_wiki_runtime()
 install_gitlab_wiki_registration_runtime()
+install_github_content_registration_runtime()
 install_manage_custom_hook()
 
 # Runtime installers wrap several module functions. Keep package-level exports
@@ -210,6 +221,7 @@ __all__ = [
     "GitLabProjectLocation",
     "GitLabRegistration",
     "GitLabWikiInventoryItem",
+    "GitHubRepository",
     "LEGACY_REDMINE_API_KEY_ENV",
     "PROGRESS_FRAME",
     "REDMINE_BATCH_SIZE",
@@ -245,6 +257,9 @@ __all__ = [
     "extract_json_result",
     "fetch_gitlab_issues",
     "fetch_gitlab_wiki",
+    "fetch_github_issues",
+    "generated_github_issues_link",
+    "generated_github_wiki_link",
     "generated_gitlab_issues_link",
     "generated_gitlab_wiki_link",
     "generated_redmine_link",
@@ -264,6 +279,7 @@ __all__ = [
     "install_gitlab_issue_fixes",
     "install_gitlab_wiki_registration_runtime",
     "install_gitlab_wiki_runtime",
+    "install_github_content_registration_runtime",
     "install_teams_source_runtime",
     "list_gitlab_registrations",
     "list_redmine_registrations",
@@ -271,6 +287,7 @@ __all__ = [
     "new_run_state",
     "parse_gitlab_api_project_web_url",
     "parse_gitlab_project",
+    "parse_github_repository_url",
     "parse_redmine_project_url",
     "record_retry",
     "redact_runtime_path",

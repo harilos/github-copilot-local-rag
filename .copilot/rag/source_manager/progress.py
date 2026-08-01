@@ -22,6 +22,8 @@ _PROVIDER_LABELS = {
     "svn": "SVN",
     "redmine": "Redmine",
     "gitlab_issues": "GitLab Issue",
+    "github_issues": "GitHub Issues",
+    "github_wiki": "GitHub Wiki",
     "sharepoint": "SharePoint",
     "other": "Other",
 }

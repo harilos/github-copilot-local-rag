@@ -139,9 +139,12 @@ Selected-database menu:
 ```
 
 A Source is the unit of acquisition and URL generation. The Source Manager
-supports GitHub, SVN, Redmine, SharePoint synchronized folders, Teams shared
-folders synchronized through OneDrive, GitLab Issues, and a local one-time
-import. File-based Sources can ingest all supported files or documents only;
+supports GitHub repositories, GitHub Issues, GitHub Wiki, SVN, Redmine,
+SharePoint synchronized folders, Teams shared folders synchronized through
+OneDrive, GitLab Issues, and a local one-time import. GitHub Issues uses the
+authenticated `gh` CLI and materializes Issue bodies and comments as Markdown.
+GitHub Wiki synchronizes the repository's `.wiki.git` remote. File-based
+Sources can ingest all supported files or documents only;
 Markdown is included in the documents-only selection. It stores provider
 configuration and resumable checkpoints outside indexed document identity. A
 Source becomes searchable only after successful ingestion.

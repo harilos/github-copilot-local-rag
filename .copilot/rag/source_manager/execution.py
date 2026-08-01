@@ -33,6 +33,10 @@ from .gitlab_issues import (
     fetch_gitlab_issues,
     gitlab_issues_updated_after,
 )
+from .github_content import (
+    fetch_github_issues,
+    parse_github_repository_url,
+)
 from .networking import is_gitlab_token_request, reject_http_redirects
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
 from .security import validate_environment_name
@@ -81,6 +85,23 @@ def execute_fetch_plan(
     try:
         if provider == "github":
             result = _github(
+                parameters,
+                work,
+                runner,
+                progress_callback=progress_callback,
+            )
+        elif provider == "github_wiki":
+            repository = parse_github_repository_url(
+                parameters.get("repository_url")
+            )
+            result = _github(
+                {"repository_url": repository.wiki_clone_url},
+                work,
+                runner,
+                progress_callback=progress_callback,
+            )
+        elif provider == "github_issues":
+            result = fetch_github_issues(
                 parameters,
                 work,
                 runner,

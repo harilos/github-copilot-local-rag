@@ -9,6 +9,8 @@ _database_list.TYPE_LABELS["azure-devops"] = "Azure DevOps"
 _database_list.TYPE_LABELS["other-git"] = "その他のGit"
 _database_list.TYPE_LABELS["teams"] = "Microsoft Teams"
 _database_list.TYPE_LABELS["gitlab_wiki"] = "GitLab Wiki"
+_database_list.TYPE_LABELS["github_issues"] = "GitHub Issues"
+_database_list.TYPE_LABELS["github_wiki"] = "GitHub Wiki"
 main = _database_list.main
 
 

@@ -209,10 +209,12 @@ The Source Manager package is separate from search presentation. It provides:
 - Source-local state;
 - package creation and validation.
 
-Supported acquisition sources are GitHub, SVN, Redmine, GitLab Issues,
-SharePoint synchronized folders, Teams shared folders synchronized through
-OneDrive, and one-time local input. New Sources are introduced only through a
-successful add/ingestion flow.
+Supported acquisition sources are GitHub repositories, GitHub Issues, GitHub
+Wiki, SVN, Redmine, GitLab Issues, SharePoint synchronized folders, Teams
+shared folders synchronized through OneDrive, and one-time local input. GitHub
+Issues is acquired through an authenticated `gh` CLI and GitHub Wiki through
+the repository's `.wiki.git` remote. New Sources are introduced only through
+a successful add/ingestion flow.
 
 SharePoint acquisition/update is Windows-only and resolves a synchronized
 root from machine-local environment configuration. The synchronized tree is

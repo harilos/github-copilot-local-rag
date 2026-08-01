@@ -697,6 +697,8 @@ def add_source_screen(self: Any, db_name: str) -> None:
             ("6", "GitLab Issue"),
             ("7", "GitLab Wiki"),
             ("8", "手元の資料を一度だけ取り込む（Other）"),
+            ("9", "GitHub Issues"),
+            ("10", "GitHub Wiki"),
             ("0", "戻る"),
         ),
     )
@@ -712,6 +714,8 @@ def add_source_screen(self: Any, db_name: str) -> None:
         "6": self._prompt_new_gitlab_issues_source,
         "7": self._prompt_new_gitlab_wiki_source,
         "8": self._prompt_new_other_source,
+        "9": self._prompt_new_github_issues_source,
+        "10": self._prompt_new_github_wiki_source,
     }
     form = forms.get(choice)
     if form is None:

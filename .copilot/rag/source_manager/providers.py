@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .errors import SourceManagerError
 from .gitlab_issues import gitlab_token_env, parse_gitlab_project
+from .github_content import parse_github_repository_url
 from .redmine import parse_redmine_project_url
 from .security import (
     validate_environment_name,
@@ -21,7 +22,16 @@ from .security import (
 
 
 SUPPORTED_PROVIDERS = frozenset(
-    {"github", "svn", "redmine", "gitlab_issues", "sharepoint", "other"}
+    {
+        "github",
+        "github_issues",
+        "github_wiki",
+        "svn",
+        "redmine",
+        "gitlab_issues",
+        "sharepoint",
+        "other",
+    }
 )
 REDMINE_BATCH_SIZE = 5
 REDMINE_MAX_ATTEMPTS = 3
@@ -88,6 +98,10 @@ def validate_provider_config(
     validate_persistable(supplied, field="provider_settings")
     if kind == "github":
         return _validate_github(supplied)
+    if kind == "github_issues":
+        return _validate_github_issues(supplied)
+    if kind == "github_wiki":
+        return _validate_github_wiki(supplied)
     if kind == "svn":
         return _validate_svn(supplied)
     if kind == "redmine":
@@ -138,6 +152,24 @@ def build_fetch_plan(
             destination,
             normalized,
             "repository_revision",
+        )
+    elif kind == "github_wiki":
+        step = FetchStep(
+            "wiki",
+            "git_fetch_wiki",
+            True,
+            destination,
+            normalized,
+            "repository_revision",
+        )
+    elif kind == "github_issues":
+        step = FetchStep(
+            "issues",
+            "github_fetch_issues",
+            True,
+            destination,
+            normalized,
+            "github_issue_snapshot",
         )
     elif kind == "svn":
         step = FetchStep(
@@ -250,6 +282,28 @@ def _validate_github(settings: dict[str, Any]) -> dict[str, Any]:
     )
     repository = _validate_git_fetch_url(settings.get("repository_url"))
     return {"repository_url": repository}
+
+
+def _validate_github_wiki(settings: dict[str, Any]) -> dict[str, Any]:
+    _only_keys(settings, {"repository_url"})
+    repository = parse_github_repository_url(settings.get("repository_url"))
+    return {"repository_url": repository.repository_url}
+
+
+def _validate_github_issues(settings: dict[str, Any]) -> dict[str, Any]:
+    _only_keys(settings, {"repository_url", "state", "include_comments"})
+    repository = parse_github_repository_url(settings.get("repository_url"))
+    state = str(settings.get("state") or "all").strip().lower()
+    if state not in {"open", "closed", "all"}:
+        raise SourceManagerError("GitHub Issues state must be open, closed, or all")
+    include_comments = settings.get("include_comments", True)
+    if not isinstance(include_comments, bool):
+        raise SourceManagerError("GitHub Issues include_comments must be boolean")
+    return {
+        "repository_url": repository.repository_url,
+        "state": state,
+        "include_comments": include_comments,
+    }
 
 
 def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:

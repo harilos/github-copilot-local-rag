@@ -25,6 +25,8 @@ TYPE_LABELS = {
     "sharepoint": "SharePoint",
     "redmine": "Redmine",
     "gitlab_issues": "GitLab Issue",
+    "github_issues": "GitHub Issues",
+    "github_wiki": "GitHub Wiki",
     "other": "Other",
 }
 
