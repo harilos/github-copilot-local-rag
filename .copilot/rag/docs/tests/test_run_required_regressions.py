@@ -52,6 +52,22 @@ class RequiredRegressionRunnerTests(unittest.TestCase):
             ),
         )
 
+    def test_zero_test_file_is_reported_as_uncollected(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix=".required-regression-test-",
+            dir=runner.REPOSITORY_ROOT,
+        ) as temporary:
+            path = Path(temporary) / "test_empty.py"
+            path.write_text("# deliberately contains no tests\n", encoding="utf-8")
+
+            summary = runner.run_files([path])
+
+        self.assertEqual([], summary["failed_files"])
+        self.assertEqual(
+            [path.relative_to(runner.REPOSITORY_ROOT).as_posix()],
+            summary["uncollected_files"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,33 +51,43 @@ def run_files(files: Iterable[Path]) -> dict[str, Any]:
     requested = [Path(path).resolve() for path in files]
     results: list[dict[str, Any]] = []
     for path in requested:
-        completed = subprocess.run(
-            [sys.executable, str(path)],
-            cwd=REPOSITORY_ROOT,
-            env=test_environment(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        combined = "\n".join(
-            value for value in (completed.stdout, completed.stderr) if value
-        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(path)],
+                cwd=REPOSITORY_ROOT,
+                env=test_environment(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            returncode = completed.returncode
+            combined = "\n".join(
+                value
+                for value in (completed.stdout, completed.stderr)
+                if value
+            )
+        except OSError as exc:
+            returncode = 127
+            combined = f"{type(exc).__name__}: test process did not start"
         tests, skipped = parse_test_counts(combined)
+        collected = tests > 0
         result = {
             "file": path.relative_to(REPOSITORY_ROOT).as_posix(),
-            "returncode": completed.returncode,
+            "returncode": returncode,
             "tests": tests,
             "skipped": skipped,
+            "collected": collected,
         }
         results.append(result)
+        passed = returncode == 0 and collected
         print(
-            f"[{('PASS' if completed.returncode == 0 else 'FAIL')}] "
+            f"[{('PASS' if passed else 'FAIL')}] "
             f"{result['file']} tests={tests} skipped={skipped}",
             flush=True,
         )
-        if completed.returncode != 0:
+        if returncode != 0:
             print(combined, flush=True)
     executed = {Path(result["file"]).as_posix() for result in results}
     expected = {
@@ -94,6 +104,11 @@ def run_files(files: Iterable[Path]) -> dict[str, Any]:
             for result in results
             if int(result["returncode"]) != 0
         ],
+        "uncollected_files": [
+            result["file"]
+            for result in results
+            if not bool(result["collected"])
+        ],
         "missing_files": missing,
     }
     print("LOCAL_RAG_REGRESSION_SUMMARY=" + json.dumps(summary, sort_keys=True))
@@ -103,7 +118,15 @@ def run_files(files: Iterable[Path]) -> dict[str, Any]:
 def main() -> int:
     files = discover_test_files()
     summary = run_files(files)
-    return 1 if summary["failed_files"] or summary["missing_files"] else 0
+    return (
+        1
+        if (
+            summary["failed_files"]
+            or summary["uncollected_files"]
+            or summary["missing_files"]
+        )
+        else 0
+    )
 
 
 if __name__ == "__main__":
