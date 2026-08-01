@@ -33,6 +33,76 @@ def _skip_ws_comments(text: str, index: int) -> int:
     return index
 
 
+def _validated_jsonc(text: str) -> None:
+    rendered: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            rendered.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            rendered.append(character)
+            index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            if end < 0:
+                rendered.extend(" " * (len(text) - index))
+                break
+            rendered.extend(" " * (end - index))
+            rendered.append("\n")
+            index = end + 1
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment")
+            comment = text[index : end + 2]
+            rendered.extend("\n" if value == "\n" else " " for value in comment)
+            index = end + 2
+            continue
+        rendered.append(character)
+        index += 1
+
+    normalized = rendered
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(normalized):
+        character = normalized[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif character == ",":
+            following = index + 1
+            while following < len(normalized) and normalized[following].isspace():
+                following += 1
+            if following < len(normalized) and normalized[following] in "}]":
+                normalized[index] = " "
+        index += 1
+    try:
+        json.loads("".join(normalized))
+    except json.JSONDecodeError as exc:
+        raise ValueError("malformed JSONC") from exc
+
+
 def _scan_string(text: str, index: int) -> int:
     quote = text[index]
     index += 1
@@ -285,6 +355,7 @@ def patch_settings_with_status(
 ) -> tuple[str, bool]:
     if not text.strip():
         text = "{}\n"
+    _validated_jsonc(text)
     root_start, root_end = _object_bounds(text)
     enable = _find_property(
         text, root_start, root_end, "chat.tools.terminal.enableAutoApprove"

@@ -234,6 +234,12 @@ if ($HadPackagedRuntime) {
     }
     & $TargetPython @SetupArguments | Out-Null
     if ($LASTEXITCODE -ne 0) {
+        if ($ConfigureVSCodeAutoApprove) {
+            throw (
+                "installed runtime verification failed: explicit VS Code " +
+                "auto-approve opt-in did not complete"
+            )
+        }
         throw "installed runtime verification failed"
     }
 

@@ -108,6 +108,10 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("rag\\dbs\\", installer)
                 self.assertIn("[switch]$ConfigureVSCodeAutoApprove", installer)
                 self.assertIn("--configure-vscode-auto-approve", installer)
+                self.assertIn("explicit VS Code", installer)
+                self.assertIn(
+                    "auto-approve opt-in did not complete", installer
+                )
                 self.assertNotIn("Stop-Process", installer)
                 self.assertNotIn("taskkill", installer.casefold())
 

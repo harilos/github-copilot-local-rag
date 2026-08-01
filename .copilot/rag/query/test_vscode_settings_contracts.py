@@ -111,21 +111,32 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             patch_settings("{/* unterminated", self.rules)
-        with self.assertRaisesRegex(ValueError, "missing property comma"):
+        with self.assertRaisesRegex(ValueError, "malformed JSONC"):
             patch_settings('{"editor.fontSize":15 "files.autoSave":"off"}', self.rules)
 
-    def test_missing_comma_is_reported_without_rewriting_original(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            appdata = Path(directory)
-            path = appdata / "Code" / "User" / "settings.json"
-            path.parent.mkdir(parents=True)
-            original = b'{"editor.fontSize":15 "files.autoSave":"off"}\n'
-            path.write_bytes(original)
-            result = configure_vscode(self.home, appdata)
-            self.assertEqual("error", result["status"])
-            self.assertEqual(0, result["targets_changed"])
-            self.assertEqual(original, path.read_bytes())
-            self.assertEqual([], list(path.parent.glob("*.local-rag-backup-*")))
+    def test_malformed_jsonc_is_reported_without_rewriting_original(self) -> None:
+        malformed_values = (
+            b'{"editor.fontSize":15 "files.autoSave":"off"}\n',
+            b'{"editor.fontSize":nope}\n',
+            b'{"editor.fontSize":,"files.autoSave":"off"}\n',
+            b'{,"editor.fontSize":15}\n',
+            b'{"editor.fontSize":15,,"files.autoSave":"off"}\n',
+            b'{"editor.fontFamily":"bad\\q"}\n',
+            b'{"nested":{"a":1 "b":2}}\n',
+        )
+        for original in malformed_values:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                appdata = Path(directory)
+                path = appdata / "Code" / "User" / "settings.json"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(original)
+                before_mtime = path.stat().st_mtime_ns
+                result = configure_vscode(self.home, appdata)
+                self.assertEqual("error", result["status"])
+                self.assertEqual(0, result["targets_changed"])
+                self.assertEqual(original, path.read_bytes())
+                self.assertEqual(before_mtime, path.stat().st_mtime_ns)
+                self.assertEqual([], list(path.parent.glob("*.local-rag-backup-*")))
 
     def test_candidate_paths_do_not_create_absent_insiders_or_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -248,7 +259,7 @@ class VSCodeSettingsContractTests(unittest.TestCase):
 
 
     def test_unknown_global_types_and_approve_false_fail_closed_manual(self) -> None:
-        for value in ('"false"', "null", "{}", "0", "TRUE"):
+        for value in ('"false"', "null", "{}", "0"):
             with self.subTest(global_value=value), tempfile.TemporaryDirectory() as directory:
                 appdata = Path(directory)
                 path = appdata / "Code" / "User" / "settings.json"
@@ -281,7 +292,8 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             uppercase = original.replace(b"false", b"TRUE", 1)
             path.write_bytes(uppercase)
             result = configure_vscode(self.home, appdata)
-            self.assertEqual("manual_action_required", result["status"])
+            self.assertEqual("error", result["status"])
+            self.assertEqual(0, result["targets_changed"])
             self.assertEqual(uppercase, path.read_bytes())
 
 
