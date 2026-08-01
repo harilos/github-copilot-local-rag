@@ -94,7 +94,15 @@ def _validated_jsonc(text: str) -> None:
             following = index + 1
             while following < len(normalized) and normalized[following].isspace():
                 following += 1
-            if following < len(normalized) and normalized[following] in "}]":
+            previous = index - 1
+            while previous >= 0 and normalized[previous].isspace():
+                previous -= 1
+            if (
+                following < len(normalized)
+                and normalized[following] in "}]"
+                and previous >= 0
+                and normalized[previous] not in "{[,:"
+            ):
                 normalized[index] = " "
         index += 1
     try:

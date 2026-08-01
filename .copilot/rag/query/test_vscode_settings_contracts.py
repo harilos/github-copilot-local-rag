@@ -123,6 +123,10 @@ class VSCodeSettingsContractTests(unittest.TestCase):
             b'{"editor.fontSize":15,,"files.autoSave":"off"}\n',
             b'{"editor.fontFamily":"bad\\q"}\n',
             b'{"nested":{"a":1 "b":2}}\n',
+            b'{,}\n',
+            b'{"x":[,]}\n',
+            b'{/*comment*/,}\n',
+            b'{"x":,}\n',
         )
         for original in malformed_values:
             with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
