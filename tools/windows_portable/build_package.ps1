@@ -4,6 +4,9 @@ param(
     [Parameter(Mandatory = $true)][string]$ModelRoot,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [ValidateSet("search-only", "admin-full")][string]$Profile = "search-only",
+    [string]$DatabasesRoot,
+    [string[]]$DatabaseNames,
+    [switch]$NoDatabase,
     [string]$DatabaseRoot
 )
 
@@ -47,8 +50,26 @@ $Arguments = @(
     "--dependency-lock-sha256", $DependencyFingerprint,
     "--model-fingerprint", $ModelFingerprint
 )
-if ($DatabaseRoot) {
+if ($DatabaseRoot -and ($DatabasesRoot -or $DatabaseNames.Count)) {
+    throw "legacy DatabaseRoot cannot be combined with canonical database arguments"
+}
+if ($NoDatabase -and ($DatabaseRoot -or $DatabasesRoot -or $DatabaseNames.Count)) {
+    throw "NoDatabase cannot be combined with database arguments"
+}
+if ($DatabaseNames.Count -and -not $DatabasesRoot) {
+    throw "DatabaseNames requires DatabasesRoot"
+}
+if ($NoDatabase) {
+    $Arguments += "--no-database"
+} elseif ($DatabasesRoot) {
+    $Arguments += @("--dbs-root", $DatabasesRoot)
+    foreach ($DatabaseName in $DatabaseNames) {
+        $Arguments += @("--db", $DatabaseName)
+    }
+} elseif ($DatabaseRoot) {
     $Arguments += @("--database-root", $DatabaseRoot)
+} else {
+    $Arguments += @("--dbs-root", (Join-Path $RepositoryRoot ".copilot\rag\dbs"))
 }
 & $Python.Source @Arguments
 if ($LASTEXITCODE -ne 0) {

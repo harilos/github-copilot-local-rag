@@ -638,6 +638,78 @@ def create_distribution_package(
             pass
 
 
+def stage_search_database_snapshots(
+    dbs_root: Path,
+    destination_root: Path,
+    *,
+    db_names: Sequence[str],
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically stage canonical filtered search snapshots for explicit DBs."""
+
+    root = _real_directory(dbs_root, "dbs_root")
+    names = tuple(str(value) for value in db_names)
+    entries, databases = _database_entries(
+        root, db_names=names, distribution=True
+    )
+    destination = Path(destination_root).resolve(strict=False)
+    parent = _real_directory(destination.parent, "database_snapshot_parent")
+    if destination.parent.resolve(strict=True) != parent or destination.exists():
+        raise PackageError("package_output_exists")
+    stage = Path(tempfile.mkdtemp(prefix=".local-rag-db-snapshot.", dir=str(parent)))
+    try:
+        manifest = _stage_package(
+            stage,
+            entries,
+            kind=_DISTRIBUTION_KIND,
+            databases=databases,
+            created=_created_at(created_at),
+            tool_version="database-snapshot",
+        )
+        validate_package_tree(stage, expected_kind=_DISTRIBUTION_KIND)
+        source = stage / ".copilot" / "rag" / "dbs"
+        if names and not source.is_dir():
+            raise PackageError("package_manifest_dbs_invalid")
+        if source.is_dir():
+            os.replace(source, destination)
+        else:
+            destination.mkdir()
+        records = []
+        for database in manifest.get("dbs") or []:
+            name = str(database.get("name") or "")
+            prefix = f".copilot/rag/dbs/{name}/"
+            db_files = [
+                dict(record)
+                for record in manifest.get("files") or []
+                if str(record.get("path") or "").startswith(prefix)
+            ]
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    db_files, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()
+            records.append(
+                {
+                    **dict(database),
+                    "prefix": f".copilot/rag/dbs/{name}",
+                    "file_count": len(db_files),
+                    "bytes": sum(int(item["size"]) for item in db_files),
+                    "fingerprint": fingerprint,
+                    "coverage": "closed-set",
+                }
+            )
+        return {
+            "databases": records,
+            "files": [dict(value) for value in manifest.get("files") or []],
+            "total": dict(manifest.get("total") or {}),
+        }
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
 def create_admin_transfer_package(
     copilot_home: Path,
     output_directory: Path,
@@ -1807,8 +1879,12 @@ def _selected_database_names(
     root: Path,
     values: Sequence[str] | None,
 ) -> list[str]:
-    if values:
-        names = sorted(set(str(value) for value in values))
+    if values is not None:
+        requested = [str(value) for value in values]
+        folded = [value.casefold() for value in requested]
+        if len(folded) != len(set(folded)):
+            raise PackageError("database_name_duplicate")
+        names = sorted(requested, key=str.casefold)
     else:
         names = sorted(
             path.name

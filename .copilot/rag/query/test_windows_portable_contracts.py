@@ -253,6 +253,35 @@ class PortableRuntimeContractTests(unittest.TestCase):
             finally:
                 SETUP._release_setup_lock()
 
+    def test_packaged_setup_can_defer_completion_marker_until_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._fixture(root)
+            query = manifest.parent
+            venv = query / ".venv"
+            python = venv / "Scripts" / "python.exe"
+            marker_path = completion_marker_for(query)
+            marker_path.write_bytes(b"old-marker")
+            verification = {"status": "ready", "setup_complete": True, "lookup_ready": True, "runtime": {"packaged_runtime": "pass"}, "databases": {"healthy": ["fixture-rag"], "unhealthy": []}, "warnings": [], "next_action": None}
+            output = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(sys, "argv", ["setup.py", "--defer-completion-marker", "--format", "json"]),
+                    mock.patch.object(SETUP, "_setup_paths", return_value=(query, venv, python, marker_path)),
+                    mock.patch("portable_runtime.platform.system", return_value="Windows"),
+                    mock.patch("portable_runtime.platform.machine", return_value="AMD64"),
+                    mock.patch.object(SETUP, "_run_verification", return_value=verification),
+                    mock.patch.object(SETUP, "_write_completion_marker") as write_marker,
+                    mock.patch.dict(os.environ, {"APPDATA": ""}),
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(0, SETUP.main())
+                self.assertTrue(json.loads(output.getvalue())["setup_complete"])
+                write_marker.assert_not_called()
+                self.assertFalse(marker_path.exists())
+            finally:
+                SETUP._release_setup_lock()
+
     def test_explicit_vscode_opt_in_failure_is_setup_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

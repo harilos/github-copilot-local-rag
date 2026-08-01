@@ -48,6 +48,15 @@ class PackageContractTests(unittest.TestCase):
         self.assertIn("install.sh", destinations)
         self.assertIn("install.ps1", destinations)
 
+    def test_explicit_empty_database_selection_never_expands_to_all(self) -> None:
+        dbs = self.root / "dbs"
+        (dbs / "one-rag").mkdir(parents=True)
+        (dbs / "one-rag" / "db.json").write_text("{}", encoding="utf-8")
+        self.assertEqual([], packages._selected_database_names(dbs, ()))
+        self.assertEqual(["one-rag"], packages._selected_database_names(dbs, None))
+        with self.assertRaisesRegex(packages.PackageError, "database_name_duplicate"):
+            packages._selected_database_names(dbs, ("one-rag", "ONE-RAG"))
+
     def test_distribution_excludes_completion_markers_and_backups(self) -> None:
         for relative in (
             "rag/query/.rag-deps-installed",

@@ -5,6 +5,7 @@ import re
 from typing import Any, Mapping
 
 from .database_copy_core import DatabaseCopyError, copy_database
+from multi_select import SelectionRow, toggle_selection
 
 _RUNTIME_PATCH_MARKER = "_local_rag_database_copy_runtime_installed"
 _CLASS_PATCH_MARKER = "_local_rag_database_copy_ui_installed"
@@ -197,67 +198,33 @@ def choose_excluded_sources(
     db_name: str,
     sources: list[dict[str, Any]],
 ) -> set[str] | None:
-    excluded: set[str] = set()
     if not sources:
-        return excluded
-    while True:
-        manager._print_screen_header("DBのコピーを作る", db_name=db_name)
-        manager.output(
-            "全Sourceがコピー対象です。番号を入力すると、"
-            "そのSourceを『コピーしない』へ切り替えます。"
-        )
-        manager.output("\nSource選択")
-        for index, source in enumerate(sources, start=1):
-            key = choice_key(source, index)
-            details = (
+        return set()
+    rows = tuple(
+        SelectionRow(
+            choice_key(source, index),
+            (
                 f"{source_name(source)} "
                 f"[{str(source.get('source_type') or 'other')}] "
-                f"{int(source.get('document_count') or 0):,}文書"
-            )
-            state = "コピーする"
-            if key in excluded:
-                details = strike_text(manager, details)
-                state = "コピーしない"
-            manager.output(f"{index}. [{state}] {details}")
-        manager.output(
-            "\n番号／カンマ区切り: 切替  A: 全てコピー  X: 全て除外"
-            "\nC: 選択確定  0: 中止"
+                f"{int(source.get('document_count') or 0):,} documents"
+            ),
         )
-        action = manager._ask("操作: ")
-        if action in (None, "0"):
-            manager._print_info("DBコピーを中止しました。")
-            return None
-        normalized = str(action).strip().casefold()
-        if normalized == "a":
-            excluded.clear()
-            continue
-        if normalized == "x":
-            excluded = {
-                choice_key(source, index)
-                for index, source in enumerate(sources, start=1)
-            }
-            continue
-        if normalized == "c":
-            return excluded
-        try:
-            indexes = {
-                int(value.strip())
-                for value in normalized.split(",")
-                if value.strip()
-            }
-        except ValueError:
-            manager._invalid_selection("Source番号、A、X、C、または0")
-            continue
-        if not indexes or any(index < 1 or index > len(sources) for index in indexes):
-            manager._invalid_selection(f"1～{len(sources)}、A、X、C、または0")
-            continue
-        for index in indexes:
-            key = choice_key(sources[index - 1], index)
-            if key in excluded:
-                excluded.remove(key)
-            else:
-                excluded.add(key)
-
+        for index, source in enumerate(sources, start=1)
+    )
+    result = toggle_selection(
+        rows,
+        ask=manager._ask,
+        output=manager.output,
+        invalid=manager._invalid_selection,
+        title=f"Source selection for {db_name}",
+        selected_text="copy",
+        excluded_text="do not copy",
+    )
+    if result.mode == "cancelled":
+        manager._print_info("Database copy was cancelled.")
+        return None
+    selected = set(result.keys)
+    return {row.key for row in rows if row.key not in selected}
 
 def choice_key(source: Mapping[str, Any], index: int) -> str:
     return str(

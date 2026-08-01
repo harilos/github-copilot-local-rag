@@ -103,6 +103,11 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--defer-completion-marker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--configure-vscode-auto-approve",
         action="store_true",
         help=(
@@ -203,6 +208,10 @@ def main() -> int:
             )
         ):
             parser.error("packaged runtime setup is offline and immutable")
+    if args.defer_completion_marker and packaged_runtime is None:
+        parser.error("--defer-completion-marker is restricted to packaged runtime setup")
+    if args.defer_completion_marker and offline_modes:
+        parser.error("--defer-completion-marker cannot be combined with offline modes")
     try:
         network = (_packaged_network() if packaged_runtime is not None else resolve_network_configuration(
             cli_proxy=args.proxy,
@@ -238,7 +247,7 @@ def main() -> int:
         )
         _emit(payload, args.format)
         return 1
-    if args.refresh_completion_marker:
+    if args.refresh_completion_marker or args.defer_completion_marker:
         try:
             _invalidate_completion_marker(marker)
         except SetupStepError as exc:
@@ -443,7 +452,11 @@ def main() -> int:
             normal_previous_marker = _read_optional_bytes(marker)
             normal_marker_previously_valid = normal_previous_marker is not None
 
-    if verification.get("setup_complete") and not args.verify_only:
+    if (
+        verification.get("setup_complete")
+        and not args.verify_only
+        and not args.defer_completion_marker
+    ):
         try:
             _write_completion_marker(
                 marker,

@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import email.parser
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
+import re
 import stat
+import sys
 import tempfile
+import types
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
 MANIFEST_SCHEMA = "local-rag.packaged-runtime.v1"
-PACKAGE_SCHEMA = "local-rag.windows-package.v1"
+PACKAGE_SCHEMA = "local-rag.windows-package.v2"
+_DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
 SUPPORTED_PROFILES = frozenset({"search-only", "admin-full"})
 FORBIDDEN_NAMES = frozenset(
     {
@@ -43,6 +49,9 @@ class BuildRequest:
     python_version: str
     dependency_lock_sha256: str
     model_fingerprint: str
+    databases_root: Path | None = None
+    database_names: tuple[str, ...] = ()
+    no_database: bool = False
     database_root: Path | None = None
 
 
@@ -53,6 +62,8 @@ class BuildResult:
     package_manifest_sha256: str
     expanded_size: int
     file_count: int
+    database_names: tuple[str, ...]
+    database_bytes: int
 
 
 def build_package(request: BuildRequest) -> BuildResult:
@@ -73,16 +84,34 @@ def build_package(request: BuildRequest) -> BuildResult:
         model_target = copilot_root / "rag" / "models" / "ruri-v3-30m-onnx-int8"
         _copy_tree_exact(request.runtime_root, runtime_target)
         _copy_tree_exact(request.model_root, model_target)
-        if request.database_root is not None:
-            _copy_tree_exact(
-                request.database_root,
-                copilot_root / "rag" / "dbs" / request.database_root.name,
+        database_names, databases_root = _normalized_databases(request)
+        database_result = {"databases": [], "files": [], "total": {"bytes": 0}}
+        if databases_root is not None:
+            snapshot_root = package_root / ".database-snapshots"
+            snapshot_api = _load_snapshot_api(request.payload_root)
+            database_result = snapshot_api(
+                databases_root,
+                snapshot_root,
+                db_names=database_names,
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
+            target_dbs = copilot_root / "rag" / "dbs"
+            target_dbs.mkdir(parents=True, exist_ok=True)
+            for name in database_names:
+                source = snapshot_root / name
+                if not source.is_dir():
+                    raise ValueError(f"database snapshot is missing: {name}")
+                destination = target_dbs / name
+                if destination.exists():
+                    raise ValueError(f"database destination exists: {name}")
+                source.replace(destination)
+            shutil.rmtree(snapshot_root)
 
         runtime_manifest = _runtime_manifest(request, runtime_target)
         runtime_manifest_path = query_root / ".packaged-runtime.json"
         _write_json(runtime_manifest_path, runtime_manifest)
-        _write_text(package_root / "install.ps1", _install_bootstrap())
+        _write_text(package_root / "install.cmd", _install_cmd())
+        _write_text(package_root / "internal" / "install.ps1", _install_bootstrap())
         _write_text(package_root / "README-WINDOWS.md", _windows_readme())
         _write_text(
             package_root / "THIRD_PARTY_NOTICES.md",
@@ -109,6 +138,7 @@ def build_package(request: BuildRequest) -> BuildResult:
             "python_version": request.python_version,
             "dependency_lock_sha256": request.dependency_lock_sha256,
             "model_fingerprint": request.model_fingerprint,
+            "databases": list(database_result["databases"]),
             "files": package_entries,
         }
         package_manifest_path = package_root / "PACKAGE-MANIFEST.json"
@@ -130,7 +160,86 @@ def build_package(request: BuildRequest) -> BuildResult:
         package_manifest_sha256=package_manifest_sha256,
         expanded_size=expanded_size,
         file_count=file_count,
+        database_names=database_names,
+        database_bytes=int((database_result.get("total") or {}).get("bytes") or 0),
     )
+
+
+def _normalized_databases(request: BuildRequest) -> tuple[tuple[str, ...], Path | None]:
+    if request.no_database:
+        if request.database_root is not None or request.databases_root is not None or request.database_names:
+            raise ValueError("no_database cannot be combined with database arguments")
+        return (), None
+    if request.database_root is not None:
+        if request.databases_root is not None or request.database_names:
+            raise ValueError("legacy database_root cannot be combined with canonical DB arguments")
+        legacy_input = request.database_root.expanduser().absolute()
+        _reject_reparse_ancestors(legacy_input)
+        legacy = legacy_input.resolve(strict=True)
+        root = legacy.parent.resolve(strict=True)
+        names = (legacy.name,)
+    else:
+        if request.databases_root is None:
+            raise ValueError("database selection is required; use no_database explicitly")
+        root = (
+            _trusted_root(request.databases_root)
+            if request.databases_root is not None
+            else None
+        )
+        names = tuple(str(value) for value in request.database_names)
+    folded = [name.casefold() for name in names]
+    if len(folded) != len(set(folded)):
+        raise ValueError("database names collide after casefold")
+    if any(not _DB_NAME.fullmatch(name) for name in names):
+        raise ValueError("database name is invalid")
+    if names and root is None:
+        raise ValueError("databases_root is required when databases are selected")
+    if root is not None:
+        if not root.is_dir():
+            raise ValueError("databases_root is missing")
+        metadata = root.lstat()
+        if root.is_symlink() or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError("databases_root link or reparse point is forbidden")
+        for name in names:
+            candidate = root / name
+            metadata = candidate.lstat()
+            if candidate.is_symlink() or (
+                getattr(metadata, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise ValueError("database link or reparse point is forbidden")
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_dir() or resolved.parent != root:
+                raise ValueError("database is outside the trusted root")
+            _reject_links(resolved)
+    return tuple(sorted(names, key=str.casefold)), root
+
+
+def _load_snapshot_api(payload_root: Path):
+    source_manager = payload_root / "rag" / "source_manager"
+    packages_path = source_manager / "packages.py"
+    installers_path = source_manager / "package_installers.py"
+    if not packages_path.is_file() or not installers_path.is_file():
+        raise ValueError("canonical database snapshot API is missing from payload")
+    package_name = "_local_rag_windows_snapshot_api"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(source_manager)]
+    sys.modules[package_name] = package
+    installer_spec = importlib.util.spec_from_file_location(
+        f"{package_name}.package_installers", installers_path
+    )
+    installers = importlib.util.module_from_spec(installer_spec)
+    assert installer_spec.loader is not None
+    sys.modules[installer_spec.name] = installers
+    installer_spec.loader.exec_module(installers)
+    packages_spec = importlib.util.spec_from_file_location(
+        f"{package_name}.packages", packages_path
+    )
+    packages = importlib.util.module_from_spec(packages_spec)
+    assert packages_spec.loader is not None
+    sys.modules[packages_spec.name] = packages
+    packages_spec.loader.exec_module(packages)
+    return packages.stage_search_database_snapshots
 
 
 def _validate_request(request: BuildRequest) -> None:
@@ -152,13 +261,38 @@ def _validate_request(request: BuildRequest) -> None:
         if not root.is_dir():
             raise ValueError(f"{label} root is missing: {root}")
         _reject_links(root)
+    _normalized_databases(request)
 
 
 def _reject_links(root: Path) -> None:
-    for path in (root, *root.rglob("*")):
+    attributes = getattr(root.lstat(), "st_file_attributes", 0)
+    if root.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"symlink or reparse point is forbidden: {root}")
+    for path in root.rglob("*"):
         attributes = getattr(path.lstat(), "st_file_attributes", 0)
         if path.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise ValueError(f"symlink or reparse point is forbidden: {path}")
+
+
+def _reject_reparse_ancestors(path: Path) -> None:
+    current = path.absolute()
+    while True:
+        if current.exists() or current.is_symlink():
+            attributes = getattr(current.lstat(), "st_file_attributes", 0)
+            if current.is_symlink() or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise ValueError(f"symlink or reparse point is forbidden: {current}")
+        if current.parent == current:
+            return
+        current = current.parent
+
+
+def _trusted_root(path: Path) -> Path:
+    original = path.expanduser().absolute()
+    _reject_reparse_ancestors(original)
+    resolved = original.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("databases_root is missing")
+    return resolved
 
 
 def _copy_payload(source: Path, target: Path) -> None:
@@ -190,7 +324,7 @@ def _payload_excluded(relative: Path, is_dir: bool) -> bool:
     if name.endswith(FORBIDDEN_SUFFIXES):
         return True
     if len(parts) >= 2 and parts[0] == "rag" and parts[1] in {"dbs", "models"}:
-        return len(parts) != 3 or is_dir or name not in {"readme.md", ".gitkeep"}
+        return True
     return False
 
 
@@ -308,17 +442,25 @@ def _assert_no_forbidden_payload(root: Path) -> None:
 def _write_deterministic_zip(package_root: Path, destination: Path) -> None:
     if destination.exists():
         raise FileExistsError(f"refusing to overwrite existing package: {destination}")
-    with zipfile.ZipFile(
-        destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
-    ) as archive:
-        for path in sorted(package_root.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = Path(package_root.name) / path.relative_to(package_root)
-            info = zipfile.ZipInfo(relative.as_posix(), (2026, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o100644 << 16
-            archive.writestr(info, path.read_bytes())
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.partial")
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as archive:
+            for path in sorted(package_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                relative = Path(package_root.name) / path.relative_to(package_root)
+                info = zipfile.ZipInfo(relative.as_posix(), (2026, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, path.read_bytes())
+        with zipfile.ZipFile(temporary) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("generated ZIP failed CRC verification")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -348,6 +490,22 @@ def _install_bootstrap() -> str:
     return template.read_text(encoding="utf-8")
 
 
+def _install_cmd() -> str:
+    return (
+        "@echo off\n"
+        "setlocal\n"
+        "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
+        "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
+        "\"%~dp0internal\\install.ps1\" %*\n"
+        "set \"local_rag_rc=%ERRORLEVEL%\"\n"
+        "if not \"%local_rag_rc%\"==\"0\" (\n"
+        "  echo Local RAG installation failed with error code %local_rag_rc%.\n"
+        "  pause\n"
+        ")\n"
+        "exit /b %local_rag_rc%\n"
+    )
+
+
 def _windows_readme() -> str:
     return """# Local RAG for Windows x64
 
@@ -355,10 +513,13 @@ This package contains a fixed, offline Python runtime. System Python, py.exe,
 PATH changes, administrator rights, registry changes, pip, and model downloads
 are not required.
 
-After copying the package's .copilot tree into your profile, run:
+Extract the ZIP to a local folder and double-click `install.cmd`. The launcher
+uses Windows PowerShell 5.1 with a process-scoped execution-policy bypass and
+returns the installer's exit code. It pauses only when installation fails.
 
-    & "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" `
-      "$env:USERPROFILE\\.copilot\\rag\\setup.py" --format human
+The package contains exactly the databases declared in `PACKAGE-MANIFEST.json`.
+Existing unrelated databases are preserved. Replacing a database whose content
+differs requires `install.cmd -ReplaceExistingDatabases`.
 
 In VS Code Copilot Chat, select Agent and enable runInTerminal in Configure
 Tools. Enable readFile when using file result delivery. Global auto-approve,

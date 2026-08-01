@@ -163,6 +163,23 @@ class ManagerContractTests(unittest.TestCase):
         root.mkdir()
         return root
 
+    def test_distribution_and_admin_packages_share_frozen_database_selection(self) -> None:
+        for name in ("one-rag", "two-rag"):
+            root = self.make_db(name)
+            (root / "db.json").write_text("{}", encoding="utf-8")
+        summaries = [{"name": "one-rag"}, {"name": "two-rag"}]
+        for kind, function_name in (("distribution", "create_distribution_package"), ("admin", "create_admin_transfer_package")):
+            manager = self.manager(["2", "c"])
+            target = self.base / f"{kind}-output"
+            with (
+                mock.patch.object(manager, "_database_summaries", return_value=summaries),
+                mock.patch.object(manager, "_prompt_preserving_value", return_value=str(target)),
+                mock.patch.object(manager, "_confirm", return_value=True),
+                mock.patch.object(source_packages, function_name, return_value={"manifest": {"total": {"files": 0, "bytes": 0}}}) as create,
+            ):
+                manager._create_portable_package(kind)
+            self.assertEqual(("one-rag",), create.call_args.kwargs["db_names"])
+
     def test_fixed_human_menu_contract(self) -> None:
         self.assertEqual(
             [label for _, label in manage.TOP_MENU],

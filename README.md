@@ -346,3 +346,15 @@ path規則、network/proxy、package検証については
 
 repository内のlicenseと、同梱する各dependency/modelのlicenseを確認して
 利用してください。
+
+
+### Windows portable multi-database ZIP
+
+The Windows portable builder selects databases from one trusted parent directory.
+Use `-DatabasesRoot` with repeatable `-DatabaseNames`, or omit the names to
+open the shared toggle selector. Use `-NoDatabase` only for an explicit
+runtime-only package. Extract the completed ZIP and run the top-level ASCII
+`install.cmd`; its implementation is manifest-covered at
+`internal\install.ps1`. Existing unrelated databases are preserved, and a
+differing same-name database is replaced only with
+`-ReplaceExistingDatabases`.

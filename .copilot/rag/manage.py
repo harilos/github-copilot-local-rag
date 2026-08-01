@@ -737,6 +737,36 @@ class LocalRagManager:
             )
 
     def _create_portable_package(self, kind: str) -> None:
+        from multi_select import (
+            SelectionResult,
+            database_selection_rows,
+            toggle_selection,
+        )
+
+        summaries = self._database_summaries()
+        rows = database_selection_rows(summaries, self.dbs_root)
+        if rows:
+            selection = toggle_selection(
+                rows,
+                ask=self._ask,
+                output=self.output,
+                invalid=self._invalid_selection,
+                title="Database selection (initially all selected)",
+                selected_text="include",
+                excluded_text="exclude",
+            )
+        else:
+            selection = SelectionResult("none")
+        if selection.mode == "cancelled":
+            self._print_info("Package creation was cancelled.")
+            return
+        db_names = tuple(selection.keys)
+        if not db_names and not self._confirm(
+            "No database will be included and lookup will not be ready. Continue?"
+        ):
+            self._print_info("Package creation was cancelled.")
+            return
+
         is_distribution = kind == "distribution"
         label = (
             "利用者向け検索パッケージ"
@@ -760,9 +790,10 @@ class LocalRagManager:
         if destination is None:
             return
         output = Path(destination).expanduser()
+        self.output(f"Databases ({len(db_names)}): {', '.join(db_names) or 'none'}")
         self.output("\n作成内容")
         self.output(f"種類: {label}")
-        self.output(f"対象: 現在の全DB")
+        self.output(f"Selected databases: {len(db_names)}")
         self.output(
             "認証情報、端末設定、実行中の一時情報: 含めない"
         )
@@ -779,11 +810,13 @@ class LocalRagManager:
                 result = create_distribution_package(
                     self.rag_root.parent,
                     output,
+                    db_names=db_names,
                 )
             else:
                 result = create_admin_transfer_package(
                     self.rag_root.parent,
                     output,
+                    db_names=db_names,
                 )
         except Exception as exc:
             self._print_internal_diagnostic(
