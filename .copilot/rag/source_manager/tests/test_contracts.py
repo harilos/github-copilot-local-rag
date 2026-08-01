@@ -22,6 +22,8 @@ from source_manager import (
     build_fetch_plan,
     confirm_add_success,
     execute_fetch_plan,
+    generated_github_issues_link,
+    generated_github_wiki_link,
     list_sources,
     redmine_batches,
     parse_redmine_project_url,
@@ -1313,6 +1315,80 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             sidecar["sources"][0]["link"]["strategy"],
         )
 
+    def test_repository_wiki_and_issues_publish_to_one_sidecar(self) -> None:
+        repository_url = "https://github.com/example/repository"
+        values = (
+            (
+                "github",
+                "Repository",
+                {
+                    "enabled": True,
+                    "strategy": "github-blob",
+                    "settings": {
+                        "repository_url": repository_url,
+                        "ref": "main",
+                        "permalink_enabled": False,
+                    },
+                },
+            ),
+            (
+                "github_wiki",
+                "Wiki",
+                generated_github_wiki_link(repository_url),
+            ),
+            (
+                "github_issues",
+                "Issues",
+                generated_github_issues_link(repository_url),
+            ),
+        )
+        stored_sources = []
+        for index, (source_type, display_name, link) in enumerate(values, 1):
+            stored = SourceStore(self.db_root).create_source(
+                source_type=source_type,
+                display_name=display_name,
+                fetch={"repository_url": repository_url},
+                source_id=f"indexed-source-{index}",
+                link=link,
+            )
+            stored_sources.append(stored)
+        catalog = sqlite3.connect(self.db_root / "catalog.sqlite")
+        try:
+            catalog.execute(
+                """
+                CREATE TABLE document (
+                    doc_pk INTEGER PRIMARY KEY,
+                    source_id TEXT,
+                    path TEXT NOT NULL,
+                    visible_until INTEGER
+                )
+                """
+            )
+            for index, stored in enumerate(stored_sources, 1):
+                catalog.execute(
+                    "INSERT INTO document VALUES (?, ?, ?, NULL)",
+                    (
+                        index,
+                        f"indexed-source-{index}",
+                        f"{stored.payload['local_source_key']}/document.md",
+                    ),
+                )
+            catalog.commit()
+        finally:
+            catalog.close()
+
+        rag_root = Path(__file__).resolve().parents[2]
+        for stored in stored_sources:
+            publish_source_metadata(self.db_root, stored.payload, rag_root)
+        sidecar = json.loads(
+            (self.db_root / "source-links.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(3, len(sidecar["sources"]))
+        self.assertEqual(
+            {"github", "github_wiki", "github_issues"},
+            {source["source_type"] for source in sidecar["sources"]},
+        )
+
     def test_other_runtime_path_is_redacted_after_success(self) -> None:
         runtime = Path(self.temporary.name).resolve() / "incoming"
         runtime.mkdir()
@@ -2107,6 +2183,106 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         ).payload
         self.assertFalse(stored["metadata_sync_pending"])
         self.assertNotIn("pending_metadata", stored)
+
+    def test_github_metadata_resume_uses_real_publisher_without_refetch(
+        self,
+    ) -> None:
+        calls = {"fetch": 0, "add": 0, "metadata": 0}
+        rag_root = Path(__file__).resolve().parents[2]
+
+        def fetch(_plan, work, _state):
+            calls["fetch"] += 1
+            (Path(work) / "README.md").write_text(
+                "fixture",
+                encoding="utf-8",
+            )
+            return {"status": "ok", "documents": 1}
+
+        def add(_arguments):
+            calls["add"] += 1
+            key = list_sources(self.db_root)[0]["local_source_key"]
+            catalog = sqlite3.connect(self.db_root / "catalog.sqlite")
+            try:
+                catalog.execute(
+                    """
+                    CREATE TABLE document (
+                        doc_pk INTEGER PRIMARY KEY,
+                        source_id TEXT,
+                        path TEXT NOT NULL,
+                        visible_until INTEGER
+                    )
+                    """
+                )
+                catalog.execute(
+                    "INSERT INTO document VALUES (?, ?, ?, NULL)",
+                    (1, key, f"{key}/README.md"),
+                )
+                catalog.commit()
+            finally:
+                catalog.close()
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_valid_add_summary(key)),
+                stderr="",
+            )
+
+        def publish_after_one_failure(db_root, source, runtime_root):
+            calls["metadata"] += 1
+            if calls["metadata"] == 1:
+                raise SourceManagerError("synthetic metadata interruption")
+            publish_source_metadata(db_root, source, runtime_root)
+
+        link = {
+            "enabled": True,
+            "strategy": "github-blob",
+            "settings": {
+                "repository_url": "https://github.com/example/repository",
+                "ref": "main",
+                "permalink_enabled": False,
+            },
+        }
+        first = register_source(
+            self.db_root,
+            source_type="github",
+            display_name="Repository",
+            fetch={
+                "repository_url": "https://github.com/example/repository.git",
+            },
+            link=link,
+            start=True,
+            python_executable=Path(self.temporary.name) / "venv-python",
+            rag_root=rag_root,
+            executor=fetch,
+            command_runner=add,
+            metadata_publisher=publish_after_one_failure,
+        )
+        self.assertEqual("metadata_sync_pending", first["status"])
+        self.assertEqual({"fetch": 1, "add": 1, "metadata": 1}, calls)
+
+        resumed = update_source(
+            self.db_root,
+            first["local_source_key"],
+            python_executable=Path(self.temporary.name) / "venv-python",
+            rag_root=rag_root,
+            executor=fetch,
+            command_runner=add,
+            metadata_publisher=publish_after_one_failure,
+        )
+        self.assertEqual("updated", resumed["status"])
+        self.assertEqual("metadata_sync", resumed["resumed_operation"])
+        self.assertEqual({"fetch": 1, "add": 1, "metadata": 2}, calls)
+        stored = SourceStore(self.db_root).read_source(
+            first["local_source_key"]
+        ).payload
+        self.assertFalse(stored["metadata_sync_pending"])
+        self.assertNotIn("pending_metadata", stored)
+        sidecar = json.loads(
+            (self.db_root / "source-links.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "https://github.com/example/repository",
+            sidecar["sources"][0]["link"]["settings"]["repository_url"],
+        )
 
     def test_fetched_symlink_is_rejected_before_add(self) -> None:
         if not hasattr(os, "symlink"):
