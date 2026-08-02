@@ -19,7 +19,7 @@ from .paths import (
     logs_dir,
     output_root,
 )
-from .store import delete_ids
+from .store import delete_ids, source_records
 
 
 ProgressCallback = Callable[[Mapping[str, Any]], None]
@@ -63,16 +63,22 @@ def delete_source_data(
     }
 
     catalog_ids = set(catalog.source_chunk_ids(value))
+    vector_records = _inventory_vector_records(value, catalog_ids)
+    vector_ids = {
+        str(record.get("id") or "")
+        for record in vector_records
+        if str(record.get("id") or "")
+    }
     clean_actions = _plan_clean_deletion(
         value,
         state=state,
         matching_state_keys=matching_state_keys,
-        expected_record_ids=catalog_ids | state_record_ids,
+        expected_record_ids=catalog_ids | state_record_ids | vector_ids,
     )
-    # Catalog ownership is canonical for vector deletion.  State is useful for
-    # clean recovery, but a stale/corrupt state ID must never delete a sibling
-    # Source's vector.
-    record_ids = sorted(catalog_ids)
+    # Chroma's exact metadata filter is canonical for vector deletion.  State
+    # and catalog IDs remain recovery hints for their own stores, but never
+    # authorize deletion of a vector owned by a sibling Source.
+    record_ids = sorted(vector_ids)
     _emit_progress(
         progress_callback,
         phase="delete.verify",
@@ -108,6 +114,7 @@ def delete_source_data(
         if record_ids
         else 0
     )
+    _verify_vector_source_empty(value)
     _emit_progress(
         progress_callback,
         phase="delete.vector",
@@ -463,14 +470,43 @@ def _delete_vector_ids(
     ids: list[str],
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> int:
+    callback = delete_ids
+    if progress_callback is None:
+        return _with_target_vector_environment(callback, ids)
+    return _with_target_vector_environment(
+        callback,
+        ids,
+        progress_callback=progress_callback,
+    )
+
+
+def _inventory_vector_records(
+    source_id: str,
+    _known_catalog_ids: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    return _with_target_vector_environment(source_records, source_id)
+
+
+def _verify_vector_source_empty(source_id: str) -> None:
+    residual = _inventory_vector_records(source_id)
+    if residual:
+        raise RuntimeError(
+            "vector source deletion left residual records: "
+            f"source_id={source_id!r} count={len(residual)}"
+        )
+
+
+def _with_target_vector_environment(
+    callback: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
     keys = ("CHROMA_DIR_V2", "CHROMA_COLLECTION")
     previous = {key: os.environ.get(key) for key in keys}
     os.environ["CHROMA_DIR_V2"] = str(index_dir() / "chroma")
     os.environ["CHROMA_COLLECTION"] = collection_name_for_db(db_name())
     try:
-        if progress_callback is None:
-            return delete_ids(ids)
-        return delete_ids(ids, progress_callback=progress_callback)
+        return callback(*args, **kwargs)
     finally:
         for key, value in previous.items():
             if value is None:

@@ -37,6 +37,19 @@ class SourceDeleteContracts(unittest.TestCase):
         (self.clean / "records").mkdir(parents=True)
         self.logs.mkdir()
         self.index.mkdir()
+        inventory = mock.patch.object(
+            source_delete,
+            "_inventory_vector_records",
+            side_effect=lambda source_id, known_ids=(): [
+                {
+                    "id": str(record_id),
+                    "metadata": {"source_id": source_id},
+                }
+                for record_id in known_ids
+            ],
+        )
+        inventory.start()
+        self.addCleanup(inventory.stop)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

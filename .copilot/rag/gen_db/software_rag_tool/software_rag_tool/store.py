@@ -87,11 +87,25 @@ def _get_or_create_collection() -> Any:
     return client.get_or_create_collection(name=name, metadata=metadata)
 
 
+def _get_existing_collection() -> Any | None:
+    _require_chromadb()
+    cdir = chroma_dir()
+    if not cdir.exists():
+        return None
+    client = _persistent_client(cdir)
+    try:
+        return client.get_collection(name=collection_name())
+    except ChromaNotFoundError:
+        return None
+
+
 def upsert_records(records: list[dict[str, Any]], progress_callback: Callable[[int, int], None] | None = None) -> int:
     if not records:
         return 0
 
-    collection = _get_or_create_collection()
+    collection = _get_existing_collection()
+    if collection is None:
+        return 0
     embedder = get_embedder()
     batch_size = int(os.getenv("EMBED_BATCH_SIZE", "8"))
     if batch_size <= 0:
@@ -137,6 +151,35 @@ def delete_ids(
                 # Progress reporting is observational.
                 pass
     return deleted
+
+
+def source_records(source_id: str) -> list[dict[str, Any]]:
+    """Read vector ownership using one exact raw ``source_id`` filter.
+
+    This path never creates a collection.  Filter/read errors propagate so a
+    caller can fail closed before mutating another store.
+    """
+    value = str(source_id)
+    collection = _get_existing_collection()
+    if collection is None:
+        return []
+    result = collection.get(
+        where={"source_id": value},
+        include=["metadatas"],
+    )
+    ids = list(result.get("ids") or [])
+    metadatas = list(result.get("metadatas") or [])
+    if len(ids) != len(metadatas):
+        raise RuntimeError("Chroma source inventory returned misaligned metadata")
+    records: list[dict[str, Any]] = []
+    for record_id, metadata in zip(ids, metadatas):
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Chroma source inventory returned missing metadata")
+        owner = metadata.get("source_id")
+        if not isinstance(owner, str) or owner != value:
+            raise RuntimeError("Chroma source inventory returned an unverified owner")
+        records.append({"id": str(record_id), "metadata": dict(metadata)})
+    return sorted(records, key=lambda item: item["id"])
 
 
 def collection_count() -> int:
