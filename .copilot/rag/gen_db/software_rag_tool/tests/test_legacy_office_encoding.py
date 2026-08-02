@@ -49,6 +49,18 @@ class ConverterOutputDecodingTests(unittest.TestCase):
                 with self.assertRaises(extractors.ConverterOutputDecodeError):
                     extractors._decode_converter_output(payload)
 
+    def test_control_characters_fail_for_every_decode_path(self) -> None:
+        cases = (
+            b"abc\x00def",
+            codecs.BOM_UTF8 + b"abc\x00def",
+            "abc\x00def".encode("utf-16"),
+            "あ\x00".encode("cp932"),
+        )
+        for payload in cases:
+            with self.subTest(prefix=payload[:4]):
+                with self.assertRaises(extractors.ConverterOutputDecodeError):
+                    extractors._decode_converter_output(payload)
+
     def test_textutil_decodes_converter_stdout_bytes(self) -> None:
         completed = subprocess.CompletedProcess(
             args=["textutil"],

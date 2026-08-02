@@ -192,16 +192,19 @@ def _decode_converter_output(data: bytes) -> str:
     for bom, encoding in _CONVERTER_BOM_ENCODINGS:
         if data.startswith(bom):
             try:
-                return data.decode(encoding, errors="strict")
+                text = data.decode(encoding, errors="strict")
             except UnicodeError as exc:
                 raise ConverterOutputDecodeError(
                     f"converter output has an invalid {encoding} byte sequence"
                 ) from exc
+            return _validate_converter_text(text)
 
     try:
-        return data.decode("utf-8", errors="strict")
+        text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         pass
+    else:
+        return _validate_converter_text(text)
 
     try:
         text = data.decode("cp932", errors="strict")
@@ -210,12 +213,16 @@ def _decode_converter_output(data: bytes) -> str:
             "converter output is neither valid UTF-8 nor valid CP932"
         ) from exc
 
+    return _validate_converter_text(text)
+
+
+def _validate_converter_text(text: str) -> str:
     if any(
         unicodedata.category(char) == "Cc" and char not in "\t\n\r"
         for char in text
     ):
         raise ConverterOutputDecodeError(
-            "converter output decoded as CP932 but contains non-text control bytes"
+            "converter output contains non-text control characters"
         )
     return text
 
