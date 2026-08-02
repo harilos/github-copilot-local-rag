@@ -21,6 +21,7 @@ from .tokenize import (
     identifier_aliases,
     identifier_match_keys,
     phrase_queries,
+    supported_unicode_filename_anchor,
     tokenizer_fingerprint,
     tokenize_for_fts,
     tokens_for_fts,
@@ -605,6 +606,9 @@ def exact_search(
     if not path.exists():
         return []
     anchors = extract_anchors(question, limit=30)
+    filename = supported_unicode_filename_anchor(question)
+    if filename and filename not in anchors:
+        anchors.append(filename)
     if not anchors:
         return []
     lookup_values = _lookup_values_for_anchors(anchors)
