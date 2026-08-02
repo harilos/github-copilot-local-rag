@@ -12,7 +12,11 @@ from .db_runtime import DbRegistry
 from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
-from .retrieval import adaptive_hybrid_query, cold_lexical_fast_path, hybrid_query
+from .retrieval import (
+    adaptive_hybrid_query,
+    cold_lexical_fast_path,
+    hybrid_query_with_health,
+)
 from .search_request import normalize_search_request
 from .source_paths import SourcePathError, canonical_stored_path
 from .token_budget import conservative_token_count, truncate_to_token_limit
@@ -48,6 +52,7 @@ COMPACT_SEARCH_FIELDS = (
     "retrieval_route",
     "dense_used",
     "dense_skipped_reason",
+    "lane_health",
     "error",
     "message",
     "required_action",
@@ -92,7 +97,7 @@ def run_search_payload(
         }
     )
     question = str(request["original_question"])
-    rows = hybrid_query(
+    rows, lane_health = hybrid_query_with_health(
         question,
         top_k=top_k,
         source=source,
@@ -120,7 +125,10 @@ def run_search_payload(
         payload["identifier_diagnostics_enabled"] = False
     payload["retrieval_mode"] = mode
     payload["retrieval_route"] = mode
-    payload["dense_used"] = mode in {"hybrid", "dense"}
+    payload["lane_health"] = lane_health
+    payload["dense_used"] = bool(
+        (lane_health.get("dense") or {}).get("succeeded")
+    )
     _apply_answer_goal_ranking(payload, str(request["answer_goal"]))
     _add_discovery_lane(
         payload,
@@ -130,7 +138,9 @@ def run_search_payload(
         use_dense=mode in {"hybrid", "dense"},
         deadline_monotonic=deadline_monotonic,
         dense_runtime_ready=dense_runtime_ready,
+        dense_failure_known=_dense_lane_failed(payload),
     )
+    _apply_dense_lane_outcome(payload, retrieval_mode=mode)
     return _finalize_search_payload(
         payload,
         store=store,
@@ -197,6 +207,7 @@ def run_adaptive_search_payload(
     payload["retrieval_route"] = route["retrieval_route"]
     payload["dense_used"] = bool(route["dense_used"])
     payload["dense_skipped_reason"] = route.get("dense_skipped_reason")
+    payload["lane_health"] = dict(route.get("lane_health") or {})
     if explain:
         payload["retrieval_funnel"] = dict(route.get("retrieval_funnel") or {})
     certificate = route.get("certificate") or {}
@@ -229,7 +240,9 @@ def run_adaptive_search_payload(
             "exact": list(route.get("verified_exact_rows") or []),
             "dense_ran": bool(route.get("dense_used")),
         },
+        dense_failure_known=_dense_lane_failed(payload),
     )
+    _apply_dense_lane_outcome(payload, retrieval_mode="hybrid")
     return _finalize_search_payload(
         payload,
         store=store,
@@ -284,6 +297,13 @@ def try_cold_lexical_fast_path(
         payload["retrieval_route"] = "cold_identifier_no_hit"
         payload["dense_used"] = False
         payload["dense_skipped_reason"] = "cold_lexical_fast_path"
+        payload["lane_health"] = {
+            "dense": {
+                "attempted": False,
+                "succeeded": False,
+                "error": None,
+            }
+        }
         return _finalize_search_payload(
             payload,
             store=store,
@@ -308,6 +328,13 @@ def try_cold_lexical_fast_path(
     payload["retrieval_route"] = "cold_lexical_fast_path"
     payload["dense_used"] = False
     payload["dense_skipped_reason"] = "cold_lexical_fast_path"
+    payload["lane_health"] = {
+        "dense": {
+            "attempted": False,
+            "succeeded": False,
+            "error": None,
+        }
+    }
     return _finalize_search_payload(
         payload,
         store=store,
@@ -463,6 +490,38 @@ def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
     return normalized
 
 
+def _dense_lane_failed(payload: dict[str, Any]) -> bool:
+    dense = (payload.get("lane_health") or {}).get("dense") or {}
+    return bool(dense.get("error")) or (
+        bool(dense.get("attempted")) and not bool(dense.get("succeeded"))
+    )
+
+
+def _apply_dense_lane_outcome(
+    payload: dict[str, Any],
+    *,
+    retrieval_mode: str,
+) -> None:
+    dense = (payload.get("lane_health") or {}).get("dense") or {}
+    payload["dense_used"] = bool(dense.get("succeeded"))
+    if not _dense_lane_failed(payload):
+        return
+    error_kind = str(dense.get("error") or "Error")
+    warnings = list(payload.get("warnings") or [])
+    warnings.append(f"dense_search_unavailable:{error_kind}")
+    payload["warnings"] = sorted(set(warnings))
+    payload.pop("legacy_status", None)
+    if retrieval_mode == "dense":
+        payload["status"] = "error"
+        payload["answerability"] = "none"
+        payload["error"] = "dense_search_unavailable"
+    else:
+        payload["status"] = "partial"
+        payload["answerability"] = (
+            "partial" if payload.get("evidence") else "none"
+        )
+
+
 def _add_discovery_lane(
     payload: dict[str, Any],
     store: Any,
@@ -473,6 +532,7 @@ def _add_discovery_lane(
     precomputed: dict[str, Any] | None = None,
     deadline_monotonic: float | None = None,
     dense_runtime_ready: bool = False,
+    dense_failure_known: bool = False,
 ) -> None:
     """Build a recall-first document lane independently from evidence packing."""
     question = str(request["original_question"])
@@ -644,9 +704,13 @@ def _add_discovery_lane(
             )
 
     dense_queries: list[tuple[str, str, float]] = []
-    if use_dense and not bool((precomputed or {}).get("dense_ran")):
+    if (
+        use_dense
+        and not dense_failure_known
+        and not bool((precomputed or {}).get("dense_ran"))
+    ):
         dense_queries.append((question, original_label, 1.0))
-    if use_dense:
+    if use_dense and not dense_failure_known:
         for facet_index, facet in enumerate(request.get("facets") or []):
             if facet.get("kind") != "semantic":
                 continue
@@ -704,6 +768,12 @@ def _add_discovery_lane(
             "insufficient_remaining_deadline"
         )
     elif unique_dense:
+        lane_health = payload.setdefault("lane_health", {})
+        dense_health = lane_health.setdefault(
+            "dense",
+            {"attempted": False, "succeeded": False, "error": None},
+        )
+        dense_health["attempted"] = True
         try:
             queries = [item[0] for item in unique_dense]
             if hasattr(store, "vector_query_many"):
@@ -728,7 +798,11 @@ def _add_discovery_lane(
                     weight=1.0 * factor,
                 )
             dense_used = True
+            dense_health["succeeded"] = True
+            dense_health["error"] = None
+            payload["dense_used"] = True
         except Exception as exc:
+            dense_health["error"] = type(exc).__name__
             discovery_warnings.append(
                 f"dense_discovery_error:{type(exc).__name__}"
             )
@@ -1826,6 +1900,9 @@ def normalize_search_contract(payload: dict[str, Any]) -> dict[str, Any]:
         normalized[key] = list(value) if isinstance(value, list) else []
     if not isinstance(normalized.get("coverage"), dict):
         normalized["coverage"] = {}
+    lane_health = normalized.get("lane_health")
+    if not isinstance(lane_health, dict):
+        normalized["lane_health"] = {}
     if status == "ok":
         normalized.setdefault("answerability", "full" if normalized["evidence"] else "none")
     elif status == "partial":

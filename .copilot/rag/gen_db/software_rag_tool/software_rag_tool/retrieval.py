@@ -128,21 +128,58 @@ def hybrid_query(
     use_lexical: bool = True,
     backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]]:
+    rows, _lane_health = hybrid_query_with_health(
+        question,
+        top_k=top_k,
+        source=source,
+        fetch_k=fetch_k,
+        max_per_doc=max_per_doc,
+        budget_tokens=budget_tokens,
+        explain=explain,
+        use_dense=use_dense,
+        use_lexical=use_lexical,
+        backend=backend,
+    )
+    return rows
+
+
+def hybrid_query_with_health(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    fetch_k: int | None = None,
+    max_per_doc: int = 2,
+    budget_tokens: int | None = None,
+    explain: bool = False,
+    use_dense: bool = True,
+    use_lexical: bool = True,
+    backend: SearchBackend | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     backend = backend or _GlobalBackend()
     dense_k = fetch_k or max(DEFAULT_DENSE_K, top_k * 4)
     family_rankings: list[tuple[str, float, list[dict[str, Any]]]] = []
     warnings: list[str] = []
+    dense_health: dict[str, Any] = {
+        "attempted": False,
+        "succeeded": False,
+        "error": None,
+    }
 
     if use_dense:
+        dense_health["attempted"] = True
         try:
             dense_rows = _without_test_fixtures(
                 backend.vector_query(question, top_k=dense_k, source=source)
             )
             family_rankings.append(("dense", 1.0, dense_rows))
+            dense_health["succeeded"] = True
         except ConfigMismatchError:
             raise
         except Exception as exc:
-            warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
+            error_kind = type(exc).__name__
+            dense_health["error"] = error_kind
+            warnings.append(f"dense_search_unavailable:{error_kind}")
 
     exact_rows: list[dict[str, Any]] = []
     lexical_rows: list[dict[str, Any]] = []
@@ -223,7 +260,7 @@ def hybrid_query(
         else:
             row.pop("debug", None)
             row.pop("score", None)
-    return rows
+    return rows, {"dense": dense_health}
 
 
 def adaptive_hybrid_query(
@@ -322,18 +359,22 @@ def adaptive_hybrid_query(
         family_rankings.append(("exact", 1.4, verified_exact_rows))
 
     dense_rows: list[dict[str, Any]] = []
-    dense_used = certificate is None
+    dense_attempted = certificate is None
+    dense_succeeded = False
+    dense_error: str | None = None
     warnings: list[str] = []
-    if dense_used:
+    if dense_attempted:
         try:
             dense_rows = _without_test_fixtures(
                 backend.vector_query(question, top_k=dense_k, source=source)
             )
             family_rankings.insert(0, ("dense", 1.0, dense_rows))
+            dense_succeeded = True
         except ConfigMismatchError:
             raise
         except Exception as exc:
-            warnings.append(f"dense search unavailable: {type(exc).__name__}: {exc}")
+            dense_error = type(exc).__name__
+            warnings.append(f"dense_search_unavailable:{dense_error}")
         # Keep the already-collected anchor candidate in fusion without
         # granting it a direct-evidence signal. The anchor search is another
         # lexical view, so do not give the same row a second RRF vote when it
@@ -417,10 +458,22 @@ def adaptive_hybrid_query(
         "retrieval_route": (
             "adaptive_lexical_certified"
             if certificate is not None
-            else "adaptive_hybrid_dense"
+            else (
+                "adaptive_hybrid_dense"
+                if dense_succeeded
+                else "adaptive_hybrid_dense_partial"
+            )
         ),
-        "dense_used": dense_used,
+        "dense_used": dense_succeeded,
+        "dense_attempted": dense_attempted,
         "dense_skipped_reason": reason,
+        "lane_health": {
+            "dense": {
+                "attempted": dense_attempted,
+                "succeeded": dense_succeeded,
+                "error": dense_error,
+            }
+        },
         "certificate": certificate,
         "raw_exact_rows": raw_exact_rows,
         "verified_exact_rows": verified_exact_rows,

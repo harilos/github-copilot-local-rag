@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -23,8 +24,14 @@ from software_rag_tool.retrieval import (
     adaptive_hybrid_query,
     cold_lexical_fast_path,
     hybrid_query,
+    hybrid_query_with_health,
 )
-from software_rag_tool.search_api import json_payload, normalize_search_contract
+from software_rag_tool import search_api
+from software_rag_tool.search_api import (
+    compact_search_contract,
+    json_payload,
+    normalize_search_contract,
+)
 from software_rag_tool.tokenize import extract_anchors, identifier_match_keys, tokenize_for_fts
 
 
@@ -123,6 +130,216 @@ class FakeBackend:
             return list(self.neighbor_rows[chunk_uid])
         row = self.fetch_rows_by_ids([chunk_uid]).get(chunk_uid)
         return [row] if row else []
+
+
+class FailingDenseBackend(FakeBackend):
+    def vector_query(
+        self,
+        question: str,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["dense"] += 1
+        raise RuntimeError("private filesystem and model details")
+
+
+class DenseThenFailBackend(FakeBackend):
+    def vector_query(
+        self,
+        question: str,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["dense"] += 1
+        if self.calls["dense"] > 1:
+            raise RuntimeError("private discovery details")
+        return list(self.dense_rows)
+
+
+class DenseLaneHealthContractTests(unittest.TestCase):
+    def test_success_health_does_not_change_rows_ranks_or_rrf(self) -> None:
+        legacy_backend = FakeBackend()
+        health_backend = FakeBackend()
+        legacy = hybrid_query(
+            "How does seasonal efficiency influence household demand?",
+            top_k=2,
+            explain=True,
+            backend=legacy_backend,
+        )
+        rows, health = hybrid_query_with_health(
+            "How does seasonal efficiency influence household demand?",
+            top_k=2,
+            explain=True,
+            backend=health_backend,
+        )
+        self.assertEqual(legacy, rows)
+        self.assertEqual(
+            {"attempted": True, "succeeded": True, "error": None},
+            health["dense"],
+        )
+
+    def test_adaptive_failure_is_partial_and_does_not_claim_dense_used(self) -> None:
+        backend = FailingDenseBackend()
+        backend.anchor_rows = []
+        rows, route = adaptive_hybrid_query(
+            "How does seasonal efficiency influence household demand?",
+            top_k=2,
+            explain=False,
+            db_scope_confirmed=True,
+            backend=backend,
+        )
+        self.assertTrue(rows)
+        self.assertEqual("adaptive_hybrid_dense_partial", route["retrieval_route"])
+        self.assertFalse(route["dense_used"])
+        self.assertEqual(
+            {"attempted": True, "succeeded": False, "error": "RuntimeError"},
+            route["lane_health"]["dense"],
+        )
+        self.assertEqual(1, backend.calls["dense"])
+
+    def test_hybrid_failure_is_public_when_explain_is_false_and_not_retried(self) -> None:
+        backend = FailingDenseBackend()
+        backend.anchor_rows = []
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="How does seasonal efficiency influence household demand?",
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertFalse(payload["dense_used"])
+        self.assertEqual("RuntimeError", payload["lane_health"]["dense"]["error"])
+        self.assertIn("dense_search_unavailable:RuntimeError", payload["warnings"])
+        self.assertNotIn("private filesystem", str(payload))
+        self.assertEqual(1, backend.calls["dense"])
+
+    def test_adaptive_failure_is_not_retried_by_discovery_facets(self) -> None:
+        backend = FailingDenseBackend()
+        backend.anchor_rows = []
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        request = {
+            "original_question": "How does seasonal efficiency influence demand?",
+            "answer_goal": "survey",
+            "facets": [
+                {"kind": "semantic", "query": "seasonal efficiency"},
+                {"kind": "semantic", "query": "household demand"},
+            ],
+            "inferred_concepts": [{"term": "cooling demand"}],
+        }
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_adaptive_search_payload(
+                db_name="fixture-rag",
+                question=request["original_question"],
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+                search_request=request,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertEqual(1, backend.calls["dense"])
+        self.assertFalse(payload["dense_used"])
+
+    def test_dense_only_failure_is_explicit_error_not_no_hit(self) -> None:
+        backend = FailingDenseBackend()
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="semantic query",
+                top_k=2,
+                retrieval_mode="dense",
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual("error", payload["status"])
+        self.assertEqual("dense_search_unavailable", payload["error"])
+        self.assertFalse(payload["dense_used"])
+        self.assertNotEqual("no_hit", payload["status"])
+        self.assertEqual(1, backend.calls["dense"])
+
+    def test_discovery_failure_keeps_successful_primary_dense_usage_visible(self) -> None:
+        backend = DenseThenFailBackend()
+        backend.anchor_rows = []
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        request = {
+            "original_question": "How does seasonal efficiency influence demand?",
+            "answer_goal": "survey",
+            "facets": [
+                {"kind": "semantic", "query": "household demand"},
+            ],
+        }
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_adaptive_search_payload(
+                db_name="fixture-rag",
+                question=request["original_question"],
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+                search_request=request,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertTrue(payload["dense_used"])
+        self.assertTrue(payload["lane_health"]["dense"]["succeeded"])
+        self.assertEqual("RuntimeError", payload["lane_health"]["dense"]["error"])
+        self.assertNotIn("private discovery", str(payload))
+        self.assertEqual(2, backend.calls["dense"])
+
+    def test_lexical_only_marks_dense_unattempted(self) -> None:
+        backend = FakeBackend()
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="lexical query",
+                top_k=2,
+                retrieval_mode="lexical",
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual(
+            {"attempted": False, "succeeded": False, "error": None},
+            payload["lane_health"]["dense"],
+        )
+        self.assertFalse(payload["dense_used"])
+        self.assertEqual(0, backend.calls["dense"])
+
+    def test_compact_contract_preserves_lane_health(self) -> None:
+        health = {
+            "dense": {
+                "attempted": True,
+                "succeeded": False,
+                "error": "RuntimeError",
+            }
+        }
+        compact = compact_search_contract(
+            {
+                "status": "partial",
+                "evidence": [],
+                "warnings": ["dense_search_unavailable:RuntimeError"],
+                "lane_health": health,
+            }
+        )
+        self.assertEqual(health, compact["lane_health"])
 
 
 class SourceIdentityContractTests(unittest.TestCase):

@@ -304,6 +304,14 @@ def _execute_search_payload(
         result["dense_skipped_reason"] = (
             "background_dense_warmup_incomplete"
         )
+        result["lane_health"] = {
+            "dense": {
+                "attempted": False,
+                "succeeded": False,
+                "error": None,
+                "skipped_reason": "background_dense_warmup_incomplete",
+            }
+        }
         return result
     if (
         bool(payload.get("adaptive_hybrid"))

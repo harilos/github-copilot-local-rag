@@ -313,6 +313,15 @@ class PersistentDaemonContracts(unittest.TestCase):
             "background_dense_warmup_incomplete",
             result["dense_skipped_reason"],
         )
+        self.assertEqual(
+            {
+                "attempted": False,
+                "succeeded": False,
+                "error": None,
+                "skipped_reason": "background_dense_warmup_incomplete",
+            },
+            result["lane_health"]["dense"],
+        )
 
     def test_client_and_manager_imports_are_native_runtime_free(self) -> None:
         script = f"""
