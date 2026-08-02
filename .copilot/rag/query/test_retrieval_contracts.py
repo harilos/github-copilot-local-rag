@@ -32,6 +32,7 @@ from software_rag_tool.search_api import (
     compact_search_contract,
     json_payload,
     normalize_search_contract,
+    payload_to_prompt,
 )
 from software_rag_tool.tokenize import extract_anchors, identifier_match_keys, tokenize_for_fts
 
@@ -1930,6 +1931,194 @@ class CatalogAnchorContractTests(unittest.TestCase):
 
 
 class LightweightJsonContractTests(unittest.TestCase):
+    def test_exact_anchor_after_900_chars_is_centered_and_range_is_consistent(self) -> None:
+        anchor = "ERR-LATE-900"
+        text = ("preface line without evidence\n" * 45) + (
+            f"Decisive evidence is {anchor} and it explains the failure."
+        ) + ("\ntrailing context" * 20)
+        row = result_row(
+            "late-exact",
+            text,
+            signals=["exact"],
+            path="report.pdf",
+        )
+        row["rank"] = 1
+        row["metadata"].update({"page": 7, "lines": "40-90"})
+        row["debug"] = {
+            "exact_match": {"matched_terms": [anchor]}
+        }
+        payload = json_payload(
+            [row],
+            f"Explain {anchor}",
+            "fixture-rag",
+            220,
+        )
+        evidence = payload["evidence"][0]
+        self.assertIn(anchor, evidence["text"])
+        self.assertLessEqual(len(evidence["text"]), 220)
+        self.assertTrue(evidence["text"].startswith("…"))
+        source_range = evidence["source_ranges"][0]
+        self.assertEqual("chunk_text", source_range["coordinate_space"])
+        self.assertEqual(7, source_range["page"])
+        self.assertEqual("40-90", source_range["lines"])
+        visible = evidence["text"].strip("…")
+        self.assertEqual(
+            visible,
+            text[source_range["char_start"] : source_range["char_end"]],
+        )
+        self.assertEqual(
+            anchor,
+            text[
+                source_range["anchor_char_start"] : source_range["anchor_char_end"]
+            ],
+        )
+        start = source_range["anchor_excerpt_start"]
+        end = source_range["anchor_excerpt_end"]
+        self.assertEqual(anchor, evidence["text"][start:end])
+        self.assertIn(anchor, payload_to_prompt(payload))
+
+    def test_bm25_late_japanese_and_unicode_normalized_anchors_survive(self) -> None:
+        cases = (
+            ("深部固有語", "深部固有語"),
+            ("Ａ２Ｗ", "A2W"),
+        )
+        for query_anchor, stored_anchor in cases:
+            with self.subTest(anchor=query_anchor):
+                text = ("前置きだけの文章。" * 140) + (
+                    f"根拠となる値は{stored_anchor}です。"
+                ) + ("後続説明。" * 40)
+                row = result_row(
+                    "late-bm25",
+                    text,
+                    signals=["lexical"],
+                )
+                row["rank"] = 1
+                payload = json_payload(
+                    [row],
+                    f"{query_anchor}について説明してください",
+                    "fixture-rag",
+                    180,
+                )
+                self.assertIn(stored_anchor, payload["evidence"][0]["text"])
+                self.assertLessEqual(len(payload["evidence"][0]["text"]), 180)
+
+    def test_winning_exact_anchor_beats_earlier_lexical_match(self) -> None:
+        exact_anchor = "EXACT-LATE-42"
+        text = "lexicalword " + ("padding " * 180) + exact_anchor + " decisive"
+        row = result_row(
+            "mixed",
+            text,
+            signals=["exact", "lexical"],
+        )
+        row["rank"] = 1
+        row["debug"] = {
+            "exact_match": {"matched_terms": [exact_anchor]}
+        }
+        payload = json_payload(
+            [row],
+            f"lexicalword {exact_anchor}",
+            "fixture-rag",
+            160,
+        )
+        self.assertIn(exact_anchor, payload["evidence"][0]["text"])
+        self.assertNotIn("lexicalword", payload["evidence"][0]["text"])
+
+    def test_anchor_longer_than_budget_is_explicit_partial_not_silent(self) -> None:
+        anchor = "ANCHOR-" + ("X" * 80)
+        text = ("prefix " * 150) + anchor + " suffix"
+        row = result_row("oversized-anchor", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {
+            "exact_match": {"matched_terms": [anchor]}
+        }
+        payload = json_payload(
+            [row],
+            anchor,
+            "fixture-rag",
+            40,
+        )
+        self.assertEqual("partial", payload["status"])
+        self.assertIn(
+            "evidence_anchor_exceeds_max_chars",
+            payload["warnings"],
+        )
+        self.assertLessEqual(len(payload["evidence"][0]["text"]), 40)
+
+        one_char = json_payload(
+            [row],
+            anchor,
+            "fixture-rag",
+            1,
+        )
+        self.assertEqual("partial", one_char["status"])
+        self.assertLessEqual(len(one_char["evidence"][0]["text"]), 1)
+
+    def test_dense_no_anchor_and_visible_prefix_keep_legacy_excerpt(self) -> None:
+        dense_text = "dense prefix " + ("x" * 1_100)
+        dense = result_row("dense", dense_text, signals=["dense"])
+        dense["rank"] = 1
+        dense_payload = json_payload(
+            [dense],
+            "semantic paraphrase",
+            "fixture-rag",
+            120,
+        )
+        self.assertEqual(dense_text[:120], dense_payload["evidence"][0]["text"])
+        self.assertNotIn("source_ranges", dense_payload["evidence"][0])
+
+        anchor = "VISIBLE-ID"
+        exact_text = anchor + " " + ("x" * 1_100)
+        exact = result_row("exact", exact_text, signals=["exact"])
+        exact["rank"] = 1
+        exact["debug"] = {
+            "exact_match": {"matched_terms": [anchor]}
+        }
+        exact_payload = json_payload(
+            [exact],
+            anchor,
+            "fixture-rag",
+            120,
+        )
+        self.assertEqual(exact_text[:120], exact_payload["evidence"][0]["text"])
+        self.assertNotIn("source_ranges", exact_payload["evidence"][0])
+
+    def test_short_chunk_is_byte_for_byte_unchanged(self) -> None:
+        text = "Short evidence with SHORT-ID."
+        row = result_row("short", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {
+            "exact_match": {"matched_terms": ["SHORT-ID"]}
+        }
+        payload = json_payload(
+            [row],
+            "SHORT-ID",
+            "fixture-rag",
+            900,
+        )
+        self.assertEqual(text, payload["evidence"][0]["text"])
+        self.assertNotIn("source_ranges", payload["evidence"][0])
+
+    def test_compact_projection_does_not_front_truncate_centered_anchor(self) -> None:
+        anchor = "COMPACT-LATE-ANCHOR"
+        text = ("長い前置き文章です。" * 180) + anchor + ("後続文脈です。" * 120)
+        row = result_row("compact-late", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {
+            "exact_match": {"matched_terms": [anchor]}
+        }
+        payload = json_payload(
+            [row],
+            anchor,
+            "fixture-rag",
+            900,
+        )
+        compact = compact_search_contract(payload, explain=False)
+        self.assertIn(anchor, compact["evidence"][0]["text"])
+        source_range = compact["evidence"][0]["source_ranges"][0]
+        start = source_range["anchor_excerpt_start"]
+        end = source_range["anchor_excerpt_end"]
+        self.assertEqual(anchor, compact["evidence"][0]["text"][start:end])
+
     def test_anchor_evidence_is_separated_from_background_and_warns_on_table_fragment(self) -> None:
         rows = [
             {

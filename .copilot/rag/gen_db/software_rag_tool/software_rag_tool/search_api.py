@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,12 @@ from .retrieval import (
 from .search_request import normalize_search_request
 from .source_paths import SourcePathError, canonical_stored_path
 from .token_budget import conservative_token_count, truncate_to_token_limit
-from .tokenize import canonicalize, extract_anchors, identifier_match_keys
+from .tokenize import (
+    canonicalize,
+    extract_anchors,
+    identifier_match_keys,
+    tokens_for_fts,
+)
 from .tokenize import LexicalTokenizerError
 
 
@@ -1295,9 +1301,14 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
         warnings.extend((row.get("debug") or {}).get("warnings") or [])
         warnings.extend(row.get("context_warnings") or [])
         meta = row.get("metadata") or {}
-        text = row.get("text") or ""
-        if len(text) > max_chars:
-            text = text[:max_chars]
+        raw_text = str(row.get("text") or "")
+        excerpt = _public_evidence_excerpt(
+            row,
+            question=question,
+            max_chars=max_chars,
+        )
+        text = str(excerpt["text"])
+        if len(raw_text) > max_chars:
             truncated = True
         item: dict[str, Any] = {
             "id": f"R{row['rank']}",
@@ -1330,10 +1341,15 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
         for key in ("context_before", "context_after", "context_reason"):
             if row.get(key) not in (None, ""):
                 item[key] = row[key]
-        if row.get("source_ranges"):
-            item["source_ranges"] = list(row["source_ranges"])
-        if row.get("context_warnings"):
-            item["context_warnings"] = list(row["context_warnings"])
+        source_ranges = _excerpt_source_ranges(row, meta, excerpt)
+        if source_ranges:
+            item["source_ranges"] = source_ranges
+        context_warnings = list(row.get("context_warnings") or [])
+        if excerpt.get("warning"):
+            context_warnings.append(str(excerpt["warning"]))
+        if context_warnings:
+            item["context_warnings"] = sorted(set(context_warnings))
+            warnings.extend(item["context_warnings"])
         for key in (
             "support_kind",
             "anchor_chunk_uid",
@@ -1347,6 +1363,11 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
             item["debug"] = row["debug"]
         result = dict(row)
         result["text"] = text
+        result.pop("_match_spans", None)
+        if source_ranges:
+            result["source_ranges"] = source_ranges
+        if context_warnings:
+            result["context_warnings"] = sorted(set(context_warnings))
         signals = set(str(value) for value in row.get("signals") or [])
         warnings.extend(_evidence_limit_warnings(text, meta))
         converted.append((item, result, signals))
@@ -1448,6 +1469,304 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
     if status == "no_hit":
         payload["legacy_status"] = "no_evidence"
     return payload
+
+
+def _public_evidence_excerpt(
+    row: dict[str, Any],
+    *,
+    question: str,
+    max_chars: int,
+) -> dict[str, Any]:
+    text = str(row.get("text") or "")
+    if len(text) <= max_chars:
+        return {"text": text, "changed": False}
+    if max_chars <= 0:
+        return {
+            "text": "",
+            "changed": True,
+            "warning": "evidence_excerpt_budget_invalid",
+        }
+    spans = _row_match_spans(row, question)
+    if not spans:
+        return {"text": text[:max_chars], "changed": False}
+    best = _select_excerpt_span(spans, max_chars=max_chars, text_length=len(text))
+    # Keep the historical prefix byte-for-byte when the winning evidence is
+    # already visible there. A-17 only changes responses that would lose it.
+    if int(best["end"]) <= max_chars:
+        return {"text": text[:max_chars], "changed": False}
+    anchor_start = int(best["start"])
+    anchor_end = int(best["end"])
+    if anchor_end - anchor_start > max_chars:
+        start = anchor_start
+        prefix = "…" if start > 0 else ""
+        suffix_reserve = 1 if max_chars - len(prefix) >= 2 else 0
+        content_limit = max(0, max_chars - len(prefix) - suffix_reserve)
+        end = min(len(text), start + content_limit)
+        suffix = "…" if end < len(text) and suffix_reserve else ""
+        rendered = prefix + text[start:end] + suffix
+        return {
+            "text": rendered,
+            "changed": True,
+            "char_start": start,
+            "char_end": end,
+            "anchor_char_start": anchor_start,
+            "anchor_char_end": anchor_end,
+            "anchor_excerpt_start": len(prefix),
+            "anchor_excerpt_end": len(prefix) + min(
+                content_limit,
+                anchor_end - anchor_start,
+            ),
+            "prefix_omitted": bool(prefix),
+            "suffix_omitted": bool(suffix),
+            "warning": "evidence_anchor_exceeds_max_chars",
+        }
+
+    content_limit = max(1, max_chars - 2)
+    midpoint = (anchor_start + anchor_end) // 2
+    start = max(0, midpoint - content_limit // 2)
+    start = min(start, max(0, len(text) - content_limit))
+    end = min(len(text), start + content_limit)
+    if anchor_start < start:
+        start = anchor_start
+        end = min(len(text), start + content_limit)
+    if anchor_end > end:
+        end = anchor_end
+        start = max(0, end - content_limit)
+    start, end = _prefer_excerpt_boundaries(
+        text,
+        start=start,
+        end=end,
+        anchor_start=anchor_start,
+        anchor_end=anchor_end,
+    )
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    available = max_chars - len(prefix) - len(suffix)
+    if end - start > available:
+        excess = end - start - available
+        trim_left = min(excess // 2, max(0, anchor_start - start))
+        start += trim_left
+        excess -= trim_left
+        end -= min(excess, max(0, end - anchor_end))
+    rendered = prefix + text[start:end] + suffix
+    return {
+        "text": rendered,
+        "changed": True,
+        "char_start": start,
+        "char_end": end,
+        "anchor_char_start": anchor_start,
+        "anchor_char_end": anchor_end,
+        "anchor_excerpt_start": len(prefix) + anchor_start - start,
+        "anchor_excerpt_end": len(prefix) + anchor_end - start,
+        "prefix_omitted": bool(prefix),
+        "suffix_omitted": bool(suffix),
+        "match_lane": str(best["lane"]),
+    }
+
+
+def _row_match_spans(
+    row: dict[str, Any],
+    question: str,
+) -> list[dict[str, Any]]:
+    text = str(row.get("text") or "")
+    signals = {str(value) for value in row.get("signals") or []}
+    debug = row.get("debug") or {}
+    terms: list[tuple[str, str, int]] = []
+    if "exact" in signals:
+        exact_terms = list((debug.get("exact_match") or {}).get("matched_terms") or [])
+        exact_terms.extend(extract_anchors(question, limit=30))
+        terms.extend((str(term), "exact", 3) for term in exact_terms)
+    if "lexical_anchor" in signals:
+        anchor = str((debug.get("lexical_anchor") or {}).get("token") or "")
+        if anchor:
+            terms.append((anchor, "lexical_anchor", 2))
+    if signals & {"lexical", "lexical_anchor"}:
+        lexical_terms = [
+            *tokens_for_fts(question, max_tokens=32),
+            *extract_anchors(question, limit=30),
+            *re.findall(r"[A-Za-z0-9][A-Za-z0-9_.:/-]+", question),
+        ]
+        lane = "lexical_anchor" if "lexical_anchor" in signals else "lexical"
+        priority = 2 if lane == "lexical_anchor" else 1
+        terms.extend((str(term), lane, priority) for term in lexical_terms)
+    spans: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for term, lane, priority in terms:
+        if not term:
+            continue
+        for start, end, quality in _text_term_spans(text, term):
+            key = (start, end, lane)
+            if key in seen:
+                continue
+            seen.add(key)
+            spans.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "term": term,
+                    "lane": lane,
+                    "lane_priority": priority,
+                    "quality": quality,
+                }
+            )
+    return spans
+
+
+def _text_term_spans(text: str, term: str) -> list[tuple[int, int, int]]:
+    spans: list[tuple[int, int, int]] = []
+    start = 0
+    while term and len(spans) < 8:
+        found = text.find(term, start)
+        if found < 0:
+            break
+        spans.append((found, found + len(term), 2))
+        start = found + max(1, len(term))
+    if spans:
+        return spans
+    if text.isascii() and term.isascii():
+        folded_text = text.casefold()
+        folded_term = term.casefold()
+        start = 0
+        while folded_term and len(spans) < 8:
+            found = folded_text.find(folded_term, start)
+            if found < 0:
+                break
+            spans.append((found, found + len(term), 2))
+            start = found + max(1, len(term))
+        if spans:
+            return spans
+    normalized_chars: list[str] = []
+    raw_offsets: list[int] = []
+    for raw_index, character in enumerate(text):
+        normalized = unicodedata.normalize("NFKC", character).casefold()
+        for normalized_character in normalized:
+            normalized_chars.append(normalized_character)
+            raw_offsets.append(raw_index)
+    normalized_text = "".join(normalized_chars)
+    normalized_term = unicodedata.normalize("NFKC", term).casefold()
+    start = 0
+    while normalized_term and len(spans) < 8:
+        found = normalized_text.find(normalized_term, start)
+        if found < 0:
+            break
+        raw_start = raw_offsets[found]
+        raw_end = raw_offsets[found + len(normalized_term) - 1] + 1
+        spans.append((raw_start, raw_end, 1))
+        start = found + max(1, len(normalized_term))
+    return spans
+
+
+def _select_excerpt_span(
+    spans: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    text_length: int,
+) -> dict[str, Any]:
+    def coverage(span: dict[str, Any]) -> int:
+        midpoint = (int(span["start"]) + int(span["end"])) // 2
+        start = max(0, midpoint - max_chars // 2)
+        end = min(text_length, start + max_chars)
+        return sum(
+            1
+            for candidate in spans
+            if int(candidate["start"]) >= start
+            and int(candidate["end"]) <= end
+        )
+
+    return max(
+        spans,
+        key=lambda span: (
+            int(span["lane_priority"]),
+            int(span["quality"]),
+            len(str(span["term"])),
+            coverage(span),
+            -int(span["start"]),
+            str(span["term"]),
+        ),
+    )
+
+
+def _prefer_excerpt_boundaries(
+    text: str,
+    *,
+    start: int,
+    end: int,
+    anchor_start: int,
+    anchor_end: int,
+) -> tuple[int, int]:
+    boundaries = "\n。！？.!?"
+    if start > 0:
+        candidates = [
+            index + 1
+            for index in range(start, min(anchor_start, start + 48))
+            if text[index] in boundaries
+        ]
+        if candidates:
+            start = candidates[0]
+    if end < len(text):
+        candidates = [
+            index + 1
+            for index in range(max(anchor_end, end - 48), end)
+            if text[index] in boundaries
+        ]
+        if candidates:
+            end = candidates[-1]
+    return start, end
+
+
+def _excerpt_source_ranges(
+    row: dict[str, Any],
+    metadata: dict[str, Any],
+    excerpt: dict[str, Any],
+) -> list[dict[str, Any]]:
+    ranges = [
+        dict(value)
+        for value in row.get("source_ranges") or []
+        if isinstance(value, dict)
+    ]
+    if not excerpt.get("changed") or "char_start" not in excerpt:
+        return ranges
+    matched = next(
+        (value for value in ranges if value.get("kind") == "matched"),
+        None,
+    )
+    if matched is None:
+        matched = {
+            "kind": "matched",
+            "chunk_uid": str(row.get("id") or ""),
+            "chunk_index": metadata.get("chunk_index"),
+            "section": str(
+                metadata.get("section_path")
+                or metadata.get("chunk_title")
+                or ""
+            ),
+        }
+        for key in ("page", "slide", "lines"):
+            if metadata.get(key) not in (None, ""):
+                matched[key] = metadata[key]
+        ranges.insert(0, matched)
+    matched.update(
+        {
+            "coordinate_space": "chunk_text",
+            "char_start": int(excerpt["char_start"]),
+            "char_end": int(excerpt["char_end"]),
+            "anchor_char_start": int(excerpt["anchor_char_start"]),
+            "anchor_char_end": int(excerpt["anchor_char_end"]),
+            "anchor_excerpt_start": int(excerpt["anchor_excerpt_start"]),
+            "anchor_excerpt_end": int(excerpt["anchor_excerpt_end"]),
+            "prefix_omitted": bool(excerpt.get("prefix_omitted")),
+            "suffix_omitted": bool(excerpt.get("suffix_omitted")),
+            "chunk_line_start": str(row.get("text") or "").count(
+                "\n", 0, int(excerpt["char_start"])
+            )
+            + 1,
+            "chunk_line_end": str(row.get("text") or "").count(
+                "\n", 0, int(excerpt["char_end"])
+            )
+            + 1,
+        }
+    )
+    return ranges
 
 
 def _anchored_neighbor_is_direct(
@@ -2186,7 +2505,11 @@ def _project_contexts(
                 max(0, COMPACT_AUXILIARY_TOKEN_LIMIT - overhead_tokens - 20),
             )
         if _conservative_token_count(text) > text_budget:
-            text = _truncate_to_token_limit(text, text_budget)
+            text = _project_anchor_excerpt_to_token_limit(
+                item,
+                text,
+                text_budget,
+            )
             item["text"] = text
             if item.get("matched_excerpt"):
                 item["matched_excerpt"] = text
@@ -2214,6 +2537,70 @@ def _project_contexts(
     if len(projected) < len(selected):
         truncated = True
     return projected, truncated
+
+
+def _project_anchor_excerpt_to_token_limit(
+    item: dict[str, Any],
+    text: str,
+    limit: int,
+) -> str:
+    matched = next(
+        (
+            value
+            for value in item.get("source_ranges") or []
+            if isinstance(value, dict)
+            and value.get("kind") == "matched"
+            and value.get("coordinate_space") == "chunk_text"
+        ),
+        None,
+    )
+    if matched is None or limit <= 0:
+        return _truncate_to_token_limit(text, limit)
+    prefix_length = 1 if matched.get("prefix_omitted") and text.startswith("…") else 0
+    suffix_length = 1 if matched.get("suffix_omitted") and text.endswith("…") else 0
+    content_end = len(text) - suffix_length if suffix_length else len(text)
+    content = text[prefix_length:content_end]
+    anchor_start = int(matched.get("anchor_char_start") or 0) - int(
+        matched.get("char_start") or 0
+    )
+    anchor_end = int(matched.get("anchor_char_end") or 0) - int(
+        matched.get("char_start") or 0
+    )
+    if not (0 <= anchor_start < anchor_end <= len(content)):
+        return _truncate_to_token_limit(text, limit)
+
+    low, high = 0, len(content)
+    best: tuple[str, int, int, int, int] | None = None
+    while low <= high:
+        radius = (low + high) // 2
+        start = max(0, anchor_start - radius)
+        end = min(len(content), anchor_end + radius)
+        prefix = "…" if matched.get("prefix_omitted") or start > 0 else ""
+        suffix = "…" if matched.get("suffix_omitted") or end < len(content) else ""
+        candidate = prefix + content[start:end] + suffix
+        if _conservative_token_count(candidate) <= limit:
+            best = (candidate, start, end, len(prefix), len(suffix))
+            low = radius + 1
+        else:
+            high = radius - 1
+    if best is None:
+        warnings = list(item.get("context_warnings") or [])
+        warnings.append("evidence_anchor_exceeds_compact_budget")
+        item["context_warnings"] = sorted(set(warnings))
+        return _truncate_to_token_limit(text, limit)
+
+    candidate, start, end, rendered_prefix, _rendered_suffix = best
+    old_start = int(matched["char_start"])
+    old_line_start = int(matched.get("chunk_line_start") or 1)
+    matched["char_start"] = old_start + start
+    matched["char_end"] = old_start + end
+    matched["anchor_excerpt_start"] = rendered_prefix + anchor_start - start
+    matched["anchor_excerpt_end"] = rendered_prefix + anchor_end - start
+    matched["prefix_omitted"] = bool(rendered_prefix)
+    matched["suffix_omitted"] = candidate.endswith("…")
+    matched["chunk_line_start"] = old_line_start + content[:start].count("\n")
+    matched["chunk_line_end"] = old_line_start + content[:end].count("\n")
+    return candidate
 
 
 def _project_context(context: dict[str, Any], *, explain: bool) -> dict[str, Any]:
