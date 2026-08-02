@@ -11,6 +11,7 @@ from bisect import bisect_left, bisect_right
 from pathlib import Path
 from typing import Any
 
+from . import catalog
 from .db_runtime import DbRegistry
 from .dbs import require_db_name
 from .env import load_env
@@ -290,7 +291,7 @@ def try_cold_lexical_fast_path(
             db_scope_confirmed=True,
             backend=store,
         )
-    except LexicalTokenizerError:
+    except (LexicalTokenizerError, catalog.CatalogSearchError):
         return None
     if rows is None:
         if not identifier_diagnostics:
@@ -540,10 +541,15 @@ def _apply_dense_lane_outcome(
 
 
 def _lexical_lane_failed(payload: dict[str, Any]) -> bool:
-    lexical = (payload.get("lane_health") or {}).get("lexical") or {}
-    return bool(lexical.get("error")) or (
-        bool(lexical.get("attempted"))
-        and not bool(lexical.get("succeeded"))
+    lane_health = payload.get("lane_health") or {}
+    return any(
+        bool(health.get("error"))
+        or (
+            bool(health.get("attempted"))
+            and not bool(health.get("succeeded"))
+        )
+        for lane in ("lexical", "exact", "metadata")
+        for health in [lane_health.get(lane) or {}]
     )
 
 
@@ -554,10 +560,15 @@ def _apply_lexical_lane_outcome(
 ) -> None:
     if not _lexical_lane_failed(payload):
         return
-    lexical = (payload.get("lane_health") or {}).get("lexical") or {}
-    error_kind = str(lexical.get("error") or "Error")
+    lane_health = payload.get("lane_health") or {}
     warnings = list(payload.get("warnings") or [])
-    warnings.append(f"lexical_search_unavailable:{error_kind}")
+    for lane in ("lexical", "exact", "metadata"):
+        health = lane_health.get(lane) or {}
+        if not health.get("error"):
+            continue
+        warnings.append(
+            f"{lane}_search_unavailable:{health.get('error') or 'Error'}"
+        )
     payload["warnings"] = sorted(set(warnings))
     payload.pop("legacy_status", None)
     if retrieval_mode == "lexical":
@@ -732,6 +743,22 @@ def _add_discovery_lane(
                 f"lexical_search_unavailable:{type(exc).__name__}"
             )
             break
+        except catalog.CatalogSearchError as exc:
+            _LOGGER.debug(
+                "Catalog discovery lane failed",
+                exc_info=exc,
+            )
+            lane_health = payload.setdefault("lane_health", {})
+            lane_health[exc.lane] = {
+                "attempted": True,
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+            discovery_warnings.append(
+                f"{exc.lane}_search_unavailable:{type(exc).__name__}"
+            )
+            lexical_failure_known = True
+            break
         except Exception as exc:
             discovery_warnings.append(
                 f"discovery lexical unavailable: {type(exc).__name__}"
@@ -746,7 +773,7 @@ def _add_discovery_lane(
         kind="literal",
         index=0,
     )
-    for literal in literal_identifiers[:3]:
+    for literal in ([] if lexical_failure_known else literal_identifiers[:3]):
         try:
             verified = [
                 row
@@ -764,6 +791,22 @@ def _add_discovery_lane(
                 weight=literal_weight,
                 literal=str(literal),
             )
+        except catalog.CatalogSearchError as exc:
+            _LOGGER.debug(
+                "Exact discovery lane failed",
+                exc_info=exc,
+            )
+            lane_health = payload.setdefault("lane_health", {})
+            lane_health[exc.lane] = {
+                "attempted": True,
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+            discovery_warnings.append(
+                f"{exc.lane}_search_unavailable:{type(exc).__name__}"
+            )
+            lexical_failure_known = True
+            break
         except Exception as exc:
             discovery_warnings.append(
                 f"discovery exact unavailable: {type(exc).__name__}"

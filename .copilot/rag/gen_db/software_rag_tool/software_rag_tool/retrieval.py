@@ -190,7 +190,7 @@ def hybrid_query_with_health(
     raw_exact_complete = False
     selected_exact_document = ""
     anchor_ids: list[str] = []
-    lexical_health: dict[str, Any] | None = None
+    catalog_health: dict[str, dict[str, Any]] = {}
     if use_lexical:
         try:
             (
@@ -198,7 +198,7 @@ def hybrid_query_with_health(
                 lexical_rows,
                 metadata_rows,
                 raw_exact_complete,
-                lexical_health,
+                catalog_health,
             ) = _lexical_candidates_with_health(
                 question,
                 source=source,
@@ -214,12 +214,12 @@ def hybrid_query_with_health(
             )
             lexical_rows = _without_test_fixtures(lexical_rows)
             metadata_rows = _without_test_fixtures(metadata_rows)
-            if lexical_health is not None:
+            for lane, health in catalog_health.items():
                 warnings.append(
-                    f"lexical_search_unavailable:{lexical_health['error']}"
+                    f"{lane}_search_unavailable:{health['error']}"
                 )
             if (
-                lexical_health is None
+                not catalog_health
                 and use_dense
                 and not _has_strong_exact_anchor(question, exact_rows)
             ):
@@ -229,12 +229,12 @@ def hybrid_query_with_health(
                         source=source,
                         backend=backend,
                     )
-                except LexicalTokenizerError as exc:
+                except (LexicalTokenizerError, catalog.LexicalSearchError) as exc:
                     _LOGGER.debug(
                         "Lexical tokenizer anchor lane failed",
                         exc_info=exc,
                     )
-                    lexical_health = {
+                    catalog_health["lexical"] = {
                         "attempted": True,
                         "succeeded": False,
                         "error": type(exc).__name__,
@@ -298,8 +298,8 @@ def hybrid_query_with_health(
             row.pop("debug", None)
             row.pop("score", None)
     lane_health = {"dense": dense_health}
-    if use_lexical and lexical_health is not None:
-        lane_health["lexical"] = lexical_health
+    if use_lexical:
+        lane_health.update(catalog_health)
     return rows, lane_health
 
 
@@ -329,7 +329,7 @@ def adaptive_hybrid_query(
         lexical_rows,
         metadata_rows,
         raw_exact_complete,
-        lexical_health,
+        catalog_health,
     ) = _lexical_candidates_with_health(
         question,
         source=source,
@@ -338,7 +338,7 @@ def adaptive_hybrid_query(
     raw_exact_rows = _without_test_fixtures(raw_exact_rows)
     lexical_rows = _without_test_fixtures(lexical_rows)
     metadata_rows = _without_test_fixtures(metadata_rows)
-    if lexical_health is not None:
+    if catalog_health:
         anchor_rows = []
     else:
         try:
@@ -347,12 +347,12 @@ def adaptive_hybrid_query(
                 source=source,
                 backend=backend,
             )
-        except LexicalTokenizerError as exc:
+        except (LexicalTokenizerError, catalog.LexicalSearchError) as exc:
             _LOGGER.debug(
                 "Lexical tokenizer anchor lane failed",
                 exc_info=exc,
             )
-            lexical_health = {
+            catalog_health["lexical"] = {
                 "attempted": True,
                 "succeeded": False,
                 "error": type(exc).__name__,
@@ -428,9 +428,9 @@ def adaptive_hybrid_query(
     dense_succeeded = False
     dense_error: str | None = None
     warnings: list[str] = []
-    if lexical_health is not None:
+    for lane, health in catalog_health.items():
         warnings.append(
-            f"lexical_search_unavailable:{lexical_health['error']}"
+            f"{lane}_search_unavailable:{health['error']}"
         )
     if dense_attempted:
         try:
@@ -542,7 +542,7 @@ def adaptive_hybrid_query(
                 "succeeded": dense_succeeded,
                 "error": dense_error,
             },
-            **({"lexical": lexical_health} if lexical_health is not None else {}),
+            **catalog_health,
         },
         "certificate": certificate,
         "raw_exact_rows": raw_exact_rows,
@@ -709,13 +709,21 @@ def _lexical_candidates_with_health(
     list[dict[str, Any]],
     list[dict[str, Any]],
     bool,
-    dict[str, Any] | None,
+    dict[str, dict[str, Any]],
 ]:
-    exact_rows_with_sentinel = backend.exact_search(
-        question,
-        top_k=DEFAULT_EXACT_K + 1,
-        source=source,
-    )
+    lane_health: dict[str, dict[str, Any]] = {}
+    try:
+        exact_rows_with_sentinel = backend.exact_search(
+            question,
+            top_k=DEFAULT_EXACT_K + 1,
+            source=source,
+        )
+    except catalog.ExactSearchError as exc:
+        _LOGGER.debug("Exact catalog lane failed", exc_info=exc)
+        lane_health["exact"] = _failed_lane_health(exc)
+        # A catalog-level SQLite failure is not retried through the remaining
+        # persistent lanes in the same request.
+        return [], [], [], False, lane_health
     exact_result_set_complete = len(exact_rows_with_sentinel) <= DEFAULT_EXACT_K
     exact_rows = exact_rows_with_sentinel[:DEFAULT_EXACT_K]
     try:
@@ -724,34 +732,35 @@ def _lexical_candidates_with_health(
             top_k=DEFAULT_LEXICAL_K,
             source=source,
         )
+    except (LexicalTokenizerError, catalog.LexicalSearchError) as exc:
+        _LOGGER.debug("Lexical catalog lane failed", exc_info=exc)
+        lane_health["lexical"] = _failed_lane_health(exc)
+        return exact_rows, [], [], exact_result_set_complete, lane_health
+    try:
         metadata_rows = backend.metadata_search(
             question,
             top_k=DEFAULT_METADATA_K,
             source=source,
         )
-    except LexicalTokenizerError as exc:
-        _LOGGER.debug(
-            "Lexical tokenizer lane failed",
-            exc_info=exc,
-        )
-        return (
-            exact_rows,
-            [],
-            [],
-            exact_result_set_complete,
-            {
-                "attempted": True,
-                "succeeded": False,
-                "error": type(exc).__name__,
-            },
-        )
+    except (LexicalTokenizerError, catalog.MetadataSearchError) as exc:
+        _LOGGER.debug("Metadata catalog lane failed", exc_info=exc)
+        lane_health["metadata"] = _failed_lane_health(exc)
+        return exact_rows, lexical_rows, [], exact_result_set_complete, lane_health
     return (
         exact_rows,
         lexical_rows,
         metadata_rows,
         exact_result_set_complete,
-        None,
+        lane_health,
     )
+
+
+def _failed_lane_health(exc: Exception) -> dict[str, Any]:
+    return {
+        "attempted": True,
+        "succeeded": False,
+        "error": type(exc).__name__,
+    }
 
 
 def _weighted_rrf(families: list[tuple[str, float, list[dict[str, Any]]]]) -> dict[str, dict[str, Any]]:
@@ -1764,7 +1773,7 @@ def _anchor_candidates(
         return []
     try:
         return _without_test_fixtures(search(question, top_k=1, source=source))
-    except LexicalTokenizerError:
+    except (LexicalTokenizerError, catalog.CatalogSearchError):
         raise
     except Exception:
         return []

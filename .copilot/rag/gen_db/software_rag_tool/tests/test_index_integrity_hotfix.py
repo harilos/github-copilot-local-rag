@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -354,6 +355,102 @@ class Bm25TermFrequencyContracts(unittest.TestCase):
             with catalog.connect(path):
                 pass
             self.assertEqual(fingerprint, catalog.counts(path)["tokenizer"])
+
+
+class CatalogSearchHealthContracts(unittest.TestCase):
+    @staticmethod
+    def _record() -> dict:
+        return {
+            "id": "catalog-health",
+            "text": "RFC10026 alpha catalog evidence",
+            "metadata": {
+                "doc_id": "catalog-health",
+                "path": "RFC10026.md",
+                "source_id": "fixture-source",
+            },
+        }
+
+    def _catalog_with_record(self, directory: str) -> Path:
+        with mock.patch.dict(os.environ, {"RAG_OUTPUT_ROOT": directory}):
+            catalog.upsert_records([self._record()])
+            return catalog.catalog_path()
+
+    def test_missing_search_tables_raise_typed_lane_errors(self) -> None:
+        cases = (
+            ("fts_word", catalog.bm25_search, catalog.LexicalSearchError),
+            ("file_fts", catalog.metadata_search, catalog.MetadataSearchError),
+            ("document_lookup", catalog.exact_search, catalog.ExactSearchError),
+        )
+        for table, search, error_type in cases:
+            with self.subTest(table=table), tempfile.TemporaryDirectory() as temporary:
+                path = self._catalog_with_record(temporary)
+                connection = sqlite3.connect(path)
+                try:
+                    connection.row_factory = sqlite3.Row
+                    connection.execute(f"DROP TABLE {table}")
+                    with self.assertRaises(error_type) as raised:
+                        search(
+                            "RFC10026",
+                            top_k=2,
+                            path=path,
+                            conn=connection,
+                        )
+                finally:
+                    connection.close()
+                self.assertIsInstance(raised.exception.__cause__, sqlite3.OperationalError)
+                self.assertNotIn(str(path), str(raised.exception))
+
+    def test_real_sqlite_lock_is_not_converted_to_empty_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._catalog_with_record(temporary)
+            blocker = sqlite3.connect(path, timeout=0)
+            reader = None
+            try:
+                blocker.execute("PRAGMA journal_mode=DELETE")
+                blocker.execute("PRAGMA locking_mode=EXCLUSIVE")
+                blocker.execute("BEGIN EXCLUSIVE")
+                blocker.execute(
+                    "UPDATE database_meta SET value=value WHERE key='schema_version'"
+                )
+                reader = sqlite3.connect(path, timeout=0)
+                reader.row_factory = sqlite3.Row
+                with self.assertRaises(catalog.LexicalSearchError) as raised:
+                    catalog.bm25_search(
+                        "alpha",
+                        top_k=2,
+                        path=path,
+                        conn=reader,
+                    )
+                cause = raised.exception.__cause__
+                self.assertIsInstance(cause, sqlite3.OperationalError)
+                self.assertIn(
+                    getattr(cause, "sqlite_errorcode", None),
+                    {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED},
+                )
+            finally:
+                if reader is not None:
+                    reader.close()
+                blocker.rollback()
+                blocker.close()
+
+    def test_only_narrow_fts_parser_errors_are_safe_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self._catalog_with_record(temporary)
+            with catalog.connect_readonly(path) as connection:
+                self.assertEqual(
+                    [],
+                    catalog._run_fts(
+                        connection,
+                        "fts_word",
+                        '"',
+                        2,
+                        "any",
+                    ),
+                )
+            backend_failure = sqlite3.OperationalError("no such table: fts_word")
+            backend_failure.sqlite_errorcode = sqlite3.SQLITE_ERROR
+            backend_failure.sqlite_errorname = "SQLITE_ERROR"
+            self.assertFalse(catalog._is_safe_fts_query_syntax_error(backend_failure))
 
 
 class TokenizerRuntimeIntegrityContracts(unittest.TestCase):

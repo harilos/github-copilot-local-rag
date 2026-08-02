@@ -323,6 +323,46 @@ class PersistentDaemonContracts(unittest.TestCase):
             result["lane_health"]["dense"],
         )
 
+    def test_cold_worker_preserves_catalog_lane_failure_health(self) -> None:
+        def standard(**_kwargs):
+            return {
+                "status": "error",
+                "warnings": ["lexical_search_unavailable:LexicalSearchError"],
+                "evidence": [],
+                "document_results": [],
+                "lane_health": {
+                    "lexical": {
+                        "attempted": True,
+                        "succeeded": False,
+                        "error": "LexicalSearchError",
+                    }
+                },
+            }
+
+        result = _execute_search_payload(
+            {
+                "db": "ac-rag",
+                "question": "general lexical question",
+                "retrieval_mode": "hybrid",
+            },
+            run_adaptive_search_payload=lambda **_kwargs: {},
+            run_search_payload=standard,
+            deadline_monotonic=None,
+            dense_runtime_ready=False,
+        )
+        self.assertEqual(
+            "LexicalSearchError",
+            result["lane_health"]["lexical"]["error"],
+        )
+        self.assertEqual(
+            "background_dense_warmup_incomplete",
+            result["lane_health"]["dense"]["skipped_reason"],
+        )
+        self.assertIn(
+            "lexical_search_unavailable:LexicalSearchError",
+            result["warnings"],
+        )
+
     def test_client_and_manager_imports_are_native_runtime_free(self) -> None:
         script = f"""
 import importlib.util, json, sys

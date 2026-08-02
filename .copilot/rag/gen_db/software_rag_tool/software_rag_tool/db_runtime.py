@@ -120,7 +120,10 @@ class DbStore:
 
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        self._validate_lexical_tokenizer()
+        try:
+            self._validate_lexical_tokenizer()
+        except sqlite3.Error as exc:
+            raise catalog.LexicalSearchError() from exc
         return catalog.bm25_search(
             question,
             top_k=top_k,
@@ -131,7 +134,10 @@ class DbStore:
 
     def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        self._validate_lexical_tokenizer()
+        try:
+            self._validate_lexical_tokenizer()
+        except sqlite3.Error as exc:
+            raise catalog.LexicalSearchError() from exc
         return catalog.anchor_lexical_search(
             question,
             top_k=top_k,
@@ -142,7 +148,10 @@ class DbStore:
 
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
-        self._validate_lexical_tokenizer()
+        try:
+            self._validate_lexical_tokenizer()
+        except sqlite3.Error as exc:
+            raise catalog.MetadataSearchError() from exc
         return catalog.metadata_search(
             question,
             top_k=top_k,

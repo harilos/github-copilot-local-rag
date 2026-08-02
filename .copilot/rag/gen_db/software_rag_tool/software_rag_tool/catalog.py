@@ -42,6 +42,27 @@ _COMMON_WEAK_ACRONYMS = {
     "racs",
 }
 
+
+class CatalogSearchError(RuntimeError):
+    """Bounded query-time catalog failure with its public lane identity."""
+
+    lane = "catalog"
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.lane}_catalog_search_failed")
+
+
+class ExactSearchError(CatalogSearchError):
+    lane = "exact"
+
+
+class LexicalSearchError(CatalogSearchError):
+    lane = "lexical"
+
+
+class MetadataSearchError(CatalogSearchError):
+    lane = "metadata"
+
 _RESULT_COLUMNS = """
   c.chunk_pk,
   c.chunk_uid,
@@ -501,13 +522,28 @@ def bm25_search(
     if not queries:
         return []
     rows: dict[str, dict[str, Any]] = {}
-    with _reader(conn, path) as reader:
-        for query_text in queries:
-            for row in _run_fts(reader, "fts_word", query_text, top_k * 2, source):
-                item = _row_to_result(row, signal="lexical", score=row["score"])
-                current = rows.get(item["id"])
-                if current is None or float(item.get("score") or 0) < float(current.get("score") or 0):
-                    rows[item["id"]] = item
+    try:
+        with _reader(conn, path) as reader:
+            for query_text in queries:
+                for row in _run_fts(
+                    reader,
+                    "fts_word",
+                    query_text,
+                    top_k * 2,
+                    source,
+                ):
+                    item = _row_to_result(
+                        row,
+                        signal="lexical",
+                        score=row["score"],
+                    )
+                    current = rows.get(item["id"])
+                    if current is None or float(item.get("score") or 0) < float(
+                        current.get("score") or 0
+                    ):
+                        rows[item["id"]] = item
+    except sqlite3.Error as exc:
+        raise LexicalSearchError() from exc
     ranked = sorted(rows.values(), key=lambda item: float(item.get("score") or 0))
     return _ranked(ranked[:top_k])
 
@@ -552,8 +588,8 @@ def anchor_lexical_search(
                 )
             )
             return _ranked(rows[:top_k])
-    except (sqlite3.Error, ValueError):
-        return []
+    except sqlite3.Error as exc:
+        raise LexicalSearchError() from exc
 
 
 def metadata_search(
@@ -596,11 +632,14 @@ def metadata_search(
         ORDER BY docs.score ASC
     """
     params: list[Any] = [query_text, *source_params, top_k]
-    with _reader(conn, path) as reader:
-        try:
-            rows = [_row_to_result(row, signal="metadata", score=row["score"]) for row in reader.execute(sql, params)]
-        except sqlite3.OperationalError:
-            rows = []
+    try:
+        with _reader(conn, path) as reader:
+            rows = [
+                _row_to_result(row, signal="metadata", score=row["score"])
+                for row in reader.execute(sql, params)
+            ]
+    except sqlite3.Error as exc:
+        raise MetadataSearchError() from exc
     return _ranked(rows[:top_k])
 
 
@@ -623,17 +662,36 @@ def exact_search(
         return []
     lookup_values = _lookup_values_for_anchors(anchors)
     rows: dict[str, dict[str, Any]] = {}
-    with _reader(conn, path) as reader:
-        for row in _document_lookup_search(reader, lookup_values, top_k=top_k, source=source):
-            item = _row_to_result(row, signal="exact", score=-0.1)
-            _set_exact_debug(item, row, match_kind="document_lookup")
-            rows[item["id"]] = item
-        for row in _identifier_search(reader, lookup_values, top_k=top_k, source=source):
-            item = _row_to_result(row, signal="exact", score=-float(row["match_count"]))
-            _set_exact_debug(item, row, match_kind="casefold_exact")
-            current = rows.get(item["id"])
-            if current is None or float(item["score"]) < float(current.get("score") or 0):
+    try:
+        with _reader(conn, path) as reader:
+            for row in _document_lookup_search(
+                reader,
+                lookup_values,
+                top_k=top_k,
+                source=source,
+            ):
+                item = _row_to_result(row, signal="exact", score=-0.1)
+                _set_exact_debug(item, row, match_kind="document_lookup")
                 rows[item["id"]] = item
+            for row in _identifier_search(
+                reader,
+                lookup_values,
+                top_k=top_k,
+                source=source,
+            ):
+                item = _row_to_result(
+                    row,
+                    signal="exact",
+                    score=-float(row["match_count"]),
+                )
+                _set_exact_debug(item, row, match_kind="casefold_exact")
+                current = rows.get(item["id"])
+                if current is None or float(item["score"]) < float(
+                    current.get("score") or 0
+                ):
+                    rows[item["id"]] = item
+    except sqlite3.Error as exc:
+        raise ExactSearchError() from exc
     ranked = sorted(rows.values(), key=lambda item: float(item.get("score") or 0))
     return _ranked(ranked[:top_k])
 
@@ -1217,8 +1275,22 @@ def _run_fts(conn: sqlite3.Connection, table: str, query_text: str, top_k: int, 
     params: list[Any] = [query_text, *source_params, top_k]
     try:
         return list(conn.execute(sql, params))
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        if _is_safe_fts_query_syntax_error(exc):
+            return []
+        raise
+
+
+def _is_safe_fts_query_syntax_error(exc: sqlite3.OperationalError) -> bool:
+    """Recognize only FTS5 parser errors at the MATCH execution boundary."""
+    if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_ERROR:
+        return False
+    if getattr(exc, "sqlite_errorname", None) != "SQLITE_ERROR":
+        return False
+    detail = str(exc)
+    return detail == "unterminated string" or detail.startswith(
+        "fts5: syntax error near "
+    )
 
 
 def _row_to_result(row: sqlite3.Row, *, signal: str, score: float) -> dict[str, Any]:

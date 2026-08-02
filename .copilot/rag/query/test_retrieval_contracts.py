@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -184,6 +185,48 @@ class AnchorTokenizerFailingBackend(FakeBackend):
         del question, top_k, source
         self.calls["anchor"] += 1
         raise TokenizerFingerprintError("private anchor fingerprint details")
+
+
+class CatalogLexicalFailingBackend(FakeBackend):
+    def bm25_search(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["lexical"] += 1
+        cause = sqlite3.OperationalError("private locked database path")
+        raise catalog.LexicalSearchError() from cause
+
+
+class CatalogExactFailingBackend(FakeBackend):
+    def exact_search(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["exact"] += 1
+        cause = sqlite3.OperationalError("private missing exact table")
+        raise catalog.ExactSearchError() from cause
+
+
+class CatalogMetadataFailingBackend(FakeBackend):
+    def metadata_search(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["metadata"] += 1
+        cause = sqlite3.OperationalError("private missing metadata table")
+        raise catalog.MetadataSearchError() from cause
 
 
 class DenseLaneHealthContractTests(unittest.TestCase):
@@ -457,6 +500,96 @@ class LexicalTokenizerHealthContractTests(unittest.TestCase):
         self.assertEqual(1, backend.calls["lexical"])
         self.assertEqual(0, backend.calls["metadata"])
         self.assertEqual(0, backend.calls["anchor"])
+
+
+class CatalogLaneHealthContractTests(unittest.TestCase):
+    @staticmethod
+    def _payload(
+        backend: FakeBackend,
+        *,
+        mode: str = "hybrid",
+    ) -> dict[str, Any]:
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            return search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="ordinary cooling question",
+                top_k=2,
+                retrieval_mode=mode,
+                explain=False,
+                identifier_diagnostics=False,
+            )
+
+    def test_hybrid_lexical_sqlite_failure_is_partial_and_not_retried(self) -> None:
+        backend = CatalogLexicalFailingBackend()
+        payload = self._payload(backend)
+        self.assertEqual("partial", payload["status"])
+        self.assertTrue(payload["evidence"])
+        self.assertEqual(
+            {
+                "attempted": True,
+                "succeeded": False,
+                "error": "LexicalSearchError",
+            },
+            payload["lane_health"]["lexical"],
+        )
+        self.assertIn(
+            "lexical_search_unavailable:LexicalSearchError",
+            payload["warnings"],
+        )
+        self.assertNotIn("private", str(payload))
+        self.assertEqual(1, backend.calls["lexical"])
+        self.assertEqual(0, backend.calls["metadata"])
+        self.assertEqual(0, backend.calls["anchor"])
+
+    def test_lexical_only_sqlite_failure_is_explicit_error(self) -> None:
+        backend = CatalogLexicalFailingBackend()
+        payload = self._payload(backend, mode="lexical")
+        self.assertEqual("error", payload["status"])
+        self.assertEqual("lexical_search_unavailable", payload["error"])
+        self.assertNotEqual("no_hit", payload["status"])
+        self.assertEqual(1, backend.calls["lexical"])
+
+    def test_exact_sqlite_failure_is_typed_partial_and_stops_catalog_retries(self) -> None:
+        backend = CatalogExactFailingBackend()
+        payload = self._payload(backend)
+        self.assertEqual("partial", payload["status"])
+        self.assertEqual(
+            "ExactSearchError",
+            payload["lane_health"]["exact"]["error"],
+        )
+        self.assertIn(
+            "exact_search_unavailable:ExactSearchError",
+            payload["warnings"],
+        )
+        self.assertEqual(1, backend.calls["exact"])
+        self.assertEqual(0, backend.calls["lexical"])
+        self.assertEqual(0, backend.calls["metadata"])
+        self.assertEqual(0, backend.calls["anchor"])
+
+    def test_metadata_sqlite_failure_keeps_earlier_lane_results(self) -> None:
+        backend = CatalogMetadataFailingBackend()
+        payload = self._payload(backend)
+        self.assertEqual("partial", payload["status"])
+        self.assertTrue(payload["evidence"])
+        self.assertEqual(
+            "MetadataSearchError",
+            payload["lane_health"]["metadata"]["error"],
+        )
+        self.assertIn(
+            "metadata_search_unavailable:MetadataSearchError",
+            payload["warnings"],
+        )
+        self.assertEqual(1, backend.calls["exact"])
+        self.assertEqual(1, backend.calls["lexical"])
+        self.assertEqual(1, backend.calls["metadata"])
+        self.assertEqual(0, backend.calls["anchor"])
+
+
+class LexicalTokenizerFailureContractTests(unittest.TestCase):
 
     def test_lexical_only_tokenizer_failure_is_explicit_error(self) -> None:
         backend = TokenizerFailingBackend()
