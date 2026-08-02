@@ -27,13 +27,14 @@ Copilotへ`ローカルRAGの初期設定をして`と依頼することもで�
 macOS/Linux:
 
 ```bash
-python3 ~/.copilot/rag/setup.py --format human
+python3 -B ~/.copilot/rag/setup.py --format human
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
@@ -44,13 +45,14 @@ system Python、`py` launcher、PATH変更、管理者権限は不要です。
 macOS/Linux:
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python ~/.copilot/rag/manage.py
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/manage.py
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
@@ -58,7 +60,8 @@ Windows Git Bash:
 
 ```bash
 "$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
-"$HOME/.copilot/rag/manage.py"
+  -B \
+  "$HOME/.copilot/rag/manage.py"
 ```
 
 共通入力:

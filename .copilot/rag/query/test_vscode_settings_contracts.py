@@ -42,11 +42,11 @@ class VSCodeSettingsContractTests(unittest.TestCase):
 
         list_command = (
             '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-            '"$env:USERPROFILE\\.copilot\\rag\\list_dbs.py" --format prompt'
+            '-B "$env:USERPROFILE\\.copilot\\rag\\list_dbs.py" --format prompt'
         )
         search_command = (
             '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-            '"$env:USERPROFILE\\.copilot\\rag\\search.py" "release blocker"'
+            '-B "$env:USERPROFILE\\.copilot\\rag\\search.py" "release blocker"'
         )
         multiline = list_command.replace(" --format", " \x60\r\n  --format")
         self.assertTrue(matches(self.rules[0], list_command))
@@ -54,6 +54,7 @@ class VSCodeSettingsContractTests(unittest.TestCase):
         self.assertTrue(matches(self.rules[1], search_command))
         for unsafe in (
             list_command + "; Remove-Item victim",
+            list_command.replace(" -B ", " "),
             list_command.replace("list_dbs.py", "manage.py"),
             list_command.replace('" --format prompt', '" -c calc'),
             list_command.replace("python.exe", "powershell.exe"),

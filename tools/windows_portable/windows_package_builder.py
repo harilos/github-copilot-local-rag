@@ -36,6 +36,12 @@ FORBIDDEN_NAMES = frozenset(
 )
 FORBIDDEN_PARTS = frozenset({"__pycache__", "run"})
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".pem", ".key")
+PUBLIC_CA_BUNDLE_PATHS = frozenset(
+    {
+        ".copilot/rag/query/.venv/lib/site-packages/certifi/cacert.pem",
+        ".copilot/rag/query/.venv/lib/site-packages/grpc/_cython/_credentials/roots.pem",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,7 @@ def build_package(request: BuildRequest) -> BuildResult:
         runtime_target = query_root / ".venv"
         model_target = copilot_root / "rag" / "models" / "ruri-v3-30m-onnx-int8"
         _copy_tree_exact(request.runtime_root, runtime_target)
+        _ensure_query_root_on_runtime_path(runtime_target)
         _copy_tree_exact(request.model_root, model_target)
         database_names, databases_root = _normalized_databases(request)
         database_result = {"databases": [], "files": [], "total": {"bytes": 0}}
@@ -335,6 +342,40 @@ def _copy_tree_exact(source: Path, target: Path) -> None:
     shutil.copytree(source, target, symlinks=False)
 
 
+def _ensure_query_root_on_runtime_path(runtime_root: Path) -> None:
+    scripts_root = runtime_root / "Scripts"
+    path_files = sorted(
+        scripts_root.glob("python*._pth"),
+        key=lambda path: path.name.casefold(),
+    )
+    if len(path_files) != 1:
+        raise ValueError("runtime must contain exactly one Python ._pth")
+    path_file = path_files[0]
+    try:
+        text = path_file.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Python ._pth must be UTF-8 text") from exc
+    lines = text.splitlines()
+    query_root_entry = r"..\.."
+    lines = [
+        line
+        for line in lines
+        if line.strip().replace("/", "\\").casefold()
+        != query_root_entry.casefold()
+    ]
+    import_site_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().casefold() == "import site"
+        ),
+        len(lines),
+    )
+    lines.insert(import_site_index, query_root_entry)
+    with path_file.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 def _runtime_manifest(request: BuildRequest, runtime_root: Path) -> dict[str, object]:
     entries = _manifest_entries(runtime_root)
     executable = "Scripts/python.exe"
@@ -435,7 +476,12 @@ def _assert_no_forbidden_payload(root: Path) -> None:
             raise ValueError("completion marker must not be packaged")
         if name in FORBIDDEN_NAMES or name.startswith(".source-connections."):
             raise ValueError(f"machine-local configuration must not be packaged: {relative}")
-        if name.endswith((".pem", ".key")):
+        is_public_ca_bundle = (
+            relative.as_posix().casefold() in PUBLIC_CA_BUNDLE_PATHS
+        )
+        if name.endswith(".key") or (
+            name.endswith(".pem") and not is_public_ca_bundle
+        ):
             raise ValueError(f"possible credential must not be packaged: {relative}")
 
 

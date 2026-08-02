@@ -81,20 +81,24 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-@contextmanager
-def connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
-    """Open an existing catalog without creating WAL or schema writes."""
+def readonly_uri(path: Path) -> str:
+    """Return an immutable read-only SQLite URI that cannot create sidecars."""
     resolved = path.resolve()
     resolved_text = str(resolved)
+    query = "?mode=ro&immutable=1"
     if resolved_text.startswith("\\\\"):
         # sqlite rejects a file URI with a non-empty authority, including
         # ``file://server/share``.  Four leading slashes keep a Windows UNC
         # path in the URI path component and preserve read-only mode.
         unc_path = resolved_text.lstrip("\\").replace("\\", "/")
-        uri = "file:////" + quote(unc_path, safe="/:") + "?mode=ro"
-    else:
-        uri = resolved.as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+        return "file:////" + quote(unc_path, safe="/:") + query
+    return resolved.as_uri() + query
+
+
+@contextmanager
+def connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open an existing catalog without creating WAL or schema writes."""
+    conn = sqlite3.connect(readonly_uri(path), uri=True)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")

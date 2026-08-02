@@ -5,6 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
 $PackageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $Payload = Join-Path $PackageRoot ".copilot"
 $Target = Join-Path $env:USERPROFILE ".copilot"
@@ -71,6 +74,23 @@ function Remove-Tree {
     param([string]$Path)
     if ($Path -and (Test-Path -LiteralPath $Path)) {
         Assert-ChildPath -Root $Target -Candidate $Path
+        foreach ($Entry in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+            if (($Entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw ("refusing to delete a transaction tree containing a reparse point: " + $Entry.FullName)
+            }
+            if (($Entry.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                $WritableAttributes = $Entry.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                [System.IO.File]::SetAttributes($Entry.FullName, $WritableAttributes)
+            }
+        }
+        $RootEntry = Get-Item -LiteralPath $Path -Force
+        if (($RootEntry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw ("refusing to delete a transaction reparse point: " + $RootEntry.FullName)
+        }
+        if (($RootEntry.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            $WritableAttributes = $RootEntry.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+            [System.IO.File]::SetAttributes($RootEntry.FullName, $WritableAttributes)
+        }
         [System.IO.Directory]::Delete($Path, $true)
     }
 }
@@ -130,14 +150,14 @@ if ($Actual.Count -ne ($Declared.Count + 1) -or -not $Actual.ContainsKey("packag
 foreach ($Key in $Declared.Keys) { if (-not $Actual.ContainsKey($Key)) { throw "package tree is not the manifest closed set" } }
 
 $SourcePython = Join-Path $SourceRuntime "Scripts\python.exe"
-$SourceVerificationText = (& $SourcePython (Join-Path $SourceQuery "setup.py") --verify-only --format json | Out-String)
+$SourceVerificationText = (& $SourcePython -B (Join-Path $SourceQuery "setup.py") --verify-only --format json | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "source packaged runtime verification failed" }
 $SourceVerification = $SourceVerificationText | ConvertFrom-Json
 if (-not $SourceVerification.setup_complete) { throw "source packaged runtime is incomplete" }
 if (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf) { throw "stop the owned Local RAG daemon before updating" }
 $DbArguments = @("--package-root", $PackageRoot, "--target-root", $TargetDbs, "--preflight")
 if ($ReplaceExistingDatabases) { $DbArguments += "--replace-existing" }
-& $SourcePython (Join-Path $SourceQuery "portable_db_install.py") @DbArguments | Out-Null
+& $SourcePython -B (Join-Path $SourceQuery "portable_db_install.py") @DbArguments | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "database preflight failed" }
 
 try {
@@ -209,10 +229,10 @@ try {
     }
     $DbArguments = @("--package-root", $PackageRoot, "--target-root", $TargetDbs)
     if ($ReplaceExistingDatabases) { $DbArguments += "--replace-existing" }
-    & (Join-Path $TargetRuntime "Scripts\python.exe") (Join-Path $TargetQuery "portable_db_install.py") @DbArguments | Out-Null
+    & (Join-Path $TargetRuntime "Scripts\python.exe") -B (Join-Path $TargetQuery "portable_db_install.py") @DbArguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "database publish failed" }
 
-    $SetupArguments = @((Join-Path $Target "rag\setup.py"), "--format", "json", "--defer-completion-marker")
+    $SetupArguments = @("-B", (Join-Path $Target "rag\setup.py"), "--format", "json", "--defer-completion-marker")
     if ($ConfigureVSCodeAutoApprove) { $SetupArguments += "--configure-vscode-auto-approve" }
     $SetupText = (& (Join-Path $TargetRuntime "Scripts\python.exe") @SetupArguments | Out-String)
     if ($LASTEXITCODE -ne 0) {
@@ -225,7 +245,7 @@ try {
     $Healthy = @($Setup.databases.healthy)
     foreach ($Database in $Manifest.databases) { if ($Healthy -notcontains [string]$Database.name) { throw ("installed database is unhealthy: " + $Database.name) } }
 
-    $ListText = (& (Join-Path $TargetRuntime "Scripts\python.exe") (Join-Path $TargetQuery "list_dbs.py") --format json | Out-String)
+    $ListText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (Join-Path $TargetQuery "list_dbs.py") --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "installed database listing failed" }
     $ListPayload = $ListText | ConvertFrom-Json
     $ListedNames = @($ListPayload.databases | ForEach-Object { [string]$_.name })
@@ -234,12 +254,12 @@ try {
     if ($PreexistingDatabaseNames.Count -eq 0 -and @(Compare-Object $ManifestNames $ListedNames).Count -ne 0) { throw "fresh install database set differs from manifest" }
 
     if (@($Manifest.databases).Count -gt 0) {
-        $SmokeArguments = @((Join-Path $TargetQuery "portable_db_smoke.py"))
+        $SmokeArguments = @("-B", (Join-Path $TargetQuery "portable_db_smoke.py"))
         foreach ($Database in $Manifest.databases) { $SmokeArguments += @("--db", [string]$Database.name) }
         & (Join-Path $TargetRuntime "Scripts\python.exe") @SmokeArguments | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "database smoke search failed" }
     }
-    $RefreshText = (& (Join-Path $TargetRuntime "Scripts\python.exe") (Join-Path $Target "rag\setup.py") --refresh-completion-marker --format json | Out-String)
+    $RefreshText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (Join-Path $Target "rag\setup.py") --refresh-completion-marker --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { throw "completion marker refresh failed" }
     $Refresh = $RefreshText | ConvertFrom-Json
     if (-not $Refresh.setup_complete -or -not (Test-Path -LiteralPath $ActiveMarker -PathType Leaf)) { throw "completion marker postvalidation failed" }
@@ -261,6 +281,8 @@ try {
         $Backup = Join-Path $BackupProduct $Relative; $Destination = Join-Path $Target $Relative
         if (Test-Path -LiteralPath $Backup -PathType Leaf) { Copy-Item -LiteralPath $Backup -Destination $Destination -Force }
     }
+    Remove-Tree $BackupProduct
+    Remove-Tree $BackupDbs
     foreach ($Path in ($ProductCreatedDirectories | Sort-Object { $_.Length } -Descending)) {
         if ((Test-Path -LiteralPath $Path -PathType Container) -and -not (Get-ChildItem -LiteralPath $Path -Force)) { [System.IO.Directory]::Delete($Path) }
     }

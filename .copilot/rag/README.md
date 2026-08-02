@@ -10,13 +10,14 @@ it copies the contained `.copilot` directory into the user's home directory.
 On a clean installation, prepare the runtime before lookup or Manager use:
 
 ```bash
-python3 ~/.copilot/rag/setup.py --format human
+python3 -B ~/.copilot/rag/setup.py --format human
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
@@ -50,9 +51,11 @@ macOS/Linux:
 
 ```bash
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/list_dbs.py --format json
 
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/search.py \
   --db <db-name>-rag \
   --include-db-hint \
@@ -66,10 +69,12 @@ Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
   --format json
 
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\search.py" `
   --db <db-name>-rag `
   --include-db-hint `
@@ -98,13 +103,14 @@ retrieval.
 Use the interactive Manager for every change:
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python ~/.copilot/rag/manage.py
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/manage.py
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 

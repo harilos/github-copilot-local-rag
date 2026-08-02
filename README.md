@@ -144,13 +144,14 @@ Copilotへ`ローカルRAGの初期設定をして`と依頼します。手動�
 macOS/Linux:
 
 ```bash
-python3 ~/.copilot/rag/setup.py --format human
+python3 -B ~/.copilot/rag/setup.py --format human
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\setup.py" --format human
 ```
 
@@ -171,13 +172,14 @@ DB作成、Source追加、更新、再開、DBコピー、検索修復、配布�
 macOS/Linux:
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python ~/.copilot/rag/manage.py
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/manage.py
 ```
 
 Windows PowerShell:
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
@@ -309,9 +311,11 @@ packageには検索資料と内部URLが含まれる場合があります。機�
 
 ```bash
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/list_dbs.py --format text
 
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/search.py \
   --db project-rag \
   --include-db-hint \
@@ -324,10 +328,12 @@ packageには検索資料と内部URLが含まれる場合があります。機�
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
   --format text
 
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\search.py" `
   --db project-rag `
   --include-db-hint `

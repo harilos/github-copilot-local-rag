@@ -32,6 +32,7 @@ def main() -> int:
     completed = subprocess.run(
         [
             str(VENV_PYTHON),
+            "-B",
             str(QUERY_ROOT / "setup.py"),
             "--repair-completion-marker",
             "--format",
@@ -39,7 +40,11 @@ def main() -> int:
         ],
         check=False,
         cwd=str(RAG_ROOT),
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env={
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
     )
     return int(completed.returncode)
 

@@ -164,6 +164,12 @@ class PublicDatabaseListWrapperTests(unittest.TestCase):
             code = database_list.main([])
         self.assertEqual(0, code)
         run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual([sys.executable, "-B"], command[:2])
+        self.assertEqual(
+            "1",
+            run.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"],
+        )
         self.assertEqual("lower warning\n", stderr.getvalue())
         payload = json.loads(stdout.getvalue())
         self.assertEqual("local-rag.database-list.v2", payload["schema"])
@@ -543,6 +549,58 @@ class PublicSearchWrapperTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_catalog_probe_does_not_create_wal_sidecars(self) -> None:
+        catalog = self.db / "catalog.sqlite"
+        connection = sqlite3.connect(catalog)
+        try:
+            self.assertEqual(
+                "wal",
+                connection.execute("PRAGMA journal_mode=WAL").fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+        sidecars = [
+            catalog.with_name(catalog.name + suffix)
+            for suffix in ("-wal", "-shm")
+        ]
+        for sidecar in sidecars:
+            sidecar.unlink(missing_ok=True)
+
+        with search_command._connect_readonly(catalog) as readonly:
+            self.assertEqual(
+                1,
+                readonly.execute("SELECT COUNT(*) FROM document").fetchone()[0],
+            )
+
+        self.assertFalse([path for path in sidecars if path.exists()])
+        code, _stdout, _stderr, _runner = self._run(
+            ["--db", "example-rag", "question"]
+        )
+        self.assertEqual(0, code)
+        self.assertFalse([path for path in sidecars if path.exists()])
+
+    def test_catalog_probe_uses_immutable_unc_uri(self) -> None:
+        resolved = Path(r"\\server\share\catalog.sqlite")
+        connection = mock.Mock()
+        with (
+            mock.patch.object(Path, "resolve", return_value=resolved),
+            mock.patch.object(
+                search_command.sqlite3,
+                "connect",
+                return_value=connection,
+            ) as connect,
+            search_command._connect_readonly(Path("ignored")),
+        ):
+            pass
+
+        connect.assert_called_once_with(
+            "file:////server/share/catalog.sqlite?mode=ro&immutable=1",
+            uri=True,
+        )
+        connection.execute.assert_called_once_with("PRAGMA query_only=ON")
+        connection.close.assert_called_once_with()
+
     def _run(
         self,
         arguments: list[str],
@@ -601,9 +659,14 @@ class PublicSearchWrapperTests(unittest.TestCase):
         self.assertEqual(0, code)
         run.assert_called_once()
         command = run.call_args.args[0]
+        self.assertEqual([sys.executable, "-B"], command[:2])
         self.assertEqual(
             ("query", "search.py"),
-            Path(command[1]).parts[-2:],
+            Path(command[2]).parts[-2:],
+        )
+        self.assertEqual(
+            "1",
+            run.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"],
         )
         self.assertIn("--facet", command)
         self.assertEqual(
@@ -934,7 +997,7 @@ class PublicSearchWrapperTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(
             ("query", "result_detail.py"),
-            Path(command[1]).parts[-2:],
+            Path(command[2]).parts[-2:],
         )
         self.assertFalse(
             any(

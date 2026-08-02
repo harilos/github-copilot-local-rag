@@ -41,11 +41,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # catalog/metadata information.  Human-readable text is rendered only
     # after that single lower invocation.
     child_arguments = ["--format", "json"]
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     completed = subprocess.run(
-        [sys.executable, str(lower), *child_arguments],
+        [sys.executable, "-B", str(lower), *child_arguments],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        env=environment,
     )
     _write_bytes(sys.stderr, completed.stderr)
     if completed.returncode != 0:

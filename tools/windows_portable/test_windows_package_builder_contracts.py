@@ -10,7 +10,13 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from windows_package_builder import BuildRequest, _normalized_databases, build_package
+from windows_package_builder import (
+    BuildRequest,
+    _assert_no_forbidden_payload,
+    _ensure_query_root_on_runtime_path,
+    _normalized_databases,
+    build_package,
+)
 
 
 class WindowsPackageBuilderContractTests(unittest.TestCase):
@@ -44,11 +50,21 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             for relative, data in {
                 "Scripts/python.exe": b"MZ-python",
                 "Scripts/python313.dll": b"MZ-dll",
-                "Scripts/python313._pth": b"python313.zip\nLib/site-packages\n",
+                "Scripts/python313._pth": b"python313.zip\nLib/site-packages\nimport site\n",
                 "Scripts/python313.zip": b"stdlib",
                 "Lib/site-packages/demo.py": b"VALUE=1\n",
                 "Lib/site-packages/demo-1.0.dist-info/METADATA": (
                     b"Name: demo\nVersion: 1.0\n"
+                ),
+                "Lib/site-packages/certifi/cacert.pem": b"PUBLIC CA BUNDLE\n",
+                "Lib/site-packages/certifi-1.0.dist-info/METADATA": (
+                    b"Name: certifi\nVersion: 1.0\n"
+                ),
+                "Lib/site-packages/grpc/_cython/_credentials/roots.pem": (
+                    b"PUBLIC GRPC CA BUNDLE\n"
+                ),
+                "Lib/site-packages/grpcio-1.0.dist-info/METADATA": (
+                    b"Name: grpcio\nVersion: 1.0\n"
                 ),
             }.items():
                 target = runtime / relative
@@ -93,6 +109,30 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn(prefix + "sbom.spdx.json", names)
                 self.assertIn(
                     prefix + ".copilot/rag/query/.packaged-runtime.json", names
+                )
+                path_file = (
+                    prefix
+                    + ".copilot/rag/query/.venv/Scripts/python313._pth"
+                )
+                path_lines = archive.read(path_file).decode("utf-8").splitlines()
+                self.assertEqual(
+                    1,
+                    sum(
+                        line.replace("/", "\\").casefold() == r"..\.."
+                        for line in path_lines
+                    ),
+                )
+                self.assertLess(path_lines.index(r"..\.."), path_lines.index("import site"))
+                self.assertIn(
+                    prefix
+                    + ".copilot/rag/query/.venv/Lib/site-packages/certifi/cacert.pem",
+                    names,
+                )
+                self.assertIn(
+                    prefix
+                    + ".copilot/rag/query/.venv/Lib/site-packages/grpc/"
+                    + "_cython/_credentials/roots.pem",
+                    names,
                 )
                 self.assertNotIn(
                     prefix + ".copilot/rag/query/.rag-deps-installed", names
@@ -252,6 +292,29 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
         self.assertIn("[string[]]$DatabaseNames", powershell)
         self.assertIn("foreach ($DatabaseName in $DatabaseNames)", powershell)
         self.assertIn("--no-database", powershell)
+        self.assertIn("Join-Path $ToolRoot $(", powershell)
+        self.assertIn("& $Python.Source -B @Arguments", powershell)
+        installer = Path(__file__).with_name("install-template.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(2, installer.count("& $SourcePython -B "))
+        self.assertEqual(
+            3,
+            installer.count('& (Join-Path $TargetRuntime "Scripts\\python.exe") -B '),
+        )
+        self.assertIn('$SetupArguments = @("-B",', installer)
+        self.assertIn('$SmokeArguments = @("-B",', installer)
+        self.assertIn(
+            '$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)',
+            installer,
+        )
+        self.assertIn('$OutputEncoding = $Utf8NoBom', installer)
+        self.assertIn('[Console]::OutputEncoding = $Utf8NoBom', installer)
+        self.assertIn("Remove-Tree $BackupProduct", installer)
+        self.assertIn("Remove-Tree $BackupDbs", installer)
+        self.assertIn("[System.IO.FileAttributes]::ReadOnly", installer)
+        self.assertIn("[System.IO.File]::SetAttributes", installer)
+        self.assertIn("transaction tree containing a reparse point", installer)
         cli = Path(__file__).with_name("build_package.py").read_text(encoding="utf-8")
         self.assertIn("except EOFError:", cli)
         self.assertIn("ask=_ask", cli)
@@ -279,6 +342,71 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                         model_fingerprint="b" * 64,
                     )
                 )
+    def test_allows_only_the_fixed_public_ca_pem_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ca_bundle = (
+                root
+                / ".copilot"
+                / "rag"
+                / "query"
+                / ".venv"
+                / "Lib"
+                / "site-packages"
+                / "certifi"
+                / "cacert.pem"
+            )
+            ca_bundle.parent.mkdir(parents=True)
+            ca_bundle.write_text("PUBLIC CA BUNDLE\n", encoding="ascii")
+            grpc_bundle = (
+                root
+                / ".copilot"
+                / "rag"
+                / "query"
+                / ".venv"
+                / "Lib"
+                / "site-packages"
+                / "grpc"
+                / "_cython"
+                / "_credentials"
+                / "roots.pem"
+            )
+            grpc_bundle.parent.mkdir(parents=True)
+            grpc_bundle.write_text("PUBLIC GRPC CA BUNDLE\n", encoding="ascii")
+            _assert_no_forbidden_payload(root)
+            private_key = root / "private.pem"
+            private_key.write_text("PRIVATE\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "possible credential"):
+                _assert_no_forbidden_payload(root)
+            private_key.unlink()
+            private_key = root / "private.key"
+            private_key.write_text("PRIVATE\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "possible credential"):
+                _assert_no_forbidden_payload(root)
+            private_key.unlink()
+
+            misplaced_bundle = root / "other" / "roots.pem"
+            misplaced_bundle.parent.mkdir()
+            misplaced_bundle.write_text("PUBLIC CA BUNDLE\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "possible credential"):
+                _assert_no_forbidden_payload(root)
+
+    def test_normalizes_query_root_runtime_path_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            path_file = runtime / "Scripts" / "python313._pth"
+            path_file.parent.mkdir(parents=True)
+            path_file.write_text(
+                "python313.zip\n../../\nLib/site-packages\n  ..\\..  \nimport site\n",
+                encoding="utf-8",
+            )
+            _ensure_query_root_on_runtime_path(runtime)
+            lines = path_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, lines.count(r"..\.."))
+            self.assertEqual(
+                lines.index("import site") - 1,
+                lines.index(r"..\.."),
+            )
 
 
 if __name__ == "__main__":

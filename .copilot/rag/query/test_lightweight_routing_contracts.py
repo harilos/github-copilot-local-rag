@@ -130,10 +130,12 @@ class LightweightRoutingContractTests(unittest.TestCase):
     ) -> None:
         text = LOOKUP.read_text(encoding="utf-8")
         self.assertIn("~/.copilot/rag/query/.venv/bin/python", text)
+        self.assertIn("bin/python \\\n  -B \\", text)
         self.assertIn(
             r"$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe",
             text,
         )
+        self.assertIn('Scripts\\python.exe" `\n  -B `', text)
         self.assertIn(
             "$HOME/.copilot/rag/query/.venv/Scripts/python.exe",
             text,

@@ -138,11 +138,56 @@ class SourcePathContractTests(unittest.TestCase):
                 pass
         uri = connect.call_args.args[0]
         self.assertEqual(
-            "file:////server/share/folder%20name/catalog.sqlite?mode=ro",
+            "file:////server/share/folder%20name/catalog.sqlite"
+            "?mode=ro&immutable=1",
             uri,
         )
         self.assertTrue(connect.call_args.kwargs["uri"])
 
+
+    def test_immutable_readonly_catalog_does_not_create_wal_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "catalog.sqlite"
+            connection = sqlite3.connect(path)
+            try:
+                mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                self.assertEqual("wal", str(mode).casefold())
+                connection.execute("CREATE TABLE demo(value TEXT)")
+                connection.execute("INSERT INTO demo VALUES ('ok')")
+                connection.commit()
+            finally:
+                connection.close()
+            wal = Path(f"{path}-wal")
+            shm = Path(f"{path}-shm")
+            wal.unlink(missing_ok=True)
+            shm.unlink(missing_ok=True)
+
+            with catalog.connect_readonly(path) as readonly:
+                self.assertEqual(
+                    "ok",
+                    readonly.execute("SELECT value FROM demo").fetchone()[0],
+                )
+
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
+
+    def test_runtime_and_portable_smoke_use_immutable_read_contract(self) -> None:
+        runtime = (
+            TOOL_ROOT / "software_rag_tool" / "db_runtime.py"
+        ).read_text(encoding="utf-8")
+        smoke = (QUERY_ROOT / "portable_db_smoke.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "catalog.readonly_uri(self.context.catalog_path)",
+            runtime,
+        )
+        self.assertIn(
+            "from software_rag_tool.search_api import registry, run_search_payload",
+            smoke,
+        )
+        self.assertIn("finally:", smoke)
+        self.assertIn("registry().close()", smoke)
 
 if __name__ == "__main__":
     unittest.main()

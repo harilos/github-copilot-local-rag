@@ -18,7 +18,7 @@ def main() -> int:
         )
         return 2
     completed = subprocess.run(
-        [sys.executable, str(LOWER_SETUP), *sys.argv[1:]],
+        [sys.executable, "-B", str(LOWER_SETUP), *sys.argv[1:]],
         check=False,
         cwd=str(RAG_ROOT),
     )

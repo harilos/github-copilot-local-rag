@@ -328,11 +328,23 @@ def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
     )
 
     def command(script: Path) -> str:
-        absolute = re.escape(f'"{python}"') + separator + re.escape(f'"{script}"')
+        absolute = (
+            re.escape(f'"{python}"')
+            + separator
+            + re.escape("-B")
+            + separator
+            + re.escape(f'"{script}"')
+        )
         formal_script = (
             '"$env:USERPROFILE\\.copilot\\rag\\' + script.name + '"'
         )
-        formal = re.escape(formal_python) + separator + re.escape(formal_script)
+        formal = (
+            re.escape(formal_python)
+            + separator
+            + re.escape("-B")
+            + separator
+            + re.escape(formal_script)
+        )
         prefix = f"(?:{absolute}|{formal})"
         return f"/^{prefix}(?:{separator}{safe_argument})*$/"
 

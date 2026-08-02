@@ -442,6 +442,7 @@ class ManagerContractTests(unittest.TestCase):
         self.assertNotIsInstance(argv, str)
         self.assertEqual(kwargs["env"]["PYTHONIOENCODING"], "utf-8")
         self.assertEqual(kwargs["env"]["PYTHONUTF8"], "1")
+        self.assertEqual(kwargs["env"]["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertEqual(
             Path(kwargs["env"]["RAG_DBS_ROOT"]),
             self.dbs_root.resolve(),
@@ -880,6 +881,10 @@ class ManagerContractTests(unittest.TestCase):
             )
         argv = self.runner.calls[-1][0]
         self.assertEqual("delete_source.py", Path(argv[1]).name)
+        self.assertEqual(
+            "1",
+            self.runner.calls[-1][1]["env"]["PYTHONDONTWRITEBYTECODE"],
+        )
         self.assertEqual(
             argv[-5:],
             [

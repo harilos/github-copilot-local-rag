@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,16 @@ class PortableDatabaseInstallContracts(unittest.TestCase):
             root=Path(directory); source=package(root/"package",{"one-rag":b"new"}); target=root/"target"; (target/"one-rag").mkdir(parents=True); existing=target/"one-rag"/"data.bin"; existing.write_bytes(b"old")
             with self.assertRaisesRegex(ValueError,"replacement was not approved"): dbi.install_databases(source,target)
             self.assertEqual(b"old",existing.read_bytes()); dbi.install_databases(source,target,replace_existing=True); self.assertEqual(b"new",existing.read_bytes())
+    def test_explicit_replace_removes_backup_containing_readonly_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); source=package(root/"package",{"one-rag":b"new"}); target=root/"target"; existing=target/"one-rag"; existing.mkdir(parents=True)
+            (existing/"data.bin").write_bytes(b"old"); readonly=existing/"sources"/"provider"/".git"/"objects"/"pack"/"pack.idx"; readonly.parent.mkdir(parents=True); readonly.write_bytes(b"readonly"); readonly.chmod(stat.S_IREAD)
+            try:
+                result=dbi.install_databases(source,target,replace_existing=True)
+                self.assertEqual("replaced",result["databases"]["one-rag"]); self.assertEqual(b"new",(target/"one-rag"/"data.bin").read_bytes()); self.assertEqual([],list(target.glob(".*.backup-*")))
+            finally:
+                for path in root.rglob("pack.idx"):
+                    path.chmod(stat.S_IWRITE)
     def test_second_publish_failure_rolls_back_all_databases(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); source=package(root/"package",{"one-rag":b"new1","two-rag":b"new2"}); target=root/"target"

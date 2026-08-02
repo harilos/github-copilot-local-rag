@@ -125,12 +125,14 @@ falls back to PATH-based Python.
 
 ```bash
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/list_dbs.py \
   --format json
 ```
 
 ```bash
 ~/.copilot/rag/query/.venv/bin/python \
+  -B \
   ~/.copilot/rag/search.py \
   --db <selected-db> \
   --include-db-hint \
@@ -144,12 +146,14 @@ falls back to PATH-based Python.
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
   --format json
 ```
 
 ```powershell
 & "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
+  -B `
   "$env:USERPROFILE\.copilot\rag\search.py" `
   --db <selected-db> `
   --include-db-hint `
@@ -163,6 +167,7 @@ falls back to PATH-based Python.
 
 ```bash
 "$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
+  -B \
   "$HOME/.copilot/rag/search.py" \
   --db <selected-db> \
   --include-db-hint \

@@ -742,6 +742,8 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             r"C:\path\to\.copilot\rag\query\.venv\Scripts\python.exe",
             command[0],
         )
+        self.assertEqual("-B", command[1])
+        self.assertEqual(("scripts", "query.py"), Path(command[2]).parts[-2:])
         self.assertIn("--adaptive-hybrid", command)
         self.assertIn("--literal-identifier", command)
         self.assertIn("A2Wの意味と用途", command)
@@ -1539,7 +1541,11 @@ class DaemonLifecycleTests(unittest.TestCase):
             mock.patch.object(SEARCH, "_release_start_lock"),
             mock.patch.object(SEARCH, "_free_port", return_value=12345),
             mock.patch.object(SEARCH.secrets, "token_hex", return_value="expected-generation"),
-            mock.patch.object(SEARCH.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                SEARCH.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen,
             mock.patch.object(SEARCH, "_read_state", return_value=expected_state),
             mock.patch.object(SEARCH, "_healthcheck", return_value=True),
             mock.patch.object(SEARCH, "_terminate_process_tree") as terminate,
@@ -1554,6 +1560,9 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(expected_state, state)
         terminate.assert_not_called()
+        command = popen.call_args.args[0]
+        self.assertEqual(["python", "-B"], command[:2])
+        self.assertEqual("ragd.py", Path(command[2]).name)
 
     def test_windows_start_accepts_authenticated_venv_launcher_child_pid(self) -> None:
         process = mock.Mock()

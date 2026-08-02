@@ -11,6 +11,8 @@ from typing import Any, Sequence
 
 RAG_ROOT = Path(__file__).resolve().parent
 _QUERY_ROOT = RAG_ROOT / "query"
+if str(RAG_ROOT) not in sys.path:
+    sys.path.insert(0, str(RAG_ROOT))
 if str(_QUERY_ROOT) not in sys.path:
     sys.path.insert(0, str(_QUERY_ROOT))
 
@@ -105,10 +107,12 @@ def _self_heal_lookup_gate(
     environment[_SELF_HEAL_ACTIVE_ENV] = "1"
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         subprocess.run(
             [
                 str(python),
+                "-B",
                 str(_QUERY_ROOT / "setup.py"),
                 "--repair-completion-marker",
                 "--format",

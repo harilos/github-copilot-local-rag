@@ -3064,6 +3064,7 @@ class LocalRagManager:
                             **os.environ,
                             "PYTHONIOENCODING": "utf-8",
                             "PYTHONUTF8": "1",
+                            "PYTHONDONTWRITEBYTECODE": "1",
                             "RAG_DBS_ROOT": str(self.dbs_root),
                         },
                     )
@@ -3079,6 +3080,7 @@ class LocalRagManager:
                             **os.environ,
                             "PYTHONIOENCODING": "utf-8",
                             "PYTHONUTF8": "1",
+                            "PYTHONDONTWRITEBYTECODE": "1",
                             "RAG_DBS_ROOT": str(self.dbs_root),
                         },
                         stdout=subprocess.PIPE,
@@ -5646,6 +5648,7 @@ class LocalRagManager:
                 **os.environ,
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
                 "RAG_DBS_ROOT": str(self.dbs_root),
             },
         }

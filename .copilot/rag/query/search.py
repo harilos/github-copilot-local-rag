@@ -199,6 +199,7 @@ def main() -> None:
     env = os.environ.copy()
     env.setdefault("RAG_DBS_ROOT", str(DBS_ROOT))
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     request = {
         "request_id": uuid.uuid4().hex,
@@ -490,6 +491,7 @@ def _run_sync_script(
     )
     cmd = [
         python,
+        "-B",
         str(script),
         question,
     ]
@@ -1603,6 +1605,7 @@ def _start_daemon(
     try:
         cmd = [
             python,
+            "-B",
             str(Path(__file__).resolve().parent / "ragd.py"),
             "--token",
             token,

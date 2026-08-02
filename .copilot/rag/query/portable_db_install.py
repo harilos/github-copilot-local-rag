@@ -11,6 +11,23 @@ from pathlib import Path, PurePosixPath
 
 SCHEMA = "local-rag.windows-package.v2"
 
+
+def remove_tree(path: Path, *, ignore_errors: bool = False) -> None:
+    def clear_readonly(function: object, value: str, error_info: tuple[type[BaseException], BaseException, object]) -> None:
+        error = error_info[1]
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(value, stat.S_IWRITE)
+        function(value)  # type: ignore[operator]
+
+    try:
+        shutil.rmtree(path, onerror=clear_readonly)
+    except FileNotFoundError:
+        return
+    except Exception:
+        if not ignore_errors:
+            raise
+
 def reject_reparse_ancestors(path: Path) -> None:
     current = path.absolute()
     while True:
@@ -145,16 +162,16 @@ def install_databases(package_root: Path, target_root: Path, *, replace_existing
                 statuses[name] = "replaced" if backup is not None else "installed"
         except Exception:
             for _name, target, backup in reversed(published):
-                shutil.rmtree(target, ignore_errors=True)
+                remove_tree(target, ignore_errors=True)
                 if backup is not None and backup.exists():
                     os.replace(backup, target)
             raise
         for _name, _target, backup in published:
             if backup is not None:
-                shutil.rmtree(backup)
+                remove_tree(backup)
     finally:
         for _name, _target, stage, _backup in plans:
-            shutil.rmtree(stage, ignore_errors=True)
+            remove_tree(stage, ignore_errors=True)
     return {"status": "ok", "databases": statuses}
 
 def main() -> int:

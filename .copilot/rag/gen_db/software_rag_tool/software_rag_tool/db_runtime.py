@@ -167,7 +167,7 @@ class DbStore:
     def _get_catalog_connection(self) -> sqlite3.Connection:
         with self._catalog_lock:
             if self._catalog_connection is None:
-                uri = self.context.catalog_path.resolve().as_uri() + "?mode=ro"
+                uri = catalog.readonly_uri(self.context.catalog_path)
                 connection = sqlite3.connect(uri, uri=True)
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA query_only=ON")

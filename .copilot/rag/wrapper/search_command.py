@@ -53,6 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     rag_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["LOCAL_RAG_WRAPPER_INTERNAL"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     if mode == "detail":
         lower = rag_root / "query" / "result_detail.py"
         child_arguments = arguments
@@ -79,7 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     try:
         completed = subprocess.run(
-            [sys.executable, str(lower), *child_arguments],
+            [sys.executable, "-B", str(lower), *child_arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -802,9 +803,9 @@ def _connect_readonly(path: Path) -> _ReadonlyConnection:
     text = str(resolved)
     if text.startswith("\\\\"):
         unc = text.lstrip("\\").replace("\\", "/")
-        uri = "file:////" + quote(unc, safe="/:") + "?mode=ro"
+        uri = "file:////" + quote(unc, safe="/:") + "?mode=ro&immutable=1"
     else:
-        uri = resolved.as_uri() + "?mode=ro"
+        uri = resolved.as_uri() + "?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     connection.execute("PRAGMA query_only=ON")
     return _ReadonlyConnection(connection)

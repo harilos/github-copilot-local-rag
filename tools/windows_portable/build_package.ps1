@@ -15,7 +15,7 @@ $ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $ToolRoot "..\.."))
 $Lock = Get-Content -Raw -Encoding UTF8 (Join-Path $ToolRoot "runtime-lock.json") |
     ConvertFrom-Json
-$RequirementsLock = Join-Path $ToolRoot (
+$RequirementsLock = Join-Path $ToolRoot $(
     if ($Profile -eq "search-only") {
         "requirements-search.lock"
     } else {
@@ -71,7 +71,7 @@ if ($NoDatabase) {
 } else {
     $Arguments += @("--dbs-root", (Join-Path $RepositoryRoot ".copilot\rag\dbs"))
 }
-& $Python.Source @Arguments
+& $Python.Source -B @Arguments
 if ($LASTEXITCODE -ne 0) {
     throw "Windows portable package build failed"
 }

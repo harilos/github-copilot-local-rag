@@ -89,7 +89,8 @@ class CompletionMarkerSelfHealContractTests(unittest.TestCase):
             run.assert_called_once()
             command = run.call_args.args[0]
             self.assertEqual(str(python), command[0])
-            self.assertEqual(str(query_root / "setup.py"), command[1])
+            self.assertEqual("-B", command[1])
+            self.assertEqual(str(query_root / "setup.py"), command[2])
             self.assertIn("--repair-completion-marker", command)
             self.assertEqual(subprocess.PIPE, run.call_args.kwargs["stdout"])
             self.assertEqual(subprocess.PIPE, run.call_args.kwargs["stderr"])
@@ -99,6 +100,10 @@ class CompletionMarkerSelfHealContractTests(unittest.TestCase):
                 run.call_args.kwargs["env"][
                     PUBLIC_SEARCH._SELF_HEAL_ACTIVE_ENV
                 ],
+            )
+            self.assertEqual(
+                "1",
+                run.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"],
             )
 
     def test_valid_gate_does_not_start_repair(self) -> None:
