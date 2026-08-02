@@ -61,19 +61,34 @@ def identifier_match_keys(text: str) -> list[str]:
 
 
 def tokenizer_fingerprint() -> str:
-    return "sudachi-a-v1" if _sudachi() else "fallback-cjk-ngram-v1"
+    return "sudachi-a-v2-tf" if _sudachi() else "fallback-cjk-ngram-v2-tf"
 
 
-def tokenize_for_fts(text: str, *, max_tokens: int | None = None) -> str:
-    tokens = tokens_for_fts(text, max_tokens=max_tokens)
+def tokenize_for_fts(
+    text: str,
+    *,
+    max_tokens: int | None = None,
+    preserve_occurrences: bool = False,
+) -> str:
+    tokens = tokens_for_fts(
+        text,
+        max_tokens=max_tokens,
+        preserve_occurrences=preserve_occurrences,
+    )
     return " ".join(tokens)
 
 
-def tokens_for_fts(text: str, *, max_tokens: int | None = None) -> list[str]:
+def tokens_for_fts(
+    text: str,
+    *,
+    max_tokens: int | None = None,
+    preserve_occurrences: bool = False,
+) -> list[str]:
     tokens = _sudachi_tokens(text)
     if not tokens:
         tokens = _fallback_tokens(text)
-    output = _unique(_clean_token_stream(tokens))
+    cleaned = list(_clean_token_stream(tokens))
+    output = cleaned if preserve_occurrences else _unique(cleaned)
     if max_tokens is not None:
         return output[:max_tokens]
     return output

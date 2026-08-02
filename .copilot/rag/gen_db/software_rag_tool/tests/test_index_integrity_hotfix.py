@@ -8,8 +8,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from software_rag_tool import catalog, incremental, source_delete, store
+from software_rag_tool import catalog, incremental, manifest, source_delete, store
 from software_rag_tool.embeddings import DocumentTokenBudget
+from software_rag_tool.tokenize import (
+    tokenize_for_fts,
+    tokenizer_fingerprint,
+    tokens_for_fts,
+)
 
 
 class CharacterTokenizer:
@@ -137,6 +142,81 @@ class ResetCollectionContracts(unittest.TestCase):
             save_state.assert_not_called()
             upsert.assert_not_called()
             manifest.assert_not_called()
+
+
+class Bm25TermFrequencyContracts(unittest.TestCase):
+    @staticmethod
+    def _record(record_id: str, text: str) -> dict:
+        return {
+            "id": record_id,
+            "text": text,
+            "metadata": {
+                "doc_id": record_id,
+                "path": f"{record_id}.txt",
+                "source_id": "fixture-source",
+            },
+        }
+
+    def test_query_tokens_remain_unique_while_index_tokens_keep_occurrences(self) -> None:
+        text = "alpha alpha beta alpha"
+        alpha = tokens_for_fts("alpha")[0]
+        beta = tokens_for_fts("beta")[0]
+        self.assertEqual([alpha, beta], tokens_for_fts(text))
+        self.assertEqual(
+            [alpha, alpha, beta, alpha],
+            tokens_for_fts(text, preserve_occurrences=True),
+        )
+        self.assertEqual(
+            " ".join([alpha, alpha, beta]),
+            tokenize_for_fts(
+                text,
+                max_tokens=3,
+                preserve_occurrences=True,
+            ),
+        )
+
+    def test_catalog_index_stores_repeated_term_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(os.environ, {"RAG_OUTPUT_ROOT": temporary}):
+                catalog.upsert_records(
+                    [self._record("repeat", "alpha alpha alpha beta")]
+                )
+                with catalog.connect_readonly(catalog.catalog_path()) as connection:
+                    stored = connection.execute(
+                        "SELECT body_tokens FROM fts_word"
+                    ).fetchone()[0]
+            alpha = tokens_for_fts("alpha")[0]
+            beta = tokens_for_fts("beta")[0]
+            self.assertEqual(" ".join([alpha, alpha, alpha, beta]), stored)
+
+    def test_repeated_term_outranks_equal_length_single_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with mock.patch.dict(os.environ, {"RAG_OUTPUT_ROOT": temporary}):
+                catalog.upsert_records(
+                    [
+                        self._record(
+                            "repeat",
+                            "alpha alpha alpha beta gamma delta epsilon",
+                        ),
+                        self._record(
+                            "single",
+                            "alpha zeta eta beta gamma delta epsilon",
+                        ),
+                    ]
+                )
+                rows = catalog.bm25_search("alpha", top_k=2)
+            self.assertEqual(["repeat", "single"], [row["id"] for row in rows])
+            self.assertLess(rows[0]["score"], rows[1]["score"])
+
+    def test_manifest_and_catalog_share_term_frequency_fingerprint(self) -> None:
+        fingerprint = tokenizer_fingerprint()
+        self.assertIn("-v2-tf", fingerprint)
+        self.assertEqual(fingerprint, manifest.build_manifest(0)["tokenizer"])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "catalog.sqlite"
+            with catalog.connect(path):
+                pass
+            self.assertEqual(fingerprint, catalog.counts(path)["tokenizer"])
 
 
 class SourceDeleteCrossStoreContracts(unittest.TestCase):

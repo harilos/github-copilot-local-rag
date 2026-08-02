@@ -721,8 +721,16 @@ def _insert_record(conn: sqlite3.Connection, record: dict[str, Any], now: str) -
         "INSERT INTO fts_word(rowid, heading_tokens, body_tokens) VALUES (?, ?, ?)",
         (
             chunk_pk,
-            tokenize_for_fts(heading, max_tokens=100),
-            tokenize_for_fts(text, max_tokens=2000),
+            tokenize_for_fts(
+                heading,
+                max_tokens=100,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                text,
+                max_tokens=2000,
+                preserve_occurrences=True,
+            ),
         ),
     )
     _insert_identifiers(conn, chunk_pk, FIELD_HEADING, heading, limit=80)
@@ -775,10 +783,26 @@ def _upsert_document(conn: sqlite3.Connection, record: dict[str, Any], meta: dic
         "INSERT INTO file_fts(rowid, basename_tokens, stem_tokens, path_tokens, title_tokens) VALUES (?, ?, ?, ?, ?)",
         (
             doc_pk,
-            tokenize_for_fts(Path(path).name, max_tokens=80),
-            tokenize_for_fts(Path(path).stem, max_tokens=80),
-            tokenize_for_fts(path, max_tokens=200),
-            tokenize_for_fts(title, max_tokens=100),
+            tokenize_for_fts(
+                Path(path).name,
+                max_tokens=80,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                Path(path).stem,
+                max_tokens=80,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                path,
+                max_tokens=200,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                title,
+                max_tokens=100,
+                preserve_occurrences=True,
+            ),
         ),
     )
     return doc_pk
