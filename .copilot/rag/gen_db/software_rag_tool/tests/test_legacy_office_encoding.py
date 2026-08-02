@@ -11,6 +11,30 @@ from pathlib import Path
 from unittest import mock
 
 from software_rag_tool import catalog, extractors, records, retrieval
+from software_rag_tool.embeddings import DocumentTokenBudget
+
+
+class _CharacterTokenizer:
+    def __call__(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool = True,
+        **_kwargs: object,
+    ) -> dict[str, list[int]]:
+        tokens = list(range(len(text)))
+        if add_special_tokens:
+            tokens = [10_001, *tokens, 10_002]
+        return {"input_ids": tokens}
+
+
+_TEST_TOKEN_BUDGET = DocumentTokenBudget(
+    tokenizer=_CharacterTokenizer(),
+    document_prefix="doc: ",
+    tokenizer_name="explicit-character-test-double",
+    target_tokens=320,
+    max_tokens=384,
+)
 
 
 class ConverterOutputDecodingTests(unittest.TestCase):
@@ -172,6 +196,7 @@ class LegacyDocAcceptanceTests(unittest.TestCase):
                             root,
                             root / filename,
                             source_id="legacy-doc-fixture",
+                            document_token_budget=_TEST_TOKEN_BUDGET,
                         )
                     )
                 catalog.upsert_records(indexed)

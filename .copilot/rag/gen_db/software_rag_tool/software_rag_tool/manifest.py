@@ -8,6 +8,7 @@ from typing import Any
 from .embeddings import embedding_fingerprint
 from .paths import default_collection_name, index_dir, output_root
 from .tokenize import tokenizer_fingerprint
+from .chunking import TOKEN_SAFE_CHUNKER_VERSION
 
 
 class ConfigMismatchError(RuntimeError):
@@ -18,7 +19,11 @@ def manifest_path() -> Path:
     return index_dir() / "manifest.json"
 
 
-def build_manifest(record_count: int) -> dict[str, Any]:
+def build_manifest(
+    record_count: int,
+    *,
+    chunker_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     embedding = embedding_fingerprint()
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -26,7 +31,8 @@ def build_manifest(record_count: int) -> dict[str, Any]:
         "record_count": record_count,
         "collection": default_collection_name(),
         "chroma_space": "cosine",
-        "chunker_version": "jp-sw-v1",
+        "chunker_version": TOKEN_SAFE_CHUNKER_VERSION,
+        "chunker": chunker_config or {"version": TOKEN_SAFE_CHUNKER_VERSION},
         "catalog_schema_version": 2,
         "tokenizer": tokenizer_fingerprint(),
         "retrieval": "hybrid-rrf-v1",
@@ -34,10 +40,22 @@ def build_manifest(record_count: int) -> dict[str, Any]:
     }
 
 
-def write_manifest(record_count: int) -> Path:
+def write_manifest(
+    record_count: int,
+    *,
+    chunker_config: dict[str, Any] | None = None,
+) -> Path:
     path = manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(build_manifest(record_count), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            build_manifest(record_count, chunker_config=chunker_config),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return path
 
 

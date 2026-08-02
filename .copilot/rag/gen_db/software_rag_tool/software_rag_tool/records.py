@@ -5,6 +5,15 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from .embeddings import (
+    DocumentEmbeddingTokenLimitError,
+    DocumentTokenBudget,
+    get_document_token_budget,
+)
+from .chunking import (
+    DEFAULT_CHUNK_OVERLAP_TOKENS,
+    TOKEN_SAFE_CHUNKER_VERSION,
+)
 from .extractors import SUPPORTED_EXTENSIONS, extract_sections
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 
@@ -19,6 +28,38 @@ def sha256_bytes(data: bytes) -> str:
 
 def file_content_hash(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def chunker_config(
+    *,
+    chunk_max_chars: int,
+    chunk_overlap: int,
+    document_token_budget: DocumentTokenBudget,
+) -> dict[str, Any]:
+    return {
+        "version": TOKEN_SAFE_CHUNKER_VERSION,
+        "target_tokens": document_token_budget.target_tokens,
+        "overlap_tokens": DEFAULT_CHUNK_OVERLAP_TOKENS,
+        "hard_limit_tokens": document_token_budget.max_tokens,
+        "max_chars": chunk_max_chars,
+        "overlap_chars": chunk_overlap,
+        "tokenizer": document_token_budget.tokenizer_name,
+        "document_prefix": document_token_budget.document_prefix,
+    }
+
+
+def chunker_version(config: dict[str, Any]) -> str:
+    keys = (
+        "version",
+        "target_tokens",
+        "overlap_tokens",
+        "hard_limit_tokens",
+        "max_chars",
+        "overlap_chars",
+        "tokenizer",
+        "document_prefix",
+    )
+    return ":".join(f"{key}={config[key]}" for key in keys)
 
 
 def iter_input_files(root: Path) -> Iterable[Path]:
@@ -77,19 +118,28 @@ def build_records_for_file(
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
     ingestion_scope: IngestionScope | None = None,
+    document_token_budget: DocumentTokenBudget | None = None,
 ) -> list[dict[str, Any]]:
     scope = ingestion_scope or resolve_ingestion_scope(root)
     stored = scope.file(path)
+    token_budget = document_token_budget or get_document_token_budget()
+    config = chunker_config(
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
+        document_token_budget=token_budget,
+    )
     sections = extract_sections(
         stored.resolved_path,
         chunk_max_chars=chunk_max_chars,
         chunk_overlap=chunk_overlap,
+        token_budget=token_budget,
+        embedding_path=stored.stored_path,
     )
     content_hash = content_hash or file_content_hash(stored.resolved_path)
     doc_id = sha256_text(
         f"{source_id}:{stored.stored_path}:{content_hash}"
     )
-    chunker_version = f"jp-sw-v1:max_chars={chunk_max_chars}:overlap={chunk_overlap}"
+    current_chunker_version = chunker_version(config)
 
     records: list[dict[str, Any]] = []
     chunk_index = 0
@@ -98,10 +148,21 @@ def build_records_for_file(
         if not text:
             continue
         text_hash = sha256_text(text)
-        chunk_id = sha256_text(f"{doc_id}:{chunker_version}:{chunk_index}")
+        chunk_id = sha256_text(
+            f"{doc_id}:{current_chunker_version}:{chunk_index}"
+        )
         embedding_text = (
             f"{stored.stored_path}\n{section.title}\n{text}"
         )
+        embedding_token_count = token_budget.count_embedding_text(
+            embedding_text
+        )
+        if embedding_token_count > token_budget.max_tokens:
+            raise DocumentEmbeddingTokenLimitError(
+                "record exceeds the hard document token limit: "
+                f"path={stored.stored_path!r} section={section.title!r} "
+                f"tokens={embedding_token_count} limit={token_budget.max_tokens}"
+            )
         records.append(
             {
                 "id": chunk_id,
@@ -124,9 +185,11 @@ def build_records_for_file(
                     "content_hash": content_hash,
                     "chunk_hash": text_hash,
                     "text_hash": text_hash,
-                    "chunker_version": chunker_version,
+                    "chunker_version": current_chunker_version,
                     "chunk_max_chars": chunk_max_chars,
                     "chunk_overlap": chunk_overlap,
+                    "embedding_token_count": embedding_token_count,
+                    "embedding_token_limit": token_budget.max_tokens,
                 },
             }
         )
@@ -139,10 +202,12 @@ def build_records(
     source_id: str = "local",
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
+    document_token_budget: DocumentTokenBudget | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     scope = resolve_ingestion_scope(root)
+    token_budget = document_token_budget or get_document_token_budget()
 
     for path in iter_input_files(scope.scan_root):
         stored = scope.file(path)
@@ -155,6 +220,7 @@ def build_records(
                     chunk_max_chars=chunk_max_chars,
                     chunk_overlap=chunk_overlap,
                     ingestion_scope=scope,
+                    document_token_budget=token_budget,
                 )
             )
         except Exception as exc:

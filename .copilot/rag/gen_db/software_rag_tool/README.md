@@ -62,7 +62,18 @@ EMBED_DOCUMENT_PREFIX=検索文書:
 EMBED_QUERY_PREFIX=検索クエリ: 
 ```
 
-Changing the embedding model or prefixes requires rebuilding the vector index. Changing the tokenizer or catalog schema can be handled by rebuilding the lexical catalog from clean JSONL. Older catalog schemas are not migrated in place.
+Dense document chunks are measured with the prepared Ruri tokenizer before
+indexing. The target is 320 tokens with up to 48 body tokens of overlap inside
+the same extracted section; the final document prefix, path, section title,
+body, and special tokens must fit the hard 384-token model limit. The legacy
+`--chunk-max-chars` and `--chunk-overlap` options remain character-based
+additional ceilings and are not reinterpreted as token counts. Document-mode
+embedding refuses oversized input instead of silently truncating it.
+
+Changing the embedding model, document prefix, or tokenizer requires a full
+re-ADD/rebuild because the tokenizer participates in chunk identity. Changing
+only the catalog schema can be handled by rebuilding the lexical catalog from
+clean JSONL. Older catalog schemas are not migrated in place.
 
 Prepare the default ONNX INT8 model before dense indexing/search:
 
