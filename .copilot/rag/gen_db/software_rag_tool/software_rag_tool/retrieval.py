@@ -1945,8 +1945,7 @@ def _raw_anchor_occurs(row: dict[str, Any], anchor: str) -> bool:
             basename,
             stem,
         }
-        if query_value in filename_values:
-            return True
+        return query_value in filename_values
     haystack = "\n".join(
         [
             str(row.get("text") or ""),

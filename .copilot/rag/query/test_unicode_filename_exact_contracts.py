@@ -69,6 +69,33 @@ class UnicodeFilenameExactContractTests(unittest.TestCase):
                     catalog.exact_search(query, top_k=5, path=self.catalog_path),
                 )
 
+    def test_title_only_unicode_match_is_not_verified_as_filename_exact(self) -> None:
+        with catalog.connect(self.catalog_path) as connection:
+            catalog._insert_record(
+                connection,
+                {
+                    "id": "title-only",
+                    "text": "運用手順書",
+                    "metadata": {
+                        "path": "docs/unrelated.txt",
+                        "title": "運用手順書",
+                    },
+                },
+                "now",
+            )
+            connection.commit()
+        rows = catalog.exact_search(
+            "運用手順書",
+            top_k=5,
+            path=self.catalog_path,
+        )
+        title_only = [row for row in rows if row["id"] == "title-only"]
+        self.assertEqual(1, len(title_only))
+        self.assertEqual(
+            [],
+            _matching_strong_exact_rows("運用手順書", title_only),
+        )
+
     def test_ascii_four_of_four_remain_exact(self) -> None:
         for query in [
             "ReleaseNotes.TXT",
