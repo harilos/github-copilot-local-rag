@@ -111,9 +111,11 @@ def upsert_records(records: list[dict[str, Any]], progress_callback: Callable[[i
     if not records:
         return 0
 
-    collection = _get_existing_collection()
-    if collection is None:
-        return 0
+    # Upsert is an explicit index mutation path.  It must create the target
+    # collection after a successful reset (and for a first build).  Read-only
+    # inventory paths such as source_records() deliberately continue to use
+    # _get_existing_collection() so deletion preflight never creates a store.
+    collection = _get_or_create_collection()
     embedder = get_embedder()
     batch_size = int(os.getenv("EMBED_BATCH_SIZE", "8"))
     if batch_size <= 0:

@@ -45,6 +45,19 @@ def test_budget() -> DocumentTokenBudget:
 
 
 class ResetCollectionContracts(unittest.TestCase):
+    @staticmethod
+    def _vector_record(record_id: str, text: str) -> dict:
+        return {
+            "id": record_id,
+            "text": text,
+            "embedding_text": text,
+            "metadata": {
+                "doc_id": record_id,
+                "path": f"{record_id}.txt",
+                "source_id": "fixture-source",
+            },
+        }
+
     def test_absent_directory_is_idempotent_without_client_creation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             missing = Path(temporary) / "missing"
@@ -121,6 +134,120 @@ class ResetCollectionContracts(unittest.TestCase):
                 gc.collect()
                 system.stop()
                 SharedSystemClient.clear_system_cache()
+
+    def test_upsert_recreates_collection_after_successful_reset(self) -> None:
+        from chromadb.api.client import SharedSystemClient
+
+        class FixtureEmbedder:
+            def encode(self, texts, *, mode):
+                self.mode = mode
+                return [[float(index + 1), 1.0] for index, _ in enumerate(texts)]
+
+        temporary = tempfile.TemporaryDirectory()
+        try:
+            cdir = Path(temporary.name) / "chroma"
+            environment = {
+                "CHROMA_DIR_V2": str(cdir),
+                "CHROMA_COLLECTION": "fresh_upsert_fixture",
+            }
+            records = [
+                self._vector_record("new-a", "new alpha"),
+                self._vector_record("new-b", "new beta"),
+            ]
+            embedder = FixtureEmbedder()
+            with (
+                mock.patch.dict(os.environ, environment),
+                mock.patch.object(store, "get_embedder", return_value=embedder),
+                mock.patch.object(
+                    store,
+                    "embedding_fingerprint",
+                    return_value={
+                        "embedding_model": "fixture-model",
+                        "embedding_dimension": 2,
+                    },
+                ),
+            ):
+                store.reset_collection()
+                self.assertEqual(2, store.upsert_records(records))
+                client = store._persistent_client(cdir)
+                collection = client.get_collection("fresh_upsert_fixture")
+                self.assertIsNotNone(collection)
+                self.assertEqual(["new-a", "new-b"], sorted(collection.get()["ids"]))
+                self.assertEqual("document", embedder.mode)
+                system = client._system
+                del collection, client
+                gc.collect()
+                system.stop()
+        finally:
+            SharedSystemClient.clear_system_cache()
+            temporary.cleanup()
+
+    def test_build_index_reset_replaces_old_collection_with_clean_records(self) -> None:
+        import chromadb
+        from chromadb.api.client import SharedSystemClient
+        from chromadb.config import Settings
+
+        class FixtureEmbedder:
+            def encode(self, texts, *, mode):
+                del mode
+                return [[float(index + 1), 1.0] for index, _ in enumerate(texts)]
+
+        temporary = tempfile.TemporaryDirectory()
+        try:
+            output_root = Path(temporary.name) / "fixture-rag"
+            clean = output_root / "data" / "clean" / "records"
+            clean.mkdir(parents=True)
+            records = [
+                self._vector_record("clean-a", "clean alpha"),
+                self._vector_record("clean-b", "clean beta"),
+            ]
+            (clean / "fixture.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
+            cdir = output_root / "index" / "chroma"
+            cdir.mkdir(parents=True)
+            environment = {
+                "RAG_OUTPUT_ROOT": str(output_root),
+                "CHROMA_DIR_V2": str(cdir),
+                "CHROMA_COLLECTION": "build_reset_fixture",
+            }
+            with mock.patch.dict(os.environ, environment):
+                client = chromadb.PersistentClient(
+                    path=str(cdir),
+                    settings=Settings(anonymized_telemetry=False),
+                )
+                old = client.get_or_create_collection("build_reset_fixture")
+                old.add(
+                    ids=["old"],
+                    documents=["old"],
+                    embeddings=[[1.0, 0.0]],
+                    metadatas=[{"source_id": "old"}],
+                )
+                with (
+                    mock.patch.object(store, "require_index_tokenizer"),
+                    mock.patch.object(store, "get_embedder", return_value=FixtureEmbedder()),
+                    mock.patch.object(
+                        store,
+                        "embedding_fingerprint",
+                        return_value={
+                            "embedding_model": "fixture-model",
+                            "embedding_dimension": 2,
+                        },
+                    ),
+                    mock.patch.object(store, "write_manifest"),
+                ):
+                    self.assertEqual(2, store.build_index(reset=True))
+                replacement = client.get_collection("build_reset_fixture")
+                self.assertEqual(["clean-a", "clean-b"], sorted(replacement.get()["ids"]))
+                self.assertNotIn("old", replacement.get()["ids"])
+                system = client._system
+                del replacement, old, client
+                gc.collect()
+                system.stop()
+        finally:
+            SharedSystemClient.clear_system_cache()
+            temporary.cleanup()
 
     def test_incremental_reset_failure_precedes_every_persistent_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
