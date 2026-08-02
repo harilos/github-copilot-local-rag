@@ -56,6 +56,12 @@ def add_or_update_root(
         document_token_budget=token_budget,
     )
     scope = resolve_ingestion_scope(root, scan_subdir)
+    if reset_db:
+        # Vector reset is the destructive gate.  Do it before clean/state or
+        # catalog mutation so a lock, permission, corruption, or client error
+        # cannot leave a mixed old/new generation behind.
+        reset_collection()
+        reset_catalog()
     if reset_clean:
         _reset_clean_dir()
         state = _initial_state()
@@ -119,8 +125,6 @@ def add_or_update_root(
     )
 
     if reset_db:
-        reset_collection()
-        reset_catalog()
         emit_event("collection_reset")
 
     files = list(iter_input_files(scope.scan_root))

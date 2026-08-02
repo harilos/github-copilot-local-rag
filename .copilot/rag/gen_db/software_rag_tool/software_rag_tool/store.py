@@ -7,9 +7,11 @@ from typing import Any, Callable
 try:
     import chromadb
     from chromadb.config import Settings
+    from chromadb.errors import NotFoundError as ChromaNotFoundError
 except ModuleNotFoundError:
     chromadb = None  # type: ignore[assignment]
     Settings = None  # type: ignore[assignment,misc]
+    ChromaNotFoundError = ()  # type: ignore[assignment,misc]
 
 from .catalog import reset_catalog, upsert_records as upsert_catalog_records
 from .embeddings import embedding_fingerprint, get_embedder
@@ -56,13 +58,20 @@ def build_index(reset: bool = True) -> int:
 def reset_collection() -> None:
     _require_chromadb()
     cdir = chroma_dir()
-    cdir.mkdir(parents=True, exist_ok=True)
+    if not cdir.exists():
+        return
     client = _persistent_client(cdir)
     name = collection_name()
     try:
-        client.delete_collection(name)
-    except Exception:
-        pass
+        client.get_collection(name=name)
+    except ChromaNotFoundError:
+        return
+    client.delete_collection(name=name)
+    try:
+        client.get_collection(name=name)
+    except ChromaNotFoundError:
+        return
+    raise RuntimeError(f"Chroma collection still exists after reset: {name}")
 
 
 def _get_or_create_collection() -> Any:
