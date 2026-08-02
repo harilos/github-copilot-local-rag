@@ -405,28 +405,28 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
             first = run()
             self.assertEqual(400, first["documents"])
             self.assertEqual(400, counts["detail"])
-            self.assertEqual(80, counts["batch"])
+            self.assertEqual(8, counts["batch"])
             self.assertEqual(400, len(list((work / "issues").glob("*.md"))))
 
             second = run()
             self.assertEqual(400, second["inventory_documents"])
             self.assertEqual(400, second["unchanged_documents"])
             self.assertEqual(400, counts["detail"])
-            self.assertEqual(80, counts["batch"])
+            self.assertEqual(8, counts["batch"])
 
             third = run()
             self.assertEqual(400, third["inventory_documents"])
             self.assertEqual(400, counts["detail"])
-            self.assertEqual(80, counts["batch"])
+            self.assertEqual(8, counts["batch"])
 
             updated[301] = "2026-07-29T01:00:01Z"
             changed = run()
             self.assertEqual(1, changed["fetched_this_run"])
             self.assertEqual(401, counts["detail"])
-            self.assertEqual(81, counts["batch"])
+            self.assertEqual(9, counts["batch"])
             run()
             self.assertEqual(401, counts["detail"])
-            self.assertEqual(81, counts["batch"])
+            self.assertEqual(9, counts["batch"])
 
     def test_localhost_http_refresh_keeps_credentials_out_of_output(self) -> None:
         secret = "LOCAL-TEST-SECRET-DO-NOT-LOG-7f2a4c9e"

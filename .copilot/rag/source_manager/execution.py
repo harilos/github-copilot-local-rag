@@ -42,6 +42,7 @@ from .github_content import (
     parse_github_repository_url,
 )
 from .networking import is_gitlab_token_request, reject_http_redirects
+from .redmine_contract import REDMINE_ADD_BATCH_SIZE
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
 from .security import validate_environment_name
 
@@ -55,6 +56,9 @@ ProgressCallback = Callable[[int, int], None]
 InventoryCallback = Callable[[list[int]], None]
 InventorySnapshotCallback = Callable[[int, list[int]], None]
 HttpProgressCallback = Callable[[Mapping[str, Any]], None]
+
+_REDMINE_LOG_TARGET_INTERVAL = 10
+_REDMINE_TITLE_MAX_CHARS = 80
 
 
 def execute_fetch_plan(
@@ -929,6 +933,25 @@ def _redmine(
                 response_diagnostic=response_diagnostic,
             )
         target = issues_directory / f"{issue_id}.md"
+        if position % _REDMINE_LOG_TARGET_INTERVAL == 0:
+            title = _redmine_progress_title(issue.get("subject"))
+            _emit_http_progress(
+                progress_callback,
+                {
+                    "event": "redmine.item",
+                    "provider": "redmine",
+                    "phase": "redmine.detail",
+                    "label_ja": "Redmine Issue処理開始",
+                    "completed": position - 1,
+                    "current_index": position,
+                    "total": len(ordered_issue_ids),
+                    "unit": "件",
+                    "total_kind": "exact",
+                    "current_item": f"Issue #{issue_id}「{title}」— Markdown生成開始",
+                    "status": "started",
+                },
+            )
+
         target.write_text(
             _redmine_issue_markdown(issue),
             encoding="utf-8",
@@ -938,7 +961,7 @@ def _redmine(
             item_callback(position, issue_id)
         if (
             batch_callback is not None
-            and position - last_reflected_count >= 5
+            and position - last_reflected_count >= REDMINE_ADD_BATCH_SIZE
             and position < len(ordered_issue_ids)
         ):
             batch_callback(position, issue_id)
@@ -1884,6 +1907,17 @@ def _http_get(
             return int(response.status), response.read(), dict(response.headers)
     except urllib.error.HTTPError as exc:
         return int(exc.code), exc.read(), dict(exc.headers or {})
+
+
+def _redmine_progress_title(value: Any) -> str:
+    text = " ".join(
+        sanitize_diagnostic(value, max_chars=8_000).split()
+    )
+    if not text:
+        return "タイトルなし"
+    if len(text) <= _REDMINE_TITLE_MAX_CHARS:
+        return text
+    return text[: _REDMINE_TITLE_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _redmine_issue_markdown(issue: Mapping[str, Any]) -> str:

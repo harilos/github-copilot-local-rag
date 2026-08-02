@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from .errors import SourceManagerError
 from .gitlab_issues import gitlab_token_env, parse_gitlab_project
 from .github_content import parse_github_repository_url
+from .redmine_contract import REDMINE_ADD_BATCH_SIZE
 from .redmine import parse_redmine_project_url
 from .security import (
     validate_environment_name,
@@ -34,7 +35,7 @@ SUPPORTED_PROVIDERS = frozenset(
         "other",
     }
 )
-REDMINE_BATCH_SIZE = 5
+REDMINE_BATCH_SIZE = REDMINE_ADD_BATCH_SIZE
 REDMINE_MAX_ATTEMPTS = 3
 GITLAB_ISSUES_BATCH_SIZE = 5
 GITLAB_ISSUES_MAX_ATTEMPTS = 3

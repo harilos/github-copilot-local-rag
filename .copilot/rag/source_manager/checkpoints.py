@@ -7,11 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence, TypeVar
 
 from .errors import SourceManagerError
-from .providers import FetchPlan
+from .providers import REDMINE_BATCH_SIZE, FetchPlan
 from .security import validate_persistable
-
-
-REDMINE_BATCH_SIZE = 5
 
 
 @dataclass(frozen=True)

@@ -512,10 +512,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             )
         )
 
-    def test_redmine_batches_five_and_never_retries_http_500(self) -> None:
+    def test_redmine_batches_fifty_and_never_retries_http_500(self) -> None:
         self.assertEqual(
-            [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11]],
-            redmine_batches(range(1, 12)),
+            [list(range(1, 51)), [51, 52, 53]],
+            redmine_batches(range(1, 54)),
         )
         self.assertTrue(
             REDMINE_RETRY_POLICY.should_retry(attempt=1, status_code=503)
@@ -1677,14 +1677,14 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             self.assertIn('"journals"', text)
             self.assertIn('"attachments"', text)
 
-    def test_redmine_reflects_five_and_resumes_only_unconfirmed_batch(
+    def test_redmine_reflects_fifty_and_resumes_only_unconfirmed_batch(
         self,
     ) -> None:
-        issue_ids = list(range(1, 13))
+        issue_ids = list(range(1, 54))
         detail_calls: list[int] = []
         list_calls = 0
         add_calls = 0
-        fail_second_add = True
+        fail_first_add = True
 
         def getter(url, _headers, _timeout):
             nonlocal list_calls
@@ -1719,9 +1719,9 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             )
 
         def add(arguments):
-            nonlocal add_calls, fail_second_add
+            nonlocal add_calls, fail_first_add
             add_calls += 1
-            if fail_second_add and add_calls == 2:
+            if fail_first_add and add_calls == 1:
                 return SimpleNamespace(
                     returncode=1,
                     stdout="",
@@ -1770,20 +1770,20 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             registered["local_source_key"]
         ).payload
         self.assertEqual("reflect", interrupted["phase"])
-        self.assertEqual(10, interrupted["fetched_count"])
-        self.assertEqual(5, interrupted["indexed_confirmed_count"])
-        self.assertEqual(5, interrupted["pending_count"])
+        self.assertEqual(50, interrupted["fetched_count"])
+        self.assertEqual(0, interrupted["indexed_confirmed_count"])
+        self.assertEqual(50, interrupted["pending_count"])
         self.assertEqual(issue_ids, interrupted["redmine_issue_ids"])
         self.assertEqual(
             "2025-02-08",
             interrupted["redmine_updated_on_cutoff"],
         )
         self.assertIn("fixture failure", interrupted["last_error"])
-        self.assertEqual(list(range(1, 11)), detail_calls)
-        self.assertEqual(3, list_calls)
+        self.assertEqual(list(range(1, 51)), detail_calls)
+        self.assertEqual(11, list_calls)
 
-        fail_second_add = False
-        issue_ids[:] = [0, *range(1, 13)]
+        fail_first_add = False
+        issue_ids[:] = [0, *range(1, 54)]
         result = update_source(
             self.db_root,
             registered["local_source_key"],
@@ -1798,10 +1798,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             ),
         )
         self.assertEqual("updated", result["status"])
-        self.assertEqual(12, result["indexed_confirmed_count"])
-        self.assertEqual(list(range(1, 13)), detail_calls)
-        self.assertEqual(3, list_calls)
-        self.assertEqual(4, add_calls)
+        self.assertEqual(53, result["indexed_confirmed_count"])
+        self.assertEqual(list(range(1, 54)), detail_calls)
+        self.assertEqual(11, list_calls)
+        self.assertEqual(3, add_calls)
         final = SourceStore(self.db_root).read_state(
             registered["local_source_key"]
         ).payload
