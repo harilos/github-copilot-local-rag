@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import unicodedata
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 from typing import Any
 
@@ -1496,10 +1497,16 @@ def _public_evidence_excerpt(
         return {"text": text[:max_chars], "changed": False}
     anchor_start = int(best["start"])
     anchor_end = int(best["end"])
-    if anchor_end - anchor_start > max_chars:
+    anchor_length = anchor_end - anchor_start
+    required_marker_count = int(anchor_start > 0) + int(anchor_end < len(text))
+    if anchor_length + required_marker_count > max_chars:
         start = anchor_start
         prefix = "…" if start > 0 else ""
-        suffix_reserve = 1 if max_chars - len(prefix) >= 2 else 0
+        suffix_reserve = (
+            1
+            if anchor_end < len(text) and max_chars - len(prefix) >= 2
+            else 0
+        )
         content_limit = max(0, max_chars - len(prefix) - suffix_reserve)
         end = min(len(text), start + content_limit)
         suffix = "…" if end < len(text) and suffix_reserve else ""
@@ -1521,17 +1528,17 @@ def _public_evidence_excerpt(
             "warning": "evidence_anchor_exceeds_max_chars",
         }
 
-    content_limit = max(1, max_chars - 2)
-    midpoint = (anchor_start + anchor_end) // 2
-    start = max(0, midpoint - content_limit // 2)
-    start = min(start, max(0, len(text) - content_limit))
-    end = min(len(text), start + content_limit)
-    if anchor_start < start:
-        start = anchor_start
-        end = min(len(text), start + content_limit)
-    if anchor_end > end:
-        end = anchor_end
-        start = max(0, end - content_limit)
+    # Reserve omission markers before selecting content. Trimming after markers
+    # are added can otherwise remove part of an anchor that individually fits.
+    content_limit = max_chars - required_marker_count
+    remaining = content_limit - anchor_length
+    left_available = anchor_start
+    right_available = len(text) - anchor_end
+    left_context = min(left_available, remaining // 2)
+    right_context = min(right_available, remaining - left_context)
+    left_context += min(left_available - left_context, remaining - left_context - right_context)
+    start = anchor_start - left_context
+    end = anchor_end + right_context
     start, end = _prefer_excerpt_boundaries(
         text,
         start=start,
@@ -1541,13 +1548,6 @@ def _public_evidence_excerpt(
     )
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(text) else ""
-    available = max_chars - len(prefix) - len(suffix)
-    if end - start > available:
-        excess = end - start - available
-        trim_left = min(excess // 2, max(0, anchor_start - start))
-        start += trim_left
-        excess -= trim_left
-        end -= min(excess, max(0, end - anchor_end))
     rendered = prefix + text[start:end] + suffix
     return {
         "text": rendered,
@@ -1591,10 +1591,15 @@ def _row_match_spans(
         terms.extend((str(term), lane, priority) for term in lexical_terms)
     spans: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
+    normalized_cache: dict[str, Any] = {}
     for term, lane, priority in terms:
         if not term:
             continue
-        for start, end, quality in _text_term_spans(text, term):
+        for start, end, quality in _text_term_spans(
+            text,
+            term,
+            normalized_cache=normalized_cache,
+        ):
             key = (start, end, lane)
             if key in seen:
                 continue
@@ -1612,7 +1617,12 @@ def _row_match_spans(
     return spans
 
 
-def _text_term_spans(text: str, term: str) -> list[tuple[int, int, int]]:
+def _text_term_spans(
+    text: str,
+    term: str,
+    *,
+    normalized_cache: dict[str, Any] | None = None,
+) -> list[tuple[int, int, int]]:
     spans: list[tuple[int, int, int]] = []
     start = 0
     while term and len(spans) < 8:
@@ -1635,24 +1645,38 @@ def _text_term_spans(text: str, term: str) -> list[tuple[int, int, int]]:
             start = found + max(1, len(term))
         if spans:
             return spans
-    normalized_chars: list[str] = []
-    raw_offsets: list[int] = []
-    for raw_index, character in enumerate(text):
-        normalized = unicodedata.normalize("NFKC", character).casefold()
-        for normalized_character in normalized:
-            normalized_chars.append(normalized_character)
-            raw_offsets.append(raw_index)
-    normalized_text = "".join(normalized_chars)
+    cache = normalized_cache if normalized_cache is not None else {}
+    if "text" not in cache:
+        normalized_text = unicodedata.normalize("NFKC", text).casefold()
+        # Prefix lengths map normalized offsets back to conservative raw
+        # boundaries. Equal-length plateaus include combining code points that
+        # compose with their predecessor in whole-string normalization.
+        raw_boundary_lengths = [
+            len(unicodedata.normalize("NFKC", text[:raw_end]).casefold())
+            for raw_end in range(len(text) + 1)
+        ]
+        cache["text"] = normalized_text
+        cache["raw_boundary_lengths"] = raw_boundary_lengths
+    else:
+        normalized_text = str(cache["text"])
+        raw_boundary_lengths = list(cache["raw_boundary_lengths"])
     normalized_term = unicodedata.normalize("NFKC", term).casefold()
     start = 0
     while normalized_term and len(spans) < 8:
         found = normalized_text.find(normalized_term, start)
         if found < 0:
             break
-        raw_start = raw_offsets[found]
-        raw_end = raw_offsets[found + len(normalized_term) - 1] + 1
+        normalized_end = found + len(normalized_term)
+        raw_start = max(0, bisect_right(raw_boundary_lengths, found) - 1)
+        raw_end = bisect_left(raw_boundary_lengths, normalized_end)
+        if (
+            raw_end < len(raw_boundary_lengths)
+            and raw_boundary_lengths[raw_end] == normalized_end
+        ):
+            raw_end = bisect_right(raw_boundary_lengths, normalized_end) - 1
+        raw_end = min(len(text), max(raw_start + 1, raw_end))
         spans.append((raw_start, raw_end, 1))
-        start = found + max(1, len(normalized_term))
+        start = normalized_end
     return spans
 
 

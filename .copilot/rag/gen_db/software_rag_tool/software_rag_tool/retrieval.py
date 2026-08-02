@@ -223,7 +223,26 @@ def hybrid_query_with_health(
                 and use_dense
                 and not _has_strong_exact_anchor(question, exact_rows)
             ):
-                anchor_rows = _anchor_candidates(question, source=source, backend=backend)
+                try:
+                    anchor_rows = _anchor_candidates(
+                        question,
+                        source=source,
+                        backend=backend,
+                    )
+                except LexicalTokenizerError as exc:
+                    _LOGGER.debug(
+                        "Lexical tokenizer anchor lane failed",
+                        exc_info=exc,
+                    )
+                    lexical_health = {
+                        "attempted": True,
+                        "succeeded": False,
+                        "error": type(exc).__name__,
+                    }
+                    warnings.append(
+                        f"lexical_search_unavailable:{type(exc).__name__}"
+                    )
+                    anchor_rows = []
                 lexical_rows, anchor_ids = _merge_anchor_rows(lexical_rows, anchor_rows)
             family_rankings.append(("lexical", 1.1, lexical_rows))
             family_rankings.append(("metadata", 0.7, metadata_rows))
@@ -319,11 +338,26 @@ def adaptive_hybrid_query(
     raw_exact_rows = _without_test_fixtures(raw_exact_rows)
     lexical_rows = _without_test_fixtures(lexical_rows)
     metadata_rows = _without_test_fixtures(metadata_rows)
-    anchor_rows = (
-        []
-        if lexical_health is not None
-        else _anchor_candidates(question, source=source, backend=backend)
-    )
+    if lexical_health is not None:
+        anchor_rows = []
+    else:
+        try:
+            anchor_rows = _anchor_candidates(
+                question,
+                source=source,
+                backend=backend,
+            )
+        except LexicalTokenizerError as exc:
+            _LOGGER.debug(
+                "Lexical tokenizer anchor lane failed",
+                exc_info=exc,
+            )
+            lexical_health = {
+                "attempted": True,
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+            anchor_rows = []
     verified_exact_rows = _matching_strong_exact_rows(question, raw_exact_rows)
     selected_exact_document = _mark_exact_evidence_eligibility(
         question,
@@ -1730,6 +1764,8 @@ def _anchor_candidates(
         return []
     try:
         return _without_test_fixtures(search(question, top_k=1, source=source))
+    except LexicalTokenizerError:
+        raise
     except Exception:
         return []
 

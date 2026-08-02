@@ -173,6 +173,19 @@ class TokenizerFailingBackend(FakeBackend):
         raise TokenizerFingerprintError("private runtime fingerprint details")
 
 
+class AnchorTokenizerFailingBackend(FakeBackend):
+    def anchor_lexical_search(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["anchor"] += 1
+        raise TokenizerFingerprintError("private anchor fingerprint details")
+
+
 class DenseLaneHealthContractTests(unittest.TestCase):
     def test_success_health_does_not_change_rows_ranks_or_rrf(self) -> None:
         legacy_backend = FakeBackend()
@@ -358,6 +371,56 @@ class DenseLaneHealthContractTests(unittest.TestCase):
 
 
 class LexicalTokenizerHealthContractTests(unittest.TestCase):
+    def test_hybrid_anchor_tokenizer_failure_is_public_partial_health(self) -> None:
+        backend = AnchorTokenizerFailingBackend()
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="ordinary cooling question",
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertEqual(
+            {
+                "attempted": True,
+                "succeeded": False,
+                "error": "TokenizerFingerprintError",
+            },
+            payload["lane_health"]["lexical"],
+        )
+        self.assertIn(
+            "lexical_search_unavailable:TokenizerFingerprintError",
+            payload["warnings"],
+        )
+        self.assertNotIn("private anchor", str(payload))
+        self.assertEqual(1, backend.calls["anchor"])
+
+    def test_adaptive_anchor_tokenizer_failure_is_health_not_no_hit(self) -> None:
+        backend = AnchorTokenizerFailingBackend()
+        rows, route = adaptive_hybrid_query(
+            "ordinary cooling question",
+            top_k=2,
+            explain=False,
+            db_scope_confirmed=True,
+            backend=backend,
+        )
+        self.assertTrue(rows)
+        self.assertEqual(
+            {
+                "attempted": True,
+                "succeeded": False,
+                "error": "TokenizerFingerprintError",
+            },
+            route["lane_health"]["lexical"],
+        )
+        self.assertEqual(1, backend.calls["anchor"])
+
     def test_hybrid_keeps_dense_and_exact_results_with_public_partial_health(self) -> None:
         backend = TokenizerFailingBackend()
         exact = result_row("exact", "A2L direct evidence", signals=["exact"])
@@ -2052,6 +2115,79 @@ class LightweightJsonContractTests(unittest.TestCase):
         )
         self.assertEqual("partial", one_char["status"])
         self.assertLessEqual(len(one_char["evidence"][0]["text"]), 1)
+
+    def test_prefix_marker_and_anchor_exactly_fit_at_chunk_end(self) -> None:
+        anchor = "ABCDEFGHI"
+        text = ("prefix " * 20) + anchor
+        row = result_row("prefix-only", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {"exact_match": {"matched_terms": [anchor]}}
+        payload = json_payload([row], anchor, "fixture-rag", 10)
+        evidence = payload["evidence"][0]
+        self.assertEqual(f"…{anchor}", evidence["text"])
+        self.assertNotIn(
+            "evidence_anchor_exceeds_max_chars",
+            payload["warnings"],
+        )
+        source_range = evidence["source_ranges"][0]
+        self.assertEqual(
+            anchor,
+            text[
+                source_range["anchor_char_start"] : source_range["anchor_char_end"]
+            ],
+        )
+
+    def test_two_sided_markers_and_anchor_exactly_fit(self) -> None:
+        anchor = "ABCDEFGHI"
+        text = ("prefix " * 20) + anchor + (" suffix" * 20)
+        row = result_row("two-sided-fit", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {"exact_match": {"matched_terms": [anchor]}}
+        payload = json_payload([row], anchor, "fixture-rag", 11)
+        evidence = payload["evidence"][0]
+        self.assertEqual(f"…{anchor}…", evidence["text"])
+        self.assertNotIn(
+            "evidence_anchor_exceeds_max_chars",
+            payload["warnings"],
+        )
+
+    def test_two_sided_marker_budget_failure_is_explicit_partial(self) -> None:
+        anchor = "ABCDEFGHI"
+        text = ("prefix " * 20) + anchor + (" suffix" * 20)
+        row = result_row("two-sided-partial", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {"exact_match": {"matched_terms": [anchor]}}
+        payload = json_payload([row], anchor, "fixture-rag", 10)
+        self.assertEqual("partial", payload["status"])
+        self.assertIn(
+            "evidence_anchor_exceeds_max_chars",
+            payload["warnings"],
+        )
+        self.assertLessEqual(len(payload["evidence"][0]["text"]), 10)
+
+    def test_whole_nfkc_maps_decomposed_late_anchor_to_raw_offsets(self) -> None:
+        query_anchor = "ガ"
+        stored_anchor = "カ\u3099"
+        text = ("前置きだけ。" * 40) + stored_anchor + "決定的な根拠。"
+        row = result_row("decomposed-anchor", text, signals=["exact"])
+        row["rank"] = 1
+        row["debug"] = {"exact_match": {"matched_terms": [query_anchor]}}
+        payload = json_payload([row], query_anchor, "fixture-rag", 20)
+        evidence = payload["evidence"][0]
+        self.assertIn(stored_anchor, evidence["text"])
+        source_range = evidence["source_ranges"][0]
+        self.assertEqual(
+            stored_anchor,
+            text[
+                source_range["anchor_char_start"] : source_range["anchor_char_end"]
+            ],
+        )
+        self.assertEqual(
+            stored_anchor,
+            evidence["text"][
+                source_range["anchor_excerpt_start"] : source_range["anchor_excerpt_end"]
+            ],
+        )
 
     def test_dense_no_anchor_and_visible_prefix_keep_legacy_excerpt(self) -> None:
         dense_text = "dense prefix " + ("x" * 1_100)
