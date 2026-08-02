@@ -117,14 +117,14 @@ class ConverterOutputDecodingTests(unittest.TestCase):
 class LegacyDocAcceptanceTests(unittest.TestCase):
     def test_three_cp932_docs_preserve_phrases_and_hit_top_five(self) -> None:
         fixtures = {
-            "alpha.doc": "移行の承認番号は DOC-ALPHA-731 です。",
-            "beta.doc": "例外の申請番号は DOC-BETA-842 です。",
-            "gamma.doc": "復旧の確認番号は DOC-GAMMA-953 です。",
+            "alpha.doc": "移行の承認合言葉は青空航路です。管理番号 DOC-ALPHA-731。",
+            "beta.doc": "例外の申請合言葉は白銀灯台です。管理番号 DOC-BETA-842。",
+            "gamma.doc": "復旧の確認合言葉は紅葉渓谷です。管理番号 DOC-GAMMA-953。",
         }
         queries = {
-            "DOC-ALPHA-731 の承認内容は？": "input/alpha.doc",
-            "DOC-BETA-842 の申請内容は？": "input/beta.doc",
-            "DOC-GAMMA-953 の復旧内容は？": "input/gamma.doc",
+            "青空航路の承認内容は？": "input/alpha.doc",
+            "白銀灯台の申請内容は？": "input/beta.doc",
+            "紅葉渓谷の復旧内容は？": "input/gamma.doc",
         }
 
         with tempfile.TemporaryDirectory() as temporary:
