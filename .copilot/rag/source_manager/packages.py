@@ -669,6 +669,7 @@ def stage_search_database_snapshots(
         source = stage / "dbs"
         source.mkdir()
         created = _created_at(created_at)
+        observations: list[tuple[_Entry, str]] = []
         for entry in entries:
             relative = _safe_relative(entry.destination)
             if (
@@ -694,17 +695,22 @@ def stage_search_database_snapshots(
                     target,
                     source_root=entry.source_root,
                 )
+                source_fingerprint = _sha256(target)
             else:
                 _copy_stable_regular_file(
                     entry.source,
                     target,
                     source_root=entry.source_root,
                 )
+                source_fingerprint = _sha256(target)
                 if entry.mode == "source_links":
                     try:
                         _validate_source_links_payload(target.read_bytes())
                     except OSError as exc:
                         raise PackageError("source_links_invalid") from exc
+            if entry.source is not None:
+                observations.append((entry, source_fingerprint))
+        _verify_source_fingerprints(observations)
         os.replace(source, destination)
         _fsync_directory(parent)
         return {

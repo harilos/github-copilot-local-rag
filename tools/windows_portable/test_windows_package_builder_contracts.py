@@ -10,7 +10,9 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
+import windows_package_builder as package_builder
 from windows_package_builder import BuildRequest, build_package
 
 
@@ -289,6 +291,33 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
                 with self.assertRaisesRegex(ValueError, "forbidden_package_source"):
+                    build_package(request)
+
+    def test_rechecks_database_sources_before_publishing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = _request(Path(directory))
+            original = package_builder._SNAPSHOT_MODULE._copy_stable_regular_file
+            changed = False
+
+            def replace_after_selection(source, destination, *, source_root=None):
+                nonlocal changed
+                if source.name == "data.bin" and not changed:
+                    source.write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
+                    changed = True
+                return original(
+                    source,
+                    destination,
+                    source_root=source_root,
+                )
+
+            with mock.patch.object(
+                package_builder._SNAPSHOT_MODULE,
+                "_copy_stable_regular_file",
+                side_effect=replace_after_selection,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "forbidden_package_source"
+                ):
                     build_package(request)
 
     def test_normalizes_query_root_runtime_path_entry(self) -> None:
