@@ -44,6 +44,7 @@ def chunker_config(
         "max_chars": chunk_max_chars,
         "overlap_chars": chunk_overlap,
         "tokenizer": document_token_budget.tokenizer_name,
+        "document_prefix": document_token_budget.document_prefix,
     }
 
 
@@ -56,6 +57,7 @@ def chunker_version(config: dict[str, Any]) -> str:
         "max_chars",
         "overlap_chars",
         "tokenizer",
+        "document_prefix",
     )
     return ":".join(f"{key}={config[key]}" for key in keys)
 

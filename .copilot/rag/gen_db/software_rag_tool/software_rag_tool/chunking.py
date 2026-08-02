@@ -269,7 +269,10 @@ def _select_semantic_boundary(text: str, start: int, end: int) -> int:
         return paragraph + 2
 
     sentence_end = -1
-    for match in re.finditer(r"[。！？.!?](?=\s|$)", text[minimum:end]):
+    for match in re.finditer(
+        r"(?:[。！？]|[.!?](?=\s|$))",
+        text[minimum:end],
+    ):
         sentence_end = minimum + match.end()
     if sentence_end > minimum:
         return sentence_end

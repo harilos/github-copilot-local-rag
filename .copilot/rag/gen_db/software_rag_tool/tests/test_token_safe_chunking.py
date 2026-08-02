@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,12 +15,14 @@ from software_rag_tool.config import default_onnx_model_dir
 from software_rag_tool.embeddings import (
     DocumentEmbeddingTokenLimitError,
     DocumentTokenBudget,
+    SentenceTransformerEmbedder,
     _validate_document_inputs,
     get_document_token_budget,
 )
 from software_rag_tool.ingestion_paths import resolve_ingestion_scope
 from software_rag_tool.records import (
     build_records_for_file,
+    chunker_config,
     file_content_hash,
 )
 
@@ -125,6 +129,7 @@ class TokenSafeChunkingTests(unittest.TestCase):
             ("a" * 26 + "\n\n" + "b" * 60, "a" * 26),
             ("a" * 26 + ". " + "b" * 60, "a" * 26 + "."),
             ("a" * 26 + "\n" + "b" * 60, "a" * 26),
+            ("あ" * 26 + "。" + "い" * 60, "あ" * 26 + "。"),
         )
         for text, expected_first in cases:
             with self.subTest(expected_first=repr(expected_first)):
@@ -162,6 +167,43 @@ class TokenSafeChunkingTests(unittest.TestCase):
         ):
             _validate_document_inputs(tokenizer, ["x" * 20], max_tokens=16)
 
+    def test_sentence_transformer_keeps_query_model_limit_unchanged(self) -> None:
+        class FakeVector:
+            def tolist(self) -> list[float]:
+                return [1.0]
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.max_seq_length = 64
+                self.tokenizer = CharacterTokenizer()
+
+            def encode(self, texts: list[str], **_kwargs: object) -> list[FakeVector]:
+                return [FakeVector() for _ in texts]
+
+        model = FakeModel()
+        module = types.SimpleNamespace(
+            SentenceTransformer=lambda *_args, **_kwargs: model
+        )
+        shared_tokenizer = CharacterTokenizer()
+        with (
+            mock.patch.dict(sys.modules, {"sentence_transformers": module}),
+            mock.patch(
+                "software_rag_tool.embeddings.get_embedding_tokenizer",
+                return_value=shared_tokenizer,
+            ),
+        ):
+            embedder = SentenceTransformerEmbedder(
+                "fixture-model",
+                "document: ",
+                "query: ",
+            )
+        self.assertEqual(64, model.max_seq_length)
+        self.assertEqual(64, embedder.max_length)
+        self.assertIs(shared_tokenizer, model.tokenizer)
+        self.assertEqual([[1.0]], embedder.encode(["q" * 100], mode="query"))
+        with self.assertRaises(DocumentEmbeddingTokenLimitError):
+            embedder.encode(["d" * 100], mode="document")
+
     def test_real_ruri_tokenizer_enforces_384_for_edge_cases(self) -> None:
         model_dir = default_onnx_model_dir()
         if not model_dir.exists():
@@ -194,6 +236,71 @@ class TokenSafeChunkingTests(unittest.TestCase):
 
 
 class IncrementalReplacementTests(unittest.TestCase):
+    def test_failed_upgrade_keeps_old_fingerprint_and_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            source = root / "document.txt"
+            source.write_text("content", encoding="utf-8")
+            scope = resolve_ingestion_scope(root)
+            stored_path = scope.file(source).stored_path
+            key = f"fixture:{stored_path}"
+            old_config = {"max_chars": 1400, "overlap": 160}
+            state = {
+                "files": {
+                    key: {
+                        "content_hash": file_content_hash(source),
+                        "chunker_config": old_config,
+                        "record_ids": ["legacy-id"],
+                        "status": "indexed",
+                    }
+                }
+            }
+            budget = test_budget()
+            current_config = chunker_config(
+                chunk_max_chars=1400,
+                chunk_overlap=160,
+                document_token_budget=budget,
+            )
+            with mock.patch.object(
+                incremental,
+                "build_records_for_file",
+                side_effect=RuntimeError("injected extraction failure"),
+            ):
+                failed = incremental._prepare_file(
+                    scope,
+                    source,
+                    "fixture",
+                    state,
+                    retry_errors=False,
+                    document_token_budget=budget,
+                    current_chunker_config=current_config,
+                )
+            self.assertEqual("error", failed["status"])
+            incremental._record_error(state, failed)
+            self.assertEqual(old_config, state["files"][key]["chunker_config"])
+            self.assertEqual(
+                current_config,
+                state["files"][key]["failed_chunker_config"],
+            )
+            with mock.patch.object(
+                incremental,
+                "build_records_for_file",
+                return_value=[{"id": "new-id"}],
+            ) as build_records:
+                retry = incremental._prepare_file(
+                    scope,
+                    source,
+                    "fixture",
+                    state,
+                    retry_errors=False,
+                    document_token_budget=budget,
+                    current_chunker_config=current_config,
+                )
+            self.assertEqual("ready", retry["status"])
+            self.assertEqual(["legacy-id"], retry["previous_record_ids"])
+            build_records.assert_called_once()
+
     def test_old_chunker_records_are_replaced_then_second_add_skips(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
@@ -288,6 +395,22 @@ class IncrementalReplacementTests(unittest.TestCase):
                 self.assertEqual(1, second["skipped_files"])
                 delete_ids.assert_not_called()
                 upsert_records.assert_not_called()
+
+                changed_prefix_budget = DocumentTokenBudget(
+                    tokenizer=budget.tokenizer,
+                    document_prefix="changed document prefix: ",
+                    tokenizer_name=budget.tokenizer_name,
+                    target_tokens=budget.target_tokens,
+                    max_tokens=budget.max_tokens,
+                )
+                third = incremental.add_or_update_root(
+                    root=root,
+                    source_id="fixture",
+                    document_token_budget=changed_prefix_budget,
+                )
+                self.assertEqual(1, third["indexed_files"])
+                delete_ids.assert_called_once_with(current_ids)
+                self.assertTrue(upsert_records.called)
 
 
 class ExtractorFormatTokenBudgetTests(unittest.TestCase):

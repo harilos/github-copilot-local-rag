@@ -284,6 +284,9 @@ def _prepare_file(
             "resolved_root": str(scope.resolved_root),
             "content_hash": content_hash,
             "chunker_config": active_chunker_config,
+            "previous_chunker_config": dict(
+                (prev or {}).get("chunker_config") or {}
+            ),
             "previous_record_ids": list((prev or {}).get("record_ids") or []),
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -383,7 +386,13 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
         "scan_subdir": item.get("scan_subdir") or ".",
         "resolved_root": item.get("resolved_root") or "",
         "content_hash": item["content_hash"],
-        "chunker_config": item.get("chunker_config") or {},
+        "chunker_config": (
+            item.get("previous_chunker_config")
+            if item.get("previous_record_ids")
+            else item.get("chunker_config")
+        )
+        or {},
+        "failed_chunker_config": item.get("chunker_config") or {},
         "record_ids": item["previous_record_ids"],
         "record_count": len(item["previous_record_ids"]),
         "status": "error",

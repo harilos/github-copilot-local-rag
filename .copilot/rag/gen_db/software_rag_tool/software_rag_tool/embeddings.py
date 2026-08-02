@@ -182,10 +182,9 @@ class SentenceTransformerEmbedder:
         tokenizer = get_embedding_tokenizer()
         self._model.tokenizer = tokenizer
         self._tokenizer = tokenizer
-        self.max_length = document_embedding_max_tokens()
-        self._model.max_seq_length = min(
+        self.max_length = min(
+            document_embedding_max_tokens(),
             int(self._model.max_seq_length),
-            self.max_length,
         )
         print("Embedding model loaded", file=sys.stderr)
 
