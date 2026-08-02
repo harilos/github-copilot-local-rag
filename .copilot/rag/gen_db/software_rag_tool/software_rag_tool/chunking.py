@@ -7,6 +7,7 @@ from typing import Protocol
 
 DEFAULT_CHUNK_TARGET_TOKENS = 320
 DEFAULT_CHUNK_OVERLAP_TOKENS = 48
+TOKEN_SAFE_CHUNKER_VERSION = "jp-ruri-token-v2"
 
 
 class DocumentTokenBudget(Protocol):

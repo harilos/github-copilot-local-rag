@@ -16,7 +16,9 @@ from .progress import emit_event, write_progress
 from .records import build_records_for_file, file_content_hash, iter_input_files, sha256_text
 from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
 from .config import DEFAULT_INGESTION_BATCH_SIZE_FILES
+from .embeddings import DocumentTokenBudget, get_document_token_budget
 from .store import collection_count, delete_ids, reset_collection, upsert_records
+from .records import chunker_config
 
 
 def add_or_update_root(
@@ -32,11 +34,14 @@ def add_or_update_root(
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
     resume: bool = False,
+    document_token_budget: DocumentTokenBudget | None = None,
 ) -> dict[str, Any]:
     if chunk_max_chars <= 0:
         raise ValueError("chunk_max_chars must be positive")
     if chunk_overlap < 0:
         raise ValueError("chunk_overlap must be zero or positive")
+    if chunk_overlap >= chunk_max_chars:
+        raise ValueError("chunk_overlap must be smaller than chunk_max_chars")
     if resume and (reset_db or reset_clean):
         raise ValueError(
             "resume cannot be combined with reset_db or reset_clean"
@@ -44,6 +49,12 @@ def add_or_update_root(
 
     if include_root_name_in_path is not True:
         raise ValueError("root-name inclusion is mandatory")
+    token_budget = document_token_budget or get_document_token_budget()
+    current_chunker_config = chunker_config(
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
+        document_token_budget=token_budget,
+    )
     scope = resolve_ingestion_scope(root, scan_subdir)
     if reset_clean:
         _reset_clean_dir()
@@ -144,6 +155,8 @@ def add_or_update_root(
                 force_index=force_index,
                 chunk_max_chars=chunk_max_chars,
                 chunk_overlap=chunk_overlap,
+                document_token_budget=token_budget,
+                current_chunker_config=current_chunker_config,
             )
             status = item["status"]
             if status == "skip":
@@ -198,7 +211,7 @@ def add_or_update_root(
 
         write_progress(status="running", phase="verify", current_file="")
         count = collection_count()
-        write_manifest(count)
+        write_manifest(count, chunker_config=current_chunker_config)
         profile_updated = update_profile_from_clean()
         summary["collection_count"] = count
         summary["profile_updated"] = profile_updated
@@ -230,14 +243,21 @@ def _prepare_file(
     force_index: bool = False,
     chunk_max_chars: int = 1400,
     chunk_overlap: int = 160,
+    document_token_budget: DocumentTokenBudget | None = None,
+    current_chunker_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rel = scope.file(path).stored_path
     key = _state_key(source_id, rel)
     content_hash = file_content_hash(path)
     prev = state["files"].get(key)
-    chunker_config = {"max_chars": chunk_max_chars, "overlap": chunk_overlap}
+    token_budget = document_token_budget or get_document_token_budget()
+    active_chunker_config = current_chunker_config or chunker_config(
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
+        document_token_budget=token_budget,
+    )
 
-    if not force_index and prev and prev.get("content_hash") == content_hash and prev.get("chunker_config") == chunker_config:
+    if not force_index and prev and prev.get("content_hash") == content_hash and prev.get("chunker_config") == active_chunker_config:
         if prev.get("status") == "indexed":
             return {"status": "skip", "rel": rel}
         if prev.get("status") == "error" and not retry_errors:
@@ -252,6 +272,7 @@ def _prepare_file(
             chunk_max_chars=chunk_max_chars,
             chunk_overlap=chunk_overlap,
             ingestion_scope=scope,
+            document_token_budget=token_budget,
         )
     except Exception as exc:
         return {
@@ -262,7 +283,7 @@ def _prepare_file(
             "scan_subdir": scope.scan_subdir,
             "resolved_root": str(scope.resolved_root),
             "content_hash": content_hash,
-            "chunker_config": chunker_config,
+            "chunker_config": active_chunker_config,
             "previous_record_ids": list((prev or {}).get("record_ids") or []),
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -275,7 +296,7 @@ def _prepare_file(
         "scan_subdir": scope.scan_subdir,
         "resolved_root": str(scope.resolved_root),
         "content_hash": content_hash,
-        "chunker_config": chunker_config,
+        "chunker_config": active_chunker_config,
         "previous_record_ids": list((prev or {}).get("record_ids") or []),
         "records": records,
     }
@@ -362,6 +383,7 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
         "scan_subdir": item.get("scan_subdir") or ".",
         "resolved_root": item.get("resolved_root") or "",
         "content_hash": item["content_hash"],
+        "chunker_config": item.get("chunker_config") or {},
         "record_ids": item["previous_record_ids"],
         "record_count": len(item["previous_record_ids"]),
         "status": "error",
