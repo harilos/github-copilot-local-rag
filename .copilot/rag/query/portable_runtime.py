@@ -203,6 +203,14 @@ def _required_text(payload: dict[str, Any], key: str) -> str:
 
 
 def _verify_pe_amd64(path: Path, relative: PurePosixPath) -> None:
+    if is_amd64_pe(path):
+        return
+    raise PortableRuntimeError(
+        f"runtime PE is not AMD64: {relative.as_posix()}"
+    )
+
+
+def is_amd64_pe(path: Path) -> bool:
     try:
         with path.open("rb") as handle:
             header = handle.read(4096)
@@ -214,12 +222,9 @@ def _verify_pe_amd64(path: Path, relative: PurePosixPath) -> None:
         if header[pe_offset : pe_offset + 4] != b"PE\0\0":
             raise ValueError
         machine = struct.unpack_from("<H", header, pe_offset + 4)[0]
-        if machine != 0x8664:
-            raise ValueError
-    except (OSError, struct.error, ValueError) as exc:
-        raise PortableRuntimeError(
-            f"runtime PE is not AMD64: {relative.as_posix()}"
-        ) from exc
+        return machine == 0x8664
+    except (OSError, struct.error, ValueError):
+        return False
 
 
 def _distribution_inventory(runtime_root: Path) -> list[tuple[str, str]]:

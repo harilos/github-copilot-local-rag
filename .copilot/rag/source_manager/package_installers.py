@@ -56,6 +56,10 @@ if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_m
   tar -xf -
 )
 
+rm -f -- \
+  "$TARGET_DIR/rag/query/portable_db_install.py" \
+  "$TARGET_DIR/rag/query/portable_db_smoke.py"
+
 if [ -x "$RUNTIME_PYTHON" ]; then
   if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
       --refresh-completion-marker --format json >/dev/null; then
@@ -170,6 +174,16 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
             New-Item -ItemType Directory -Force -Path $Parent | Out-Null
         }
         Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+    }
+}
+
+foreach ($RelativePath in @(
+    "rag\query\portable_db_install.py",
+    "rag\query\portable_db_smoke.py"
+)) {
+    $RetiredPath = Join-Path $Target $RelativePath
+    if (Test-Path -LiteralPath $RetiredPath -PathType Leaf) {
+        [System.IO.File]::Delete($RetiredPath)
     }
 }
 

@@ -1,5 +1,5 @@
 # Direct runtime capability lock for the search-only profile.
-# The package manifest additionally hashes every installed transitive file.
+# Runtime dependencies are resolved when the portable runtime is assembled.
 packaging==25.0
 chromadb==1.0.20
 numpy==2.3.2

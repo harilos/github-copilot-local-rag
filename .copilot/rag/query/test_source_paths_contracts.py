@@ -171,23 +171,15 @@ class SourcePathContractTests(unittest.TestCase):
             self.assertFalse(wal.exists())
             self.assertFalse(shm.exists())
 
-    def test_runtime_and_portable_smoke_use_immutable_read_contract(self) -> None:
+    def test_runtime_uses_immutable_read_contract_and_portable_smoke_is_retired(self) -> None:
         runtime = (
             TOOL_ROOT / "software_rag_tool" / "db_runtime.py"
         ).read_text(encoding="utf-8")
-        smoke = (QUERY_ROOT / "portable_db_smoke.py").read_text(
-            encoding="utf-8"
-        )
         self.assertIn(
             "catalog.readonly_uri(self.context.catalog_path)",
             runtime,
         )
-        self.assertIn(
-            "from software_rag_tool.search_api import registry, run_search_payload",
-            smoke,
-        )
-        self.assertIn("finally:", smoke)
-        self.assertIn("registry().close()", smoke)
+        self.assertFalse((QUERY_ROOT / "portable_db_smoke.py").exists())
 
 if __name__ == "__main__":
     unittest.main()

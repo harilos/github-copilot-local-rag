@@ -1,412 +1,411 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import sqlite3
+import os
+import shutil
+import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
-from windows_package_builder import (
-    BuildRequest,
-    _assert_no_forbidden_payload,
-    _ensure_query_root_on_runtime_path,
-    _normalized_databases,
-    build_package,
-)
+from windows_package_builder import BuildRequest, build_package
+
+
+HERE = Path(__file__).resolve().parent
+
+
+def _write_pe(path: Path, machine: int = 0x8664) -> None:
+    payload = bytearray(512)
+    payload[:2] = b"MZ"
+    struct.pack_into("<I", payload, 0x3C, 0x80)
+    payload[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", payload, 0x84, machine)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
+    payload = root / "payload"
+    runtime = root / "runtime"
+    model = root / "model"
+    dbs = root / "dbs"
+    output = root / "output"
+
+    (payload / "rag" / "query").mkdir(parents=True)
+    (payload / "rag" / "query" / "search.py").write_text(
+        "print('search')\n", encoding="utf-8"
+    )
+    (payload / "rag" / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    (payload / "rag" / "config").mkdir()
+    (payload / "rag" / "config" / "network.example.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (payload / "rag" / "config" / "network.json").write_text(
+        '{"secret":true}\n', encoding="utf-8"
+    )
+    (payload / "rag" / "query" / ".rag-deps-installed").write_text(
+        "stale\n", encoding="utf-8"
+    )
+    (payload / "rag" / "query" / ".packaged-runtime.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (payload / "rag" / "query" / "portable_db_install.py").write_text(
+        "raise SystemExit\n", encoding="utf-8"
+    )
+    (payload / "rag" / "query" / "portable_db_smoke.py").write_text(
+        "raise SystemExit\n", encoding="utf-8"
+    )
+
+    _write_pe(runtime / "Scripts" / "python.exe")
+    _write_pe(runtime / "python313.dll")
+    (runtime / "Scripts" / "python313._pth").write_text(
+        "python313.zip\nimport site\n", encoding="utf-8"
+    )
+    (runtime / "Scripts" / "python313.zip").write_bytes(b"stdlib")
+    (runtime / "Lib" / "site-packages").mkdir(parents=True)
+    (runtime / "Lib" / "site-packages" / "module.py").write_text(
+        "VALUE = 1\n", encoding="utf-8"
+    )
+
+    model.mkdir()
+    (model / "model.onnx").write_bytes(b"model")
+    (model / "config.json").write_text("{}\n", encoding="utf-8")
+
+    dbs.mkdir()
+    for name in database_names:
+        database = dbs / name
+        database.mkdir()
+        (database / "catalog.sqlite").write_bytes(("db:" + name).encode())
+        (database / "index").mkdir()
+        (database / "index" / "data.bin").write_bytes(b"index")
+
+    return payload, runtime, model, dbs, output
+
+
+def _request(
+    root: Path,
+    *,
+    database_names: tuple[str, ...] = ("alpha-rag",),
+    no_database: bool = False,
+    profile: str = "search-only",
+) -> BuildRequest:
+    payload, runtime, model, dbs, output = _fixture(
+        root, database_names=database_names
+    )
+    return BuildRequest(
+        payload_root=payload,
+        runtime_root=runtime,
+        model_root=model,
+        output_dir=output,
+        databases_root=None if no_database else dbs,
+        database_names=() if no_database else database_names,
+        no_database=no_database,
+        version="1.2.3",
+        profile=profile,
+        python_version="3.13.5",
+    )
 
 
 class WindowsPackageBuilderContractTests(unittest.TestCase):
-    def test_builds_copy_ready_zip_and_excludes_runtime_state(self) -> None:
+    def test_builds_copy_ready_zip_without_test_validation_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            payload = root / "payload" / ".copilot"
-            query = payload / "rag" / "query"
-            query.mkdir(parents=True)
-            (query / "setup.py").write_text("print('setup')\n", encoding="utf-8")
-            (query / ".rag-deps-installed").write_text("forbidden\n", encoding="utf-8")
-            (query / ".rag-deps-installed.active.pre-update.123").write_text(
-                "forbidden-backup\n", encoding="utf-8"
-            )
-            (payload / "rag" / "config").mkdir()
-            (payload / "rag" / "config" / "network.json").write_text(
-                '{"secret":true}', encoding="utf-8"
-            )
-            runtime = root / "runtime"
-            scripts = runtime / "Scripts"
-            site = runtime / "Lib" / "site-packages"
-            private_db = payload / "rag" / "dbs" / "private" / "data"
-            private_db.mkdir(parents=True)
-            (private_db / "vectors.bin").write_bytes(b"private")
-            private_model = payload / "rag" / "models" / "private"
-            private_model.mkdir(parents=True)
-            (private_model / "model.onnx").write_bytes(b"stale")
+            request = _request(Path(directory))
+            result = build_package(request)
+            self.assertEqual(("alpha-rag",), result.database_names)
 
-            scripts.mkdir(parents=True)
-            site.mkdir(parents=True)
-            for relative, data in {
-                "Scripts/python.exe": b"MZ-python",
-                "Scripts/python313.dll": b"MZ-dll",
-                "Scripts/python313._pth": b"python313.zip\nLib/site-packages\nimport site\n",
-                "Scripts/python313.zip": b"stdlib",
-                "Lib/site-packages/demo.py": b"VALUE=1\n",
-                "Lib/site-packages/demo-1.0.dist-info/METADATA": (
-                    b"Name: demo\nVersion: 1.0\n"
-                ),
-                "Lib/site-packages/certifi/cacert.pem": b"PUBLIC CA BUNDLE\n",
-                "Lib/site-packages/certifi-1.0.dist-info/METADATA": (
-                    b"Name: certifi\nVersion: 1.0\n"
-                ),
-                "Lib/site-packages/grpc/_cython/_credentials/roots.pem": (
-                    b"PUBLIC GRPC CA BUNDLE\n"
-                ),
-                "Lib/site-packages/grpcio-1.0.dist-info/METADATA": (
-                    b"Name: grpcio\nVersion: 1.0\n"
-                ),
-            }.items():
-                target = runtime / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-            model = root / "model"
-            model.mkdir()
-            (model / "model.onnx").write_bytes(b"model")
-            output = root / "out"
-
-            result = build_package(
-                BuildRequest(
-                    payload_root=payload,
-                    runtime_root=runtime,
-                    model_root=model,
-                    output_dir=output,
-                    version="1.0.1",
-                    profile="search-only",
-                    python_version="3.13.5",
-                    dependency_lock_sha256="a" * 64,
-                    model_fingerprint="b" * 64,
-                    no_database=True,
-                )
-            )
-
-            self.assertTrue(result.zip_path.is_file())
-            verified = subprocess.run([sys.executable, str(Path(__file__).with_name("verify_package.py")), str(result.zip_path)], capture_output=True, text=True, check=False)
-            self.assertEqual(0, verified.returncode, verified.stderr)
-            self.assertEqual(
-                hashlib.sha256(result.zip_path.read_bytes()).hexdigest(),
-                result.zip_sha256,
-            )
             with zipfile.ZipFile(result.zip_path) as archive:
+                self.assertIsNone(archive.testzip())
                 names = set(archive.namelist())
-                prefix = "local-rag-windows-x64-1.0.1/"
-                self.assertIn(prefix + "PACKAGE-MANIFEST.json", names)
-                manifest = json.loads(archive.read(prefix + "PACKAGE-MANIFEST.json"))
-                self.assertEqual("local-rag.windows-package.v2", manifest["schema"])
-                self.assertEqual([], manifest["databases"])
-                self.assertFalse(any("/.copilot/rag/dbs/" in name for name in names))
-                self.assertIn(prefix + "SHA256SUMS", names)
-                self.assertIn(prefix + "sbom.spdx.json", names)
+                prefix = "local-rag-windows-x64-1.2.3/"
+                self.assertIn(prefix + "install.cmd", names)
+                self.assertIn(prefix + "internal/install.ps1", names)
                 self.assertIn(
-                    prefix + ".copilot/rag/query/.packaged-runtime.json", names
-                )
-                path_file = (
-                    prefix
-                    + ".copilot/rag/query/.venv/Scripts/python313._pth"
-                )
-                path_lines = archive.read(path_file).decode("utf-8").splitlines()
-                self.assertEqual(
-                    1,
-                    sum(
-                        line.replace("/", "\\").casefold() == r"..\.."
-                        for line in path_lines
-                    ),
-                )
-                self.assertLess(path_lines.index(r"..\.."), path_lines.index("import site"))
-                self.assertIn(
-                    prefix
-                    + ".copilot/rag/query/.venv/Lib/site-packages/certifi/cacert.pem",
+                    prefix + ".copilot/rag/query/.venv/Scripts/python.exe",
                     names,
                 )
                 self.assertIn(
                     prefix
-                    + ".copilot/rag/query/.venv/Lib/site-packages/grpc/"
-                    + "_cython/_credentials/roots.pem",
+                    + ".copilot/rag/models/ruri-v3-30m-onnx-int8/model.onnx",
                     names,
                 )
-                self.assertNotIn(
-                    prefix + ".copilot/rag/query/.rag-deps-installed", names
+                self.assertIn(
+                    prefix + ".copilot/rag/dbs/alpha-rag/catalog.sqlite",
+                    names,
                 )
-                self.assertFalse(
-                    any("/.rag-deps-installed." in name for name in names)
-                )
-                self.assertNotIn(
-                    prefix + ".copilot/rag/config/network.json", names
-                )
-                self.assertTrue(
-                    all(".." not in Path(name).parts for name in names)
-                )
-                self.assertFalse(
-                    any("/rag/dbs/private/" in name for name in names)
-                )
-                self.assertFalse(
-                    any("/rag/models/private/" in name for name in names)
-                )
-                self.assertNotIn(prefix + "install.ps1", names)
-                launcher = archive.read(prefix + "install.cmd")
-                launcher.decode("ascii")
-                self.assertIn(b"internal\\install.ps1", launcher)
-                installer = archive.read(prefix + "internal/install.ps1").decode("utf-8")
+                for retired in (
+                    "PACKAGE-MANIFEST.json",
+                    "SHA256SUMS",
+                    ".copilot/rag/query/.packaged-runtime.json",
+                    ".copilot/rag/query/portable_db_install.py",
+                    ".copilot/rag/query/portable_db_smoke.py",
+                    ".copilot/rag/query/.rag-deps-installed",
+                    ".copilot/rag/config/network.json",
+                ):
+                    self.assertNotIn(prefix + retired, names)
+
+                installer = archive.read(
+                    prefix + "internal/install.ps1"
+                ).decode("utf-8")
+                for removed in (
+                    "Get-FileHash",
+                    "PACKAGE-MANIFEST",
+                    "--verify-only",
+                    "--refresh-completion-marker",
+                    "list_dbs.py",
+                    "portable_db_smoke.py\")",
+                    "portable_db_install.py\")",
+                ):
+                    self.assertNotIn(removed, installer)
+                self.assertIn("Assert-Amd64PortableRuntime", installer)
+                self.assertIn("-ReplaceExistingDatabases", installer)
                 self.assertIn("[System.IO.Directory]::Move", installer)
-                self.assertIn("local-rag.windows-package.v2", installer)
-                self.assertIn("portable_db_install.py", installer)
-                self.assertIn("--defer-completion-marker", installer)
-                self.assertIn("list_dbs.py", installer)
-                self.assertIn("installed setup is not lookup-ready", installer)
-                catch = installer.index("} catch {")
-                self.assertLess(installer.index("Close-CompletionMarkerGate", catch), installer.index("$RuntimePublished", catch))
-                self.assertIn("PACKAGE-MANIFEST.json", installer)
-                self.assertIn("source-connections.secrets.json", installer)
-                self.assertIn("rag\\dbs\\", installer)
-                self.assertIn("[switch]$ConfigureVSCodeAutoApprove", installer)
-                self.assertIn("--configure-vscode-auto-approve", installer)
-                self.assertIn("explicit VS Code", installer)
-                self.assertIn(
-                    "auto-approve opt-in did not complete", installer
-                )
-                self.assertNotIn("Stop-Process", installer)
-                self.assertNotIn("taskkill", installer.casefold())
 
-
-    def test_ascii_cmd_launcher_forwards_arguments_outside_package_cwd(self) -> None:
-        prefix = "portable-" + "".join(map(chr, (0x65E5, 0x672C, 0x8A9E))) + "-space-"
-        with tempfile.TemporaryDirectory(prefix=prefix) as directory:
-            root = Path(directory)
-            internal = root / "internal"
-            internal.mkdir()
-            (root / "install.cmd").write_text(
-                __import__("windows_package_builder")._install_cmd(),
-                encoding="ascii",
-                newline="\r\n",
-            )
-            (internal / "install.ps1").write_text(
-                'param([string]$Value)\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot "argv.txt"), $Value)\nexit 0\n',
-                encoding="utf-8",
-            )
-            completed = subprocess.run(
-                ["cmd.exe", "/d", "/c", str(root / "install.cmd"), "forwarded"],
-                cwd=Path(__file__).parent,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual("forwarded", (internal / "argv.txt").read_text(encoding="utf-8"))
-
-    def test_builds_verified_canonical_one_two_and_five_database_zips(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            payload = Path(__file__).resolve().parents[2] / ".copilot"
-            runtime = root / "runtime"
-            for relative, data in {
-                "Scripts/python.exe": b"MZ-python",
-                "Scripts/python313.dll": b"MZ-dll",
-                "Scripts/python313._pth": b"python313.zip\nLib/site-packages\n",
-                "Scripts/python313.zip": b"stdlib",
-                "Lib/site-packages/demo.py": b"VALUE=1\n",
-                "Lib/site-packages/demo-1.0.dist-info/METADATA": b"Name: demo\nVersion: 1.0\n",
-            }.items():
-                target = runtime / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
-            model = root / "model"
-            model.mkdir()
-            (model / "model.onnx").write_bytes(b"model")
-            dbs = root / "dbs"
-            names = tuple(f"canonical-{index}-rag" for index in range(5))
-            for name in names:
-                database = dbs / name
-                database.mkdir(parents=True)
-                (database / "VERSION.json").write_text('{"schema":1}', encoding="utf-8")
-                (database / "db.json").write_text(
-                    json.dumps({"name": name, "display_name": name}), encoding="utf-8"
+    def test_builds_zero_one_two_and_five_database_packages(self) -> None:
+        for count in (0, 1, 2, 5):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                names = tuple(f"db-{index}-rag" for index in range(count))
+                request = _request(
+                    Path(directory),
+                    database_names=names,
+                    no_database=count == 0,
                 )
-                connection = sqlite3.connect(database / "catalog.sqlite")
-                try:
-                    connection.execute("CREATE TABLE fixture (value TEXT)")
-                    connection.execute("INSERT INTO fixture VALUES (?)", (name,))
-                    connection.commit()
-                finally:
-                    connection.close()
-                index = database / "index"
-                index.mkdir()
-                (index / "vectors.bin").write_bytes(name.encode("ascii"))
-            for count in (1, 2, 5):
-                selected = names[:count]
-                result = build_package(
-                    BuildRequest(
-                        payload_root=payload,
-                        runtime_root=runtime,
-                        model_root=model,
-                        output_dir=root / f"out-{count}",
-                        version=f"canonical-{count}",
-                        profile="search-only",
-                        python_version="3.13.5",
-                        dependency_lock_sha256="a" * 64,
-                        model_fingerprint="b" * 64,
-                        databases_root=dbs,
-                        database_names=selected,
-                    )
-                )
-                verified = subprocess.run(
-                    [sys.executable, str(Path(__file__).with_name("verify_package.py")), str(result.zip_path)],
-                    capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(0, verified.returncode, verified.stderr)
+                result = build_package(request)
+                self.assertEqual(names, result.database_names)
                 with zipfile.ZipFile(result.zip_path) as archive:
-                    prefix = f"local-rag-windows-x64-canonical-{count}/"
-                    manifest = json.loads(archive.read(prefix + "PACKAGE-MANIFEST.json"))
-                    self.assertEqual(list(selected), [item["name"] for item in manifest["databases"]])
-                    packaged = {
-                        item["path"].split("/")[3]
-                        for item in manifest["files"]
-                        if item["path"].startswith(".copilot/rag/dbs/")
+                    archived = {
+                        name.split("/")[4]
+                        for name in archive.namelist()
+                        if "/.copilot/rag/dbs/" in name
+                        and len(name.split("/")) > 4
                     }
-                    self.assertEqual(set(selected), packaged)
+                self.assertEqual(set(names), archived)
 
-    def test_canonical_interface_freezes_five_database_names(self) -> None:
+    def test_rejects_non_amd64_runtime_before_publishing_zip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dbs = root / "dbs"
-            names = tuple(f"fixture-{index}-rag" for index in range(5))
-            for name in names:
-                (dbs / name).mkdir(parents=True)
-            request = BuildRequest(root, root, root, root, "1", "search-only", "3", "a" * 64, "b" * 64, databases_root=dbs, database_names=tuple(reversed(names)))
-            selected, selected_root = _normalized_databases(request)
-            self.assertEqual(names, selected)
-            self.assertEqual(dbs.resolve(), selected_root)
-            collision = BuildRequest(root, root, root, root, "1", "search-only", "3", "a" * 64, "b" * 64, databases_root=dbs, database_names=(names[0], names[0].upper()))
-            with self.assertRaisesRegex(ValueError, "casefold"):
-                _normalized_databases(collision)
-        powershell = Path(__file__).with_name("build_package.ps1").read_text(encoding="utf-8")
-        self.assertIn("[string[]]$DatabaseNames", powershell)
-        self.assertIn("foreach ($DatabaseName in $DatabaseNames)", powershell)
-        self.assertIn("--no-database", powershell)
-        self.assertIn("Join-Path $ToolRoot $(", powershell)
-        self.assertIn("& $Python.Source -B @Arguments", powershell)
-        installer = Path(__file__).with_name("install-template.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertEqual(2, installer.count("& $SourcePython -B "))
-        self.assertEqual(
-            3,
-            installer.count('& (Join-Path $TargetRuntime "Scripts\\python.exe") -B '),
-        )
-        self.assertIn('$SetupArguments = @("-B",', installer)
-        self.assertIn('$SmokeArguments = @("-B",', installer)
-        self.assertIn(
-            '$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)',
-            installer,
-        )
-        self.assertIn('$OutputEncoding = $Utf8NoBom', installer)
-        self.assertIn('[Console]::OutputEncoding = $Utf8NoBom', installer)
-        self.assertIn("Remove-Tree $BackupProduct", installer)
-        self.assertIn("Remove-Tree $BackupDbs", installer)
-        self.assertIn("[System.IO.FileAttributes]::ReadOnly", installer)
-        self.assertIn("[System.IO.File]::SetAttributes", installer)
-        self.assertIn("transaction tree containing a reparse point", installer)
-        cli = Path(__file__).with_name("build_package.py").read_text(encoding="utf-8")
-        self.assertIn("except EOFError:", cli)
-        self.assertIn("ask=_ask", cli)
-
-    def test_rejects_symlinks_and_unknown_profiles(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            payload = root / ".copilot"
-            payload.mkdir()
-            runtime = root / "runtime"
-            runtime.mkdir()
-            model = root / "model"
-            model.mkdir()
-            with self.assertRaisesRegex(ValueError, "profile"):
-                build_package(
-                    BuildRequest(
-                        payload_root=payload,
-                        runtime_root=runtime,
-                        model_root=model,
-                        output_dir=root / "out",
-                        version="1",
-                        profile="other",
-                        python_version="3",
-                        dependency_lock_sha256="a" * 64,
-                        model_fingerprint="b" * 64,
-                    )
-                )
-    def test_allows_only_the_fixed_public_ca_pem_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ca_bundle = (
-                root
-                / ".copilot"
-                / "rag"
-                / "query"
-                / ".venv"
-                / "Lib"
-                / "site-packages"
-                / "certifi"
-                / "cacert.pem"
+            request = _request(root)
+            _write_pe(request.runtime_root / "Scripts" / "python.exe", 0x014C)
+            with self.assertRaisesRegex(ValueError, "not AMD64"):
+                build_package(request)
+            self.assertFalse(
+                (request.output_dir / "local-rag-windows-x64-1.2.3.zip").exists()
             )
-            ca_bundle.parent.mkdir(parents=True)
-            ca_bundle.write_text("PUBLIC CA BUNDLE\n", encoding="ascii")
-            grpc_bundle = (
-                root
-                / ".copilot"
-                / "rag"
-                / "query"
-                / ".venv"
-                / "Lib"
-                / "site-packages"
-                / "grpc"
-                / "_cython"
-                / "_credentials"
-                / "roots.pem"
-            )
-            grpc_bundle.parent.mkdir(parents=True)
-            grpc_bundle.write_text("PUBLIC GRPC CA BUNDLE\n", encoding="ascii")
-            _assert_no_forbidden_payload(root)
-            private_key = root / "private.pem"
-            private_key.write_text("PRIVATE\n", encoding="ascii")
-            with self.assertRaisesRegex(ValueError, "possible credential"):
-                _assert_no_forbidden_payload(root)
-            private_key.unlink()
-            private_key = root / "private.key"
-            private_key.write_text("PRIVATE\n", encoding="ascii")
-            with self.assertRaisesRegex(ValueError, "possible credential"):
-                _assert_no_forbidden_payload(root)
-            private_key.unlink()
 
-            misplaced_bundle = root / "other" / "roots.pem"
-            misplaced_bundle.parent.mkdir()
-            misplaced_bundle.write_text("PUBLIC CA BUNDLE\n", encoding="ascii")
+    def test_rejects_unknown_profile_and_database_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = _request(Path(directory), profile="unknown")
+            with self.assertRaisesRegex(ValueError, "unsupported package profile"):
+                build_package(request)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root)
+            invalid = request.databases_root / "_invalid-rag"
+            (request.databases_root / "alpha-rag").rename(invalid)
+            request = BuildRequest(
+                **{
+                    **request.__dict__,
+                    "database_names": ("_invalid-rag",),
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "database name is invalid"):
+                build_package(request)
+
+    def test_allows_only_fixed_public_ca_pem_paths(self) -> None:
+        for relative in (
+            Path("Lib/site-packages/certifi/cacert.pem"),
+            Path("Lib/site-packages/grpc/_cython/_credentials/roots.pem"),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                request = _request(Path(directory), no_database=True)
+                target = request.runtime_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"public CA roots")
+                self.assertTrue(build_package(request).zip_path.is_file())
+
+        with tempfile.TemporaryDirectory() as directory:
+            request = _request(Path(directory), no_database=True)
+            private_key = request.runtime_root / "Lib" / "site-packages" / "private.pem"
+            private_key.parent.mkdir(parents=True, exist_ok=True)
+            private_key.write_bytes(b"private")
             with self.assertRaisesRegex(ValueError, "possible credential"):
-                _assert_no_forbidden_payload(root)
+                build_package(request)
 
     def test_normalizes_query_root_runtime_path_entry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            runtime = Path(directory)
-            path_file = runtime / "Scripts" / "python313._pth"
-            path_file.parent.mkdir(parents=True)
+            request = _request(Path(directory), no_database=True)
+            path_file = request.runtime_root / "Scripts" / "python313._pth"
             path_file.write_text(
-                "python313.zip\n../../\nLib/site-packages\n  ..\\..  \nimport site\n",
+                "python313.zip\n..\\..\nimport site\n..\\..\n",
                 encoding="utf-8",
             )
-            _ensure_query_root_on_runtime_path(runtime)
-            lines = path_file.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(1, lines.count(r"..\.."))
-            self.assertEqual(
-                lines.index("import site") - 1,
-                lines.index(r"..\.."),
+            result = build_package(request)
+            with zipfile.ZipFile(result.zip_path) as archive:
+                value = archive.read(
+                    "local-rag-windows-x64-1.2.3/"
+                    ".copilot/rag/query/.venv/Scripts/python313._pth"
+                ).decode("utf-8")
+            self.assertEqual(1, value.splitlines().count(r"..\.."))
+            self.assertLess(
+                value.splitlines().index(r"..\.."),
+                value.splitlines().index("import site"),
             )
+
+
+@unittest.skipUnless(os.name == "nt", "Windows PowerShell integration")
+class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
+    def _package(
+        self,
+        root: Path,
+        *,
+        machine: int = 0x8664,
+        database_content: bytes = b"new-db",
+        product_content: str = "new\n",
+    ) -> Path:
+        package = root / "package"
+        internal = package / "internal"
+        internal.mkdir(parents=True)
+        shutil.copy2(HERE / "install-template.ps1", internal / "install.ps1")
+        query = package / ".copilot" / "rag" / "query"
+        _write_pe(query / ".venv" / "Scripts" / "python.exe", machine)
+        (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
+        (query / "product.txt").write_text(product_content, encoding="utf-8")
+        model = (
+            package
+            / ".copilot"
+            / "rag"
+            / "models"
+            / "ruri-v3-30m-onnx-int8"
+        )
+        model.mkdir(parents=True)
+        (model / "model.onnx").write_bytes(b"new-model")
+        database = package / ".copilot" / "rag" / "dbs" / "selected-rag"
+        database.mkdir(parents=True)
+        (database / "catalog.sqlite").write_bytes(database_content)
+        return package
+
+    def _run(
+        self,
+        package: Path,
+        profile: Path,
+        *arguments: str,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["USERPROFILE"] = str(profile)
+        environment["APPDATA"] = str(profile / "AppData" / "Roaming")
+        powershell = (
+            Path(os.environ.get("SystemRoot", r"C:\Windows"))
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        return subprocess.run(
+            [
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(package / "internal" / "install.ps1"),
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+
+    def test_fresh_install_and_explicit_same_name_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            completed = self._run(package, profile)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            target = profile / ".copilot" / "rag"
+            self.assertEqual(
+                b"new-db",
+                (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
+            )
+
+            (target / "dbs" / "selected-rag" / "catalog.sqlite").write_bytes(
+                b"old-db"
+            )
+            unrelated = target / "dbs" / "unrelated-rag"
+            unrelated.mkdir()
+            (unrelated / "keep.txt").write_text("keep\n", encoding="utf-8")
+            rejected = self._run(package, profile)
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertEqual(
+                b"old-db",
+                (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
+            )
+            replaced = self._run(
+                package, profile, "-ReplaceExistingDatabases"
+            )
+            self.assertEqual(0, replaced.returncode, replaced.stderr)
+            self.assertEqual(
+                b"new-db",
+                (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
+            )
+            self.assertEqual(
+                "keep\n",
+                (unrelated / "keep.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_failure_after_publication_rolls_back_changed_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            target = profile / ".copilot" / "rag"
+            runtime = target / "query" / ".venv"
+            _write_pe(runtime / "Scripts" / "python.exe")
+            (runtime / "old.txt").write_text("old-runtime\n", encoding="utf-8")
+            (target / "query" / "product.txt").write_text(
+                "old-product\n", encoding="utf-8"
+            )
+            model = target / "models" / "ruri-v3-30m-onnx-int8"
+            model.mkdir(parents=True)
+            (model / "model.onnx").write_bytes(b"old-model")
+            database = target / "dbs" / "selected-rag"
+            database.mkdir(parents=True)
+            (database / "catalog.sqlite").write_bytes(b"old-db")
+
+            package = self._package(root)
+            completed = self._run(
+                package,
+                profile,
+                "-ReplaceExistingDatabases",
+                "-ConfigureVSCodeAutoApprove",
+            )
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(
+                "old-runtime\n",
+                (runtime / "old.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                b"old-model", (model / "model.onnx").read_bytes()
+            )
+            self.assertEqual(
+                b"old-db", (database / "catalog.sqlite").read_bytes()
+            )
+            self.assertEqual(
+                "old-product\n",
+                (target / "query" / "product.txt").read_text(encoding="utf-8"),
+            )
+
+    def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root, machine=0x014C)
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertFalse((profile / ".copilot").exists())
 
 
 if __name__ == "__main__":

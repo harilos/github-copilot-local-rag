@@ -103,19 +103,6 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--defer-completion-marker",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--configure-vscode-auto-approve",
-        action="store_true",
-        help=(
-            "Explicitly opt in to narrowly scoped VS Code terminal "
-            "auto-approval rules after packaged runtime verification"
-        ),
-    )
-    parser.add_argument(
         "--prepare-model",
         action="store_true",
         help="Deprecated: model preparation is now the default",
@@ -150,10 +137,6 @@ def main() -> int:
             "--verify-only, --migrate-legacy-marker, "
             "--refresh-completion-marker, and --repair-completion-marker "
             "are mutually exclusive"
-        )
-    if args.configure_vscode_auto_approve and offline_modes:
-        parser.error(
-            "--configure-vscode-auto-approve requires a normal setup run"
         )
     if (
         args.migrate_legacy_marker
@@ -208,10 +191,6 @@ def main() -> int:
             )
         ):
             parser.error("packaged runtime setup is offline and immutable")
-    if args.defer_completion_marker and packaged_runtime is None:
-        parser.error("--defer-completion-marker is restricted to packaged runtime setup")
-    if args.defer_completion_marker and offline_modes:
-        parser.error("--defer-completion-marker cannot be combined with offline modes")
     try:
         network = (_packaged_network() if packaged_runtime is not None else resolve_network_configuration(
             cli_proxy=args.proxy,
@@ -247,7 +226,7 @@ def main() -> int:
         )
         _emit(payload, args.format)
         return 1
-    if args.refresh_completion_marker or args.defer_completion_marker:
+    if args.refresh_completion_marker:
         try:
             _invalidate_completion_marker(marker)
         except SetupStepError as exc:
@@ -359,59 +338,6 @@ def main() -> int:
         *network.warnings,
         *(verification.get("warnings") or []),
     ]
-    if (
-        packaged_runtime is not None
-        and verification.get("setup_complete")
-        and not args.verify_only
-    ):
-        if not args.configure_vscode_auto_approve:
-            vscode = {
-                "status": "skipped_default_off",
-                "targets_checked": 0,
-                "targets_changed": 0,
-                "policy_effectiveness": "not_requested",
-            }
-        else:
-            appdata = os.environ.get("APPDATA")
-            if appdata:
-                try:
-                    from vscode_settings import configure_vscode
-
-                    vscode = configure_vscode(
-                        RAG_ROOT.parent, Path(appdata).expanduser()
-                    )
-                except Exception as exc:
-                    vscode = {
-                        "status": "error",
-                        "targets_checked": 0,
-                        "targets_changed": 0,
-                        "policy_effectiveness": "unknown",
-                        "error_kinds": [type(exc).__name__],
-                    }
-            else:
-                vscode = {
-                    "status": "manual_action_required",
-                    "targets_checked": 0,
-                    "targets_changed": 0,
-                    "policy_effectiveness": "unknown",
-                }
-        verification["integrations"] = {"vscode": vscode}
-        if args.configure_vscode_auto_approve and vscode.get("status") not in {
-            "configured_on_disk",
-            "already_configured",
-        }:
-            integration_failure = _error_payload(
-                failed_check="vscode_auto_approve",
-                error_kind=str(vscode.get("status") or "error"),
-                message=(
-                    "Explicit VS Code auto-approve configuration did not "
-                    "complete; settings were left fail-closed."
-                ),
-                network=network,
-            )
-            integration_failure["integrations"] = {"vscode": vscode}
-            verification = integration_failure
-
     requirements_after: str | None = None
     if marker_maintenance:
         try:
@@ -455,7 +381,6 @@ def main() -> int:
     if (
         verification.get("setup_complete")
         and not args.verify_only
-        and not args.defer_completion_marker
     ):
         try:
             _write_completion_marker(

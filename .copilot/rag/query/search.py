@@ -32,6 +32,7 @@ from software_rag_tool.search_request import (
     request_to_cli_arguments,
 )
 from result_bundle import cleanup_result_spool, publish_result_bundle
+from portable_runtime import is_amd64_pe
 from setup_contract import completion_contract_valid, completion_marker_for
 
 RUN_DIR = Path(__file__).resolve().parent / "run"
@@ -188,10 +189,12 @@ def main() -> None:
 
     venv_python = Path(__file__).resolve().parent / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = completion_marker_for(Path(__file__).resolve().parent)
-    marker_valid, _marker_reason = completion_contract_valid(
-        marker,
-        RAG_ROOT,
-    )
+    marker_valid = sys.platform.startswith("win") and is_amd64_pe(venv_python)
+    if not marker_valid:
+        marker_valid, _marker_reason = completion_contract_valid(
+            marker,
+            RAG_ROOT,
+        )
     if not (venv_python.exists() and marker_valid):
         _print_setup_required(args.format, resolution.db_name, question)
         raise SystemExit(2)

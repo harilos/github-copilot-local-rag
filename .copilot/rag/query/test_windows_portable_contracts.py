@@ -16,6 +16,7 @@ from unittest import mock
 from portable_runtime import (
     MANIFEST_SCHEMA,
     PortableRuntimeError,
+    is_amd64_pe,
     load_and_verify_runtime,
 )
 from setup_contract import (
@@ -95,6 +96,16 @@ class PortableRuntimeContractTests(unittest.TestCase):
         for path in paths:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("demo==1.0\n", encoding="utf-8")
+
+    def test_direct_amd64_check_does_not_require_a_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "python.exe"
+            binary.write_bytes(self._pe_amd64())
+            self.assertTrue(is_amd64_pe(binary))
+            invalid = bytearray(self._pe_amd64())
+            struct.pack_into("<H", invalid, 68, 0x014C)
+            binary.write_bytes(invalid)
+            self.assertFalse(is_amd64_pe(binary))
 
     def test_completion_marker_resolver_separates_packaged_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -246,104 +257,6 @@ class PortableRuntimeContractTests(unittest.TestCase):
 
                 self.assertTrue(payload["setup_complete"])
                 self.assertEqual("off", payload["network"]["mode"])
-                self.assertEqual(
-                    "skipped_default_off",
-                    payload["integrations"]["vscode"]["status"],
-                )
-            finally:
-                SETUP._release_setup_lock()
-
-    def test_packaged_setup_can_defer_completion_marker_until_smoke(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manifest = self._fixture(root)
-            query = manifest.parent
-            venv = query / ".venv"
-            python = venv / "Scripts" / "python.exe"
-            marker_path = completion_marker_for(query)
-            marker_path.write_bytes(b"old-marker")
-            verification = {"status": "ready", "setup_complete": True, "lookup_ready": True, "runtime": {"packaged_runtime": "pass"}, "databases": {"healthy": ["fixture-rag"], "unhealthy": []}, "warnings": [], "next_action": None}
-            output = io.StringIO()
-            try:
-                with (
-                    mock.patch.object(sys, "argv", ["setup.py", "--defer-completion-marker", "--format", "json"]),
-                    mock.patch.object(SETUP, "_setup_paths", return_value=(query, venv, python, marker_path)),
-                    mock.patch("portable_runtime.platform.system", return_value="Windows"),
-                    mock.patch("portable_runtime.platform.machine", return_value="AMD64"),
-                    mock.patch.object(SETUP, "_run_verification", return_value=verification),
-                    mock.patch.object(SETUP, "_write_completion_marker") as write_marker,
-                    mock.patch.dict(os.environ, {"APPDATA": ""}),
-                    contextlib.redirect_stdout(output),
-                ):
-                    self.assertEqual(0, SETUP.main())
-                self.assertTrue(json.loads(output.getvalue())["setup_complete"])
-                write_marker.assert_not_called()
-                self.assertFalse(marker_path.exists())
-            finally:
-                SETUP._release_setup_lock()
-
-    def test_explicit_vscode_opt_in_failure_is_setup_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manifest = self._fixture(root)
-            query = manifest.parent
-            venv = query / ".venv"
-            python = venv / "Scripts" / "python.exe"
-            marker_path = completion_marker_for(query)
-            verification = {
-                "status": "runtime_ready_no_db",
-                "setup_complete": True,
-                "lookup_ready": False,
-                "runtime": {"packaged_runtime": "pass"},
-                "databases": {"healthy": [], "unhealthy": []},
-                "warnings": [],
-                "next_action": None,
-            }
-            output = io.StringIO()
-            try:
-                with (
-                    mock.patch.object(
-                        sys,
-                        "argv",
-                        [
-                            "setup.py",
-                            "--configure-vscode-auto-approve",
-                            "--format",
-                            "json",
-                        ],
-                    ),
-                    mock.patch.object(SETUP, "RAG_ROOT", root),
-                    mock.patch.object(
-                        SETUP,
-                        "_setup_paths",
-                        return_value=(query, venv, python, marker_path),
-                    ),
-                    mock.patch("portable_runtime.platform.system", return_value="Windows"),
-                    mock.patch("portable_runtime.platform.machine", return_value="AMD64"),
-                    mock.patch.object(
-                        SETUP, "_run_verification", return_value=verification
-                    ),
-                    mock.patch(
-                        "vscode_settings.configure_vscode",
-                        return_value={
-                            "status": "manual_action_required",
-                            "targets_checked": 1,
-                            "targets_changed": 0,
-                            "policy_effectiveness": "unknown",
-                        },
-                    ),
-                    mock.patch.object(SETUP, "_write_completion_marker") as write_marker,
-                    mock.patch.dict(os.environ, {"APPDATA": str(root / "AppData")}),
-                    contextlib.redirect_stdout(output),
-                ):
-                    self.assertEqual(1, SETUP.main())
-                payload = json.loads(output.getvalue())
-                self.assertEqual("vscode_auto_approve", payload["failed_check"])
-                self.assertEqual(
-                    "manual_action_required",
-                    payload["integrations"]["vscode"]["status"],
-                )
-                write_marker.assert_not_called()
             finally:
                 SETUP._release_setup_lock()
 

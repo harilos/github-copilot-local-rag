@@ -79,6 +79,8 @@ rm -f -- \
   "$TARGET_DIR/rag/migration_archive.py" \
   "$TARGET_DIR/rag/gen_db/migrate_source_metadata.py" \
   "$TARGET_DIR/rag/gen_db/software_rag_tool/software_rag_tool/source_metadata_migration.py" \
+  "$TARGET_DIR/rag/query/portable_db_install.py" \
+  "$TARGET_DIR/rag/query/portable_db_smoke.py" \
   "$TARGET_DIR/skills/local-rag-admin/SKILL.md"
 rmdir -- "$TARGET_DIR/skills/local-rag-admin" 2>/dev/null || true
 

@@ -360,7 +360,12 @@ The Windows portable builder selects databases from one trusted parent directory
 Use `-DatabasesRoot` with repeatable `-DatabaseNames`, or omit the names to
 open the shared toggle selector. Use `-NoDatabase` only for an explicit
 runtime-only package. Extract the completed ZIP and run the top-level ASCII
-`install.cmd`; its implementation is manifest-covered at
-`internal\install.ps1`. Existing unrelated databases are preserved, and a
-differing same-name database is replaced only with
-`-ReplaceExistingDatabases`.
+`install.cmd`; its implementation is at `internal\install.ps1`. The installer
+checks only that the embedded Windows binaries are AMD64 before changing the
+target. Existing unrelated databases are preserved, and a selected same-name
+database is replaced only with `-ReplaceExistingDatabases`.
+
+Package hashes, closed-set manifests, model or database health checks, internal
+`list_dbs`, and search smoke tests are not part of installation. Release or
+acceptance automation must exercise the public commands from outside the
+installer.

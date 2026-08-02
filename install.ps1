@@ -152,6 +152,8 @@ $RetiredFiles = @(
     "rag\migration_archive.py",
     "rag\gen_db\migrate_source_metadata.py",
     "rag\gen_db\software_rag_tool\software_rag_tool\source_metadata_migration.py",
+    "rag\query\portable_db_install.py",
+    "rag\query\portable_db_smoke.py",
     "skills\local-rag-admin\SKILL.md"
 )
 foreach ($RelativePath in $RetiredFiles) {

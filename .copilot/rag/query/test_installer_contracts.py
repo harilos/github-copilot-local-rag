@@ -543,7 +543,6 @@ class InstallerExclusionContractTests(unittest.TestCase):
         powershell_entrypoints = (
             INSTALL_PS1.read_text(encoding="utf-8"),
             module.INSTALL_PS1_TEXT,
-            portable,
         )
         for text in shell_entrypoints:
             for fragment in (
@@ -554,6 +553,15 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 "close_markers",
             ):
                 self.assertIn(fragment, text)
+        for fragment in (
+            '$ActiveMarker = Join-Path',
+            '$LegacyMarker = Join-Path',
+            'Move-CompletionMarker',
+            'Close-CompletionMarkerGate',
+            '--refresh-completion-marker',
+        ):
+            self.assertNotIn(fragment, portable)
+        self.assertIn('Assert-Amd64PortableRuntime', portable)
         for text in powershell_entrypoints:
             for fragment in (
                 '$ActiveMarker = Join-Path',
