@@ -11,6 +11,7 @@ from .tokenize import (
     canonicalize,
     extract_anchors,
     identifier_match_keys,
+    supported_unicode_filename_anchor,
     tokens_for_fts,
 )
 
@@ -1784,11 +1785,15 @@ def _matching_strong_exact_rows(
         for anchor in extract_anchors(question, limit=30)
         if _strong_anchor(anchor)
     ]
-    if not anchors:
+    unicode_filename = supported_unicode_filename_anchor(question)
+    if not anchors and not unicode_filename:
         return []
     matching: list[dict[str, Any]] = []
     for row in exact_rows:
-        if any(_raw_anchor_occurs(row, anchor) for anchor in anchors):
+        if any(_raw_anchor_occurs(row, anchor) for anchor in anchors) or (
+            unicode_filename
+            and _raw_anchor_occurs(row, unicode_filename)
+        ):
             matching.append(row)
     return matching
 
@@ -1930,6 +1935,18 @@ def _row_haystack(row: dict[str, Any]) -> str:
 
 def _raw_anchor_occurs(row: dict[str, Any], anchor: str) -> bool:
     metadata = row.get("metadata") or {}
+    if supported_unicode_filename_anchor(anchor):
+        query_value = canonicalize(anchor).replace("\\", "/")
+        path_value = canonicalize(str(metadata.get("path") or "")).replace("\\", "/")
+        basename = path_value.rsplit("/", 1)[-1]
+        stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+        filename_values = {
+            path_value,
+            basename,
+            stem,
+        }
+        if query_value in filename_values:
+            return True
     haystack = "\n".join(
         [
             str(row.get("text") or ""),
