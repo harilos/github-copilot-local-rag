@@ -1,5 +1,5 @@
 # Direct runtime capability lock for the admin-full profile.
-# The package manifest additionally hashes every installed transitive file.
+# Runtime dependencies are resolved when the portable runtime is assembled.
 -r requirements-search.lock
 sentence-transformers==5.1.0
 optimum[onnxruntime]==1.27.0

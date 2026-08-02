@@ -15,23 +15,6 @@ $ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $ToolRoot "..\.."))
 $Lock = Get-Content -Raw -Encoding UTF8 (Join-Path $ToolRoot "runtime-lock.json") |
     ConvertFrom-Json
-$RequirementsLock = Join-Path $ToolRoot $(
-    if ($Profile -eq "search-only") {
-        "requirements-search.lock"
-    } else {
-        "requirements-admin.lock"
-    }
-)
-$DependencyFingerprint = (
-    Get-FileHash -Algorithm SHA256 -LiteralPath $RequirementsLock
-).Hash.ToLowerInvariant()
-$ModelManifest = Join-Path $ModelRoot "MODEL_MANIFEST.json"
-if (-not (Test-Path -LiteralPath $ModelManifest -PathType Leaf)) {
-    throw "MODEL_MANIFEST.json is required in ModelRoot"
-}
-$ModelFingerprint = (
-    Get-FileHash -Algorithm SHA256 -LiteralPath $ModelManifest
-).Hash.ToLowerInvariant()
 $Python = Get-Command python -ErrorAction Stop
 
 $Arguments = @(
@@ -46,9 +29,7 @@ $Arguments = @(
         )
     ).Trim(),
     "--profile", $Profile,
-    "--python-version", [string]$Lock.python.version,
-    "--dependency-lock-sha256", $DependencyFingerprint,
-    "--model-fingerprint", $ModelFingerprint
+    "--python-version", [string]$Lock.python.version
 )
 if ($DatabaseRoot -and ($DatabasesRoot -or $DatabaseNames.Count)) {
     throw "legacy DatabaseRoot cannot be combined with canonical database arguments"

@@ -111,10 +111,10 @@ class InstallerExclusionContractTests(unittest.TestCase):
         )
         self.assertIn(".pre-update.", shell)
         self.assertIn(".pre-update.", powershell)
-        for marker in ('"$ACTIVE_MARKER"', '"$LEGACY_MARKER"'):
-            self.assertIn(marker, shell)
+        self.assertIn('"$LEGACY_MARKER"', shell)
+        self.assertNotIn('"$ACTIVE_MARKER"', shell)
         self.assertIn("Move-CompletionMarker", powershell)
-        self.assertIn("$ActiveMarker", powershell)
+        self.assertNotIn("$ActiveMarker", powershell)
         self.assertIn("$LegacyMarker", powershell)
         self.assertIn("Close-CompletionMarkerGate", powershell)
         for retired in (
@@ -429,7 +429,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
         os.name == "nt",
         "PowerShell installer execution is Windows-specific",
     )
-    def test_powershell_packaged_marker_migration_and_failure_gate_closed(self) -> None:
+    def test_powershell_managed_marker_refresh_and_failure_gate_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
@@ -439,30 +439,28 @@ class InstallerExclusionContractTests(unittest.TestCase):
             (query / "setup.py").write_text(
                 "from pathlib import Path\n"
                 "import os\n"
-                "marker = Path(__file__).parent / '.rag-deps-installed'\n"
+                "marker = Path(__file__).parent / '.venv' / '.rag-deps-installed'\n"
+                "marker.parent.mkdir(parents=True, exist_ok=True)\n"
                 "marker.write_bytes(b'new-marker')\n"
                 "raise SystemExit(9 if os.environ.get('FAIL_REFRESH') else 0)\n",
                 encoding="utf-8",
             )
             (query / "product.py").write_text("NEW\n", encoding="utf-8")
 
-            def run_case(name: str, marker_kind: str, *, fail: bool, runtime: bool):
+            def run_case(name: str, *, fail: bool, runtime: bool):
                 target = root / name
                 target_query = target / "rag" / "query"
                 (target_query / ".venv" / "Scripts").mkdir(parents=True)
                 (target_query / ".packaged-runtime.json").write_text(
                     '{"schema":"fixture"}\n', encoding="utf-8"
                 )
+                (target_query / ".rag-deps-installed").write_bytes(b"retired")
                 if runtime:
                     shutil.copy2(
                         Path(sys.executable),
                         target_query / ".venv" / "Scripts" / "python.exe",
                     )
-                marker = (
-                    target_query / ".rag-deps-installed"
-                    if marker_kind == "active"
-                    else target_query / ".venv" / ".rag-deps-installed"
-                )
+                marker = target_query / ".venv" / ".rag-deps-installed"
                 marker.write_bytes(b"old-marker")
                 (target_query / "product.py").write_text("OLD\n", encoding="utf-8")
                 environment = os.environ.copy()
@@ -490,24 +488,22 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 return completed, target_query, marker
 
             completed, target_query, legacy = run_case(
-                "legacy-success", "legacy", fail=False, runtime=True
+                "managed-success", fail=False, runtime=True
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertFalse(legacy.exists())
-            self.assertEqual(
-                b"new-marker",
-                (target_query / ".rag-deps-installed").read_bytes(),
-            )
+            self.assertEqual(b"new-marker", legacy.read_bytes())
+            self.assertFalse((target_query / ".rag-deps-installed").exists())
+            self.assertFalse((target_query / ".packaged-runtime.json").exists())
             self.assertEqual(
                 [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
             )
 
             for name, runtime in (("postvalidate-failure", True), ("python-missing", False)):
-                completed, target_query, active = run_case(
-                    name, "active", fail=True, runtime=runtime
+                completed, target_query, marker = run_case(
+                    name, fail=True, runtime=runtime
                 )
                 self.assertNotEqual(0, completed.returncode)
-                self.assertFalse(active.exists())
+                self.assertFalse(marker.exists())
                 self.assertEqual("NEW\n", (target_query / "product.py").read_text())
                 backups = list(target_query.glob(
                     ".rag-deps-installed.*.pre-update.*"
@@ -516,7 +512,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 self.assertEqual(b"old-marker", backups[0].read_bytes())
 
 
-    def test_all_installer_entrypoints_share_packaged_marker_contract(self) -> None:
+    def test_generic_installers_keep_only_managed_marker_contract(self) -> None:
         module_path = (
             REPOSITORY_ROOT
             / ".copilot"
@@ -543,31 +539,39 @@ class InstallerExclusionContractTests(unittest.TestCase):
         powershell_entrypoints = (
             INSTALL_PS1.read_text(encoding="utf-8"),
             module.INSTALL_PS1_TEXT,
-            portable,
         )
         for text in shell_entrypoints:
             for fragment in (
-                'ACTIVE_MARKER="$QUERY_ROOT/.rag-deps-installed"',
                 'LEGACY_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"',
-                'move_marker "$ACTIVE_MARKER" active',
                 'move_marker "$LEGACY_MARKER" legacy',
                 "close_markers",
             ):
                 self.assertIn(fragment, text)
+            for fragment in ("PACKAGED_MANIFEST", "ACTIVE_MARKER", ' active'):
+                self.assertNotIn(fragment, text)
+        for fragment in (
+            '$ActiveMarker = Join-Path',
+            '$LegacyMarker = Join-Path',
+            'Move-CompletionMarker',
+            'Close-CompletionMarkerGate',
+            '--refresh-completion-marker',
+        ):
+            self.assertNotIn(fragment, portable)
+        self.assertIn('Assert-Amd64PortableRuntime', portable)
         for text in powershell_entrypoints:
             for fragment in (
-                '$ActiveMarker = Join-Path',
                 '$LegacyMarker = Join-Path',
                 'Move-CompletionMarker',
                 'Close-CompletionMarkerGate',
-                '"active"',
                 '"legacy"',
             ):
                 self.assertIn(fragment, text)
+            for fragment in ('$PackagedManifest =', '$ActiveMarker =', '"active"'):
+                self.assertNotIn(fragment, text)
 
 
     @unittest.skipUnless(os.name == "nt", "PowerShell execution is Windows-specific")
-    def test_generated_powershell_installer_executes_fixed_packaged_update(self) -> None:
+    def test_generated_powershell_installer_retires_packaged_state(self) -> None:
         module_path = (
             REPOSITORY_ROOT / ".copilot" / "rag" / "source_manager" / "package_installers.py"
         )
@@ -583,7 +587,9 @@ class InstallerExclusionContractTests(unittest.TestCase):
             (source / "install.ps1").write_text(module.INSTALL_PS1_TEXT, encoding="utf-8")
             (query / "setup.py").write_text(
                 "from pathlib import Path\n"
-                "(Path(__file__).parent / '.rag-deps-installed').write_bytes(b'new')\n",
+                "marker = Path(__file__).parent / '.venv' / '.rag-deps-installed'\n"
+                "marker.parent.mkdir(parents=True, exist_ok=True)\n"
+                "marker.write_bytes(b'new')\n",
                 encoding="utf-8",
             )
             target = root / "target"
@@ -596,6 +602,8 @@ class InstallerExclusionContractTests(unittest.TestCase):
             )
             active = target_query / ".rag-deps-installed"
             active.write_bytes(b"old")
+            managed = target_query / ".venv" / ".rag-deps-installed"
+            managed.write_bytes(b"old-managed")
             completed = subprocess.run(
                 [
                     "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -609,7 +617,9 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual(b"new", active.read_bytes())
+            self.assertEqual(b"new", managed.read_bytes())
+            self.assertFalse(active.exists())
+            self.assertFalse((target_query / ".packaged-runtime.json").exists())
             self.assertEqual(
                 [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
             )

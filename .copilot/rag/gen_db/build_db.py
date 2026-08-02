@@ -14,6 +14,7 @@ sys.path.insert(0, str(QUERY_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
+from windows_runtime import is_fixed_windows_runtime
 from setup_contract import completion_contract_valid, completion_marker_for
 from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 
@@ -121,10 +122,15 @@ def _runtime_python_or_exit() -> str:
     query_root = RAG_ROOT / "query"
     venv_python = query_root / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     marker = completion_marker_for(query_root)
-    marker_valid, _marker_reason = completion_contract_valid(
-        marker,
-        RAG_ROOT,
+    marker_valid = (
+        sys.platform.startswith("win")
+        and is_fixed_windows_runtime(query_root)
     )
+    if not marker_valid:
+        marker_valid, _marker_reason = completion_contract_valid(
+            marker,
+            RAG_ROOT,
+        )
     if venv_python.exists() and marker_valid:
         return str(venv_python)
     if os.getenv("RAG_ALLOW_UNINITIALIZED_RUNTIME", "").lower() in {"1", "true", "yes"}:

@@ -6,9 +6,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from portable_runtime import PortableRuntimeError, manifest_path_for
-
-
 COMPLETION_SCHEMA = "local-rag.setup-completion.v1"
 REQUIRED_RUNTIME_PASSES = (
     "venv",
@@ -33,10 +30,8 @@ COPY_RESTORE_RESULT: dict[str, Any] | None = None
 
 
 def completion_marker_for(query_root: Path) -> Path:
-    """Resolve mutable completion state without weakening runtime closed-set."""
+    """Resolve the completion state for a normal managed setup runtime."""
 
-    if manifest_path_for(query_root).is_file():
-        return query_root / ".rag-deps-installed"
     return query_root / ".venv" / ".rag-deps-installed"
 
 
@@ -112,34 +107,11 @@ def completion_contract_valid(
             != EXPECTED_EMBEDDING_DIMENSION
         ):
             return False, "completion_marker_embedding_dimension"
-        packaged = payload.get("packaged_runtime")
-        packaged_manifest = manifest_path_for(rag_root / "query").is_file()
-        if packaged_manifest and packaged is None:
-            return False, "completion_marker_packaged_runtime_required"
-        if packaged is not None:
-            if not isinstance(packaged, dict):
-                return False, "completion_marker_packaged_runtime"
-            from portable_runtime import load_and_verify_runtime
-
-            verified = load_and_verify_runtime(
-                manifest_path_for(rag_root / "query")
-            )
-            expected = {
-                "product_version": verified.product_version,
-                "profile": verified.profile,
-                "python_version": verified.python_version,
-                "dependency_lock_sha256": verified.dependency_lock_sha256,
-                "manifest_sha256": verified.manifest_sha256,
-                "model_fingerprint": verified.model_fingerprint,
-            }
-            if any(packaged.get(key) != value for key, value in expected.items()):
-                return False, "completion_marker_packaged_runtime_fingerprint"
     except (
         OSError,
         TypeError,
         ValueError,
         json.JSONDecodeError,
-        PortableRuntimeError,
     ):
         return False, "completion_marker_unreadable"
     return True, None
@@ -158,17 +130,4 @@ def completion_contract_payload(
         "requirements_sha256": requirements_fingerprint(rag_root),
         "runtime": runtime,
     }
-    if runtime.get("packaged_runtime") == "pass":
-        from portable_runtime import load_and_verify_runtime, manifest_path_for
-
-        verified = load_and_verify_runtime(manifest_path_for(rag_root / "query"))
-        payload["packaged_runtime"] = {
-            "product_version": verified.product_version,
-            "profile": verified.profile,
-            "platform": {"os": "windows", "arch": "amd64"},
-            "python_version": verified.python_version,
-            "dependency_lock_sha256": verified.dependency_lock_sha256,
-            "manifest_sha256": verified.manifest_sha256,
-            "model_fingerprint": verified.model_fingerprint,
-        }
     return payload

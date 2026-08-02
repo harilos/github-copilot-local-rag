@@ -17,6 +17,9 @@ RETIRED_PATHS = (
         "rag/gen_db/software_rag_tool/software_rag_tool/"
         "source_metadata_migration.py"
     ),
+    "rag/query/portable_db_install.py",
+    "rag/query/portable_db_smoke.py",
+    "rag/query/portable_runtime.py",
     "skills/local-rag-admin/SKILL.md",
 )
 

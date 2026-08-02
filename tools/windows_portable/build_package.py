@@ -28,8 +28,6 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--profile", choices=("search-only", "admin-full"), required=True)
     parser.add_argument("--python-version", required=True)
-    parser.add_argument("--dependency-lock-sha256", required=True)
-    parser.add_argument("--model-fingerprint", required=True)
     args = parser.parse_args()
     if args.no_database and (args.database_names or args.database_root or args.dbs_root):
         parser.error("--no-database cannot be combined with database arguments")
@@ -45,8 +43,8 @@ def main() -> int:
         if selection.mode == "cancelled":
             raise SystemExit("database selection cancelled")
         names = selection.keys
-    result = build_package(BuildRequest(payload_root=args.payload_root, runtime_root=args.runtime_root, model_root=args.model_root, output_dir=args.output_dir, databases_root=args.dbs_root, database_names=names, no_database=args.no_database, database_root=args.database_root, version=args.version, profile=args.profile, python_version=args.python_version, dependency_lock_sha256=args.dependency_lock_sha256, model_fingerprint=args.model_fingerprint))
-    print(json.dumps({"zip_path":str(result.zip_path),"zip_sha256":result.zip_sha256,"package_manifest_sha256":result.package_manifest_sha256,"expanded_size":result.expanded_size,"file_count":result.file_count,"database_names":list(result.database_names),"database_bytes":result.database_bytes}, ensure_ascii=False, sort_keys=True))
+    result = build_package(BuildRequest(payload_root=args.payload_root, runtime_root=args.runtime_root, model_root=args.model_root, output_dir=args.output_dir, databases_root=args.dbs_root, database_names=names, no_database=args.no_database, database_root=args.database_root, version=args.version, profile=args.profile, python_version=args.python_version))
+    print(json.dumps({"zip_path":str(result.zip_path),"database_names":list(result.database_names)}, ensure_ascii=False, sort_keys=True))
     return 0
 
 if __name__ == "__main__":

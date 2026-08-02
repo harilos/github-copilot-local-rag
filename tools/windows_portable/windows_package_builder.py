@@ -1,25 +1,49 @@
 from __future__ import annotations
 
-import email.parser
-import hashlib
-import importlib.util
 import json
+import importlib.util
 import os
 import shutil
 import re
 import stat
+import struct
 import sys
 import tempfile
 import types
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
-from typing import Iterable
+from pathlib import Path
 
 
-MANIFEST_SCHEMA = "local-rag.packaged-runtime.v1"
-PACKAGE_SCHEMA = "local-rag.windows-package.v2"
+SOURCE_MANAGER_ROOT = (
+    Path(__file__).resolve().parents[2] / ".copilot" / "rag" / "source_manager"
+)
+
+
+def _load_snapshot_module():
+    package_name = "_windows_portable_source_manager"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(SOURCE_MANAGER_ROOT)]
+    sys.modules[package_name] = package
+    module_name = f"{package_name}.packages"
+    spec = importlib.util.spec_from_file_location(
+        module_name, SOURCE_MANAGER_ROOT / "packages.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("database snapshot module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_SNAPSHOT_MODULE = _load_snapshot_module()
+PackageError = _SNAPSHOT_MODULE.PackageError
+stage_search_database_snapshots = (
+    _SNAPSHOT_MODULE.stage_search_database_snapshots
+)
+
+
 _DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
 SUPPORTED_PROFILES = frozenset({"search-only", "admin-full"})
 FORBIDDEN_NAMES = frozenset(
@@ -32,6 +56,10 @@ FORBIDDEN_NAMES = frozenset(
         "source-connections.secrets.json",
         ".source-connections.key",
         "windows-test-connection.local.json",
+        ".packaged-runtime.json",
+        "portable_runtime.py",
+        "portable_db_install.py",
+        "portable_db_smoke.py",
     }
 )
 FORBIDDEN_PARTS = frozenset({"__pycache__", "run"})
@@ -53,8 +81,6 @@ class BuildRequest:
     version: str
     profile: str
     python_version: str
-    dependency_lock_sha256: str
-    model_fingerprint: str
     databases_root: Path | None = None
     database_names: tuple[str, ...] = ()
     no_database: bool = False
@@ -64,12 +90,7 @@ class BuildRequest:
 @dataclass(frozen=True)
 class BuildResult:
     zip_path: Path
-    zip_sha256: str
-    package_manifest_sha256: str
-    expanded_size: int
-    file_count: int
     database_names: tuple[str, ...]
-    database_bytes: int
 
 
 def build_package(request: BuildRequest) -> BuildResult:
@@ -92,31 +113,18 @@ def build_package(request: BuildRequest) -> BuildResult:
         _ensure_query_root_on_runtime_path(runtime_target)
         _copy_tree_exact(request.model_root, model_target)
         database_names, databases_root = _normalized_databases(request)
-        database_result = {"databases": [], "files": [], "total": {"bytes": 0}}
         if databases_root is not None:
-            snapshot_root = package_root / ".database-snapshots"
-            snapshot_api = _load_snapshot_api(request.payload_root)
-            database_result = snapshot_api(
-                databases_root,
-                snapshot_root,
-                db_names=database_names,
-                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            )
             target_dbs = copilot_root / "rag" / "dbs"
-            target_dbs.mkdir(parents=True, exist_ok=True)
-            for name in database_names:
-                source = snapshot_root / name
-                if not source.is_dir():
-                    raise ValueError(f"database snapshot is missing: {name}")
-                destination = target_dbs / name
-                if destination.exists():
-                    raise ValueError(f"database destination exists: {name}")
-                source.replace(destination)
-            shutil.rmtree(snapshot_root)
+            try:
+                stage_search_database_snapshots(
+                    databases_root,
+                    target_dbs,
+                    db_names=database_names,
+                )
+            except PackageError as exc:
+                raise ValueError(str(exc)) from exc
 
-        runtime_manifest = _runtime_manifest(request, runtime_target)
-        runtime_manifest_path = query_root / ".packaged-runtime.json"
-        _write_json(runtime_manifest_path, runtime_manifest)
+        _assert_amd64_runtime(runtime_target)
         _write_text(package_root / "install.cmd", _install_cmd())
         _write_text(package_root / "internal" / "install.ps1", _install_bootstrap())
         _write_text(package_root / "README-WINDOWS.md", _windows_readme())
@@ -126,49 +134,12 @@ def build_package(request: BuildRequest) -> BuildResult:
         )
         _write_json(package_root / "sbom.spdx.json", _sbom(request))
 
-        payload_entries = _manifest_entries(
-            package_root,
-            excluded={"PACKAGE-MANIFEST.json", "SHA256SUMS"},
-        )
-        sums = "".join(
-            f"{entry['sha256']}  {entry['path']}\n" for entry in payload_entries
-        )
-        _write_text(package_root / "SHA256SUMS", sums)
-        package_entries = _manifest_entries(
-            package_root, excluded={"PACKAGE-MANIFEST.json"}
-        )
-        package_manifest = {
-            "schema": PACKAGE_SCHEMA,
-            "product_version": request.version,
-            "profile": request.profile,
-            "platform": {"os": "windows", "arch": "amd64"},
-            "python_version": request.python_version,
-            "dependency_lock_sha256": request.dependency_lock_sha256,
-            "model_fingerprint": request.model_fingerprint,
-            "databases": list(database_result["databases"]),
-            "files": package_entries,
-        }
-        package_manifest_path = package_root / "PACKAGE-MANIFEST.json"
-        _write_json(package_manifest_path, package_manifest)
-        package_manifest_sha256 = _sha256_file(package_manifest_path)
-
         _assert_no_forbidden_payload(package_root)
         _write_deterministic_zip(package_root, zip_path)
-        expanded_size = sum(
-            path.stat().st_size
-            for path in package_root.rglob("*")
-            if path.is_file()
-        )
-        file_count = sum(1 for path in package_root.rglob("*") if path.is_file())
 
     return BuildResult(
         zip_path=zip_path,
-        zip_sha256=_sha256_file(zip_path),
-        package_manifest_sha256=package_manifest_sha256,
-        expanded_size=expanded_size,
-        file_count=file_count,
         database_names=database_names,
-        database_bytes=int((database_result.get("total") or {}).get("bytes") or 0),
     )
 
 
@@ -222,42 +193,9 @@ def _normalized_databases(request: BuildRequest) -> tuple[tuple[str, ...], Path 
     return tuple(sorted(names, key=str.casefold)), root
 
 
-def _load_snapshot_api(payload_root: Path):
-    source_manager = payload_root / "rag" / "source_manager"
-    packages_path = source_manager / "packages.py"
-    installers_path = source_manager / "package_installers.py"
-    if not packages_path.is_file() or not installers_path.is_file():
-        raise ValueError("canonical database snapshot API is missing from payload")
-    package_name = "_local_rag_windows_snapshot_api"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(source_manager)]
-    sys.modules[package_name] = package
-    installer_spec = importlib.util.spec_from_file_location(
-        f"{package_name}.package_installers", installers_path
-    )
-    installers = importlib.util.module_from_spec(installer_spec)
-    assert installer_spec.loader is not None
-    sys.modules[installer_spec.name] = installers
-    installer_spec.loader.exec_module(installers)
-    packages_spec = importlib.util.spec_from_file_location(
-        f"{package_name}.packages", packages_path
-    )
-    packages = importlib.util.module_from_spec(packages_spec)
-    assert packages_spec.loader is not None
-    sys.modules[packages_spec.name] = packages
-    packages_spec.loader.exec_module(packages)
-    return packages.stage_search_database_snapshots
-
-
 def _validate_request(request: BuildRequest) -> None:
     if request.profile not in SUPPORTED_PROFILES:
         raise ValueError(f"unsupported package profile: {request.profile}")
-    for label, value in (
-        ("dependency lock", request.dependency_lock_sha256),
-        ("model fingerprint", request.model_fingerprint),
-    ):
-        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value.casefold()):
-            raise ValueError(f"{label} must be a SHA-256 hex digest")
     if not request.version.strip() or not request.python_version.strip():
         raise ValueError("version fields must be non-empty")
     for label, root in (
@@ -376,92 +314,34 @@ def _ensure_query_root_on_runtime_path(runtime_root: Path) -> None:
         handle.write("\n".join(lines) + "\n")
 
 
-def _runtime_manifest(request: BuildRequest, runtime_root: Path) -> dict[str, object]:
-    entries = _manifest_entries(runtime_root)
-    executable = "Scripts/python.exe"
-    declared = {str(entry["path"]).casefold() for entry in entries}
-    if executable.casefold() not in declared:
+def _assert_amd64_runtime(runtime_root: Path) -> None:
+    python = runtime_root / "Scripts" / "python.exe"
+    if not python.is_file():
         raise ValueError("runtime does not contain Scripts/python.exe")
-    for pattern, label in (
-        ("scripts/python*.dll", "Python DLL"),
-        ("scripts/python*._pth", "Python ._pth"),
-        ("scripts/python*.zip", "Python standard library"),
-    ):
-        import fnmatch
-
-        if not any(fnmatch.fnmatchcase(path, pattern) for path in declared):
-            raise ValueError(f"runtime does not contain {label}")
-    return {
-        "schema": MANIFEST_SCHEMA,
-        "product_version": request.version,
-        "profile": request.profile,
-        "platform": {"os": "windows", "arch": "amd64"},
-        "python": {
-            "version": request.python_version,
-            "executable": executable,
-        },
-        "dependency_lock_sha256": request.dependency_lock_sha256,
-        "model_fingerprint": request.model_fingerprint,
-        "distributions": _distribution_inventory(runtime_root),
-        "files": entries,
-    }
-
-
-def _distribution_inventory(runtime_root: Path) -> list[dict[str, str]]:
-    inventory: list[dict[str, str]] = []
-    seen: set[str] = set()
-    site_packages = runtime_root / "Lib" / "site-packages"
-    for metadata in sorted(site_packages.glob("*.dist-info/METADATA")):
-        message = email.parser.Parser().parsestr(
-            metadata.read_text(encoding="utf-8")
-        )
-        name = str(message.get("Name") or "").strip()
-        version = str(message.get("Version") or "").strip()
-        key = name.casefold()
-        if not name or not version:
-            raise ValueError("runtime distribution metadata is incomplete")
-        if key in seen:
-            raise ValueError("duplicate runtime distribution metadata")
-        seen.add(key)
-        inventory.append({"name": name, "version": version})
-    if not inventory:
-        raise ValueError("runtime distribution inventory is empty")
-    return sorted(
-        inventory,
-        key=lambda item: (item["name"].casefold(), item["version"]),
+    binaries = sorted(
+        path
+        for path in runtime_root.rglob("*")
+        if path.is_file() and path.suffix.casefold() in {".exe", ".dll", ".pyd"}
     )
-
-def _manifest_entries(
-    root: Path, *, excluded: set[str] | None = None
-) -> list[dict[str, object]]:
-    excluded = excluded or set()
-    entries: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        _safe_archive_path(relative)
-        if relative in excluded:
-            continue
-        entries.append(
-            {
-                "path": relative,
-                "size": path.stat().st_size,
-                "sha256": _sha256_file(path),
-            }
-        )
-    return entries
+    for binary in binaries:
+        if _pe_machine(binary) != 0x8664:
+            relative = binary.relative_to(runtime_root).as_posix()
+            raise ValueError(f"runtime PE is not AMD64: {relative}")
 
 
-def _safe_archive_path(value: str) -> None:
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or ":" in path.parts[0]
-    ):
-        raise ValueError(f"unsafe package path: {value}")
+def _pe_machine(path: Path) -> int:
+    try:
+        with path.open("rb") as handle:
+            if handle.read(2) != b"MZ":
+                raise ValueError
+            handle.seek(0x3C)
+            pe_offset = struct.unpack("<I", handle.read(4))[0]
+            handle.seek(pe_offset)
+            if handle.read(4) != b"PE\0\0":
+                raise ValueError
+            return struct.unpack("<H", handle.read(2))[0]
+    except (OSError, struct.error, ValueError) as exc:
+        raise ValueError(f"runtime PE header is invalid: {path}") from exc
 
 
 def _assert_no_forbidden_payload(root: Path) -> None:
@@ -521,14 +401,6 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _install_bootstrap() -> str:
     template = Path(__file__).with_name("install-template.ps1")
     if not template.is_file():
@@ -563,9 +435,9 @@ Extract the ZIP to a local folder and double-click `install.cmd`. The launcher
 uses Windows PowerShell 5.1 with a process-scoped execution-policy bypass and
 returns the installer's exit code. It pauses only when installation fails.
 
-The package contains exactly the databases declared in `PACKAGE-MANIFEST.json`.
-Existing unrelated databases are preserved. Replacing a database whose content
-differs requires `install.cmd -ReplaceExistingDatabases`.
+The package contains only the databases selected by the builder. Existing
+unrelated databases are preserved. Replacing a same-name database requires
+`install.cmd -ReplaceExistingDatabases`.
 
 In VS Code Copilot Chat, select Agent and enable runInTerminal in Configure
 Tools. Enable readFile when using file result delivery. Global auto-approve,
@@ -577,8 +449,7 @@ def _third_party_notices(request: BuildRequest) -> str:
     return f"""# Third-party notices
 
 The packaged runtime profile is `{request.profile}` and embeds CPython
-{request.python_version}. Exact dependency and model identities are recorded in
-`PACKAGE-MANIFEST.json`, `.packaged-runtime.json`, and `sbom.spdx.json`.
+{request.python_version}. The package includes `sbom.spdx.json` and this notice.
 Release production must replace or extend this generated notice with every
 license text required by the locked dependency set before distribution.
 """
@@ -611,7 +482,7 @@ def _sbom(request: BuildRequest) -> dict[str, object]:
             {
                 "name": "Local-RAG-runtime-dependencies",
                 "SPDXID": "SPDXRef-Package-Dependencies",
-                "versionInfo": request.dependency_lock_sha256,
+                "versionInfo": request.profile,
                 "downloadLocation": "NOASSERTION",
                 "filesAnalyzed": False,
                 "licenseConcluded": "NOASSERTION",

@@ -267,17 +267,21 @@ The Manager creates two different artifacts:
 ### Distribution ZIP
 
 The official Windows artifact is
-`local-rag-windows-x64-<version>.zip`. It contains CPython x64, an exact
-dependency profile, the prepared ONNX model, selected databases, package and
-runtime manifests, SHA-256 sums, notices, and an SPDX SBOM. `search-only` is the
-default profile; `admin-full` is explicit.
+`local-rag-windows-x64-<version>.zip`. It contains CPython x64, the selected
+dependency profile, the prepared ONNX model, selected databases, notices, and
+an SPDX SBOM. `search-only` is the default profile; `admin-full` is explicit.
 
-Windows setup validates the immutable runtime offline, performs a read-only DB
-health check, merges only scoped VS Code terminal rules, and atomically writes
-the completion marker. It never creates a venv, runs pip, downloads or converts
-a model, resolves a network route, or falls back to system Python. Runtime and
-model updates are staged and swapped by the package-root PowerShell bootstrap,
-outside the running embedded Python process.
+Windows setup checks the PE architecture of the embedded runtime before making
+changes. It does not hash the package, compare package or model manifests,
+inventory Python distributions, inspect database internals, run `list_dbs`, run
+a search smoke test, or refresh a completion marker. Runtime, model, selected
+same-name databases, and product-file updates are staged and rolled back
+together. Unselected databases and machine-local configuration are preserved.
+Each selected database is copied through the canonical search-only snapshot:
+search metadata, a SQLite backup, and `index/` are included, while `data/`,
+`logs/`, `sources/`, credentials, and private-key material are not shipped.
+Optional scoped VS Code terminal rules are changed only when explicitly
+requested.
 
 ### Management-PC transfer folder
 
@@ -285,10 +289,9 @@ Contains administration code, Source settings, checkpoints, databases, and
 assets required to continue management on another computer. Creation is
 resumable.
 
-Package creation does not take a global product lock. It detects file changes
-during copying and aborts rather than publishing an inconsistent artifact.
-All manifest paths are relative and checksummed. Build caches, temporary files,
-credentials, completion markers, run state, and backup sidecars are excluded.
+Package creation does not take a global product lock. Build caches, temporary
+files, credentials, completion markers, run state, and backup sidecars are
+excluded.
 Product runtime, public documentation, and the two Local RAG Skills are
 collected by explicit exclusions, so a new non-test runtime module is packaged
 without another file allowlist update. Machine-local configuration and DB
