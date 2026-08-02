@@ -13,8 +13,12 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlencode
 
 from .errors import SourceManagerError
-from .gitlab_issue_fixes import parse_gitlab_api_project_web_url
-from .gitlab_issues import GitLabProject, gitlab_token_env, parse_gitlab_project
+from .gitlab_issues import (
+    GitLabProject,
+    _validate_gitlab_api_project_identity,
+    gitlab_token_env,
+    parse_gitlab_project,
+)
 
 HttpRequest = Callable[[str, Mapping[str, str]], tuple[int, bytes, Mapping[str, str]]]
 ProgressCallback = Callable[[Mapping[str, Any]], None]
@@ -206,10 +210,12 @@ def _project_identity(project: GitLabProject, request: HttpRequest, headers: Map
     if not isinstance(payload, Mapping):
         raise SourceManagerError("GitLab project response must be an object", stage="fetch.gitlab_wiki")
     project_id = _positive(payload.get("id"), "GitLab project ID")
-    verified = parse_gitlab_api_project_web_url(payload.get("web_url"), project.gitlab_url)
-    response_path = str(payload.get("path_with_namespace") or "").strip()
-    if not response_path or response_path.casefold() != project.project_path.casefold() or verified.project_path.casefold() != project.project_path.casefold():
-        raise SourceManagerError("GitLab project response has the wrong path identity", stage="fetch.gitlab_wiki")
+    _validate_gitlab_api_project_identity(
+        payload,
+        project.project_path,
+        error_message="GitLab project response has the wrong path identity",
+        stage="fetch.gitlab_wiki",
+    )
     return GitLabProject(project.gitlab_url, project.api_base_url, project.project_url, project.project_path, project_id)
 
 

@@ -58,28 +58,31 @@ class GitLabWikiTests(unittest.TestCase):
     def test_fetch_confirms_inventory_before_page_details(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
-            token_env = gitlab_token_env("https://gitlab.example")
+            access_url = "https://gitlab.example/internal-gitlab"
+            token_env = gitlab_token_env(access_url)
             settings = {
-                "gitlab_url": "https://gitlab.example",
-                "project_url": "https://gitlab.example/group/project",
+                "gitlab_url": access_url,
+                "project_url": f"{access_url}/group/project",
                 "token_env": token_env,
             }
             responses = {
-                "/api/v4/projects/group%2Fproject": {
+                "/internal-gitlab/api/v4/projects/group%2Fproject": {
                     "id": 9,
-                    "web_url": "https://browser.example/group/project",
+                    "web_url": (
+                        "https://browser.example/external-gitlab/group/project"
+                    ),
                     "path_with_namespace": "group/project",
                 },
-                "/api/v4/projects/9/wikis": [
+                "/internal-gitlab/api/v4/projects/9/wikis": [
                     {"slug": "home", "title": "Home"},
                     {"slug": "guide/start", "title": "Start"},
                 ],
-                "/api/v4/projects/9/wikis/home": {
+                "/internal-gitlab/api/v4/projects/9/wikis/home": {
                     "slug": "home",
                     "title": "Home",
                     "content": "Hello",
                 },
-                "/api/v4/projects/9/wikis/guide%2Fstart": {
+                "/internal-gitlab/api/v4/projects/9/wikis/guide%2Fstart": {
                     "slug": "guide/start",
                     "title": "Start",
                     "content": "Guide",
@@ -88,6 +91,7 @@ class GitLabWikiTests(unittest.TestCase):
             order: list[str] = []
 
             def request(url: str, _headers: dict[str, str]):
+                self.assertTrue(url.startswith(access_url))
                 path = url.split("https://gitlab.example", 1)[1].split("?", 1)[0]
                 payload = responses[path]
                 headers = {"X-Total": "2"} if path.endswith("/wikis") else {}
