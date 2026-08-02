@@ -498,6 +498,8 @@ class GitLabIssueSourceContracts(unittest.TestCase):
             "",
             "   ",
             123,
+            " group/project",
+            "group/project ",
             "other/group/project",
             "group/project-extra",
             "group/project/child",

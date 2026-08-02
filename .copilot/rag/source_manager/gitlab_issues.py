@@ -206,10 +206,9 @@ def _validate_gitlab_api_project_identity(
     response_path = payload.get("path_with_namespace")
     if not isinstance(response_path, str):
         raise SourceManagerError(error_message, stage=stage)
-    normalized_path = response_path.strip()
     if (
-        not normalized_path
-        or normalized_path.casefold() != expected_project_path.casefold()
+        not response_path.strip()
+        or response_path.casefold() != expected_project_path.casefold()
     ):
         raise SourceManagerError(error_message, stage=stage)
 
