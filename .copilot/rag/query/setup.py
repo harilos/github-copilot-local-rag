@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import argparse
 import json
 import os
@@ -35,13 +34,6 @@ from setup_contract import (
     completion_contract_valid,
     requirements_fingerprint,
 )
-from portable_runtime import (
-    PortableRuntimeError,
-    load_and_verify_runtime,
-    manifest_path_for,
-)
-
-
 TEMPORARY_REPAIR_LABEL_JA = "検索利用判定を修復する（一時的）"
 TEMPORARY_REPAIR_ACTION = "repair_completion_marker_temporarily"
 TEMPORARY_REPAIR_ARGUMENTS = (
@@ -150,49 +142,8 @@ def main() -> int:
         )
 
     here, venv, python, marker = _setup_paths()
-    packaged_runtime = None
-    packaged_manifest = manifest_path_for(here)
-    if packaged_manifest.is_file():
-        try:
-            packaged_runtime = load_and_verify_runtime(packaged_manifest)
-        except PortableRuntimeError as exc:
-            _emit(
-                _error_payload(
-                    failed_check="packaged_runtime",
-                    error_kind="packaged_runtime_invalid",
-                    message=str(exc),
-                ),
-                args.format,
-            )
-            return 1
-        if not args.verify_only:
-            try:
-                _acquire_setup_lock(here)
-            except SetupLockError as exc:
-                _emit(
-                    _error_payload(
-                        failed_check="setup_lock",
-                        error_kind="setup_already_running",
-                        message=str(exc),
-                    ),
-                    args.format,
-                )
-                return 1
-
-        if any(
-            (
-                args.proxy,
-                args.ca_bundle,
-                args.no_proxy,
-                args.network_config,
-                args.force_model,
-                args.prepare_model,
-                args.no_prepare_model,
-            )
-        ):
-            parser.error("packaged runtime setup is offline and immutable")
     try:
-        network = (_packaged_network() if packaged_runtime is not None else resolve_network_configuration(
+        network = resolve_network_configuration(
             cli_proxy=args.proxy,
             cli_ca_bundle=args.ca_bundle,
             cli_no_proxy=args.no_proxy,
@@ -204,7 +155,7 @@ def main() -> int:
                 or args.refresh_completion_marker
                 or args.repair_completion_marker
             ),
-        ))
+        )
     except NetworkConfigError as exc:
         payload = _error_payload(
             failed_check="network_configuration",
@@ -245,7 +196,7 @@ def main() -> int:
     network_child_environment["PIP_CONFIG_FILE"] = os.devnull
     network_child_environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
 
-    if packaged_runtime is None and not (
+    if not (
         args.verify_only
         or args.migrate_legacy_marker
         or args.refresh_completion_marker
@@ -650,19 +601,6 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             pass
 
 
-def _packaged_network() -> NetworkResolution:
-    return NetworkResolution(
-        environment=_offline_child_environment(os.environ),
-        details={
-            "mode": "off",
-            "selected_route": "offline",
-            "external_operation": False,
-            "packaged_runtime": True,
-        },
-        warnings=[],
-    )
-
-
 def _setup_paths() -> tuple[Path, Path, Path, Path]:
     here = Path(__file__).resolve().parent
     venv = here / ".venv"
@@ -670,63 +608,6 @@ def _setup_paths() -> tuple[Path, Path, Path, Path]:
         "Scripts/python.exe" if sys.platform.startswith("win") else "bin/python"
     )
     return here, venv, python, completion_marker_for(here)
-
-
-_SETUP_LOCK_HANDLE = None
-
-
-class SetupLockError(RuntimeError):
-    pass
-
-
-def _acquire_setup_lock(query_root: Path) -> None:
-    global _SETUP_LOCK_HANDLE
-    if _SETUP_LOCK_HANDLE is not None:
-        return
-    lock_path = query_root / ".setup.lock"
-    handle = lock_path.open("a+b")
-    try:
-        handle.seek(0)
-        if handle.read(1) == b"":
-            handle.seek(0)
-            handle.write(b"0")
-            handle.flush()
-            os.fsync(handle.fileno())
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        handle.close()
-        raise SetupLockError("another Local RAG setup is already running") from exc
-    _SETUP_LOCK_HANDLE = handle
-    atexit.register(_release_setup_lock)
-
-
-def _release_setup_lock() -> None:
-    global _SETUP_LOCK_HANDLE
-    handle = _SETUP_LOCK_HANDLE
-    if handle is None:
-        return
-    try:
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
-        _SETUP_LOCK_HANDLE = None
-
 
 
 class SetupStepError(RuntimeError):

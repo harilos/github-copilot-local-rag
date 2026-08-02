@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -56,6 +58,9 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (payload / "rag" / "query" / "portable_db_smoke.py").write_text(
         "raise SystemExit\n", encoding="utf-8"
     )
+    (payload / "rag" / "query" / "portable_runtime.py").write_text(
+        "raise SystemExit\n", encoding="utf-8"
+    )
 
     _write_pe(runtime / "Scripts" / "python.exe")
     _write_pe(runtime / "python313.dll")
@@ -76,9 +81,26 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     for name in database_names:
         database = dbs / name
         database.mkdir()
-        (database / "catalog.sqlite").write_bytes(("db:" + name).encode())
+        connection = sqlite3.connect(database / "catalog.sqlite")
+        try:
+            connection.execute("CREATE TABLE fixture (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO fixture VALUES (?)", (name,))
+            connection.commit()
+        finally:
+            connection.close()
+        (database / "VERSION.json").write_text(
+            '{"schema_version":"1"}\n', encoding="utf-8"
+        )
+        (database / "db.json").write_text(
+            '{"name":"' + name + '"}\n', encoding="utf-8"
+        )
         (database / "index").mkdir()
         (database / "index" / "data.bin").write_bytes(b"index")
+        for admin in ("data", "logs", "sources"):
+            (database / admin).mkdir()
+            (database / admin / "credentials.json").write_text(
+                '{"token":"must-not-ship"}\n', encoding="utf-8"
+            )
 
     return payload, runtime, model, dbs, output
 
@@ -133,12 +155,25 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     prefix + ".copilot/rag/dbs/alpha-rag/catalog.sqlite",
                     names,
                 )
+                for admin in ("data", "logs", "sources"):
+                    self.assertFalse(
+                        any(
+                            name.startswith(
+                                prefix
+                                + ".copilot/rag/dbs/alpha-rag/"
+                                + admin
+                                + "/"
+                            )
+                            for name in names
+                        )
+                    )
                 for retired in (
                     "PACKAGE-MANIFEST.json",
                     "SHA256SUMS",
                     ".copilot/rag/query/.packaged-runtime.json",
                     ".copilot/rag/query/portable_db_install.py",
                     ".copilot/rag/query/portable_db_smoke.py",
+                    ".copilot/rag/query/portable_runtime.py",
                     ".copilot/rag/query/.rag-deps-installed",
                     ".copilot/rag/config/network.json",
                 ):
@@ -160,6 +195,18 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("Assert-Amd64PortableRuntime", installer)
                 self.assertIn("-ReplaceExistingDatabases", installer)
                 self.assertIn("[System.IO.Directory]::Move", installer)
+                self.assertLess(
+                    installer.index(
+                        "[System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)"
+                    ),
+                    installer.index("$PayloadRoot ="),
+                )
+                self.assertGreater(
+                    installer.index(
+                        "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
+                    ),
+                    installer.index("if ($ConfigureVSCodeAutoApprove)"),
+                )
 
     def test_builds_zero_one_two_and_five_database_packages(self) -> None:
         for count in (0, 1, 2, 5):
@@ -231,6 +278,19 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "possible credential"):
                 build_package(request)
 
+    def test_rejects_secret_or_private_key_in_search_database_payload(self) -> None:
+        for relative, content in (
+            (Path("index/.env"), b"TOKEN=secret\n"),
+            (Path("index/innocent.bin"), b"-----BEGIN PRIVATE KEY-----\n"),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                request = _request(Path(directory))
+                target = request.databases_root / "alpha-rag" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                with self.assertRaisesRegex(ValueError, "forbidden_package_source"):
+                    build_package(request)
+
     def test_normalizes_query_root_runtime_path_entry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = _request(Path(directory), no_database=True)
@@ -261,13 +321,23 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         machine: int = 0x8664,
         database_content: bytes = b"new-db",
         product_content: str = "new\n",
+        executable_python: bool = False,
     ) -> Path:
         package = root / "package"
         internal = package / "internal"
         internal.mkdir(parents=True)
         shutil.copy2(HERE / "install-template.ps1", internal / "install.ps1")
         query = package / ".copilot" / "rag" / "query"
-        _write_pe(query / ".venv" / "Scripts" / "python.exe", machine)
+        python = query / ".venv" / "Scripts" / "python.exe"
+        if executable_python:
+            python.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(sys.executable), python)
+        else:
+            _write_pe(python, machine)
+        if not executable_python:
+            (python.parent / "python313._pth").write_text(
+                "..\\..\nimport site\n", encoding="utf-8"
+            )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
         model = (
@@ -406,6 +476,48 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             completed = self._run(package, profile)
             self.assertNotEqual(0, completed.returncode)
             self.assertFalse((profile / ".copilot").exists())
+
+    def test_logical_vscode_opt_in_failure_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            target = profile / ".copilot" / "rag"
+            runtime = target / "query" / ".venv"
+            _write_pe(runtime / "Scripts" / "python.exe")
+            (runtime / "old.txt").write_text("old-runtime\n", encoding="utf-8")
+            (target / "query" / "product.txt").write_text(
+                "old-product\n", encoding="utf-8"
+            )
+            model = target / "models" / "ruri-v3-30m-onnx-int8"
+            model.mkdir(parents=True)
+            (model / "model.onnx").write_bytes(b"old-model")
+            database = target / "dbs" / "selected-rag"
+            database.mkdir(parents=True)
+            (database / "catalog.sqlite").write_bytes(b"old-db")
+
+            package = self._package(root, executable_python=True)
+            vscode = package / ".copilot" / "rag" / "query" / "vscode_settings.py"
+            vscode.write_text(
+                "import json\n"
+                "print(json.dumps({'status': 'partial_failure'}))\n",
+                encoding="utf-8",
+            )
+            completed = self._run(
+                package,
+                profile,
+                "-ReplaceExistingDatabases",
+                "-ConfigureVSCodeAutoApprove",
+            )
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(
+                "old-runtime\n", (runtime / "old.txt").read_text(encoding="utf-8")
+            )
+            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
+            self.assertEqual(
+                "old-product\n",
+                (target / "query" / "product.txt").read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":

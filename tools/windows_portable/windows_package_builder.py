@@ -1,15 +1,47 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import shutil
 import re
 import stat
 import struct
+import sys
 import tempfile
+import types
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+
+
+SOURCE_MANAGER_ROOT = (
+    Path(__file__).resolve().parents[2] / ".copilot" / "rag" / "source_manager"
+)
+
+
+def _load_snapshot_module():
+    package_name = "_windows_portable_source_manager"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(SOURCE_MANAGER_ROOT)]
+    sys.modules[package_name] = package
+    module_name = f"{package_name}.packages"
+    spec = importlib.util.spec_from_file_location(
+        module_name, SOURCE_MANAGER_ROOT / "packages.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("database snapshot module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_SNAPSHOT_MODULE = _load_snapshot_module()
+PackageError = _SNAPSHOT_MODULE.PackageError
+stage_search_database_snapshots = (
+    _SNAPSHOT_MODULE.stage_search_database_snapshots
+)
 
 
 _DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
@@ -25,6 +57,7 @@ FORBIDDEN_NAMES = frozenset(
         ".source-connections.key",
         "windows-test-connection.local.json",
         ".packaged-runtime.json",
+        "portable_runtime.py",
         "portable_db_install.py",
         "portable_db_smoke.py",
     }
@@ -82,9 +115,14 @@ def build_package(request: BuildRequest) -> BuildResult:
         database_names, databases_root = _normalized_databases(request)
         if databases_root is not None:
             target_dbs = copilot_root / "rag" / "dbs"
-            target_dbs.mkdir(parents=True, exist_ok=True)
-            for name in database_names:
-                _copy_tree_exact(databases_root / name, target_dbs / name)
+            try:
+                stage_search_database_snapshots(
+                    databases_root,
+                    target_dbs,
+                    db_names=database_names,
+                )
+            except PackageError as exc:
+                raise ValueError(str(exc)) from exc
 
         _assert_amd64_runtime(runtime_target)
         _write_text(package_root / "install.cmd", _install_cmd())

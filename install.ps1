@@ -14,10 +14,7 @@ New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
 $QueryRoot = Join-Path $Target "rag\query"
 $RuntimePython = Join-Path $QueryRoot ".venv\Scripts\python.exe"
-$PackagedManifest = Join-Path $QueryRoot ".packaged-runtime.json"
-$ActiveMarker = Join-Path $QueryRoot ".rag-deps-installed"
 $LegacyMarker = Join-Path $QueryRoot ".venv\.rag-deps-installed"
-$ActiveBackup = $null
 $LegacyBackup = $null
 function Move-CompletionMarker {
     param([string]$Marker, [string]$Label)
@@ -58,12 +55,7 @@ function Remove-CompletionMarkerBackups {
 }
 
 try {
-if (Test-Path -LiteralPath $PackagedManifest -PathType Leaf) {
-    $ActiveBackup = Move-CompletionMarker -Marker $ActiveMarker -Label "active"
-    $LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
-} else {
-    $LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
-}
+$LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
 
 function Test-InstallPayloadExcluded {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
@@ -152,6 +144,9 @@ $RetiredFiles = @(
     "rag\migration_archive.py",
     "rag\gen_db\migrate_source_metadata.py",
     "rag\gen_db\software_rag_tool\software_rag_tool\source_metadata_migration.py",
+    "rag\query\.packaged-runtime.json",
+    "rag\query\.rag-deps-installed",
+    "rag\query\portable_runtime.py",
     "rag\query\portable_db_install.py",
     "rag\query\portable_db_smoke.py",
     "skills\local-rag-admin\SKILL.md"
@@ -173,12 +168,12 @@ if (
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
     & $RuntimePython (Join-Path $Target "rag\query\setup.py") --refresh-completion-marker --format json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("setup_required: existing RAG runtime verification failed; " + "run Local RAG setup before lookup.") }
-} elseif (($null -ne $ActiveBackup) -or ($null -ne $LegacyBackup)) {
+} elseif ($null -ne $LegacyBackup) {
     throw ("setup_required: the existing Local RAG runtime Python is missing " + "after update.")
 }
-Remove-CompletionMarkerBackups -Backups @($ActiveBackup, $LegacyBackup)
+Remove-CompletionMarkerBackups -Backups @($LegacyBackup)
 } catch {
-    Close-CompletionMarkerGate -Markers @($ActiveMarker, $LegacyMarker)
+    Close-CompletionMarkerGate -Markers @($LegacyMarker)
     throw
 }
 

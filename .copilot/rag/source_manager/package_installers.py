@@ -17,12 +17,8 @@ mkdir -p "$TARGET_DIR"
 
 QUERY_ROOT="$TARGET_DIR/rag/query"
 RUNTIME_PYTHON="$QUERY_ROOT/.venv/bin/python"
-PACKAGED_MANIFEST="$QUERY_ROOT/.packaged-runtime.json"
-ACTIVE_MARKER="$QUERY_ROOT/.rag-deps-installed"
 LEGACY_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"
-ACTIVE_BACKUP=""
 LEGACY_BACKUP=""
-ACTIVE_RESCUE=""
 LEGACY_RESCUE=""
 move_marker() {
   marker="$1"; label="$2"
@@ -30,20 +26,19 @@ move_marker() {
   backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$"; suffix=0
   while [ -e "$backup" ]; do suffix=$((suffix + 1)); backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$.$suffix"; done
   if ! mv "$marker" "$backup"; then echo "setup_required: could not close the Local RAG lookup gate before update." >&2; exit 1; fi
-  if [ "$label" = "active" ]; then ACTIVE_BACKUP="$backup"; else LEGACY_BACKUP="$backup"; fi
+  LEGACY_BACKUP="$backup"
 }
 close_markers() {
   status=$?
   trap - EXIT
   if [ "$status" -ne 0 ]; then
-    if [ -n "$ACTIVE_RESCUE" ] && [ -f "$ACTIVE_RESCUE" ] && [ ! -f "$ACTIVE_BACKUP" ]; then mv "$ACTIVE_RESCUE" "$ACTIVE_BACKUP" || true; fi
     if [ -n "$LEGACY_RESCUE" ] && [ -f "$LEGACY_RESCUE" ] && [ ! -f "$LEGACY_BACKUP" ]; then mv "$LEGACY_RESCUE" "$LEGACY_BACKUP" || true; fi
-    rm -f -- "$ACTIVE_MARKER" "$LEGACY_MARKER" || true
+    rm -f -- "$LEGACY_MARKER" || true
   fi
   exit "$status"
 }
 trap close_markers EXIT
-if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_marker "$LEGACY_MARKER" legacy; else move_marker "$LEGACY_MARKER" legacy; fi
+move_marker "$LEGACY_MARKER" legacy
 
 (
   cd "$PAYLOAD_DIR"
@@ -57,6 +52,9 @@ if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_m
 )
 
 rm -f -- \
+  "$TARGET_DIR/rag/query/.packaged-runtime.json" \
+  "$TARGET_DIR/rag/query/.rag-deps-installed" \
+  "$TARGET_DIR/rag/query/portable_runtime.py" \
   "$TARGET_DIR/rag/query/portable_db_install.py" \
   "$TARGET_DIR/rag/query/portable_db_smoke.py"
 
@@ -66,17 +64,16 @@ if [ -x "$RUNTIME_PYTHON" ]; then
     echo "setup_required: existing RAG runtime verification failed; run Local RAG setup before lookup." >&2
     exit 1
   fi
-elif [ -n "$ACTIVE_BACKUP" ] || [ -n "$LEGACY_BACKUP" ]; then
+elif [ -n "$LEGACY_BACKUP" ]; then
   echo "setup_required: the existing Local RAG runtime Python is missing after update." >&2
   exit 1
 fi
-if [ -n "$ACTIVE_BACKUP" ]; then ACTIVE_RESCUE="$ACTIVE_BACKUP.cleanup"; cp -p -- "$ACTIVE_BACKUP" "$ACTIVE_RESCUE"; fi
 if [ -n "$LEGACY_BACKUP" ]; then LEGACY_RESCUE="$LEGACY_BACKUP.cleanup"; cp -p -- "$LEGACY_BACKUP" "$LEGACY_RESCUE"; fi
-rm -f -- "$ACTIVE_BACKUP" "$LEGACY_BACKUP"
-ACTIVE_BACKUP=""; LEGACY_BACKUP=""
+rm -f -- "$LEGACY_BACKUP"
+LEGACY_BACKUP=""
 trap - EXIT
-rm -f -- "$ACTIVE_RESCUE" "$LEGACY_RESCUE" || true
-ACTIVE_RESCUE=""; LEGACY_RESCUE=""
+rm -f -- "$LEGACY_RESCUE" || true
+LEGACY_RESCUE=""
 
 echo "Copied Copilot Local RAG files to: $TARGET_DIR"
 echo "Existing files not present in this package were preserved."
@@ -100,10 +97,7 @@ New-Item -ItemType Directory -Force -Path $Target | Out-Null
 
 $QueryRoot = Join-Path $Target "rag\query"
 $RuntimePython = Join-Path $QueryRoot ".venv\Scripts\python.exe"
-$PackagedManifest = Join-Path $QueryRoot ".packaged-runtime.json"
-$ActiveMarker = Join-Path $QueryRoot ".rag-deps-installed"
 $LegacyMarker = Join-Path $QueryRoot ".venv\.rag-deps-installed"
-$ActiveBackup = $null
 $LegacyBackup = $null
 function Move-CompletionMarker {
     param([string]$Marker, [string]$Label)
@@ -144,12 +138,7 @@ function Remove-CompletionMarkerBackups {
 }
 
 try {
-if (Test-Path -LiteralPath $PackagedManifest -PathType Leaf) {
-    $ActiveBackup = Move-CompletionMarker -Marker $ActiveMarker -Label "active"
-    $LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
-} else {
-    $LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
-}
+$LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
     $PayloadRoot = [System.IO.Path]::GetFullPath($Payload)
 Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
     $Relative = $_.FullName.Substring($PayloadRoot.Length).TrimStart(
@@ -178,6 +167,9 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
 }
 
 foreach ($RelativePath in @(
+    "rag\query\.packaged-runtime.json",
+    "rag\query\.rag-deps-installed",
+    "rag\query\portable_runtime.py",
     "rag\query\portable_db_install.py",
     "rag\query\portable_db_smoke.py"
 )) {
@@ -190,12 +182,12 @@ foreach ($RelativePath in @(
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
     & $RuntimePython (Join-Path $Target "rag\query\setup.py") --refresh-completion-marker --format json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("setup_required: existing RAG runtime verification failed; " + "run Local RAG setup before lookup.") }
-} elseif (($null -ne $ActiveBackup) -or ($null -ne $LegacyBackup)) {
+} elseif ($null -ne $LegacyBackup) {
     throw ("setup_required: the existing Local RAG runtime Python is missing " + "after update.")
 }
-Remove-CompletionMarkerBackups -Backups @($ActiveBackup, $LegacyBackup)
+Remove-CompletionMarkerBackups -Backups @($LegacyBackup)
 } catch {
-    Close-CompletionMarkerGate -Markers @($ActiveMarker, $LegacyMarker)
+    Close-CompletionMarkerGate -Markers @($LegacyMarker)
     throw
 }
 

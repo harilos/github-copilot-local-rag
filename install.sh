@@ -14,12 +14,8 @@ mkdir -p "$TARGET_DIR"
 
 QUERY_ROOT="$TARGET_DIR/rag/query"
 RUNTIME_PYTHON="$QUERY_ROOT/.venv/bin/python"
-PACKAGED_MANIFEST="$QUERY_ROOT/.packaged-runtime.json"
-ACTIVE_MARKER="$QUERY_ROOT/.rag-deps-installed"
 LEGACY_MARKER="$QUERY_ROOT/.venv/.rag-deps-installed"
-ACTIVE_BACKUP=""
 LEGACY_BACKUP=""
-ACTIVE_RESCUE=""
 LEGACY_RESCUE=""
 move_marker() {
   marker="$1"; label="$2"
@@ -27,20 +23,19 @@ move_marker() {
   backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$"; suffix=0
   while [ -e "$backup" ]; do suffix=$((suffix + 1)); backup="$QUERY_ROOT/.rag-deps-installed.$label.pre-update.$$.$suffix"; done
   if ! mv "$marker" "$backup"; then echo "setup_required: could not close the Local RAG lookup gate before update." >&2; exit 1; fi
-  if [ "$label" = "active" ]; then ACTIVE_BACKUP="$backup"; else LEGACY_BACKUP="$backup"; fi
+  LEGACY_BACKUP="$backup"
 }
 close_markers() {
   status=$?
   trap - EXIT
   if [ "$status" -ne 0 ]; then
-    if [ -n "$ACTIVE_RESCUE" ] && [ -f "$ACTIVE_RESCUE" ] && [ ! -f "$ACTIVE_BACKUP" ]; then mv "$ACTIVE_RESCUE" "$ACTIVE_BACKUP" || true; fi
     if [ -n "$LEGACY_RESCUE" ] && [ -f "$LEGACY_RESCUE" ] && [ ! -f "$LEGACY_BACKUP" ]; then mv "$LEGACY_RESCUE" "$LEGACY_BACKUP" || true; fi
-    rm -f -- "$ACTIVE_MARKER" "$LEGACY_MARKER" || true
+    rm -f -- "$LEGACY_MARKER" || true
   fi
   exit "$status"
 }
 trap close_markers EXIT
-if [ -f "$PACKAGED_MANIFEST" ]; then move_marker "$ACTIVE_MARKER" active; move_marker "$LEGACY_MARKER" legacy; else move_marker "$LEGACY_MARKER" legacy; fi
+move_marker "$LEGACY_MARKER" legacy
 
 (
   cd "$PAYLOAD_DIR"
@@ -79,6 +74,9 @@ rm -f -- \
   "$TARGET_DIR/rag/migration_archive.py" \
   "$TARGET_DIR/rag/gen_db/migrate_source_metadata.py" \
   "$TARGET_DIR/rag/gen_db/software_rag_tool/software_rag_tool/source_metadata_migration.py" \
+  "$TARGET_DIR/rag/query/.packaged-runtime.json" \
+  "$TARGET_DIR/rag/query/.rag-deps-installed" \
+  "$TARGET_DIR/rag/query/portable_runtime.py" \
   "$TARGET_DIR/rag/query/portable_db_install.py" \
   "$TARGET_DIR/rag/query/portable_db_smoke.py" \
   "$TARGET_DIR/skills/local-rag-admin/SKILL.md"
@@ -90,17 +88,16 @@ if [ -x "$RUNTIME_PYTHON" ]; then
     echo "setup_required: existing RAG runtime verification failed; run Local RAG setup before lookup." >&2
     exit 1
   fi
-elif [ -n "$ACTIVE_BACKUP" ] || [ -n "$LEGACY_BACKUP" ]; then
+elif [ -n "$LEGACY_BACKUP" ]; then
   echo "setup_required: the existing Local RAG runtime Python is missing after update." >&2
   exit 1
 fi
-if [ -n "$ACTIVE_BACKUP" ]; then ACTIVE_RESCUE="$ACTIVE_BACKUP.cleanup"; cp -p -- "$ACTIVE_BACKUP" "$ACTIVE_RESCUE"; fi
 if [ -n "$LEGACY_BACKUP" ]; then LEGACY_RESCUE="$LEGACY_BACKUP.cleanup"; cp -p -- "$LEGACY_BACKUP" "$LEGACY_RESCUE"; fi
-rm -f -- "$ACTIVE_BACKUP" "$LEGACY_BACKUP"
-ACTIVE_BACKUP=""; LEGACY_BACKUP=""
+rm -f -- "$LEGACY_BACKUP"
+LEGACY_BACKUP=""
 trap - EXIT
-rm -f -- "$ACTIVE_RESCUE" "$LEGACY_RESCUE" || true
-ACTIVE_RESCUE=""; LEGACY_RESCUE=""
+rm -f -- "$LEGACY_RESCUE" || true
+LEGACY_RESCUE=""
 
 echo "Installed Copilot Local RAG files to: $TARGET_DIR"
 echo "Existing copilot-instructions.md was not overwritten by this repository."

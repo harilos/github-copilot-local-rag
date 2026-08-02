@@ -180,6 +180,7 @@ class SourcePathContractTests(unittest.TestCase):
             runtime,
         )
         self.assertFalse((QUERY_ROOT / "portable_db_smoke.py").exists())
+        self.assertFalse((QUERY_ROOT / "portable_runtime.py").exists())
 
 if __name__ == "__main__":
     unittest.main()

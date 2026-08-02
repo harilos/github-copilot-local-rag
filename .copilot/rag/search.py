@@ -20,7 +20,7 @@ from reference_contract import (  # noqa: E402
     install_result_bundle_reference_contract,
     install_search_command_reference_contract,
 )
-from portable_runtime import is_amd64_pe  # noqa: E402
+from windows_runtime import is_fixed_windows_runtime  # noqa: E402
 from setup_contract import (  # noqa: E402
     completion_contract_valid,
     completion_marker_for,
@@ -103,7 +103,10 @@ def _self_heal_lookup_gate(
     python = _venv_python()
     if not python.is_file():
         return False
-    if sys.platform.startswith("win") and is_amd64_pe(python):
+    if (
+        sys.platform.startswith("win")
+        and is_fixed_windows_runtime(_QUERY_ROOT)
+    ):
         return False
 
     environment = os.environ.copy()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
 import importlib.metadata
 import json
@@ -42,19 +41,6 @@ REQUIRED_MODEL_FILES = (
     "tokenizer_config.json",
     "MODEL_MANIFEST.json",
 )
-PACKAGED_REQUIRED_IMPORTS = {
-    "search-only": (
-        "chromadb",
-        "numpy",
-        "onnxruntime",
-        "transformers",
-        "sentencepiece",
-        "sudachipy",
-    ),
-    "admin-full": REQUIRED_IMPORTS,
-}
-
-
 def main() -> int:
     result = verify_installation()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -77,23 +63,8 @@ def verify_installation() -> dict[str, Any]:
     failed_check: str | None = None
     error_kind: str | None = None
 
-    packaged = None
     try:
-        from portable_runtime import load_and_verify_runtime, manifest_path_for
-
-        manifest_path = manifest_path_for(RAG_ROOT / "query")
-        if manifest_path.is_file():
-            packaged = load_and_verify_runtime(manifest_path)
-            runtime["packaged_runtime"] = "pass"
-            runtime["profile"] = packaged.profile
-            runtime["manifest_sha256"] = packaged.manifest_sha256
-            runtime["python_version"] = packaged.python_version
-        required_imports = (
-            PACKAGED_REQUIRED_IMPORTS[packaged.profile]
-            if packaged is not None
-            else REQUIRED_IMPORTS
-        )
-        for module_name in required_imports:
+        for module_name in REQUIRED_IMPORTS:
             importlib.import_module(module_name)
         runtime["dependencies"] = "pass"
     except Exception as exc:
@@ -103,7 +74,7 @@ def verify_installation() -> dict[str, Any]:
         return _result(runtime, [], [], warnings, failed_check, error_kind)
 
     try:
-        checked_requirements = (0 if packaged is not None else _verify_declared_requirements(
+        checked_requirements = _verify_declared_requirements(
             (
                 RAG_ROOT / "query" / "requirements.txt",
                 RAG_ROOT
@@ -111,11 +82,9 @@ def verify_installation() -> dict[str, Any]:
                 / "software_rag_tool"
                 / "requirements.txt",
             )
-        ))
+        )
         runtime["requirements"] = "pass"
         runtime["requirements_checked"] = checked_requirements
-        if packaged is not None:
-            runtime["requirements_fingerprint"] = packaged.dependency_lock_sha256
     except Exception as exc:
         runtime["requirements"] = "fail"
         failed_check = "requirements"
@@ -123,7 +92,7 @@ def verify_installation() -> dict[str, Any]:
         return _result(runtime, [], [], warnings, failed_check, error_kind)
 
     try:
-        pip_check = (subprocess.CompletedProcess([], 0, "", "") if packaged is not None else subprocess.run(
+        pip_check = subprocess.run(
             [sys.executable, "-m", "pip", "check"],
             check=False,
             capture_output=True,
@@ -132,7 +101,7 @@ def verify_installation() -> dict[str, Any]:
             errors="replace",
             env=_offline_environment(),
             timeout=30,
-        ))
+        )
         if pip_check.returncode != 0:
             raise RuntimeError(
                 _safe_message(
@@ -140,8 +109,6 @@ def verify_installation() -> dict[str, Any]:
                 )
             )
         runtime["pip_check"] = "pass"
-        if packaged is not None:
-            runtime["pip_check_mode"] = "manifest_hash_coverage"
     except Exception as exc:
         runtime["pip_check"] = "fail"
         failed_check = "pip_check"
@@ -178,14 +145,6 @@ def verify_installation() -> dict[str, Any]:
         model_manifest = _read_json_object(
             model_dir / "MODEL_MANIFEST.json"
         )
-        if packaged is not None:
-            actual_model_fingerprint = hashlib.sha256(
-                (model_dir / "MODEL_MANIFEST.json").read_bytes()
-            ).hexdigest()
-            if actual_model_fingerprint != packaged.model_fingerprint:
-                raise ValueError("packaged model fingerprint mismatch")
-            runtime["model_fingerprint"] = actual_model_fingerprint
-
         if model_manifest.get("schema") != "local-rag.onnx-model.v1":
             raise ValueError("unsupported model manifest schema")
         expected_fingerprint = embedding_fingerprint()

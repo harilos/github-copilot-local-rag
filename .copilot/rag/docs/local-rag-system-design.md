@@ -277,6 +277,9 @@ inventory Python distributions, inspect database internals, run `list_dbs`, run
 a search smoke test, or refresh a completion marker. Runtime, model, selected
 same-name databases, and product-file updates are staged and rolled back
 together. Unselected databases and machine-local configuration are preserved.
+Each selected database is copied through the canonical search-only snapshot:
+search metadata, a SQLite backup, and `index/` are included, while `data/`,
+`logs/`, `sources/`, credentials, and private-key material are not shipped.
 Optional scoped VS Code terminal rules are changed only when explicitly
 requested.
 

@@ -159,19 +159,28 @@ function Assert-Amd64PortableRuntime {
 function Test-ProtectedRelativePath {
     param([string]$Relative)
     $Value = $Relative.Replace("/", "\")
-    if ($Value.StartsWith("rag\dbs\", [StringComparison]::OrdinalIgnoreCase)) {
+    if (
+        $Value -ieq "rag\dbs" -or
+        $Value.StartsWith("rag\dbs\", [StringComparison]::OrdinalIgnoreCase)
+    ) {
         return $true
     }
-    if ($Value.StartsWith("rag\query\run\", [StringComparison]::OrdinalIgnoreCase)) {
+    if (
+        $Value -ieq "rag\query\run" -or
+        $Value.StartsWith("rag\query\run\", [StringComparison]::OrdinalIgnoreCase)
+    ) {
         return $true
     }
-    if ($Value.StartsWith("rag\query\.venv\", [StringComparison]::OrdinalIgnoreCase)) {
+    if (
+        $Value -ieq "rag\query\.venv" -or
+        $Value.StartsWith("rag\query\.venv\", [StringComparison]::OrdinalIgnoreCase)
+    ) {
         return $true
     }
     if ($Value.StartsWith(
         "rag\models\ruri-v3-30m-onnx-int8\",
         [StringComparison]::OrdinalIgnoreCase
-    )) {
+    ) -or $Value -ieq "rag\models\ruri-v3-30m-onnx-int8") {
         return $true
     }
     if (
@@ -271,6 +280,14 @@ try {
         }
     }
 
+    # Close both the managed-setup marker gate and the fixed portable-runtime
+    # gate before changing product files or selected databases.  The staged
+    # runtime is published last so a new process cannot observe a mixed tree.
+    Assert-NoReparsePath -Path $TargetRuntime
+    if (Test-Path -LiteralPath $TargetRuntime) {
+        [System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)
+    }
+
     $PayloadRoot = [System.IO.Path]::GetFullPath($Payload)
     Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
         $Relative = $_.FullName.Substring($PayloadRoot.Length).TrimStart(
@@ -301,6 +318,7 @@ try {
     foreach ($Relative in @(
         "rag\query\.packaged-runtime.json",
         "rag\query\.rag-deps-installed",
+        "rag\query\portable_runtime.py",
         "rag\query\portable_db_install.py",
         "rag\query\portable_db_smoke.py"
     )) {
@@ -316,11 +334,6 @@ try {
     Assert-NoReparsePath -Path $TargetRuntime
     Assert-NoReparsePath -Path $TargetModel
     Assert-NoReparsePath -Path $TargetDbs
-    if (Test-Path -LiteralPath $TargetRuntime) {
-        [System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)
-    }
-    [System.IO.Directory]::Move($StageRuntime, $TargetRuntime)
-    $RuntimePublished = $true
     if (Test-Path -LiteralPath $TargetModel) {
         [System.IO.Directory]::Move($TargetModel, $BackupModel)
     }
@@ -346,7 +359,7 @@ try {
     }
 
     if ($ConfigureVSCodeAutoApprove) {
-        $VscodeText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
+        $VscodeText = (& (Join-Path $StageRuntime "Scripts\python.exe") -B (
             Join-Path $TargetQuery "vscode_settings.py"
         ) --copilot-home $Target | Out-String)
         if ($LASTEXITCODE -ne 0) {
@@ -355,7 +368,26 @@ try {
                 $VscodeText.Trim()
             )
         }
+        try {
+            $VscodeResult = $VscodeText | ConvertFrom-Json
+        } catch {
+            throw (
+                "explicit VS Code auto-approve opt-in returned invalid JSON: " +
+                $VscodeText.Trim()
+            )
+        }
+        if (@("configured_on_disk", "already_configured") -inotcontains (
+            [string]$VscodeResult.status
+        )) {
+            throw (
+                "explicit VS Code auto-approve opt-in did not complete: " +
+                $VscodeText.Trim()
+            )
+        }
     }
+
+    [System.IO.Directory]::Move($StageRuntime, $TargetRuntime)
+    $RuntimePublished = $true
 } catch {
     foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
         $Current = Join-Path $TargetDbs $Name

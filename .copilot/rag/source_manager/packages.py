@@ -645,7 +645,13 @@ def stage_search_database_snapshots(
     db_names: Sequence[str],
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Atomically stage canonical filtered search snapshots for explicit DBs."""
+    """Atomically stage canonical filtered search snapshots for explicit DBs.
+
+    This is a copy boundary, not a package-verification boundary.  It selects
+    only the public search payload, snapshots SQLite with the backup API, and
+    rejects unsafe sources without creating a manifest, hashes, or a closed-set
+    verification artifact.
+    """
 
     root = _real_directory(dbs_root, "dbs_root")
     names = tuple(str(value) for value in db_names)
@@ -656,52 +662,53 @@ def stage_search_database_snapshots(
     parent = _real_directory(destination.parent, "database_snapshot_parent")
     if destination.parent.resolve(strict=True) != parent or destination.exists():
         raise PackageError("package_output_exists")
-    stage = Path(tempfile.mkdtemp(prefix=".local-rag-db-snapshot.", dir=str(parent)))
+    stage = Path(
+        tempfile.mkdtemp(prefix=".local-rag-db-snapshot.", dir=str(parent))
+    )
     try:
-        manifest = _stage_package(
-            stage,
-            entries,
-            kind=_DISTRIBUTION_KIND,
-            databases=databases,
-            created=_created_at(created_at),
-            tool_version="database-snapshot",
-        )
-        validate_package_tree(stage, expected_kind=_DISTRIBUTION_KIND)
-        source = stage / ".copilot" / "rag" / "dbs"
-        if names and not source.is_dir():
-            raise PackageError("package_manifest_dbs_invalid")
-        if source.is_dir():
-            os.replace(source, destination)
-        else:
-            destination.mkdir()
-        records = []
-        for database in manifest.get("dbs") or []:
-            name = str(database.get("name") or "")
-            prefix = f".copilot/rag/dbs/{name}/"
-            db_files = [
-                dict(record)
-                for record in manifest.get("files") or []
-                if str(record.get("path") or "").startswith(prefix)
-            ]
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    db_files, sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
-            ).hexdigest()
-            records.append(
-                {
-                    **dict(database),
-                    "prefix": f".copilot/rag/dbs/{name}",
-                    "file_count": len(db_files),
-                    "bytes": sum(int(item["size"]) for item in db_files),
-                    "fingerprint": fingerprint,
-                    "coverage": "closed-set",
-                }
-            )
+        source = stage / "dbs"
+        source.mkdir()
+        created = _created_at(created_at)
+        for entry in entries:
+            relative = _safe_relative(entry.destination)
+            if (
+                len(relative.parts) < 5
+                or relative.parts[:3] != (".copilot", "rag", "dbs")
+            ):
+                raise PackageError("package_database_path_invalid")
+            target = source.joinpath(*relative.parts[3:])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if entry.mode == "distribution_wrapper":
+                _atomic_bytes(
+                    target,
+                    _distribution_wrapper_bytes(
+                        entry.content_snapshot_at,
+                        packaged_at=created,
+                    ),
+                )
+            elif entry.source is None:
+                raise PackageError("package_source_missing")
+            elif entry.mode == "sqlite":
+                _backup_sqlite(
+                    entry.source,
+                    target,
+                    source_root=entry.source_root,
+                )
+            else:
+                _copy_stable_regular_file(
+                    entry.source,
+                    target,
+                    source_root=entry.source_root,
+                )
+                if entry.mode == "source_links":
+                    try:
+                        _validate_source_links_payload(target.read_bytes())
+                    except OSError as exc:
+                        raise PackageError("source_links_invalid") from exc
+        os.replace(source, destination)
+        _fsync_directory(parent)
         return {
-            "databases": records,
-            "files": [dict(value) for value in manifest.get("files") or []],
-            "total": dict(manifest.get("total") or {}),
+            "databases": [dict(value) for value in databases],
         }
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
@@ -2218,6 +2225,54 @@ def _dedupe_entries(entries: Sequence[_Entry]) -> list[_Entry]:
             raise PackageError("package_destination_collision")
         values[entry.destination] = entry
     return [values[key] for key in sorted(values)]
+
+
+def _copy_stable_regular_file(
+    source: Path,
+    destination: Path,
+    *,
+    source_root: Path | None = None,
+) -> None:
+    """Copy one safe source while detecting replacement or concurrent writes."""
+
+    before = _assert_regular_source(source, source_root=source_root)
+    temporary = destination.parent / (
+        f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with source.open("rb") as reader, os.fdopen(
+                descriptor, "wb", closefd=False
+            ) as writer:
+                shutil.copyfileobj(reader, writer, length=_BUFFER_SIZE)
+                writer.flush()
+                os.fsync(writer.fileno())
+        finally:
+            os.close(descriptor)
+        after = _assert_regular_source(source, source_root=source_root)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or temporary.stat().st_size != after.st_size
+        ):
+            raise PackageError("package_source_changed")
+        os.replace(temporary, destination)
+    except PackageError:
+        raise
+    except OSError as exc:
+        raise PackageError("package_source_unreadable") from exc
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 
 
 def _stable_read(
