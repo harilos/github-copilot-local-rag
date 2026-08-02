@@ -18,6 +18,7 @@ TOOL_ROOT = GEN_DB_ROOT / "software_rag_tool"
 sys.path.insert(0, str(TOOL_ROOT))
 
 from software_rag_tool import incremental
+from software_rag_tool.embeddings import DocumentTokenBudget
 from software_rag_tool.ingestion_paths import resolve_ingestion_scope
 from software_rag_tool.records import build_records_for_file, iter_input_files
 
@@ -35,6 +36,29 @@ def _load_status_module():
 
 
 STATUS = _load_status_module()
+
+
+class _CharacterTokenizer:
+    def __call__(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool = True,
+        **_kwargs: object,
+    ) -> dict[str, list[int]]:
+        tokens = list(range(len(text)))
+        if add_special_tokens:
+            tokens = [10_001, *tokens, 10_002]
+        return {"input_ids": tokens}
+
+
+_TEST_TOKEN_BUDGET = DocumentTokenBudget(
+    tokenizer=_CharacterTokenizer(),
+    document_prefix="doc: ",
+    tokenizer_name="explicit-character-test-double",
+    target_tokens=320,
+    max_tokens=384,
+)
 
 
 class IngestionScopePathTests(unittest.TestCase):
@@ -108,12 +132,14 @@ class IngestionScopePathTests(unittest.TestCase):
             self.file26,
             source_id="project",
             ingestion_scope=parent,
+            document_token_budget=_TEST_TOKEN_BUDGET,
         )
         child_records = build_records_for_file(
             self.root,
             self.file26,
             source_id="project",
             ingestion_scope=child,
+            document_token_budget=_TEST_TOKEN_BUDGET,
         )
         self.assertEqual(
             parent_records[0]["doc_id"],
@@ -131,6 +157,7 @@ class IngestionScopePathTests(unittest.TestCase):
             self.file26,
             source_id="project",
             ingestion_scope=scope,
+            document_token_budget=_TEST_TOKEN_BUDGET,
         )[0]
         stored_path = "プロジェクト資料/plans/FY26/Design Report.md"
         content_hash = record["metadata"]["content_hash"]
