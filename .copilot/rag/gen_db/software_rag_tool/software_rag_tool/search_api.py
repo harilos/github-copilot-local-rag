@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -21,9 +22,11 @@ from .search_request import normalize_search_request
 from .source_paths import SourcePathError, canonical_stored_path
 from .token_budget import conservative_token_count, truncate_to_token_limit
 from .tokenize import canonicalize, extract_anchors, identifier_match_keys
+from .tokenize import LexicalTokenizerError
 
 
 _REGISTRY: DbRegistry | None = None
+_LOGGER = logging.getLogger(__name__)
 RETRIEVAL_MODES = {"hybrid", "lexical", "dense"}
 COMPACT_BACKGROUND_LIMIT = 2
 COMPACT_RELATED_LIMIT = 2
@@ -139,8 +142,10 @@ def run_search_payload(
         deadline_monotonic=deadline_monotonic,
         dense_runtime_ready=dense_runtime_ready,
         dense_failure_known=_dense_lane_failed(payload),
+        lexical_failure_known=_lexical_lane_failed(payload),
     )
     _apply_dense_lane_outcome(payload, retrieval_mode=mode)
+    _apply_lexical_lane_outcome(payload, retrieval_mode=mode)
     return _finalize_search_payload(
         payload,
         store=store,
@@ -241,8 +246,10 @@ def run_adaptive_search_payload(
             "dense_ran": bool(route.get("dense_used")),
         },
         dense_failure_known=_dense_lane_failed(payload),
+        lexical_failure_known=_lexical_lane_failed(payload),
     )
     _apply_dense_lane_outcome(payload, retrieval_mode="hybrid")
+    _apply_lexical_lane_outcome(payload, retrieval_mode="hybrid")
     return _finalize_search_payload(
         payload,
         store=store,
@@ -266,15 +273,18 @@ def try_cold_lexical_fast_path(
     load_env()
     name = require_db_name(db_name)
     store = registry().get(name)
-    rows = cold_lexical_fast_path(
-        question,
-        top_k=top_k,
-        source=source,
-        budget_tokens=budget_tokens,
-        explain=explain,
-        db_scope_confirmed=True,
-        backend=store,
-    )
+    try:
+        rows = cold_lexical_fast_path(
+            question,
+            top_k=top_k,
+            source=source,
+            budget_tokens=budget_tokens,
+            explain=explain,
+            db_scope_confirmed=True,
+            backend=store,
+        )
+    except LexicalTokenizerError:
+        return None
     if rows is None:
         if not identifier_diagnostics:
             return None
@@ -522,6 +532,38 @@ def _apply_dense_lane_outcome(
         )
 
 
+def _lexical_lane_failed(payload: dict[str, Any]) -> bool:
+    lexical = (payload.get("lane_health") or {}).get("lexical") or {}
+    return bool(lexical.get("error")) or (
+        bool(lexical.get("attempted"))
+        and not bool(lexical.get("succeeded"))
+    )
+
+
+def _apply_lexical_lane_outcome(
+    payload: dict[str, Any],
+    *,
+    retrieval_mode: str,
+) -> None:
+    if not _lexical_lane_failed(payload):
+        return
+    lexical = (payload.get("lane_health") or {}).get("lexical") or {}
+    error_kind = str(lexical.get("error") or "Error")
+    warnings = list(payload.get("warnings") or [])
+    warnings.append(f"lexical_search_unavailable:{error_kind}")
+    payload["warnings"] = sorted(set(warnings))
+    payload.pop("legacy_status", None)
+    if retrieval_mode == "lexical":
+        payload["status"] = "error"
+        payload["answerability"] = "none"
+        payload["error"] = "lexical_search_unavailable"
+    else:
+        payload["status"] = "partial"
+        payload["answerability"] = (
+            "partial" if payload.get("evidence") else "none"
+        )
+
+
 def _add_discovery_lane(
     payload: dict[str, Any],
     store: Any,
@@ -533,6 +575,7 @@ def _add_discovery_lane(
     deadline_monotonic: float | None = None,
     dense_runtime_ready: bool = False,
     dense_failure_known: bool = False,
+    lexical_failure_known: bool = False,
 ) -> None:
     """Build a recall-first document lane independently from evidence packing."""
     question = str(request["original_question"])
@@ -616,26 +659,27 @@ def _add_discovery_lane(
             dense_used = True
 
     lexical_queries: list[tuple[str, str, float]] = []
-    if not precomputed:
+    if not precomputed and not lexical_failure_known:
         lexical_queries.append((question, original_label, 1.0))
-    for facet_index, facet in enumerate(request.get("facets") or []):
-        query = str(facet.get("query") or "")
-        if query and query != question:
-            lexical_queries.append(
-                (
-                    query,
-                    query[:100],
-                    0.85
-                    * _answer_goal_facet_factor(
-                        answer_goal,
-                        kind=str(facet.get("kind") or "semantic"),
-                        index=facet_index,
-                    ),
+    if not lexical_failure_known:
+        for facet_index, facet in enumerate(request.get("facets") or []):
+            query = str(facet.get("query") or "")
+            if query and query != question:
+                lexical_queries.append(
+                    (
+                        query,
+                        query[:100],
+                        0.85
+                        * _answer_goal_facet_factor(
+                            answer_goal,
+                            kind=str(facet.get("kind") or "semantic"),
+                            index=facet_index,
+                        ),
+                    )
                 )
-            )
-    for entity in request.get("entities") or []:
-        if entity and entity != question:
-            lexical_queries.append((entity, str(entity)[:100], 0.65))
+        for entity in request.get("entities") or []:
+            if entity and entity != question:
+                lexical_queries.append((entity, str(entity)[:100], 0.65))
     for query, label, factor in lexical_queries:
         if (
             deadline_monotonic is not None
@@ -666,6 +710,21 @@ def _add_discovery_lane(
                 facet=label,
                 weight=0.7 * factor,
             )
+        except LexicalTokenizerError as exc:
+            _LOGGER.debug(
+                "Lexical tokenizer discovery lane failed",
+                exc_info=exc,
+            )
+            lane_health = payload.setdefault("lane_health", {})
+            lane_health["lexical"] = {
+                "attempted": True,
+                "succeeded": False,
+                "error": type(exc).__name__,
+            }
+            discovery_warnings.append(
+                f"lexical_search_unavailable:{type(exc).__name__}"
+            )
+            break
         except Exception as exc:
             discovery_warnings.append(
                 f"discovery lexical unavailable: {type(exc).__name__}"

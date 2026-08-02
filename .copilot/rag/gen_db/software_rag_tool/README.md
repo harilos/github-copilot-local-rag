@@ -75,6 +75,14 @@ re-ADD/rebuild because the tokenizer participates in chunk identity. Changing
 only the catalog schema can be handled by rebuilding the lexical catalog from
 clean JSONL. Older catalog schemas are not migrated in place.
 
+Lexical indexing requires Sudachi with the core dictionary by default. Its
+implementation, dictionary version, split mode, and term-occurrence policy are
+fingerprinted in both the manifest and catalog. Initialization or runtime
+fingerprint mismatch fails closed. `LOCAL_RAG_LEXICAL_TOKENIZER=fallback` is
+available only as an explicit build mode; a fallback-built DB can be queried
+only with the same fallback fingerprint and never silently substitutes for a
+Sudachi-built index.
+
 Prepare the default ONNX INT8 model before dense indexing/search:
 
 ```bash

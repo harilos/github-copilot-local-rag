@@ -20,6 +20,7 @@ from . import catalog
 from .dbs import collection_name_for_db, read_db_config, read_db_version, read_profile_hint, require_db_name
 from .embeddings import embedding_fingerprint, get_embedder
 from .manifest import ConfigMismatchError, read_manifest, validate_embedding_manifest
+from .tokenize import TokenizerFingerprintError, validate_tokenizer_fingerprint
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class DbStore:
 
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
+        self._validate_lexical_tokenizer()
         return catalog.bm25_search(
             question,
             top_k=top_k,
@@ -129,6 +131,7 @@ class DbStore:
 
     def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
+        self._validate_lexical_tokenizer()
         return catalog.anchor_lexical_search(
             question,
             top_k=top_k,
@@ -139,6 +142,7 @@ class DbStore:
 
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
         self._last_used_at = time.monotonic()
+        self._validate_lexical_tokenizer()
         return catalog.metadata_search(
             question,
             top_k=top_k,
@@ -174,6 +178,20 @@ class DbStore:
                 connection.execute("PRAGMA foreign_keys=ON")
                 self._catalog_connection = connection
             return self._catalog_connection
+
+    def _validate_lexical_tokenizer(self) -> None:
+        runtime = validate_tokenizer_fingerprint(
+            self.context.manifest.get("tokenizer")
+        )
+        connection = self._get_catalog_connection()
+        row = connection.execute(
+            "SELECT value FROM database_meta WHERE key = 'tokenizer'"
+        ).fetchone()
+        catalog_fingerprint = str(row[0]) if row else ""
+        if catalog_fingerprint != runtime:
+            raise TokenizerFingerprintError(
+                "lexical_catalog_tokenizer_fingerprint_mismatch"
+            )
 
     def close(self) -> None:
         with self._catalog_lock:

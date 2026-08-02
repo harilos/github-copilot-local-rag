@@ -31,6 +31,7 @@ REQUIRED_IMPORTS = (
     "optimum.onnxruntime",
     "sentencepiece",
     "sudachipy",
+    "sudachidict_core",
     "pypdf",
     "docx",
     "pptx",
@@ -50,6 +51,7 @@ PACKAGED_REQUIRED_IMPORTS = {
         "transformers",
         "sentencepiece",
         "sudachipy",
+        "sudachidict_core",
     ),
     "admin-full": REQUIRED_IMPORTS,
 }
@@ -65,6 +67,7 @@ def verify_installation() -> dict[str, Any]:
     runtime: dict[str, Any] = {
         "venv": "pass",
         "dependencies": "pending",
+        "lexical_tokenizer": "pending",
         "requirements": "pending",
         "pip_check": "pending",
         "model_files": "pending",
@@ -95,9 +98,14 @@ def verify_installation() -> dict[str, Any]:
         )
         for module_name in required_imports:
             importlib.import_module(module_name)
+        from software_rag_tool.tokenize import tokenizer_runtime_descriptor
+
+        runtime["lexical_tokenizer_config"] = tokenizer_runtime_descriptor()
+        runtime["lexical_tokenizer"] = "pass"
         runtime["dependencies"] = "pass"
     except Exception as exc:
         runtime["dependencies"] = "fail"
+        runtime["lexical_tokenizer"] = "fail"
         failed_check = "dependencies"
         error_kind = type(exc).__name__
         return _result(runtime, [], [], warnings, failed_check, error_kind)

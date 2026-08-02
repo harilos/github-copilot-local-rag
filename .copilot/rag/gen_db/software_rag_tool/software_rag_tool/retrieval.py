@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Any, Protocol
@@ -8,6 +9,7 @@ from . import catalog
 from .manifest import ConfigMismatchError
 from .token_budget import conservative_token_count, truncate_to_token_limit
 from .tokenize import (
+    LexicalTokenizerError,
     canonicalize,
     extract_anchors,
     identifier_match_keys,
@@ -28,6 +30,7 @@ DEFAULT_PRIMARY_PROTECTED_COUNT = 3
 DEFAULT_PRIMARY_BUDGET_RATIO = 0.75
 DEFAULT_CONTEXT_MAX_CHARS = 280
 DEFAULT_CONTEXT_TOKEN_BUDGET = 240
+_LOGGER = logging.getLogger(__name__)
 _GENERIC_IDENTIFIER_LOOKUP_TERMS = {
     "about",
     "detail",
@@ -187,9 +190,16 @@ def hybrid_query_with_health(
     raw_exact_complete = False
     selected_exact_document = ""
     anchor_ids: list[str] = []
+    lexical_health: dict[str, Any] | None = None
     if use_lexical:
         try:
-            raw_exact_rows, lexical_rows, metadata_rows, raw_exact_complete = _lexical_candidates(
+            (
+                raw_exact_rows,
+                lexical_rows,
+                metadata_rows,
+                raw_exact_complete,
+                lexical_health,
+            ) = _lexical_candidates_with_health(
                 question,
                 source=source,
                 backend=backend,
@@ -204,7 +214,15 @@ def hybrid_query_with_health(
             )
             lexical_rows = _without_test_fixtures(lexical_rows)
             metadata_rows = _without_test_fixtures(metadata_rows)
-            if use_dense and not _has_strong_exact_anchor(question, exact_rows):
+            if lexical_health is not None:
+                warnings.append(
+                    f"lexical_search_unavailable:{lexical_health['error']}"
+                )
+            if (
+                lexical_health is None
+                and use_dense
+                and not _has_strong_exact_anchor(question, exact_rows)
+            ):
                 anchor_rows = _anchor_candidates(question, source=source, backend=backend)
                 lexical_rows, anchor_ids = _merge_anchor_rows(lexical_rows, anchor_rows)
             family_rankings.append(("lexical", 1.1, lexical_rows))
@@ -260,7 +278,10 @@ def hybrid_query_with_health(
         else:
             row.pop("debug", None)
             row.pop("score", None)
-    return rows, {"dense": dense_health}
+    lane_health = {"dense": dense_health}
+    if use_lexical and lexical_health is not None:
+        lane_health["lexical"] = lexical_health
+    return rows, lane_health
 
 
 def adaptive_hybrid_query(
@@ -284,7 +305,13 @@ def adaptive_hybrid_query(
     """
     backend = backend or _GlobalBackend()
     dense_k = fetch_k or max(DEFAULT_DENSE_K, top_k * 4)
-    raw_exact_rows, lexical_rows, metadata_rows, raw_exact_complete = _lexical_candidates(
+    (
+        raw_exact_rows,
+        lexical_rows,
+        metadata_rows,
+        raw_exact_complete,
+        lexical_health,
+    ) = _lexical_candidates_with_health(
         question,
         source=source,
         backend=backend,
@@ -292,7 +319,11 @@ def adaptive_hybrid_query(
     raw_exact_rows = _without_test_fixtures(raw_exact_rows)
     lexical_rows = _without_test_fixtures(lexical_rows)
     metadata_rows = _without_test_fixtures(metadata_rows)
-    anchor_rows = _anchor_candidates(question, source=source, backend=backend)
+    anchor_rows = (
+        []
+        if lexical_health is not None
+        else _anchor_candidates(question, source=source, backend=backend)
+    )
     verified_exact_rows = _matching_strong_exact_rows(question, raw_exact_rows)
     selected_exact_document = _mark_exact_evidence_eligibility(
         question,
@@ -363,6 +394,10 @@ def adaptive_hybrid_query(
     dense_succeeded = False
     dense_error: str | None = None
     warnings: list[str] = []
+    if lexical_health is not None:
+        warnings.append(
+            f"lexical_search_unavailable:{lexical_health['error']}"
+        )
     if dense_attempted:
         try:
             dense_rows = _without_test_fixtures(
@@ -472,7 +507,8 @@ def adaptive_hybrid_query(
                 "attempted": dense_attempted,
                 "succeeded": dense_succeeded,
                 "error": dense_error,
-            }
+            },
+            **({"lexical": lexical_health} if lexical_health is not None else {}),
         },
         "certificate": certificate,
         "raw_exact_rows": raw_exact_rows,
@@ -627,6 +663,61 @@ def _lexical_candidates(
     lexical_rows = backend.bm25_search(question, top_k=DEFAULT_LEXICAL_K, source=source)
     metadata_rows = backend.metadata_search(question, top_k=DEFAULT_METADATA_K, source=source)
     return exact_rows, lexical_rows, metadata_rows, exact_result_set_complete
+
+
+def _lexical_candidates_with_health(
+    question: str,
+    *,
+    source: str,
+    backend: SearchBackend,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    bool,
+    dict[str, Any] | None,
+]:
+    exact_rows_with_sentinel = backend.exact_search(
+        question,
+        top_k=DEFAULT_EXACT_K + 1,
+        source=source,
+    )
+    exact_result_set_complete = len(exact_rows_with_sentinel) <= DEFAULT_EXACT_K
+    exact_rows = exact_rows_with_sentinel[:DEFAULT_EXACT_K]
+    try:
+        lexical_rows = backend.bm25_search(
+            question,
+            top_k=DEFAULT_LEXICAL_K,
+            source=source,
+        )
+        metadata_rows = backend.metadata_search(
+            question,
+            top_k=DEFAULT_METADATA_K,
+            source=source,
+        )
+    except LexicalTokenizerError as exc:
+        _LOGGER.debug(
+            "Lexical tokenizer lane failed",
+            exc_info=exc,
+        )
+        return (
+            exact_rows,
+            [],
+            [],
+            exact_result_set_complete,
+            {
+                "attempted": True,
+                "succeeded": False,
+                "error": type(exc).__name__,
+            },
+        )
+    return (
+        exact_rows,
+        lexical_rows,
+        metadata_rows,
+        exact_result_set_complete,
+        None,
+    )
 
 
 def _weighted_rrf(families: list[tuple[str, float, list[dict[str, Any]]]]) -> dict[str, dict[str, Any]]:

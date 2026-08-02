@@ -7,7 +7,13 @@ from typing import Any
 
 from .embeddings import embedding_fingerprint
 from .paths import default_collection_name, index_dir, output_root
-from .tokenize import tokenizer_fingerprint
+from .tokenize import (
+    TokenizerFingerprintError,
+    require_index_tokenizer,
+    tokenizer_fingerprint,
+    tokenizer_runtime_descriptor,
+    validate_tokenizer_fingerprint,
+)
 from .chunking import TOKEN_SAFE_CHUNKER_VERSION
 
 
@@ -35,6 +41,7 @@ def build_manifest(
         "chunker": chunker_config or {"version": TOKEN_SAFE_CHUNKER_VERSION},
         "catalog_schema_version": 2,
         "tokenizer": tokenizer_fingerprint(),
+        "tokenizer_config": tokenizer_runtime_descriptor(),
         "retrieval": "hybrid-rrf-v1",
         **embedding,
     }
@@ -64,6 +71,33 @@ def read_manifest(path: Path | None = None) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def validate_existing_index_tokenizer() -> str:
+    """Validate an existing lexical index without mutating it."""
+    runtime = require_index_tokenizer()
+    payload = read_manifest()
+    from .catalog import connect_readonly
+    from .paths import catalog_path
+
+    path = catalog_path()
+    if payload:
+        validate_tokenizer_fingerprint(payload.get("tokenizer"))
+    elif path.is_file():
+        raise TokenizerFingerprintError(
+            "lexical_manifest_tokenizer_fingerprint_missing"
+        )
+    if path.is_file():
+        with connect_readonly(path) as connection:
+            row = connection.execute(
+                "SELECT value FROM database_meta WHERE key = 'tokenizer'"
+            ).fetchone()
+        stored = str(row[0]) if row else ""
+        if stored != runtime:
+            raise TokenizerFingerprintError(
+                "lexical_catalog_tokenizer_fingerprint_mismatch"
+            )
+    return runtime
 
 
 def validate_embedding_manifest(manifest: dict[str, Any] | None = None, *, collection: str | None = None) -> None:

@@ -25,6 +25,8 @@ from .tokenize import (
     tokenizer_fingerprint,
     tokenize_for_fts,
     tokens_for_fts,
+    require_index_tokenizer,
+    TokenizerFingerprintError,
 )
 
 
@@ -136,6 +138,13 @@ def init_catalog(conn: sqlite3.Connection | None = None) -> None:
             _drop_catalog_objects(conn)
         elif _table_exists(conn, "chunk") and not _column_exists(conn, "chunk", "chunk_pk"):
             _drop_catalog_objects(conn)
+        elif _table_exists(conn, "chunk"):
+            stored_tokenizer = _get_meta(conn, "tokenizer")
+            current_tokenizer = tokenizer_fingerprint()
+            if stored_tokenizer != current_tokenizer:
+                raise TokenizerFingerprintError(
+                    "lexical_catalog_tokenizer_fingerprint_mismatch"
+                )
 
         conn.executescript(
             """
@@ -272,6 +281,7 @@ def reset_catalog(path: Path | None = None) -> None:
 def upsert_records(records: list[dict[str, Any]]) -> int:
     if not records:
         return 0
+    require_index_tokenizer()
     with connect() as conn:
         ids = [str(record["id"]) for record in records]
         _delete_chunks(conn, ids)

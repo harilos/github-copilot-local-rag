@@ -27,6 +27,7 @@ from software_rag_tool.retrieval import (
     hybrid_query_with_health,
 )
 from software_rag_tool import search_api
+from software_rag_tool.tokenize import TokenizerFingerprintError
 from software_rag_tool.search_api import (
     compact_search_contract,
     json_payload,
@@ -156,6 +157,19 @@ class DenseThenFailBackend(FakeBackend):
         if self.calls["dense"] > 1:
             raise RuntimeError("private discovery details")
         return list(self.dense_rows)
+
+
+class TokenizerFailingBackend(FakeBackend):
+    def bm25_search(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        source: str = "any",
+    ) -> list[dict[str, Any]]:
+        del question, top_k, source
+        self.calls["lexical"] += 1
+        raise TokenizerFingerprintError("private runtime fingerprint details")
 
 
 class DenseLaneHealthContractTests(unittest.TestCase):
@@ -340,6 +354,98 @@ class DenseLaneHealthContractTests(unittest.TestCase):
             }
         )
         self.assertEqual(health, compact["lane_health"])
+
+
+class LexicalTokenizerHealthContractTests(unittest.TestCase):
+    def test_hybrid_keeps_dense_and_exact_results_with_public_partial_health(self) -> None:
+        backend = TokenizerFailingBackend()
+        exact = result_row("exact", "A2L direct evidence", signals=["exact"])
+        exact["debug"] = {"exact_match": {"matched_terms": ["A2L"]}}
+        backend.exact_rows = [exact]
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="A2Lについて教えて",
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertTrue(payload["dense_used"])
+        self.assertIn("A2L", str(payload["evidence"]))
+        self.assertEqual(
+            {
+                "attempted": True,
+                "succeeded": False,
+                "error": "TokenizerFingerprintError",
+            },
+            payload["lane_health"]["lexical"],
+        )
+        self.assertIn(
+            "lexical_search_unavailable:TokenizerFingerprintError",
+            payload["warnings"],
+        )
+        self.assertNotIn("private runtime", str(payload))
+        self.assertEqual(1, backend.calls["lexical"])
+        self.assertEqual(0, backend.calls["metadata"])
+        self.assertEqual(0, backend.calls["anchor"])
+
+    def test_lexical_only_tokenizer_failure_is_explicit_error(self) -> None:
+        backend = TokenizerFailingBackend()
+        backend.exact_rows = []
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="ordinary lexical query",
+                top_k=2,
+                retrieval_mode="lexical",
+                explain=False,
+                identifier_diagnostics=False,
+            )
+        self.assertEqual("error", payload["status"])
+        self.assertEqual("lexical_search_unavailable", payload["error"])
+        self.assertFalse(payload["dense_used"])
+        self.assertNotEqual("no_hit", payload["status"])
+        self.assertEqual(1, backend.calls["lexical"])
+
+    def test_adaptive_tokenizer_failure_is_not_retried_by_discovery(self) -> None:
+        backend = TokenizerFailingBackend()
+        backend.exact_rows = []
+        backend.anchor_rows = []
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        request = {
+            "original_question": "How does seasonal efficiency influence demand?",
+            "answer_goal": "survey",
+            "facets": [
+                {"kind": "semantic", "query": "household demand"},
+                {"kind": "literal", "query": "seasonal efficiency"},
+            ],
+        }
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_adaptive_search_payload(
+                db_name="fixture-rag",
+                question=request["original_question"],
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+                search_request=request,
+            )
+        self.assertEqual("partial", payload["status"])
+        self.assertTrue(payload["dense_used"])
+        self.assertEqual(1, backend.calls["lexical"])
+        self.assertEqual(0, backend.calls["metadata"])
+        self.assertEqual(0, backend.calls["anchor"])
 
 
 class SourceIdentityContractTests(unittest.TestCase):

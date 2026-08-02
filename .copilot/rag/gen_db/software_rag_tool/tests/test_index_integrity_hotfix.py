@@ -8,9 +8,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from software_rag_tool import catalog, incremental, manifest, source_delete, store
+from software_rag_tool import (
+    catalog,
+    db_runtime,
+    incremental,
+    manifest,
+    source_delete,
+    store,
+    tokenize,
+)
 from software_rag_tool.embeddings import DocumentTokenBudget
 from software_rag_tool.tokenize import (
+    TokenizerFingerprintError,
+    TokenizerUnavailableError,
     tokenize_for_fts,
     tokenizer_fingerprint,
     tokens_for_fts,
@@ -210,13 +220,235 @@ class Bm25TermFrequencyContracts(unittest.TestCase):
 
     def test_manifest_and_catalog_share_term_frequency_fingerprint(self) -> None:
         fingerprint = tokenizer_fingerprint()
-        self.assertIn("-v2-tf", fingerprint)
+        self.assertIn("-v3-tf", fingerprint)
         self.assertEqual(fingerprint, manifest.build_manifest(0)["tokenizer"])
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "catalog.sqlite"
             with catalog.connect(path):
                 pass
             self.assertEqual(fingerprint, catalog.counts(path)["tokenizer"])
+
+
+class TokenizerRuntimeIntegrityContracts(unittest.TestCase):
+    def tearDown(self) -> None:
+        tokenize._sudachi.cache_clear()
+
+    def test_sudachi_import_dictionary_and_initialization_fail_closed_before_writes(
+        self,
+    ) -> None:
+        failures = (
+            ImportError("private import details"),
+            FileNotFoundError("private dictionary path"),
+            RuntimeError("private initialization details"),
+        )
+        for failure in failures:
+            with self.subTest(error=type(failure).__name__), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "input"
+                root.mkdir()
+                (root / "document.txt").write_text("body", encoding="utf-8")
+                tokenize._sudachi.cache_clear()
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {tokenize.TOKENIZER_MODE_ENV: "sudachi"},
+                    ),
+                    mock.patch.object(
+                        tokenize,
+                        "_load_sudachi",
+                        side_effect=failure,
+                    ),
+                    mock.patch.object(incremental, "reset_collection") as reset_vectors,
+                    mock.patch.object(incremental, "reset_catalog") as reset_catalog,
+                    mock.patch.object(incremental, "_save_state") as save_state,
+                    mock.patch.object(incremental, "write_progress") as progress,
+                    self.assertRaisesRegex(
+                        TokenizerUnavailableError,
+                        "sudachi_tokenizer_unavailable",
+                    ),
+                ):
+                    incremental.add_or_update_root(
+                        root=root,
+                        source_id="fixture",
+                        reset_db=True,
+                        reset_clean=True,
+                        document_token_budget=test_budget(),
+                    )
+                reset_vectors.assert_not_called()
+                reset_catalog.assert_not_called()
+                save_state.assert_not_called()
+                progress.assert_not_called()
+
+    def test_direct_catalog_build_failure_does_not_create_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            tokenize._sudachi.cache_clear()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "RAG_OUTPUT_ROOT": temporary,
+                        tokenize.TOKENIZER_MODE_ENV: "sudachi",
+                    },
+                ),
+                mock.patch.object(
+                    tokenize,
+                    "_load_sudachi",
+                    side_effect=RuntimeError("private initialization details"),
+                ),
+                self.assertRaises(TokenizerUnavailableError),
+            ):
+                catalog.upsert_records(
+                    [Bm25TermFrequencyContracts._record("record", "body")]
+                )
+            self.assertFalse((Path(temporary) / "catalog.sqlite").exists())
+
+    def test_explicit_fallback_build_and_runtime_match_only_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            chroma = root / "index" / "chroma"
+            chroma.mkdir(parents=True)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "RAG_OUTPUT_ROOT": str(root),
+                    tokenize.TOKENIZER_MODE_ENV: "fallback",
+                },
+            ):
+                catalog.upsert_records(
+                    [Bm25TermFrequencyContracts._record("record", "alpha beta")]
+                )
+                fallback_fingerprint = tokenizer_fingerprint()
+                context = db_runtime.DbContext(
+                    name="fixture-rag",
+                    root=root,
+                    catalog_path=root / "catalog.sqlite",
+                    chroma_dir=chroma,
+                    collection_name="fixture_collection",
+                    db_config={},
+                    version={},
+                    manifest={"tokenizer": fallback_fingerprint},
+                    profile_hint="",
+                    embedding_fingerprint={},
+                )
+                runtime_store = db_runtime.DbStore(context)
+                self.assertEqual(
+                    ["record"],
+                    [
+                        row["id"]
+                        for row in runtime_store.bm25_search(
+                            "alpha",
+                            top_k=1,
+                        )
+                    ],
+                )
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {tokenize.TOKENIZER_MODE_ENV: "sudachi"},
+                ),
+                self.assertRaises(TokenizerFingerprintError),
+            ):
+                runtime_store.bm25_search("alpha", top_k=1)
+            runtime_store.close()
+
+    def test_existing_index_mismatch_fails_before_incremental_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "db"
+            input_root = root / "input"
+            input_root.mkdir()
+            (input_root / "document.txt").write_text("body", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "RAG_OUTPUT_ROOT": str(output),
+                    tokenize.TOKENIZER_MODE_ENV: "fallback",
+                },
+            ):
+                catalog.upsert_records(
+                    [Bm25TermFrequencyContracts._record("old", "alpha beta")]
+                )
+                manifest.write_manifest(1)
+            tokenize._sudachi.cache_clear()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "RAG_OUTPUT_ROOT": str(output),
+                        tokenize.TOKENIZER_MODE_ENV: "sudachi",
+                    },
+                ),
+                mock.patch.object(incremental, "_load_state") as load_state,
+                mock.patch.object(incremental, "delete_ids") as delete_vectors,
+                mock.patch.object(incremental, "upsert_records") as upsert_vectors,
+                mock.patch.object(incremental, "_save_state") as save_state,
+                self.assertRaises(TokenizerFingerprintError),
+            ):
+                incremental.add_or_update_root(
+                    root=input_root,
+                    source_id="fixture",
+                    document_token_budget=test_budget(),
+                )
+            load_state.assert_not_called()
+            delete_vectors.assert_not_called()
+            upsert_vectors.assert_not_called()
+            save_state.assert_not_called()
+
+    def test_direct_catalog_mismatch_does_not_relabel_or_mix_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "RAG_OUTPUT_ROOT": str(root),
+                    tokenize.TOKENIZER_MODE_ENV: "fallback",
+                },
+            ):
+                catalog.upsert_records(
+                    [Bm25TermFrequencyContracts._record("old", "alpha beta")]
+                )
+                fallback_fingerprint = tokenizer_fingerprint()
+            tokenize._sudachi.cache_clear()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "RAG_OUTPUT_ROOT": str(root),
+                        tokenize.TOKENIZER_MODE_ENV: "sudachi",
+                    },
+                ),
+                self.assertRaises(TokenizerFingerprintError),
+            ):
+                catalog.upsert_records(
+                    [Bm25TermFrequencyContracts._record("new", "alpha beta")]
+                )
+            with catalog.connect_readonly(root / "catalog.sqlite") as connection:
+                ids = [
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT chunk_uid FROM chunk ORDER BY chunk_uid"
+                    )
+                ]
+                stored_fingerprint = str(
+                    connection.execute(
+                        "SELECT value FROM database_meta WHERE key = 'tokenizer'"
+                    ).fetchone()[0]
+                )
+            self.assertEqual(["old"], ids)
+            self.assertEqual(fallback_fingerprint, stored_fingerprint)
+
+    def test_sudachi_fingerprint_identifies_offline_dictionary_and_settings(self) -> None:
+        tokenize._sudachi.cache_clear()
+        with mock.patch.dict(
+            os.environ,
+            {tokenize.TOKENIZER_MODE_ENV: "sudachi"},
+        ):
+            descriptor = tokenize.tokenizer_runtime_descriptor()
+        self.assertEqual("sudachi", descriptor["mode"])
+        self.assertEqual("sudachipy", descriptor["implementation"])
+        self.assertEqual("A", descriptor["split_mode"])
+        self.assertNotEqual("unknown", descriptor["implementation_version"])
+        self.assertNotEqual("custom", descriptor["dictionary"])
+        self.assertNotEqual("unknown", descriptor["dictionary_version"])
 
 
 class SourceDeleteCrossStoreContracts(unittest.TestCase):

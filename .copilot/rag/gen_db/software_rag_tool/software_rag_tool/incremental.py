@@ -9,7 +9,7 @@ from typing import Any
 
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 from .jsonl import write_jsonl
-from .manifest import write_manifest
+from .manifest import validate_existing_index_tokenizer, write_manifest
 from .paths import clean_dir, logs_dir
 from .profile import update_profile_from_clean
 from .progress import emit_event, write_progress
@@ -19,6 +19,7 @@ from .config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from .embeddings import DocumentTokenBudget, get_document_token_budget
 from .store import collection_count, delete_ids, reset_collection, upsert_records
 from .records import chunker_config
+from .tokenize import require_index_tokenizer
 
 
 def add_or_update_root(
@@ -49,6 +50,12 @@ def add_or_update_root(
 
     if include_root_name_in_path is not True:
         raise ValueError("root-name inclusion is mandatory")
+    # Tokenizer availability is an index-generation precondition.  Resolve it
+    # after pure argument validation but before reset, state/progress, vector,
+    # catalog, or manifest writes.
+    require_index_tokenizer()
+    if not reset_db:
+        validate_existing_index_tokenizer()
     token_budget = document_token_budget or get_document_token_budget()
     current_chunker_config = chunker_config(
         chunk_max_chars=chunk_max_chars,

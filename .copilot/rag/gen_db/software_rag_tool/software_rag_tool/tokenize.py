@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from typing import Iterable
 
 
@@ -44,6 +46,22 @@ _STOP_TOKENS = {
     "その",
 }
 
+TOKENIZER_MODE_ENV = "LOCAL_RAG_LEXICAL_TOKENIZER"
+TOKENIZER_MODE_SUDACHI = "sudachi"
+TOKENIZER_MODE_FALLBACK = "fallback"
+
+
+class LexicalTokenizerError(RuntimeError):
+    """A bounded public error for tokenizer availability or index mismatch."""
+
+
+class TokenizerUnavailableError(LexicalTokenizerError):
+    pass
+
+
+class TokenizerFingerprintError(LexicalTokenizerError):
+    pass
+
 
 def canonicalize(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
@@ -61,7 +79,60 @@ def identifier_match_keys(text: str) -> list[str]:
 
 
 def tokenizer_fingerprint() -> str:
-    return "sudachi-a-v2-tf" if _sudachi() else "fallback-cjk-ngram-v2-tf"
+    descriptor = tokenizer_runtime_descriptor()
+    if descriptor["mode"] == TOKENIZER_MODE_FALLBACK:
+        return "fallback-cjk-ngram-v3-tf-explicit"
+    return (
+        "sudachi-a-v3-tf"
+        f":sudachipy-{descriptor['implementation_version']}"
+        f":{descriptor['dictionary']}-{descriptor['dictionary_version']}"
+    )
+
+
+def tokenizer_runtime_descriptor() -> dict[str, str]:
+    mode = tokenizer_mode()
+    if mode == TOKENIZER_MODE_FALLBACK:
+        return {
+            "mode": TOKENIZER_MODE_FALLBACK,
+            "implementation": "builtin-cjk-ngram",
+            "implementation_version": "3",
+            "dictionary": "none",
+            "dictionary_version": "none",
+            "split_mode": "n/a",
+            "occurrences": "preserved",
+        }
+    _sudachi()
+    dictionary_name, dictionary_version = _sudachi_dictionary_distribution()
+    return {
+        "mode": TOKENIZER_MODE_SUDACHI,
+        "implementation": "sudachipy",
+        "implementation_version": _distribution_version("SudachiPy"),
+        "dictionary": dictionary_name,
+        "dictionary_version": dictionary_version,
+        "split_mode": "A",
+        "occurrences": "preserved",
+    }
+
+
+def tokenizer_mode() -> str:
+    value = os.getenv(TOKENIZER_MODE_ENV, TOKENIZER_MODE_SUDACHI).strip().lower()
+    if value not in {TOKENIZER_MODE_SUDACHI, TOKENIZER_MODE_FALLBACK}:
+        raise TokenizerUnavailableError("lexical_tokenizer_mode_invalid")
+    return value
+
+
+def require_index_tokenizer() -> str:
+    """Resolve the configured index tokenizer before any persistent write."""
+    return tokenizer_fingerprint()
+
+
+def validate_tokenizer_fingerprint(index_fingerprint: object) -> str:
+    runtime = tokenizer_fingerprint()
+    if not index_fingerprint or str(index_fingerprint) != runtime:
+        raise TokenizerFingerprintError(
+            "lexical_tokenizer_fingerprint_mismatch"
+        )
+    return runtime
 
 
 def tokenize_for_fts(
@@ -84,9 +155,10 @@ def tokens_for_fts(
     max_tokens: int | None = None,
     preserve_occurrences: bool = False,
 ) -> list[str]:
-    tokens = _sudachi_tokens(text)
-    if not tokens:
+    if tokenizer_mode() == TOKENIZER_MODE_FALLBACK:
         tokens = _fallback_tokens(text)
+    else:
+        tokens = _sudachi_tokens(text)
     cleaned = list(_clean_token_stream(tokens))
     output = cleaned if preserve_occurrences else _unique(cleaned)
     if max_tokens is not None:
@@ -160,24 +232,26 @@ def phrase_queries(text: str, *, max_phrases: int = 5) -> list[str]:
 
 
 @lru_cache(maxsize=1)
-def _sudachi() -> object | None:
+def _sudachi() -> object:
     try:
-        from sudachipy import dictionary, tokenizer
+        return _load_sudachi()
+    except Exception as exc:
+        raise TokenizerUnavailableError(
+            "sudachi_tokenizer_unavailable"
+        ) from exc
 
-        return (dictionary.Dictionary().create(), tokenizer.Tokenizer.SplitMode.A)
-    except Exception:
-        try:
-            from sudachipy import Dictionary, SplitMode
 
-            return (Dictionary().create(), SplitMode.A)
-        except Exception:
-            return None
+def _load_sudachi() -> object:
+    from sudachipy import dictionary, tokenizer
+
+    return (
+        dictionary.Dictionary(dict="core").create(),
+        tokenizer.Tokenizer.SplitMode.A,
+    )
 
 
 def _sudachi_tokens(text: str) -> list[str]:
     loaded = _sudachi()
-    if not loaded:
-        return []
     tokenizer_obj, mode = loaded
     tokens: list[str] = []
     for morpheme in tokenizer_obj.tokenize(text or "", mode):  # type: ignore[attr-defined]
@@ -185,6 +259,17 @@ def _sudachi_tokens(text: str) -> list[str]:
         if normalized:
             tokens.append(normalized)
     return tokens
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _sudachi_dictionary_distribution() -> tuple[str, str]:
+    return "sudachidict-core", _distribution_version("SudachiDict-core")
 
 
 def _fallback_tokens(text: str) -> list[str]:

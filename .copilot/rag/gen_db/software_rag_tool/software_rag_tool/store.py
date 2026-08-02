@@ -16,8 +16,13 @@ except ModuleNotFoundError:
 from .catalog import reset_catalog, upsert_records as upsert_catalog_records
 from .embeddings import embedding_fingerprint, get_embedder
 from .jsonl import read_jsonl
-from .manifest import validate_embedding_manifest, write_manifest
+from .manifest import (
+    validate_embedding_manifest,
+    validate_existing_index_tokenizer,
+    write_manifest,
+)
 from .paths import chroma_dir, clean_dir, default_collection_name
+from .tokenize import require_index_tokenizer
 
 
 def collection_name() -> str:
@@ -39,6 +44,9 @@ def load_records() -> list[dict[str, Any]]:
 
 
 def build_index(reset: bool = True) -> int:
+    require_index_tokenizer()
+    if not reset:
+        validate_existing_index_tokenizer()
     records = load_records()
     if not records:
         raise RuntimeError(f"No clean jsonl records found under {clean_dir()}")
