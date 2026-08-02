@@ -18,11 +18,13 @@ from source_manager.gitlab_issues import (
     GitLabProject,
     _atomic_write_text,
     _changed_issue_iids,
+    _fetch_project_identity,
     _fetch_inventory,
     _format_timestamp,
     fetch_gitlab_issues,
     gitlab_token_env,
     gitlab_issues_updated_after,
+    parse_gitlab_project,
 )
 
 
@@ -411,6 +413,198 @@ class GitLabIssueSourceContracts(unittest.TestCase):
         self.assertEqual(2, outcome["inventory_documents"])
         for _url, headers in api.calls:
             self.assertEqual(TOKEN, headers.get("PRIVATE-TOKEN"))
+
+    def test_project_identity_accepts_dual_hostname_metadata(self) -> None:
+        cases = (
+            (
+                "P1-same-host",
+                "https://git-e.example/gitlab",
+                "group/project",
+                "https://git-e.example/gitlab/group/project",
+            ),
+            (
+                "P2-dual-host",
+                "https://git-e.example/gitlab",
+                "group/project",
+                "https://git-p.example/group/project",
+            ),
+            (
+                "P3-dual-host-subpath",
+                "https://git-e.example/internal-gitlab",
+                "group/project",
+                "https://git-p.example/external-gitlab/group/project",
+            ),
+            (
+                "P4-nested-namespace",
+                "https://git-e.example/gitlab",
+                "group/subgroup/project",
+                "https://git-p.example/group/subgroup/project",
+            ),
+        )
+        for label, gitlab_url, project_path, returned_web_url in cases:
+            with self.subTest(case=label):
+                project = parse_gitlab_project(
+                    f"{gitlab_url}/{project_path}",
+                    gitlab_url,
+                )
+                calls: list[tuple[str, dict[str, str]]] = []
+
+                def request(url, headers):
+                    calls.append((url, dict(headers)))
+                    return _json_response(
+                        {
+                            "id": PROJECT_ID,
+                            "web_url": returned_web_url,
+                            "path_with_namespace": project_path,
+                        }
+                    )
+
+                verified = _fetch_project_identity(
+                    project,
+                    request,
+                    {"PRIVATE-TOKEN": TOKEN},
+                )
+
+                self.assertEqual(
+                    (
+                        project.gitlab_url,
+                        project.api_base_url,
+                        project.project_url,
+                        project.project_path,
+                    ),
+                    (
+                        verified.gitlab_url,
+                        verified.api_base_url,
+                        verified.project_url,
+                        verified.project_path,
+                    ),
+                )
+                self.assertEqual(PROJECT_ID, verified.project_id)
+                self.assertEqual(
+                    [(project.project_api_url, {"PRIVATE-TOKEN": TOKEN})],
+                    calls,
+                )
+                self.assertNotIn("git-p.example", calls[0][0])
+
+    def test_project_identity_requires_exact_canonical_response_identity(
+        self,
+    ) -> None:
+        project = parse_gitlab_project(
+            "https://git-e.example/gitlab/group/project",
+            "https://git-e.example/gitlab",
+        )
+        invalid_paths = (
+            None,
+            "",
+            "   ",
+            123,
+            " group/project",
+            "group/project ",
+            "other/group/project",
+            "group/project-extra",
+            "group/project/child",
+            "group%2Fproject",
+            "group\\project",
+            "group/../project",
+            "group∕project",
+        )
+        for response_path in invalid_paths:
+            with self.subTest(path=response_path):
+                def request(_url, _headers):
+                    return _json_response(
+                        {
+                            "id": PROJECT_ID,
+                            "web_url": (
+                                "https://git-p.example/group/project"
+                            ),
+                            "path_with_namespace": response_path,
+                        }
+                    )
+
+                with self.assertRaisesRegex(
+                    SourceManagerError,
+                    "wrong path identity",
+                ):
+                    _fetch_project_identity(
+                        project,
+                        request,
+                        {"PRIVATE-TOKEN": TOKEN},
+                    )
+
+        pinned_project = GitLabProject(
+            gitlab_url=project.gitlab_url,
+            api_base_url=project.api_base_url,
+            project_url=project.project_url,
+            project_path=project.project_path,
+            project_id=PROJECT_ID,
+        )
+
+        def wrong_id_request(_url, _headers):
+            return _json_response(
+                {
+                    "id": PROJECT_ID + 1,
+                    "web_url": "https://git-p.example/group/project",
+                    "path_with_namespace": project.project_path,
+                }
+            )
+
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "wrong identity",
+        ):
+            _fetch_project_identity(
+                pinned_project,
+                wrong_id_request,
+                {"PRIVATE-TOKEN": TOKEN},
+            )
+
+    def test_dual_hostname_fetch_keeps_all_token_requests_on_access_host(
+        self,
+    ) -> None:
+        api = _GitLabApi(
+            {1: [_summary(1, notes=1)]},
+            discussion_pages={
+                1: {
+                    1: [
+                        _discussion(
+                            "discussion-1",
+                            1,
+                            "internal transport only",
+                            created_at="2026-07-30T01:00:00.000Z",
+                        )
+                    ]
+                }
+            },
+            project_payload={
+                "id": PROJECT_ID,
+                "web_url": (
+                    "https://gitlab-public.example.invalid/"
+                    "external/group/subgroup/project"
+                ),
+                "path_with_namespace": PROJECT_PATH,
+            },
+        )
+
+        self.fetch(api)
+
+        self.assertTrue(api.inventory_urls())
+        self.assertEqual([1], api.detail_iids())
+        self.assertTrue(
+            any(
+                urlsplit(url).path.endswith("/discussions")
+                for url in api.urls()
+            )
+        )
+        for url, headers in api.calls:
+            self.assertEqual("gitlab.example.invalid", urlsplit(url).hostname)
+            self.assertTrue(urlsplit(url).path.startswith("/gitlab/api/v4/"))
+            self.assertEqual(TOKEN, headers.get("PRIVATE-TOKEN"))
+            self.assertNotIn("gitlab-public.example.invalid", url)
+        markdown = (self.work / "issues" / "1.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(PROJECT_URL, markdown)
+        self.assertNotIn("gitlab-public.example.invalid", markdown)
 
     def test_inventory_reads_a_following_page_when_pagination_headers_are_absent(
         self,

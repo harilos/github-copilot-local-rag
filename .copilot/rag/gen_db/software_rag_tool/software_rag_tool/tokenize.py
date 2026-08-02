@@ -90,6 +90,33 @@ def extract_anchors(text: str, *, limit: int = 200) -> list[str]:
     return _unique(anchor for anchor in found if 2 <= len(anchor) <= 200)[:limit]
 
 
+def supported_unicode_filename_anchor(text: str) -> str:
+    """Return one conservative unquoted Unicode filename lookup, if any."""
+
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 200 or any(char in raw for char in "\r\n"):
+        return ""
+    normalized = canonicalize(raw)
+    if not normalized or any(char in normalized for char in "?？!！。"):
+        return ""
+    basename = normalized.replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = "." + basename.rsplit(".", 1)[-1] if "." in basename else ""
+    if suffix:
+        # The extractor registry is the source of truth and includes runtime
+        # additions installed by document_extensions.
+        from .extractors import SUPPORTED_EXTENSIONS
+
+        supported = {canonicalize(extension) for extension in SUPPORTED_EXTENSIONS}
+        if suffix in supported and any(ord(char) > 127 for char in basename):
+            return raw
+        return ""
+    if any(char.isspace() for char in normalized):
+        return ""
+    if any(ord(char) > 127 and char.isalnum() for char in normalized):
+        return raw
+    return ""
+
+
 def identifier_aliases(identifier: str) -> list[str]:
     raw = identifier.strip()
     canonical = canonicalize(raw)

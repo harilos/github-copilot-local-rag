@@ -58,19 +58,14 @@ def _fetch_project_identity(
             "GitLab project response has the wrong identity",
             stage="fetch.gitlab_issues",
         )
-    verified = parse_gitlab_api_project_web_url(
-        payload.get("web_url"), project.gitlab_url
+    _issues._validate_gitlab_api_project_identity(
+        payload,
+        project.project_path,
+        error_message=(
+            "GitLab project response has the wrong path identity"
+        ),
+        stage="fetch.gitlab_issues",
     )
-    response_path = str(payload.get("path_with_namespace") or "").strip()
-    if (
-        not response_path
-        or response_path.casefold() != project.project_path.casefold()
-        or verified.project_path.casefold() != project.project_path.casefold()
-    ):
-        raise SourceManagerError(
-            "GitLab project response has the wrong path identity",
-            stage="fetch.gitlab_issues",
-        )
     return _issues.GitLabProject(
         gitlab_url=project.gitlab_url,
         api_base_url=project.api_base_url,

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "legacy_dev_only",
+  "query_count": 32,
+  "source_artifact": "local-rag-reranker-poc/eval/questions.json",
+  "source_sha256": "sha256:3688a78ee8958a690078c4086fe17432fba2ebd150178fbaf9bda533d038a1cc",
+  "restriction": "These pre-existing PoC questions are excluded from the sealed holdout and may be used only for regression or exploratory DEV analysis."
+}

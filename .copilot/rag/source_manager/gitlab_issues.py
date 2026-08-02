@@ -190,6 +190,29 @@ def parse_gitlab_project(
     )
 
 
+def _validate_gitlab_api_project_identity(
+    payload: Mapping[str, Any],
+    expected_project_path: str,
+    *,
+    error_message: str,
+    stage: str | None = None,
+) -> None:
+    """Validate one authenticated project response without trusting its origin."""
+
+    _canonical_web_root(
+        payload.get("web_url"),
+        field="GitLab project web_url",
+    )
+    response_path = payload.get("path_with_namespace")
+    if not isinstance(response_path, str):
+        raise SourceManagerError(error_message, stage=stage)
+    if (
+        not response_path.strip()
+        or response_path.casefold() != expected_project_path.casefold()
+    ):
+        raise SourceManagerError(error_message, stage=stage)
+
+
 def gitlab_issues_updated_after(
     updated_within_days: Any,
     state: Mapping[str, Any] | None,
@@ -734,30 +757,19 @@ def _fetch_project_identity(
             "GitLab project response has the wrong identity",
             stage="fetch.gitlab_issues",
         )
-    web_url = _canonical_web_root(
-        payload.get("web_url"),
-        field="GitLab project web_url",
+    _validate_gitlab_api_project_identity(
+        payload,
+        project.project_path,
+        error_message=(
+            "GitLab project response has the wrong path identity"
+        ),
+        stage="fetch.gitlab_issues",
     )
-    verified = parse_gitlab_project(
-        web_url,
-        project.gitlab_url,
-    )
-    response_path = str(payload.get("path_with_namespace") or "").strip()
-    if (
-        not response_path
-        or response_path.casefold() != project.project_path.casefold()
-        or verified.project_path.casefold()
-        != project.project_path.casefold()
-    ):
-        raise SourceManagerError(
-            "GitLab project response has the wrong path identity",
-            stage="fetch.gitlab_issues",
-        )
     return GitLabProject(
-        gitlab_url=verified.gitlab_url,
-        api_base_url=verified.api_base_url,
-        project_url=verified.project_url,
-        project_path=verified.project_path,
+        gitlab_url=project.gitlab_url,
+        api_base_url=project.api_base_url,
+        project_url=project.project_url,
+        project_path=project.project_path,
         project_id=project_id,
     )
 

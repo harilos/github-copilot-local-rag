@@ -5,8 +5,11 @@ import json
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
-from .gitlab_issue_fixes import parse_gitlab_api_project_web_url
-from .gitlab_issues import gitlab_token_env, parse_gitlab_project
+from .gitlab_issues import (
+    _validate_gitlab_api_project_identity,
+    gitlab_token_env,
+    parse_gitlab_project,
+)
 from .gitlab_wiki import generated_gitlab_wiki_link
 from .gitlab_wiki_path_fix import install_gitlab_wiki_path_fix
 from .machine_connections import (
@@ -111,14 +114,13 @@ def _install_connection_identity_fix(
                 raise SourceManagerError(
                     "GitLab project connection check returned an invalid project ID"
                 )
-            returned = parse_gitlab_api_project_web_url(
-                payload.get("web_url"),
-                location.gitlab_url,
-            )
-            if returned.project_path != location.project_path:
-                raise SourceManagerError(
+            _validate_gitlab_api_project_identity(
+                payload,
+                location.project_path,
+                error_message=(
                     "GitLab project connection check returned a different project"
-                )
+                ),
+            )
             issues_url = (
                 f"{location.api_base_url}/projects/{int(project_id)}/issues"
                 "?scope=all&state=all&per_page=1&page=1"

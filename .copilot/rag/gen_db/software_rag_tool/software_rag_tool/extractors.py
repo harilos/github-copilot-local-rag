@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import codecs
 import platform
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from .chunking import TextSection, chunk_text, normalize_text
@@ -38,6 +40,19 @@ SUPPORTED_EXTENSIONS = {
     ".toml",
     ".ini",
 }
+
+
+class ConverterOutputDecodeError(RuntimeError):
+    """Raised when converter output is not valid supported text."""
+
+
+_CONVERTER_BOM_ENCODINGS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
 
 
 def extract_sections(path: Path, *, chunk_max_chars: int = 1400, chunk_overlap: int = 160) -> list[TextSection]:
@@ -140,12 +155,11 @@ def _convert_doc_with_textutil(path: Path) -> str:
         [exe, "-convert", "txt", "-stdout", str(path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         timeout=60,
     )
     if proc.returncode != 0:
         return ""
-    return normalize_text(proc.stdout)
+    return normalize_text(_decode_converter_output(proc.stdout))
 
 
 def _convert_with_libreoffice(path: Path) -> str:
@@ -171,7 +185,46 @@ def _convert_with_libreoffice(path: Path) -> str:
         txt_files = sorted(tmp_path.glob("*.txt"))
         if not txt_files:
             return ""
-        return normalize_text(txt_files[0].read_text(encoding="utf-8", errors="replace"))
+        return normalize_text(_decode_converter_output(txt_files[0].read_bytes()))
+
+
+def _decode_converter_output(data: bytes) -> str:
+    for bom, encoding in _CONVERTER_BOM_ENCODINGS:
+        if data.startswith(bom):
+            try:
+                text = data.decode(encoding, errors="strict")
+            except UnicodeError as exc:
+                raise ConverterOutputDecodeError(
+                    f"converter output has an invalid {encoding} byte sequence"
+                ) from exc
+            return _validate_converter_text(text)
+
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        pass
+    else:
+        return _validate_converter_text(text)
+
+    try:
+        text = data.decode("cp932", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ConverterOutputDecodeError(
+            "converter output is neither valid UTF-8 nor valid CP932"
+        ) from exc
+
+    return _validate_converter_text(text)
+
+
+def _validate_converter_text(text: str) -> str:
+    if any(
+        unicodedata.category(char) == "Cc" and char not in "\t\n\r"
+        for char in text
+    ):
+        raise ConverterOutputDecodeError(
+            "converter output contains non-text control characters"
+        )
+    return text
 
 
 def _find_libreoffice() -> str | None:
