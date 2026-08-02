@@ -8,7 +8,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
-from .chunking import TextSection, chunk_text, normalize_text
+from .chunking import DocumentTokenBudget, TextSection, chunk_text, normalize_text
 
 SUPPORTED_EXTENSIONS = {
     ".md",
@@ -55,42 +55,49 @@ _CONVERTER_BOM_ENCODINGS = (
 )
 
 
-def extract_sections(path: Path, *, chunk_max_chars: int = 1400, chunk_overlap: int = 160) -> list[TextSection]:
+def extract_sections(
+    path: Path,
+    *,
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
+    token_budget: DocumentTokenBudget | None = None,
+    embedding_path: str = "",
+) -> list[TextSection]:
     ext = path.suffix.lower()
     if ext in {".md", ".txt", ".log", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".cs", ".rb", ".php", ".sh", ".ps1", ".sql", ".json", ".yaml", ".yml", ".toml", ".ini"}:
-        return _extract_plain(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_plain(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     if ext == ".pdf":
-        return _extract_pdf(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_pdf(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     if ext == ".docx":
-        return _extract_docx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_docx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     if ext == ".pptx":
-        return _extract_pptx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_pptx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     if ext == ".xlsx":
-        return _extract_xlsx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_xlsx(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     if ext in {".doc", ".ppt"}:
-        return _extract_legacy_office(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap)
+        return _extract_legacy_office(path, chunk_max_chars=chunk_max_chars, chunk_overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     return []
 
 
-def _extract_plain(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_plain(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     text = path.read_text(encoding="utf-8", errors="replace")
-    return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
+    return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
 
 
-def _extract_pdf(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_pdf(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
     sections: list[TextSection] = []
     for i, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-        sections.extend(chunk_text(f"Page {i}", text, max_chars=chunk_max_chars, overlap=chunk_overlap))
+        sections.extend(chunk_text(f"Page {i}", text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path))
     if sections:
         return sections
     return [TextSection(title=path.name, text="")]
 
 
-def _extract_docx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_docx(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     from docx import Document
 
     doc = Document(str(path))
@@ -103,10 +110,10 @@ def _extract_docx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> li
             cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
             if cells:
                 parts.append(" | ".join(cells))
-    return chunk_text(path.name, "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap)
+    return chunk_text(path.name, "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
 
 
-def _extract_pptx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_pptx(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     from pptx import Presentation
 
     prs = Presentation(str(path))
@@ -116,11 +123,11 @@ def _extract_pptx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> li
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text.strip():
                 parts.append(shape.text)
-        sections.extend(chunk_text(f"Slide {i}", "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap))
+        sections.extend(chunk_text(f"Slide {i}", "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path))
     return sections
 
 
-def _extract_xlsx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_xlsx(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     from openpyxl import load_workbook
 
     wb = load_workbook(str(path), read_only=True, data_only=True)
@@ -131,19 +138,19 @@ def _extract_xlsx(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> li
             values = [str(v) for v in row if v is not None and str(v).strip()]
             if values:
                 rows.append("\t".join(values))
-        sections.extend(chunk_text(sheet.title, "\n".join(rows), max_chars=chunk_max_chars, overlap=chunk_overlap))
+        sections.extend(chunk_text(sheet.title, "\n".join(rows), max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path))
     return sections
 
 
-def _extract_legacy_office(path: Path, *, chunk_max_chars: int, chunk_overlap: int) -> list[TextSection]:
+def _extract_legacy_office(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
     if path.suffix.lower() == ".doc" and platform.system() == "Darwin":
         text = _convert_doc_with_textutil(path)
         if text:
-            return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
+            return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
 
     text = _convert_with_libreoffice(path)
     if text:
-        return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap)
+        return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
     raise RuntimeError(f"Failed to extract legacy Office file: {path}")
 
 

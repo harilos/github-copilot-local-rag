@@ -56,6 +56,8 @@ def install_document_extension_runtime() -> None:
         *,
         chunk_max_chars: int = 1400,
         chunk_overlap: int = 160,
+        token_budget: Any | None = None,
+        embedding_path: str = "",
     ) -> list[Any]:
         extension = Path(path).suffix.lower()
         if extension in _EXTRA_TEXT_EXTENSIONS:
@@ -63,6 +65,8 @@ def install_document_extension_runtime() -> None:
                 Path(path),
                 chunk_max_chars=chunk_max_chars,
                 chunk_overlap=chunk_overlap,
+                token_budget=token_budget,
+                embedding_path=embedding_path,
             )
         if extension == ".asta":
             return _extract_astah_project(
@@ -70,11 +74,15 @@ def install_document_extension_runtime() -> None:
                 chunk_text=extractors.chunk_text,
                 chunk_max_chars=chunk_max_chars,
                 chunk_overlap=chunk_overlap,
+                token_budget=token_budget,
+                embedding_path=embedding_path,
             )
         return original_extract(
             Path(path),
             chunk_max_chars=chunk_max_chars,
             chunk_overlap=chunk_overlap,
+            token_budget=token_budget,
+            embedding_path=embedding_path,
         )
 
     def iter_input_files(root: Path) -> Iterable[Path]:
@@ -115,6 +123,8 @@ def _extract_astah_project(
     chunk_text: Any,
     chunk_max_chars: int,
     chunk_overlap: int,
+    token_budget: Any | None = None,
+    embedding_path: str = "",
 ) -> list[Any]:
     """Extract bounded readable labels from an Astah binary project.
 
@@ -176,6 +186,8 @@ def _extract_astah_project(
         text,
         max_chars=chunk_max_chars,
         overlap=chunk_overlap,
+        token_budget=token_budget,
+        embedding_path=embedding_path,
     )
 
 
