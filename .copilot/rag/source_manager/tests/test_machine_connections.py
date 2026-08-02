@@ -326,6 +326,9 @@ class MachineConnectionStoreTests(unittest.TestCase):
                             "Group / Subgroup / Project"
                         ),
                         "web_url": project_url,
+                        "path_with_namespace": (
+                            "group/subgroup/project"
+                        ),
                     }
                 ).encode(),
                 {},
@@ -357,6 +360,146 @@ class MachineConnectionStoreTests(unittest.TestCase):
         self.assertEqual(token, calls[1][1]["PRIVATE-TOKEN"])
         self.assertNotIn(token, repr(checked))
 
+    def test_gitlab_connection_check_accepts_dual_hostname_metadata(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "P1-same-host",
+                "https://git-e.example/gitlab",
+                "group/project",
+                "https://git-e.example/gitlab/group/project",
+            ),
+            (
+                "P2-dual-host",
+                "https://git-e.example/gitlab",
+                "group/project",
+                "https://git-p.example/group/project",
+            ),
+            (
+                "P3-dual-host-subpath",
+                "https://git-e.example/internal-gitlab",
+                "group/project",
+                "https://git-p.example/external-gitlab/group/project",
+            ),
+            (
+                "P4-nested-namespace",
+                "https://git-e.example/gitlab",
+                "group/subgroup/project",
+                "https://git-p.example/group/subgroup/project",
+            ),
+        )
+        for label, gitlab_url, project_path, returned_web_url in cases:
+            with self.subTest(case=label):
+                project_url = f"{gitlab_url}/{project_path}"
+                token = f"CHECK-ONLY-{label}"
+                registration = register_gitlab_token(
+                    self.rag_root,
+                    gitlab_url,
+                    token,
+                )
+                calls: list[tuple[str, dict[str, str], float]] = []
+
+                def getter(url, headers, timeout):
+                    calls.append((url, dict(headers), float(timeout)))
+                    if "/projects/42/issues?" in url:
+                        return 200, b"[]", {}
+                    return (
+                        200,
+                        json.dumps(
+                            {
+                                "id": 42,
+                                "name": "Project",
+                                "web_url": returned_web_url,
+                                "path_with_namespace": project_path,
+                            }
+                        ).encode(),
+                        {},
+                    )
+
+                checked = check_gitlab_project(
+                    self.rag_root,
+                    gitlab_url=gitlab_url,
+                    project_url=project_url,
+                    token_env=registration.token_env,
+                    environ={},
+                    http_get=getter,
+                )
+
+                expected = gitlab_project_location(
+                    gitlab_url,
+                    project_url,
+                )
+                self.assertEqual(expected, checked.location)
+                self.assertEqual(2, len(calls))
+                for url, headers, _timeout in calls:
+                    self.assertTrue(
+                        url.startswith(f"{expected.api_base_url}/")
+                    )
+                    self.assertEqual(token, headers["PRIVATE-TOKEN"])
+                    self.assertNotIn("git-p.example", url)
+
+    def test_gitlab_connection_check_requires_exact_response_path_identity(
+        self,
+    ) -> None:
+        gitlab_url = "https://git-e.example/gitlab"
+        project_url = f"{gitlab_url}/group/project"
+        registration = register_gitlab_token(
+            self.rag_root,
+            gitlab_url,
+            "CHECK-ONLY-SECRET",
+        )
+        invalid_paths = (
+            None,
+            "",
+            "   ",
+            123,
+            "other/group/project",
+            "group/project-extra",
+            "group/project/child",
+            "group%2Fproject",
+            "group\\project",
+            "group/../project",
+            "group∕project",
+        )
+        for response_path in invalid_paths:
+            with self.subTest(path=response_path):
+                calls: list[str] = []
+
+                def getter(url, _headers, _timeout):
+                    calls.append(url)
+                    return (
+                        200,
+                        json.dumps(
+                            {
+                                "id": 42,
+                                "name": "Project",
+                                "web_url": (
+                                    "https://git-p.example/group/project"
+                                ),
+                                "path_with_namespace": response_path,
+                            }
+                        ).encode(),
+                        {},
+                    )
+
+                with self.assertRaisesRegex(
+                    SourceManagerError,
+                    "different project",
+                ):
+                    check_gitlab_project(
+                        self.rag_root,
+                        gitlab_url=gitlab_url,
+                        project_url=project_url,
+                        token_env=registration.token_env,
+                        environ={},
+                        http_get=getter,
+                    )
+                self.assertEqual(1, len(calls))
+                self.assertTrue(
+                    calls[0].startswith(f"{gitlab_url}/api/v4/")
+                )
+
     def test_gitlab_connection_check_requires_issues_api_access(
         self,
     ) -> None:
@@ -379,6 +522,7 @@ class MachineConnectionStoreTests(unittest.TestCase):
                         "id": 42,
                         "name": "Project",
                         "web_url": project_url,
+                        "path_with_namespace": "group/project",
                     }
                 ).encode(),
                 {},
@@ -419,6 +563,7 @@ class MachineConnectionStoreTests(unittest.TestCase):
                         "id": 42,
                         "name": "Project",
                         "web_url": project_url,
+                        "path_with_namespace": "group/project",
                     }
                 ).encode(),
                 {},
@@ -658,6 +803,7 @@ class ManagerMachineConnectionUiTests(unittest.TestCase):
                         "id": 7,
                         "name_with_namespace": "Group / Project",
                         "web_url": project_url,
+                        "path_with_namespace": "group/project",
                     }
                 ).encode(),
                 {},

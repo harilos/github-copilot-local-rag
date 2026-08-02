@@ -21,6 +21,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import SourceManagerError
 from .gitlab_issues import (
+    _validate_gitlab_api_project_identity,
     gitlab_connection_id,
     gitlab_token_env,
     parse_gitlab_project,
@@ -491,15 +492,13 @@ def check_gitlab_project(
             raise SourceManagerError(
                 "GitLab project connection check returned an invalid project ID"
             )
-        returned_web_url = payload.get("web_url")
-        returned = gitlab_project_location(
-            location.gitlab_url,
-            returned_web_url,
-        )
-        if returned.project_path != location.project_path:
-            raise SourceManagerError(
+        _validate_gitlab_api_project_identity(
+            payload,
+            location.project_path,
+            error_message=(
                 "GitLab project connection check returned a different project"
-            )
+            ),
+        )
         issues_url = (
             f"{location.api_base_url}/projects/{int(project_id)}/issues"
             "?scope=all&state=all&per_page=1&page=1"
@@ -530,9 +529,9 @@ def check_gitlab_project(
             payload.get("name_with_namespace") or payload.get("name") or ""
         )
         return GitLabProjectCheck(
-            location=returned,
+            location=location,
             project_id=int(project_id),
-            name=name.strip() or returned.project_path,
+            name=name.strip() or location.project_path,
         )
     finally:
         token = ""
