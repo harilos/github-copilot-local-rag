@@ -44,6 +44,7 @@ from .redmine import (
     redmine_updated_on_cutoff,
     repair_generated_redmine_link,
 )
+from .redmine_contract import is_redmine_state_checkpoint
 from .store import MISSING_ETAG, SourceStore, StoredJson
 from .subprocess_stream import (
     ProgressCallback,
@@ -1551,25 +1552,27 @@ def _update_redmine_source(
         stored = state_holder[0]
         completed = int(completed_count)
         is_new_progress = completed > detail_progress_high_water[0]
-        value = copy.deepcopy(stored.payload)
-        confirmed = int(value.get("indexed_confirmed_count") or 0)
-        value.update(
-            {
-                "status": "running",
-                "phase": "fetch",
-                "fetched_count": completed,
-                "pending_count": completed - confirmed,
-                "last_completed_item": int(issue_id),
-                "can_resume": True,
-                "last_error": None,
-            }
-        )
-        state_holder[0] = store.save_state(
-            source.payload["local_source_key"],
-            value,
-            expected_revision=stored.revision,
-            expected_etag=stored.etag,
-        )
+        checkpoint_saved = is_redmine_state_checkpoint(completed)
+        if checkpoint_saved:
+            value = copy.deepcopy(stored.payload)
+            confirmed = int(value.get("indexed_confirmed_count") or 0)
+            value.update(
+                {
+                    "status": "running",
+                    "phase": "fetch",
+                    "fetched_count": completed,
+                    "pending_count": completed - confirmed,
+                    "last_completed_item": int(issue_id),
+                    "can_resume": True,
+                    "last_error": None,
+                }
+            )
+            state_holder[0] = store.save_state(
+                source.payload["local_source_key"],
+                value,
+                expected_revision=stored.revision,
+                expected_etag=stored.etag,
+            )
         total = progress_total_holder[0]
         if is_new_progress:
             detail_progress_high_water[0] = completed
@@ -1585,7 +1588,7 @@ def _update_redmine_source(
                 "total_kind": "exact" if total is not None else "unknown",
                 "current_item": f"Issue #{int(issue_id)}",
                 "status": "running" if is_new_progress else "replayed",
-                "checkpoint_saved": True,
+                "checkpoint_saved": checkpoint_saved,
             },
         )
 
@@ -1668,7 +1671,8 @@ def _update_redmine_source(
             },
         )
 
-    resume_count = int(
+    resume_count = int(current_state.payload.get("fetched_count") or 0)
+    reflected_count = int(
         current_state.payload.get("indexed_confirmed_count") or 0
     )
     stable_ids_value = current_state.payload.get("redmine_issue_ids")
@@ -1701,6 +1705,7 @@ def _update_redmine_source(
             item_callback=item_checkpoint,
             batch_callback=reflect_batch,
             resume_count=resume_count,
+            redmine_reflected_count=reflected_count,
             stable_issue_ids=stable_issue_ids,
             inventory_callback=inventory_checkpoint,
             clock=clock,

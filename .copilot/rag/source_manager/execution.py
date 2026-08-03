@@ -73,6 +73,7 @@ def execute_fetch_plan(
     batch_callback: ProgressCallback | None = None,
     no_change_callback: ProgressCallback | None = None,
     resume_count: int = 0,
+    redmine_reflected_count: int | None = None,
     stable_issue_ids: list[int] | None = None,
     stable_project_id: int | None = None,
     inventory_callback: InventoryCallback | None = None,
@@ -142,6 +143,7 @@ def execute_fetch_plan(
                 item_callback=item_callback,
                 batch_callback=batch_callback,
                 resume_count=resume_count,
+                reflected_count=redmine_reflected_count,
                 stable_issue_ids=stable_issue_ids,
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=cutoff,
@@ -771,6 +773,7 @@ def _redmine(
     item_callback: ProgressCallback | None,
     batch_callback: ProgressCallback | None,
     resume_count: int,
+    reflected_count: int | None = None,
     stable_issue_ids: list[int] | None,
     inventory_callback: InventoryCallback | None,
     updated_on_cutoff: str | None,
@@ -893,7 +896,10 @@ def _redmine(
 
     if resume_count < 0 or resume_count > len(ordered_issue_ids):
         raise SourceManagerError("Redmine resume checkpoint is invalid")
-    last_reflected_count = int(resume_count)
+    reflected = resume_count if reflected_count is None else int(reflected_count)
+    if reflected < 0 or reflected > resume_count:
+        raise SourceManagerError("Redmine reflected checkpoint is invalid")
+    last_reflected_count = reflected
     for position, issue_id in enumerate(ordered_issue_ids, start=1):
         if position <= resume_count:
             continue

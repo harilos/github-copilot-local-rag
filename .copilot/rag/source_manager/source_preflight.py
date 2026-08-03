@@ -203,6 +203,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
         item_callback: Any,
         batch_callback: Any,
         resume_count: int,
+        reflected_count: int | None = None,
         stable_issue_ids: list[int] | None,
         inventory_callback: Any,
         updated_on_cutoff: str | None,
@@ -224,6 +225,11 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=updated_on_cutoff,
                 progress_callback=progress_callback,
+                **(
+                    {"reflected_count": reflected_count}
+                    if reflected_count is not None
+                    else {}
+                ),
             )
 
         # A resumed first import already has a stable issue inventory. Confirm
@@ -246,6 +252,11 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=updated_on_cutoff,
                 progress_callback=progress_callback,
+                **(
+                    {"reflected_count": reflected_count}
+                    if reflected_count is not None
+                    else {}
+                ),
             )
 
         # A new first import learns the approximate count from the inventory.
@@ -272,6 +283,11 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
             inventory_callback=confirmed_inventory,
             updated_on_cutoff=updated_on_cutoff,
             progress_callback=progress_callback,
+            **(
+                {"reflected_count": reflected_count}
+                if reflected_count is not None
+                else {}
+            ),
         )
 
     execution._redmine = redmine
