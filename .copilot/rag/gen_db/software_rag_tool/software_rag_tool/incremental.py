@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -153,7 +154,19 @@ def add_or_update_root(
     if reset_db:
         emit_event("collection_reset")
 
-    files = list(iter_input_files(scope.scan_root))
+    try:
+        files = list(iter_input_files(scope.scan_root))
+    except Exception as exc:
+        error_text = _run_failure_text(
+            exc,
+            scope=scope,
+            privacy_safe_root=privacy_safe_root,
+        )
+        write_progress(status="failed", phase="failed", last_error=error_text)
+        emit_event("run_failed", error=error_text)
+        if privacy_safe_root:
+            raise RuntimeError(error_text) from None
+        raise
     discovered_keys = {
         _state_key(source_id, _safe_stored_path(scope, path))
         for path in files
@@ -301,9 +314,11 @@ def add_or_update_root(
         )
         return summary
     except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}"
-        if privacy_safe_root:
-            error_text = _redact_private_root_text(error_text, scope)
+        error_text = _run_failure_text(
+            exc,
+            scope=scope,
+            privacy_safe_root=privacy_safe_root,
+        )
         write_progress(status="failed", phase="failed", last_error=error_text)
         emit_event("run_failed", error=error_text)
         if privacy_safe_root:
@@ -473,6 +488,7 @@ def _error_item(
             previous_value.get("record_ids") or []
         ),
         "previous_entry": dict(previous_value),
+        "had_previous_entry": isinstance(previous, dict),
         "error_kind": error_kind,
         "retryable": error_kind == "input_read",
         "diagnostic": diagnostic,
@@ -566,7 +582,7 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
         "failed_content_hash": item.get("failed_content_hash") or "",
         "chunker_config": (
             item.get("previous_chunker_config")
-            if item.get("previous_record_ids")
+            if item.get("had_previous_entry")
             else item.get("chunker_config")
         )
         or {},
@@ -845,9 +861,14 @@ def _is_input_read_oserror(exc: OSError, source_path: Path) -> bool:
         if value
     ]
     if not filenames:
-        # Some Windows sharing and Files-on-Demand errors omit filename even
-        # though they were raised while reading the supplied source file.
-        return True
+        if isinstance(exc, FileNotFoundError):
+            return True
+        if isinstance(exc, PermissionError) and getattr(exc, "errno", None) in {
+            errno.EACCES,
+            errno.EPERM,
+        }:
+            return True
+        return getattr(exc, "winerror", None) in _RETRYABLE_INPUT_WINERRORS
     expected = os.path.normcase(os.path.abspath(os.fspath(source_path)))
     for value in filenames:
         try:
@@ -877,13 +898,67 @@ def _private_root_identity(scope: IngestionScope) -> str:
     return "sha256:" + sha256_text(normalized)
 
 
+_CLOUD_FILES_WINERRORS = frozenset(
+    {
+        358,
+        362,
+        363,
+        364,
+        365,
+        366,
+        369,
+        370,
+        371,
+        372,
+        374,
+        375,
+        376,
+        377,
+        378,
+        379,
+        380,
+        381,
+        382,
+        383,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        392,
+        393,
+        394,
+        395,
+        396,
+        397,
+        398,
+    }
+)
+_RETRYABLE_INPUT_WINERRORS = frozenset({2, 3, 5, 32, 33}) | (
+    _CLOUD_FILES_WINERRORS
+)
+
+
+def _run_failure_text(
+    exc: BaseException,
+    *,
+    scope: IngestionScope,
+    privacy_safe_root: bool,
+) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return _redact_private_root_text(text, scope) if privacy_safe_root else text
+
+
 def _redact_private_root_text(value: Any, scope: IngestionScope) -> str:
     text = str(value or "")
     roots = {str(scope.logical_root), str(scope.resolved_root)}
-    candidates = roots | {
+    raw_candidates = roots | {
         item.replace("\\", "/") for item in roots
-    } | {
-        item.replace("/", "\\") for item in roots
+    } | {item.replace("/", "\\") for item in roots}
+    candidates = raw_candidates | {
+        item.replace("\\", "\\\\") for item in raw_candidates
     }
     for candidate in sorted(candidates, key=len, reverse=True):
         if candidate:

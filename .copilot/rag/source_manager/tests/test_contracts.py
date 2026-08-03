@@ -50,9 +50,17 @@ def _valid_add_summary(source_id: str, *, file_count: int = 1) -> dict:
         "indexed_files": file_count,
         "skipped_files": 0,
         "error_files": 0,
+        "input_error_files": 0,
+        "extract_error_files": 0,
+        "error_details": [],
         "upserted_records": file_count,
         "deleted_records": 0,
+        "result_status": "success",
     }
+
+
+def _framed(value: object) -> str:
+    return "@@LOCAL_RAG_RESULT_V1@@" + json.dumps(value)
 
 
 class SourceStoreContracts(unittest.TestCase):
@@ -942,7 +950,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(_valid_add_summary(source_id)),
+                stdout=_framed(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -1730,7 +1738,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(_valid_add_summary(source_id)),
+                stdout=_framed(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -2013,7 +2021,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             observed.append(list(arguments))
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
+                stdout=_framed(
                     _valid_add_summary(
                         arguments[arguments.index("--source-id") + 1]
                     )
@@ -2129,18 +2137,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             key = list_sources(self.db_root)[0]["local_source_key"]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "operation": "add",
-                        "source_id": key,
-                        "file_count": 1,
-                        "indexed_files": 1,
-                        "skipped_files": 0,
-                        "error_files": 0,
-                        "upserted_records": 1,
-                        "deleted_records": 0,
-                    }
-                ),
+                stdout=_framed(_valid_add_summary(key)),
                 stderr="",
             )
 
@@ -2222,7 +2219,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                 catalog.close()
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(_valid_add_summary(key)),
+                stdout=_framed(_valid_add_summary(key)),
                 stderr="",
             )
 
@@ -2324,7 +2321,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             add_roots.append(Path(arguments[arguments.index("--root") + 1]))
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
+                stdout=_framed(
                     _valid_add_summary(
                         arguments[arguments.index("--source-id") + 1]
                     )
@@ -2359,7 +2356,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(_valid_add_summary(source_id)),
+                stdout=_framed(_valid_add_summary(source_id)),
                 stderr="",
             )
 
@@ -2495,7 +2492,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
                 executor=lambda *_: {"status": "ok"},
                 command_runner=lambda _: SimpleNamespace(
                     returncode=0,
-                    stdout=json.dumps({"status": "ok"}),
+                    stdout=_framed({"status": "ok"}),
                     stderr="",
                 ),
             )
@@ -2520,7 +2517,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             )
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(payload),
+                stdout=_framed(payload),
                 stderr="",
             )
 

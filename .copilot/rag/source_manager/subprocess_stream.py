@@ -534,6 +534,7 @@ def extract_json_result(
     completed: Any,
     *,
     validator: ResultValidator | None = None,
+    require_frame: bool = False,
 ) -> dict[str, Any]:
     """Extract exactly one schema-valid result.
 
@@ -583,6 +584,18 @@ def extract_json_result(
         )
         raise ResultExtractionError(
             "multiple schema-valid framed results",
+            diagnostics=diagnostics,
+        )
+    if require_frame:
+        diagnostics.append(
+            {
+                "stage": "selection",
+                "error": "no_valid_framed_result",
+                "frame_count": len(frames),
+            }
+        )
+        raise ResultExtractionError(
+            "no schema-valid framed result",
             diagnostics=diagnostics,
         )
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from source_manager import providers, runner
+from source_manager import execution, providers, runner
 from source_manager.document_filter import (
     FILE_SELECTION_ALL,
     FILE_SELECTION_DOCUMENTS,
@@ -85,6 +86,47 @@ class DocumentFilterTests(unittest.TestCase):
         )
         self.assertEqual(5, estimated)
 
+    def test_direct_office_owner_file_count_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "~$locked.docx"
+            path.write_bytes(b"owner")
+            count = count_document_files(path)
+        self.assertEqual(0, count)
+
+    def test_sharepoint_validator_allows_only_cloud_file_reparse_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            placeholder = root / "online-only.docx"
+            placeholder.write_bytes(b"placeholder")
+            real_lstat = os.lstat
+            real_metadata = real_lstat(placeholder)
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+            def metadata_with(tag: int) -> types.SimpleNamespace:
+                return types.SimpleNamespace(
+                    st_mode=real_metadata.st_mode,
+                    st_file_attributes=reparse,
+                    st_reparse_tag=tag,
+                )
+
+            def validate_with(tag: int) -> None:
+                def lstat(path):
+                    candidate = Path(path)
+                    if candidate == placeholder:
+                        return metadata_with(tag)
+                    return real_lstat(candidate)
+
+                with (
+                    mock.patch.object(execution.os, "lstat", side_effect=lstat),
+                    mock.patch.object(Path, "is_junction", return_value=False),
+                ):
+                    execution.validate_external_add_root(root)
+
+            validate_with(0x9000001A)
+            validate_with(0x9000F01A)
+            with self.assertRaises(Exception):
+                validate_with(0xA000000C)
+
     def test_astah_fallback_indexes_filename_and_readable_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "system-model.asta"
@@ -114,8 +156,12 @@ class DocumentFilterTests(unittest.TestCase):
                 "indexed_files": 0,
                 "skipped_files": 0,
                 "error_files": 0,
+                "input_error_files": 0,
+                "extract_error_files": 0,
+                "error_details": [],
                 "upserted_records": 0,
                 "deleted_records": 0,
+                "result_status": "success",
             }
             import json
 

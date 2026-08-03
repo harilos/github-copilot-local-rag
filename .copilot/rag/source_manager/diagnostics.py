@@ -82,8 +82,12 @@ def exception_diagnostic(
             }
         )
         current = current.__cause__ or current.__context__
-    formatted = "".join(
-        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    formatted = (
+        "Traceback suppressed for privacy-sensitive Source operation."
+        if bool(getattr(exc, "suppress_traceback", False))
+        else "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
     )
     traceback_value = bounded_diagnostic(
         formatted,

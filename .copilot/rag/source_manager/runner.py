@@ -18,7 +18,11 @@ from .errors import (
     exception_summary,
     sanitize_diagnostic,
 )
-from .execution import execute_fetch_plan, validate_managed_work_tree
+from .execution import (
+    execute_fetch_plan,
+    validate_external_add_root,
+    validate_managed_work_tree,
+)
 from .diagnostics import exception_diagnostic, process_diagnostic
 from .gitlab_issues import (
     GITLAB_ISSUE_IDS_STATE_KEY,
@@ -1060,7 +1064,7 @@ def _execute_add(
     effective_progress_callback = progress_callback
     if privacy_safe_root and progress_callback is not None:
         def effective_progress_callback(event: Mapping[str, Any]) -> None:
-            progress_callback(_redact_external_root_data(event, work))
+            progress_callback(_privacy_safe_progress_event(event, work))
 
     completed = (
         command_runner(arguments)
@@ -1073,14 +1077,16 @@ def _execute_add(
     elapsed = time.monotonic() - started
     returncode = int(getattr(completed, "returncode", 1))
     if returncode != 0:
-        raw_stderr = _redact_external_root(
-            getattr(completed, "stderr", ""),
-            work,
-        ) if privacy_safe_root else str(getattr(completed, "stderr", "") or "")
-        raw_stdout = _redact_external_root(
-            getattr(completed, "stdout", ""),
-            work,
-        ) if privacy_safe_root else str(getattr(completed, "stdout", "") or "")
+        raw_stderr = (
+            ""
+            if privacy_safe_root
+            else str(getattr(completed, "stderr", "") or "")
+        )
+        raw_stdout = (
+            ""
+            if privacy_safe_root
+            else str(getattr(completed, "stdout", "") or "")
+        )
         stderr = sanitize_diagnostic(
             raw_stderr,
             max_chars=65_536,
@@ -1102,6 +1108,10 @@ def _execute_add(
         )
         safe_arguments = list(arguments)
         if privacy_safe_root:
+            safe_arguments[0:2] = [
+                "<PYTHON_EXECUTABLE>",
+                "<ADD_ENTRY_POINT>",
+            ]
             try:
                 root_index = safe_arguments.index("--root") + 1
                 safe_arguments[root_index] = "<EXTERNAL_SOURCE_ROOT>"
@@ -1109,12 +1119,14 @@ def _execute_add(
                 pass
         error.process_diagnostic = process_diagnostic(
             arguments=safe_arguments,
-            cwd=rag_root,
+            cwd="<RAG_RUNTIME>" if privacy_safe_root else rag_root,
             returncode=returncode,
             elapsed_seconds=elapsed,
             stdout=raw_stdout,
             stderr=raw_stderr,
         )
+        if privacy_safe_root:
+            error.suppress_traceback = True
         raise error
 
     def validate_add_result(value: Any) -> bool:
@@ -1132,6 +1144,8 @@ def _execute_add(
             "indexed_files",
             "skipped_files",
             "error_files",
+            "input_error_files",
+            "extract_error_files",
             "upserted_records",
             "deleted_records",
         ):
@@ -1142,28 +1156,44 @@ def _execute_add(
                 or count < 0
             ):
                 return False
-        for field in ("input_error_files", "extract_error_files"):
-            if field not in value:
-                continue
-            count = value.get(field)
-            if (
-                not isinstance(count, int)
-                or isinstance(count, bool)
-                or count < 0
-            ):
-                return False
-        if "result_status" in value and value.get("result_status") not in {
+        result_status = value.get("result_status")
+        if result_status not in {
             "success",
             "partial",
             "failure",
         }:
             return False
-        return True
+        if not isinstance(value.get("error_details"), list):
+            return False
+        file_count = int(value["file_count"])
+        indexed = int(value["indexed_files"])
+        skipped = int(value["skipped_files"])
+        errors = int(value["error_files"])
+        input_errors = int(value["input_error_files"])
+        extract_errors = int(value["extract_error_files"])
+        completed_files = indexed + skipped
+        if file_count != completed_files + errors:
+            return False
+        if errors != input_errors + extract_errors:
+            return False
+        if result_status == "success":
+            return errors == 0
+        if result_status == "partial":
+            return (
+                errors > 0
+                and input_errors == errors
+                and extract_errors == 0
+                and completed_files > 0
+            )
+        return errors > 0 and (
+            completed_files == 0 or extract_errors > 0
+        )
 
     try:
         summary = extract_json_result(
             completed,
             validator=validate_add_result,
+            require_frame=True,
         )
     except ResultExtractionError as exc:
         diagnostic_codes = sorted(
@@ -1178,21 +1208,28 @@ def _execute_add(
             if diagnostic_codes
             else ""
         )
-        raise SourceManagerError(
+        message = (
             "ADD did not return exactly one trusted JSON result "
             "with trusted source_id and schema"
             + suffix
-            + "\nJSON候補診断:\n"
-            + sanitize_diagnostic(
-                json.dumps(
-                    list(exc.diagnostics),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                max_chars=65_536,
-            ),
-            stage="reflect.add",
-        ) from exc
+        )
+        if not privacy_safe_root:
+            message += (
+                "\nJSON候補診断:\n"
+                + sanitize_diagnostic(
+                    json.dumps(
+                        list(exc.diagnostics),
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    max_chars=65_536,
+                )
+            )
+        error = SourceManagerError(message, stage="reflect.add")
+        if privacy_safe_root:
+            error.suppress_traceback = True
+            raise error from None
+        raise error from exc
     reported_source_id = summary.get("source_id")
     if not isinstance(reported_source_id, str) or reported_source_id != key:
         raise SourceManagerError(
@@ -1203,8 +1240,6 @@ def _execute_add(
     input_error_files = int(summary.get("input_error_files") or 0)
     extract_error_files = int(summary.get("extract_error_files") or 0)
     result_status = str(summary.get("result_status") or "")
-    if not result_status:
-        result_status = "failure" if error_files else "success"
     completed_files = int(summary.get("indexed_files") or 0) + int(
         summary.get("skipped_files") or 0
     )
@@ -1233,6 +1268,8 @@ def _execute_add(
             "extract_error_files": extract_error_files,
             "error_details": list(summary.get("error_details") or [])[:100],
         }
+        if privacy_safe_root:
+            error.suppress_traceback = True
         if not privacy_safe_root:
             error.process_diagnostic = process_diagnostic(
                 arguments=arguments,
@@ -1252,11 +1289,14 @@ def _execute_add(
 
 def _redact_external_root(value: Any, root: Path) -> str:
     text = str(value or "")
-    candidates = {
+    raw_candidates = {
         str(root),
         str(Path(os.path.abspath(root))),
         str(root).replace("\\", "/"),
         str(root).replace("/", "\\"),
+    }
+    candidates = raw_candidates | {
+        item.replace("\\", "\\\\") for item in raw_candidates
     }
     for candidate in sorted(candidates, key=len, reverse=True):
         if candidate:
@@ -1283,6 +1323,16 @@ def _redact_external_root_data(value: Any, root: Path) -> Any:
             for item in value
         ]
     return value
+
+
+def _privacy_safe_progress_event(
+    event: Mapping[str, Any],
+    root: Path,
+) -> dict[str, Any]:
+    safe = dict(_redact_external_root_data(event, root))
+    if safe.get("event") == "subprocess.log":
+        safe["message"] = "SharePoint ADD内部診断（詳細は秘匿）"
+    return safe
 
 
 def _update_redmine_source(
@@ -2399,7 +2449,10 @@ def _reflect_and_sync(
     progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     work = Path(add_root)
-    validate_managed_work_tree(work)
+    if str(source.payload.get("source_type") or "") == "sharepoint":
+        validate_external_add_root(work)
+    else:
+        validate_managed_work_tree(work)
     state, initial_database_reflection = _record_initial_snapshot_candidate(
         store,
         source,

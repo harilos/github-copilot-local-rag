@@ -66,7 +66,10 @@ def count_document_files(root: Path) -> int:
     if value.is_symlink():
         raise OSError("document count root must not be a symlink")
     if value.is_file():
-        return int(value.suffix.lower() in DOCUMENT_ONLY_EXTENSIONS)
+        return int(
+            not is_office_temporary_file(value)
+            and value.suffix.lower() in DOCUMENT_ONLY_EXTENSIONS
+        )
     if not value.is_dir():
         return 0
     count = 0

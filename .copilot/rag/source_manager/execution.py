@@ -1739,8 +1739,99 @@ def validate_external_add_root(root: Path) -> None:
     candidate = Path(root)
     if not candidate.is_absolute():
         raise SourceManagerError("external ADD root must be absolute")
-    _reject_linked_path_components(candidate)
-    validate_managed_work_tree(candidate)
+    try:
+        _reject_unsafe_external_path_components(candidate)
+        _validate_external_sharepoint_tree(candidate)
+    except SourceManagerError as exc:
+        exc.suppress_traceback = True
+        raise
+    except OSError as exc:
+        error = SourceManagerError(
+            "external ADD root validation failed",
+            stage="fetch.sharepoint.validate",
+        )
+        error.suppress_traceback = True
+        error.diagnostic = {
+            "error_type": type(exc).__name__,
+            "errno": getattr(exc, "errno", None),
+            "winerror": getattr(exc, "winerror", None),
+        }
+        raise error from None
+
+
+def _validate_external_sharepoint_tree(root: Path) -> None:
+    metadata = os.lstat(root)
+    if (
+        _is_unsafe_external_reparse(root, metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise SourceManagerError("external ADD root is unsafe")
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, child_names, file_names in os.walk(
+        root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        directory_path = Path(directory)
+        for name in sorted(child_names):
+            child = directory_path / name
+            child_metadata = os.lstat(child)
+            if (
+                _is_unsafe_external_reparse(child, child_metadata)
+                or not stat.S_ISDIR(child_metadata.st_mode)
+            ):
+                raise SourceManagerError(
+                    "external ADD root must not contain links or special files"
+                )
+        for name in sorted(file_names):
+            child = directory_path / name
+            child_metadata = os.lstat(child)
+            if (
+                _is_unsafe_external_reparse(child, child_metadata)
+                or not stat.S_ISREG(child_metadata.st_mode)
+            ):
+                raise SourceManagerError(
+                    "external ADD root must not contain links or special files"
+                )
+
+
+def _is_cloud_files_reparse(metadata: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if not bool(getattr(metadata, "st_file_attributes", 0) & reparse):
+        return False
+    tag = int(getattr(metadata, "st_reparse_tag", 0) or 0)
+    return tag & 0xFFFF0FFF == 0x9000001A
+
+
+def _is_unsafe_external_reparse(
+    path: Path,
+    metadata: os.stat_result,
+) -> bool:
+    if stat.S_ISLNK(metadata.st_mode) or path.is_symlink():
+        return True
+    if hasattr(path, "is_junction") and path.is_junction():
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    has_reparse = bool(
+        getattr(metadata, "st_file_attributes", 0) & reparse
+    )
+    return has_reparse and not _is_cloud_files_reparse(metadata)
+
+
+def _reject_unsafe_external_path_components(path: Path) -> None:
+    parts = Path(path).parts
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current = current / part
+        metadata = os.lstat(current)
+        if _is_unsafe_external_reparse(current, metadata):
+            raise SourceManagerError(
+                "external ADD root components must not be links"
+            )
 
 
 def _copy_regular_file(

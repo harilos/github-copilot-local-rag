@@ -9,6 +9,12 @@ from unittest import mock
 
 from source_manager import SourceManagerError, SourceStore
 from source_manager import runner
+from source_manager.diagnostics import exception_diagnostic
+from source_manager.subprocess_stream import RESULT_FRAME
+
+
+def _framed(value: dict) -> str:
+    return RESULT_FRAME + json.dumps(value, ensure_ascii=False)
 
 
 def _summary(source_id: str, *, status: str = "partial") -> dict:
@@ -70,8 +76,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout="@@LOCAL_RAG_RESULT_V1@@"
-                + json.dumps(_summary(source_id), ensure_ascii=False),
+                stdout=_framed(_summary(source_id)),
                 stderr="",
             )
 
@@ -97,7 +102,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(_summary(source_id, status="failure")),
+                stdout=_framed(_summary(source_id, status="failure")),
                 stderr="",
             )
 
@@ -131,7 +136,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         }
         completed = SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(malformed, ensure_ascii=False),
+            stdout=_framed(malformed),
             stderr="",
         )
         with self.assertRaises(SourceManagerError):
@@ -148,8 +153,33 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                 progress_callback=None,
             )
 
+    def test_unframed_add_summary_is_rejected(self) -> None:
+        source_id = "src_sharepoint-0123456789ab"
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_summary(source_id), ensure_ascii=False),
+            stderr="",
+        )
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "trusted JSON result",
+        ):
+            runner._execute_add(
+                db_root=Path("fixture-rag"),
+                source={
+                    "local_source_key": source_id,
+                    "source_type": "sharepoint",
+                },
+                work=Path("Shared Documents"),
+                python_executable=Path("python.exe"),
+                rag_root=Path("rag"),
+                command_runner=lambda _arguments: completed,
+                progress_callback=None,
+            )
+
     def test_nonzero_sharepoint_process_redacts_root_in_every_field(self) -> None:
         absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        runtime = Path(r"C:\Users\Runtime User\Local RAG")
         completed = SimpleNamespace(
             returncode=1,
             stdout=f"cannot read {absolute / 'locked.docx'}",
@@ -166,19 +196,30 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                     "source_type": "sharepoint",
                 },
                 work=absolute,
-                python_executable=Path("python.exe"),
-                rag_root=Path("rag"),
+                python_executable=runtime / "python.exe",
+                rag_root=runtime / "rag",
                 command_runner=lambda _arguments: completed,
                 progress_callback=None,
             )
         serialized = json.dumps(
             captured.exception.process_diagnostic,
             ensure_ascii=False,
+        ) + json.dumps(
+            exception_diagnostic(
+                captured.exception,
+                operation="SharePoint test",
+                stage="reflect.add",
+            ),
+            ensure_ascii=False,
         ) + str(captured.exception)
         self.assertNotIn(str(absolute), serialized)
         self.assertNotIn("Person Name", serialized)
         self.assertNotIn("PERSON NAME", serialized)
+        self.assertNotIn("Runtime User", serialized)
         self.assertIn("<EXTERNAL_SOURCE_ROOT>", serialized)
+        self.assertIn("<PYTHON_EXECUTABLE>", serialized)
+        self.assertIn("<RAG_RUNTIME>", serialized)
+        self.assertIn("Traceback suppressed", serialized)
 
     def test_streaming_progress_redacts_external_root_before_callback(self) -> None:
         absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
@@ -194,10 +235,20 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                     ),
                 }
             )
+            progress_callback(
+                {
+                    "event": "progress",
+                    "payload": {
+                        "current_file": str(
+                            absolute / "locked.docx"
+                        ).upper().replace("\\", "\\\\")
+                    },
+                }
+            )
             source_id = arguments[arguments.index("--source-id") + 1]
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
+                stdout=_framed(
                     {
                         **_summary(source_id),
                         "error_files": 0,
@@ -206,7 +257,6 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                         "result_status": "success",
                         "error_details": [],
                     },
-                    ensure_ascii=False,
                 ),
                 stderr="",
             )
@@ -228,6 +278,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         self.assertEqual("success", result["status"])
         self.assertNotIn("PERSON NAME", serialized)
         self.assertIn("<EXTERNAL_SOURCE_ROOT>", serialized)
+        self.assertIn("詳細は秘匿", serialized)
 
     def test_partial_source_state_is_retryable_and_event_is_relative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -244,7 +295,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                 source_id = arguments[arguments.index("--source-id") + 1]
                 return SimpleNamespace(
                     returncode=0,
-                    stdout=json.dumps(_summary(source_id), ensure_ascii=False),
+                    stdout=_framed(_summary(source_id)),
                     stderr="",
                 )
 

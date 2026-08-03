@@ -126,6 +126,7 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
             scope = resolve_ingestion_scope(root)
             for exception, expected_kind in (
                 (OSError(121, "cloud hydration failed", str(path)), "input_read"),
+                (OSError("extractor workspace failed"), "extract"),
                 (ValueError("corrupt package"), "extract"),
             ):
                 with (
@@ -156,6 +157,37 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
                         expected_kind == "input_read",
                         item["retryable"],
                     )
+
+    def test_filename_less_cloud_files_error_is_retryable_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "online-only.docx"
+            path.write_bytes(b"placeholder")
+            scope = resolve_ingestion_scope(root)
+            failure = OSError("cloud provider unavailable")
+            failure.winerror = 362
+            with (
+                mock.patch.object(
+                    incremental, "file_content_hash", return_value="hash"
+                ),
+                mock.patch.object(
+                    incremental,
+                    "build_records_for_file",
+                    side_effect=failure,
+                ),
+            ):
+                item = incremental._prepare_file(
+                    scope,
+                    path,
+                    "src",
+                    {"files": {}},
+                    retry_errors=True,
+                    document_token_budget=TOKEN_BUDGET,
+                    current_chunker_config={},
+                    persistent_root_identity="sha256:root",
+                )
+        self.assertEqual("input_read", item["error_kind"])
+        self.assertEqual(362, item["diagnostic"]["winerror"])
 
     def test_extractor_workspace_oserror_is_not_a_partial_input_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -452,7 +484,8 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
             output = Path(temporary) / "db"
             root.mkdir(parents=True)
             (root / "fixture.txt").write_text("fixture", encoding="utf-8")
-            failure = RuntimeError(f"unexpected failure at {str(root).upper()}")
+            escaped_root = str(root).upper().replace("\\", "\\\\")
+            failure = PermissionError(13, "denied", escaped_root)
             with (
                 mock.patch.dict(
                     os.environ, {"RAG_OUTPUT_ROOT": str(output)}, clear=False
@@ -481,6 +514,83 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
         self.assertNotIn(str(root), combined)
         self.assertNotIn("PERSON NAME", combined)
         self.assertIn("<EXTERNAL_SOURCE_ROOT>", combined)
+
+    def test_discovery_failure_redacts_private_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Person Name" / "SharePoint"
+            output = Path(temporary) / "db"
+            root.mkdir(parents=True)
+            escaped_root = str(root).replace("\\", "\\\\")
+            with (
+                mock.patch.dict(
+                    os.environ, {"RAG_OUTPUT_ROOT": str(output)}, clear=False
+                ),
+                mock.patch.object(incremental, "require_index_tokenizer"),
+                mock.patch.object(
+                    incremental, "validate_existing_index_tokenizer"
+                ),
+                mock.patch.object(
+                    incremental,
+                    "iter_input_files",
+                    side_effect=OSError(f"scan failed: {escaped_root}"),
+                ),
+                self.assertRaises(RuntimeError) as captured,
+            ):
+                incremental.add_or_update_root(
+                    root,
+                    "src_sharepoint",
+                    document_token_budget=TOKEN_BUDGET,
+                    privacy_safe_root=True,
+                )
+            persisted = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (output / "logs").iterdir()
+                if path.suffix in {".json", ".jsonl"}
+            )
+        combined = persisted + str(captured.exception)
+        self.assertNotIn("Person Name", combined)
+        self.assertNotIn("PERSON NAME", combined)
+        self.assertIn("<EXTERNAL_SOURCE_ROOT>", combined)
+
+    def test_zero_record_previous_entry_keeps_chunker_config_on_read_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "empty.txt"
+            path.write_bytes(b"")
+            scope = resolve_ingestion_scope(root)
+            rel = scope.file(path).stored_path
+            key = f"src:{rel}"
+            state = {
+                "files": {
+                    key: {
+                        "source_id": "src",
+                        "stored_path": rel,
+                        "resolved_root": "sha256:root",
+                        "content_hash": "old-hash",
+                        "chunker_config": {"version": "old"},
+                        "record_ids": [],
+                        "record_count": 0,
+                        "status": "indexed",
+                    }
+                }
+            }
+            with mock.patch.object(
+                incremental,
+                "file_content_hash",
+                side_effect=PermissionError(13, "denied", str(path)),
+            ):
+                item = incremental._prepare_file(
+                    scope,
+                    path,
+                    "src",
+                    state,
+                    retry_errors=False,
+                    document_token_budget=TOKEN_BUDGET,
+                    current_chunker_config={"version": "new"},
+                    persistent_root_identity="sha256:root",
+                )
+            incremental._record_error(state, item)
+        self.assertEqual({"version": "old"}, state["files"][key]["chunker_config"])
 
     def test_disappeared_candidate_is_partial_and_other_file_continues(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

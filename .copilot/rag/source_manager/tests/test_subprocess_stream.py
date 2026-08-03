@@ -318,8 +318,10 @@ class AddIntegrationTests(unittest.TestCase):
                 f"print('{RESULT_FRAME}' + "
                 "json.dumps({'operation':'add','source_id':key,"
                 "'file_count':1,'indexed_files':1,'skipped_files':0,"
-                "'error_files':0,'upserted_records':1,"
-                "'deleted_records':0}))\n",
+                "'error_files':0,'input_error_files':0,"
+                "'extract_error_files':0,'error_details':[],"
+                "'upserted_records':1,'deleted_records':0,"
+                "'result_status':'success'}))\n",
                 encoding="utf-8",
             )
             work = root / "db-rag" / "sources" / "src_key" / "work"
@@ -347,7 +349,7 @@ class AddIntegrationTests(unittest.TestCase):
             source_id = "src_key"
             completed = SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
+                stdout=RESULT_FRAME + json.dumps(
                     {
                         "operation": "build",
                         "source_id": source_id,
@@ -355,8 +357,12 @@ class AddIntegrationTests(unittest.TestCase):
                         "indexed_files": 1,
                         "skipped_files": 0,
                         "error_files": 0,
+                        "input_error_files": 0,
+                        "extract_error_files": 0,
+                        "error_details": [],
                         "upserted_records": 1,
                         "deleted_records": 0,
+                        "result_status": "success",
                     }
                 ),
                 stderr="",
@@ -392,7 +398,9 @@ class AddIntegrationTests(unittest.TestCase):
                 f"print('{RESULT_FRAME}' + json.dumps("
                 "{'operation':'add','source_id':key,'file_count':1,"
                 "'indexed_files':1,'skipped_files':0,'error_files':0,"
-                "'upserted_records':1,'deleted_records':0,"
+                "'input_error_files':0,'extract_error_files':0,"
+                "'error_details':[],'upserted_records':1,"
+                "'deleted_records':0,'result_status':'success',"
                 "'display_name':'日本語ソース',"
                 "'pythonioencoding':os.environ.get('PYTHONIOENCODING'),"
                 "'pythonutf8':os.environ.get('PYTHONUTF8'),"
