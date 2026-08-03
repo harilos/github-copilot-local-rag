@@ -7,7 +7,7 @@ from typing import Protocol
 
 DEFAULT_CHUNK_TARGET_TOKENS = 320
 DEFAULT_CHUNK_OVERLAP_TOKENS = 48
-TOKEN_SAFE_CHUNKER_VERSION = "jp-ruri-token-v2"
+TOKEN_SAFE_CHUNKER_VERSION = "jp-ruri-structured-token-v4"
 
 
 class DocumentTokenBudget(Protocol):
@@ -25,6 +25,15 @@ class TextSection:
     text: str
     source_start: int = 0
     source_end: int = 0
+    source_format: str = ""
+    structure_origin: str = "legacy"
+    structure_kind: str = "text"
+    structure_id: str = ""
+    parent_section_id: str = ""
+    breadcrumb: str = ""
+    page: int | None = None
+    slide: int | None = None
+    sheet: str = ""
 
 
 class DocumentTokenLimitError(RuntimeError):
@@ -38,6 +47,14 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+def normalize_structured_text(text: str) -> str:
+    """Normalize line endings while preserving indentation and code layout."""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{4,}", "\n\n\n", text)
+    return text.strip("\n")
+
+
 def chunk_text(
     title: str,
     text: str,
@@ -47,6 +64,8 @@ def chunk_text(
     token_budget: DocumentTokenBudget | None = None,
     embedding_path: str = "",
     overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+    preserve_layout: bool = False,
+    section_metadata: dict[str, object] | None = None,
 ) -> list[TextSection]:
     """Split normalized text without exceeding the final document token budget.
 
@@ -56,7 +75,11 @@ def chunk_text(
     document embeddings.
     """
 
-    text = normalize_text(text)
+    text = (
+        normalize_structured_text(text)
+        if preserve_layout
+        else normalize_text(text)
+    )
     if not text:
         return []
     if max_chars <= 0:
@@ -66,10 +89,11 @@ def chunk_text(
     if overlap >= max_chars:
         raise ValueError("overlap must be smaller than max_chars")
     if token_budget is None:
-        return _chunk_text_by_characters(title, text, max_chars, overlap)
+        sections = _chunk_text_by_characters(title, text, max_chars, overlap)
+        return _apply_section_metadata(sections, section_metadata)
     if overlap_tokens < 0:
         raise ValueError("overlap_tokens must be zero or positive")
-    return _chunk_text_by_tokens(
+    sections = _chunk_text_by_tokens(
         title,
         text,
         max_chars=max_chars,
@@ -78,6 +102,37 @@ def chunk_text(
         token_budget=token_budget,
         embedding_path=embedding_path,
     )
+    return _apply_section_metadata(sections, section_metadata)
+
+
+def _apply_section_metadata(
+    sections: list[TextSection],
+    metadata: dict[str, object] | None,
+) -> list[TextSection]:
+    if not metadata:
+        return sections
+    allowed = {
+        "source_format",
+        "structure_origin",
+        "structure_kind",
+        "structure_id",
+        "parent_section_id",
+        "breadcrumb",
+        "page",
+        "slide",
+        "sheet",
+    }
+    values = {key: value for key, value in metadata.items() if key in allowed}
+    return [
+        TextSection(
+            title=section.title,
+            text=section.text,
+            source_start=section.source_start,
+            source_end=section.source_end,
+            **values,
+        )
+        for section in sections
+    ]
 
 
 def _chunk_text_by_characters(

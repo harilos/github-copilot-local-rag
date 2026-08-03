@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -14,8 +15,21 @@ from .chunking import (
     DEFAULT_CHUNK_OVERLAP_TOKENS,
     TOKEN_SAFE_CHUNKER_VERSION,
 )
-from .extractors import SUPPORTED_EXTENSIONS, extract_sections
+from .extractors import (
+    SUPPORTED_EXTENSIONS,
+    extract_document,
+    sections_from_extraction,
+)
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
+from .pipeline import build_pipeline_contract
+from .structured_extraction import ExtractionResult
+
+
+@dataclass(frozen=True)
+class FileBuildResult:
+    records: list[dict[str, Any]]
+    extraction: ExtractionResult
+    pipeline: dict[str, Any]
 
 
 def sha256_text(text: str) -> str:
@@ -137,7 +151,40 @@ def build_records_for_file(
     chunk_overlap: int = 160,
     ingestion_scope: IngestionScope | None = None,
     document_token_budget: DocumentTokenBudget | None = None,
-) -> list[dict[str, Any]]:
+    extraction_result: ExtractionResult | None = None,
+    pipeline_contract: dict[str, Any] | None = None,
+    backend_policy: str = "legacy",
+    return_result: bool = False,
+) -> list[dict[str, Any]] | FileBuildResult:
+    result = build_file_result(
+        root,
+        path,
+        source_id=source_id,
+        content_hash=content_hash,
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap=chunk_overlap,
+        ingestion_scope=ingestion_scope,
+        document_token_budget=document_token_budget,
+        extraction_result=extraction_result,
+        pipeline_contract=pipeline_contract,
+        backend_policy=backend_policy,
+    )
+    return result if return_result else result.records
+
+
+def build_file_result(
+    root: Path,
+    path: Path,
+    source_id: str = "local",
+    content_hash: str | None = None,
+    chunk_max_chars: int = 1400,
+    chunk_overlap: int = 160,
+    ingestion_scope: IngestionScope | None = None,
+    document_token_budget: DocumentTokenBudget | None = None,
+    extraction_result: ExtractionResult | None = None,
+    pipeline_contract: dict[str, Any] | None = None,
+    backend_policy: str = "legacy",
+) -> FileBuildResult:
     scope = ingestion_scope or resolve_ingestion_scope(root)
     stored = scope.file(path)
     token_budget = document_token_budget or get_document_token_budget()
@@ -146,28 +193,37 @@ def build_records_for_file(
         chunk_overlap=chunk_overlap,
         document_token_budget=token_budget,
     )
-    sections = extract_sections(
+    active_pipeline = pipeline_contract or build_pipeline_contract(
+        chunker=config,
+        backend_policy=backend_policy,
+    )
+    extraction = extraction_result or extract_document(
         stored.resolved_path,
+        backend_policy=backend_policy,
+    )
+    sections = sections_from_extraction(
+        extraction,
         chunk_max_chars=chunk_max_chars,
         chunk_overlap=chunk_overlap,
         token_budget=token_budget,
         embedding_path=stored.stored_path,
     )
     content_hash = content_hash or file_content_hash(stored.resolved_path)
+    fingerprint = str(active_pipeline["fingerprint"])
     doc_id = sha256_text(
-        f"{source_id}:{stored.stored_path}:{content_hash}"
+        f"{source_id}:{stored.stored_path}:{content_hash}:{fingerprint}"
     )
     current_chunker_version = chunker_version(config)
 
     records: list[dict[str, Any]] = []
     chunk_index = 0
     for section in sections:
-        text = section.text.strip()
-        if not text:
+        text = section.text
+        if not text.strip():
             continue
         text_hash = sha256_text(text)
         chunk_id = sha256_text(
-            f"{doc_id}:{current_chunker_version}:{chunk_index}"
+            f"{doc_id}:{current_chunker_version}:{fingerprint}:{chunk_index}"
         )
         embedding_text = (
             f"{stored.stored_path}\n{section.title}\n{text}"
@@ -206,13 +262,36 @@ def build_records_for_file(
                     "chunker_version": current_chunker_version,
                     "chunk_max_chars": chunk_max_chars,
                     "chunk_overlap": chunk_overlap,
+                    "source_format": section.source_format,
+                    "structure_origin": section.structure_origin,
+                    "structure_kind": section.structure_kind,
+                    "structure_id": section.structure_id,
+                    "parent_section_id": section.parent_section_id,
+                    "breadcrumb": section.breadcrumb,
+                    "source_start": section.source_start,
+                    "source_end": section.source_end,
+                    "page": section.page,
+                    "slide": section.slide,
+                    "sheet": section.sheet,
+                    "extractor_backend": extraction.backend,
+                    "extractor_version": extraction.backend_version,
+                    "extraction_status": extraction.status,
+                    "extraction_fallback_reason": extraction.fallback_reason,
+                    "encoding": extraction.encoding,
+                    "encoding_reason": extraction.encoding_reason,
+                    "encoding_replacement_count": extraction.replacement_count,
+                    "pipeline_fingerprint": fingerprint,
                     "embedding_token_count": embedding_token_count,
                     "embedding_token_limit": token_budget.max_tokens,
                 },
             }
         )
         chunk_index += 1
-    return records
+    return FileBuildResult(
+        records=records,
+        extraction=extraction,
+        pipeline=active_pipeline,
+    )
 
 
 def build_records(
@@ -230,8 +309,7 @@ def build_records(
     for path in iter_input_files(scope.scan_root):
         stored = scope.file(path)
         try:
-            records.extend(
-                build_records_for_file(
+            result = build_file_result(
                     scope.logical_root,
                     path,
                     source_id=source_id,
@@ -240,6 +318,19 @@ def build_records(
                     ingestion_scope=scope,
                     document_token_budget=token_budget,
                 )
+            if not result.extraction.is_indexed:
+                errors.append(
+                    {
+                        "path": stored.stored_path,
+                        "error": (
+                            f"{result.extraction.status}:"
+                            f"{result.extraction.reason}"
+                        ),
+                    }
+                )
+                continue
+            records.extend(
+                result.records
             )
         except Exception as exc:
             errors.append(

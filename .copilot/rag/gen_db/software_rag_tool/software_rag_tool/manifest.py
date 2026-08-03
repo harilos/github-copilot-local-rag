@@ -15,6 +15,7 @@ from .tokenize import (
     validate_tokenizer_fingerprint,
 )
 from .chunking import TOKEN_SAFE_CHUNKER_VERSION
+from .pipeline import build_pipeline_contract
 
 
 class ConfigMismatchError(RuntimeError):
@@ -29,8 +30,11 @@ def build_manifest(
     record_count: int,
     *,
     chunker_config: dict[str, Any] | None = None,
+    pipeline_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     embedding = embedding_fingerprint()
+    chunker = chunker_config or {"version": TOKEN_SAFE_CHUNKER_VERSION}
+    pipeline = pipeline_contract or build_pipeline_contract(chunker=chunker)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "db_root": str(output_root()),
@@ -38,7 +42,9 @@ def build_manifest(
         "collection": default_collection_name(),
         "chroma_space": "cosine",
         "chunker_version": TOKEN_SAFE_CHUNKER_VERSION,
-        "chunker": chunker_config or {"version": TOKEN_SAFE_CHUNKER_VERSION},
+        "chunker": chunker,
+        "pipeline_fingerprint": pipeline["fingerprint"],
+        "pipeline": pipeline["descriptor"],
         "catalog_schema_version": 2,
         "tokenizer": tokenizer_fingerprint(),
         "tokenizer_config": tokenizer_runtime_descriptor(),
@@ -51,12 +57,17 @@ def write_manifest(
     record_count: int,
     *,
     chunker_config: dict[str, Any] | None = None,
+    pipeline_contract: dict[str, Any] | None = None,
 ) -> Path:
     path = manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            build_manifest(record_count, chunker_config=chunker_config),
+            build_manifest(
+                record_count,
+                chunker_config=chunker_config,
+                pipeline_contract=pipeline_contract,
+            ),
             ensure_ascii=False,
             indent=2,
         )
@@ -115,12 +126,33 @@ def validate_embedding_manifest(manifest: dict[str, Any] | None = None, *, colle
         "quantization",
         "document_prefix",
         "query_prefix",
+        "embedding_artifact",
+        "pooling",
         "collection",
     ]
+    has_embedding_contract = any(
+        key in manifest
+        for key in (
+            "embedding_model",
+            "embedding_dimension",
+            "embedding_backend",
+        )
+    )
+    required_generation_keys = (
+        {"embedding_artifact", "pooling"}
+        if has_embedding_contract
+        else set()
+    )
     mismatches = {
         key: {"manifest": manifest.get(key), "current": expected.get(key)}
         for key in keys
-        if manifest.get(key) not in {None, expected.get(key)}
+        if (
+            manifest.get(key) != expected.get(key)
+            and (
+                manifest.get(key) is not None
+                or key in required_generation_keys
+            )
+        )
     }
     if mismatches:
         raise ConfigMismatchError(

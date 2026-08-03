@@ -29,6 +29,33 @@ These wrappers process files in small resumable batches, persist resume state in
 
 For legacy `.doc` and `.ppt`, install LibreOffice and make `soffice` or `libreoffice` available on `PATH`.
 
+## Structured ingestion and offline operation
+
+Native Markdown preserves heading hierarchy, YAML front matter, fenced code,
+lists, tables, and indentation. XLSX ingestion keeps sheet/table regions and
+records missing cached formula values. PDF, DOCX, and PPTX can use the Docling
+2.117.0 document tree directly; Docling is MIT-licensed and is imported only by
+ingestion workers, never by query-only or database-list processes.
+
+Ingestion is CPU-only and starts a bounded spawn-based worker pool. The safe
+automatic limit is at most four workers. Set `RAG_INGEST_WORKERS=1`, `2`, `3`,
+or `4` only for a deliberate local resource choice. Workers only extract
+documents; the parent process remains the sole Chroma, SQLite, clean-record,
+state, progress, and manifest writer.
+
+Normal ADD never downloads Docling models. DOCX and PPTX need no external model
+artifact. Structured PDF extraction is enabled only when
+`RAG_DOCLING_ARTIFACTS_PATH` names a pre-provisioned local Docling artifact
+directory. Without that directory, PDF uses the existing pypdf fallback and
+records the fallback reason. The artifact identity, Docling version/options,
+format parsers, encoding policy, extraction-status schema, chunker, Sudachi,
+and embedding contract all participate in the persisted pipeline fingerprint.
+
+If that fingerprint changes, a single-source database can rebuild its complete
+saved scope automatically. A multi-source or mismatched-scope database fails
+closed and requires an explicit full database rebuild; the tool will not erase
+unrelated sources during an ordinary ADD.
+
 ## Interface
 
 The generated clean data is written as JSONL:

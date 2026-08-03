@@ -47,6 +47,7 @@ def install_document_extension_runtime() -> None:
 
     extractors.SUPPORTED_EXTENSIONS.update(_EXTRA_EXTENSIONS)
     original_extract = extractors.extract_sections
+    original_extract_document = extractors.extract_document
     original_iter = records.iter_input_files
     original_source_type = records._source_type
     original_language = records._language
@@ -108,8 +109,60 @@ def install_document_extension_runtime() -> None:
             return "astah"
         return original_language(Path(path))
 
+    def extract_document(
+        path: Path,
+        *,
+        backend_policy: str = "auto",
+        docling_threads: int | None = None,
+    ) -> Any:
+        from .structured_extraction import (
+            ExtractionResult,
+            StructureBlock,
+            extract_plain_text,
+        )
+
+        extension = Path(path).suffix.lower()
+        if extension in _EXTRA_TEXT_EXTENSIONS:
+            return extract_plain_text(Path(path))
+        if extension == ".asta":
+            try:
+                text = _read_astah_text(Path(path))
+            except Exception as exc:
+                return ExtractionResult(
+                    status="extract_error",
+                    backend="astah-readable-labels",
+                    backend_version="bounded-v1",
+                    source_format="asta",
+                    structure_origin="astah_binary_labels",
+                    retryable=True,
+                    reason=f"astah_{type(exc).__name__}",
+                )
+            return ExtractionResult(
+                status="indexed",
+                backend="astah-readable-labels",
+                backend_version="bounded-v1",
+                source_format="asta",
+                structure_origin="astah_binary_labels",
+                blocks=(
+                    StructureBlock(
+                        title=Path(path).name,
+                        text=text,
+                        kind="model_labels",
+                        structure_id="astah-0001",
+                        parent_section_id="astah-0001",
+                    ),
+                ),
+            )
+        return original_extract_document(
+            Path(path),
+            backend_policy=backend_policy,
+            docling_threads=docling_threads,
+        )
+
     extractors.extract_sections = extract_sections
+    extractors.extract_document = extract_document
     records.extract_sections = extract_sections
+    records.extract_document = extract_document
     records.SUPPORTED_EXTENSIONS = extractors.SUPPORTED_EXTENSIONS
     records.iter_input_files = iter_input_files
     records._source_type = source_type
@@ -134,6 +187,18 @@ def _extract_astah_project(
     dependency.  The original .asta file remains the Source of truth.
     """
 
+    text = _read_astah_text(path)
+    return chunk_text(
+        path.name,
+        text,
+        max_chars=chunk_max_chars,
+        overlap=chunk_overlap,
+        token_budget=token_budget,
+        embedding_path=embedding_path,
+    )
+
+
+def _read_astah_text(path: Path) -> str:
     with path.open("rb") as stream:
         data = stream.read(_ASTAH_READ_LIMIT + 1)
     truncated = len(data) > _ASTAH_READ_LIMIT
@@ -180,15 +245,7 @@ def _extract_astah_project(
         heading.append("Note: extraction was bounded; the original project may contain more data.")
     if not visible:
         heading.append("No readable model labels were recovered; the file name remains indexed.")
-    text = "\n".join([*heading, *visible])
-    return chunk_text(
-        path.name,
-        text,
-        max_chars=chunk_max_chars,
-        overlap=chunk_overlap,
-        token_budget=token_budget,
-        embedding_path=embedding_path,
-    )
+    return "\n".join([*heading, *visible])
 
 
 def _useful_astah_text(value: str) -> bool:

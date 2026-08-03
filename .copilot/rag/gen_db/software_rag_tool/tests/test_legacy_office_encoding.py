@@ -144,7 +144,13 @@ class ConverterOutputDecodingTests(unittest.TestCase):
             paragraphs=[types.SimpleNamespace(text="DOCX 正常系")],
             tables=[],
         )
-        with mock.patch.dict(sys.modules, {"docx": fake_docx}):
+        with (
+            mock.patch.dict(sys.modules, {"docx": fake_docx}),
+            mock.patch(
+                "software_rag_tool.structured_extraction.docling_available",
+                return_value=False,
+            ),
+        ):
             sections = extractors.extract_sections(Path("control.docx"))
 
         self.assertEqual("DOCX 正常系", sections[0].text)

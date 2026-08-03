@@ -366,6 +366,8 @@ class IncrementalReplacementTests(unittest.TestCase):
                 ),
                 mock.patch.object(incremental, "write_progress"),
                 mock.patch.object(incremental, "emit_event"),
+                mock.patch.object(incremental, "reset_collection"),
+                mock.patch.object(incremental, "reset_catalog"),
             ):
                 first = incremental.add_or_update_root(
                     root=root,
@@ -409,7 +411,8 @@ class IncrementalReplacementTests(unittest.TestCase):
                     document_token_budget=changed_prefix_budget,
                 )
                 self.assertEqual(1, third["indexed_files"])
-                delete_ids.assert_called_once_with(current_ids)
+                self.assertTrue(third["auto_pipeline_rebuild"])
+                delete_ids.assert_called_once_with([])
                 self.assertTrue(upsert_records.called)
 
 

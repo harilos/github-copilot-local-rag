@@ -205,6 +205,10 @@ _EMBEDDER_CACHE: dict[tuple[str, str, int, str, str, str], Embedder] = {}
 _EMBEDDER_CACHE_LOCK = threading.Lock()
 _TOKENIZER_CACHE: dict[tuple[str, str, str], Any] = {}
 _TOKENIZER_CACHE_LOCK = threading.Lock()
+_ARTIFACT_FINGERPRINT_CACHE: dict[
+    tuple[tuple[str, int, int], ...], str
+] = {}
+_ARTIFACT_FINGERPRINT_LOCK = threading.Lock()
 
 
 def get_embedder() -> Embedder:
@@ -374,6 +378,18 @@ def embedding_backend() -> str:
 
 def embedding_fingerprint() -> dict[str, str | int]:
     backend = embedding_backend()
+    if backend in {"onnx", "onnx-int8", "onnxruntime"}:
+        artifact = _onnx_artifact_fingerprint()
+        pooling = "named-sentence-or-pooler-else-attention-mean+l2-v1"
+    elif backend == "hash":
+        artifact = "synthetic-hash-v1"
+        pooling = "hash-l2-v1"
+    else:
+        artifact = (
+            "model-reference:"
+            + os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip()
+        )
+        pooling = "sentence-transformers-model-defined+l2-v1"
     return {
         "embedding_model": os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip(),
         "embedding_dimension": embedding_dimension(),
@@ -381,4 +397,41 @@ def embedding_fingerprint() -> dict[str, str | int]:
         "quantization": os.getenv("EMBEDDING_QUANTIZATION", DEFAULT_QUANTIZATION if "onnx" in backend else "none"),
         "document_prefix": os.getenv("EMBED_DOCUMENT_PREFIX", DEFAULT_DOCUMENT_PREFIX),
         "query_prefix": os.getenv("EMBED_QUERY_PREFIX", DEFAULT_QUERY_PREFIX),
+        "embedding_artifact": artifact,
+        "pooling": pooling,
     }
+
+
+def _onnx_artifact_fingerprint() -> str:
+    model_dir = Path(
+        os.getenv("EMBEDDING_ONNX_DIR", str(default_onnx_model_dir()))
+    ).expanduser().resolve()
+    names = (
+        "model.onnx",
+        "config.json",
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    )
+    paths = [model_dir / name for name in names if (model_dir / name).is_file()]
+    if not paths or not (model_dir / "model.onnx").is_file():
+        return "missing"
+    signature = tuple(
+        (str(path), path.stat().st_size, path.stat().st_mtime_ns)
+        for path in paths
+    )
+    with _ARTIFACT_FINGERPRINT_LOCK:
+        cached = _ARTIFACT_FINGERPRINT_CACHE.get(signature)
+        if cached is not None:
+            return cached
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8", errors="strict"))
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    value = "sha256:" + digest.hexdigest()
+    with _ARTIFACT_FINGERPRINT_LOCK:
+        _ARTIFACT_FINGERPRINT_CACHE[signature] = value
+    return value

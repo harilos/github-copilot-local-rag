@@ -130,6 +130,7 @@ def hybrid_query(
     explain: bool = False,
     use_dense: bool = True,
     use_lexical: bool = True,
+    small_to_big: bool = False,
     backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]]:
     rows, _lane_health = hybrid_query_with_health(
@@ -142,6 +143,7 @@ def hybrid_query(
         explain=explain,
         use_dense=use_dense,
         use_lexical=use_lexical,
+        small_to_big=small_to_big,
         backend=backend,
     )
     return rows
@@ -158,6 +160,7 @@ def hybrid_query_with_health(
     explain: bool = False,
     use_dense: bool = True,
     use_lexical: bool = True,
+    small_to_big: bool = False,
     backend: SearchBackend | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     backend = backend or _GlobalBackend()
@@ -286,6 +289,7 @@ def hybrid_query_with_health(
         backend=backend,
         budget_tokens=budget_tokens,
         document_anchors=document_anchors,
+        small_to_big=small_to_big,
     )
     rows = _without_test_fixtures(rows)
 
@@ -315,6 +319,7 @@ def adaptive_hybrid_query(
     explain: bool = False,
     db_scope_confirmed: bool = False,
     excluded_identifiers: set[str] | None = None,
+    small_to_big: bool = False,
     backend: SearchBackend | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run one local retrieval operation with a single lexical collection.
@@ -511,6 +516,7 @@ def adaptive_hybrid_query(
         budget_tokens=budget_tokens,
         document_anchors=document_anchors,
         packing_diagnostics=packing_diagnostics,
+        small_to_big=small_to_big,
     )
     materialized = _without_test_fixtures(materialized)
     for rank, row in enumerate(materialized, start=1):
@@ -586,6 +592,7 @@ def cold_lexical_fast_path(
     budget_tokens: int | None = None,
     explain: bool = False,
     db_scope_confirmed: bool = False,
+    small_to_big: bool = False,
     backend: SearchBackend | None = None,
 ) -> list[dict[str, Any]] | None:
     backend = backend or _GlobalBackend()
@@ -664,6 +671,7 @@ def cold_lexical_fast_path(
         backend=backend,
         budget_tokens=budget_tokens,
         document_anchors=document_anchors,
+        small_to_big=small_to_big,
     )
     for rank, row in enumerate(rows, start=1):
         row["rank"] = rank
@@ -1294,6 +1302,7 @@ def _expand_and_pack(
     budget_tokens: int | None,
     document_anchors: dict[str, dict[str, Any]],
     packing_diagnostics: dict[str, list[dict[str, Any]]] | None = None,
+    small_to_big: bool = False,
 ) -> list[dict[str, Any]]:
     """Pack every selected primary before attaching optional structure context."""
     primary_rows = _without_test_fixtures(rows)
@@ -1328,6 +1337,7 @@ def _expand_and_pack(
         backend=backend,
         context_budget_tokens=context_budget,
         verified_anchor_ids=set(document_anchors),
+        small_to_big=small_to_big,
     )
     if packing_diagnostics is not None:
         packing_diagnostics["protected_primaries"] = list(
@@ -1347,6 +1357,7 @@ def _attach_structure_context(
     backend: SearchBackend,
     context_budget_tokens: int,
     verified_anchor_ids: set[str],
+    small_to_big: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if context_budget_tokens <= 0:
         return primary_rows, []
@@ -1392,7 +1403,7 @@ def _attach_structure_context(
         before: tuple[dict[str, Any], str, str] | None = None
         after: tuple[dict[str, Any], str, str] | None = None
         neighbors = _without_test_fixtures(
-            backend.get_neighbor_rows(primary_id, window=1)
+            backend.get_neighbor_rows(primary_id, window=4 if small_to_big else 1)
         )
         for neighbor in neighbors:
             neighbor_id = str(neighbor.get("id") or "")
@@ -1405,6 +1416,7 @@ def _attach_structure_context(
             relationship = _structural_context_relationship(
                 primary,
                 neighbor,
+                small_to_big=small_to_big,
             )
             if not relationship:
                 continue
@@ -1424,9 +1436,17 @@ def _attach_structure_context(
                 else text[:DEFAULT_CONTEXT_MAX_CHARS]
             )
             candidate = (neighbor, text, relationship)
-            if direction == "before":
+            if direction == "before" and (
+                before is None
+                or (_neighbor_distance(primary, neighbor) or 999)
+                < (_neighbor_distance(primary, before[0]) or 999)
+            ):
                 before = candidate
-            else:
+            elif direction == "after" and (
+                after is None
+                or (_neighbor_distance(primary, neighbor) or 999)
+                < (_neighbor_distance(primary, after[0]) or 999)
+            ):
                 after = candidate
 
         attached_reasons: list[str] = []
@@ -1506,12 +1526,22 @@ def _neighbor_direction(
 def _structural_context_relationship(
     primary: dict[str, Any],
     neighbor: dict[str, Any],
+    *,
+    small_to_big: bool = False,
 ) -> str:
     if _doc_key(primary) != _doc_key(neighbor):
         return ""
-    if _neighbor_distance(primary, neighbor) != 1:
+    distance = _neighbor_distance(primary, neighbor)
+    if distance is None or distance > (4 if small_to_big else 1):
         return ""
-    if not _same_semantic_section(primary, neighbor):
+    same_parent = _same_structural_parent(primary, neighbor)
+    if distance > 1 and not (small_to_big and same_parent):
+        # Old indexes have no structural parent. Keep their historical
+        # immediate-neighbor behavior until they are rebuilt by Phase 2.
+        return ""
+    if not _same_semantic_section(primary, neighbor) and not (
+        small_to_big and same_parent
+    ):
         return ""
     primary_text = str(primary.get("text") or "")
     neighbor_text = str(neighbor.get("text") or "")
@@ -1560,9 +1590,22 @@ def _structural_context_relationship(
             neighbor_text,
         ):
             return "enclosing_configuration"
+    if small_to_big and same_parent:
+        return "parent_section_context"
     if not _context_is_useful(primary_text, primary):
         return ""
     return "same_section_neighbor"
+
+
+def _same_structural_parent(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    left_metadata = left.get("metadata") or {}
+    right_metadata = right.get("metadata") or {}
+    left_parent = str(left_metadata.get("parent_section_id") or "").strip()
+    right_parent = str(right_metadata.get("parent_section_id") or "").strip()
+    return bool(left_parent and left_parent == right_parent)
 
 
 def _path_suffix(path: str) -> str:
@@ -1723,7 +1766,12 @@ def _pack_protected_rows(
     budget_tokens: int,
 ) -> list[dict[str, Any]]:
     """Share the protected budget so a large first chunk cannot evict peers."""
-    selected = list(rows)
+    # Keep at least one useful excerpt under very small budgets.  Sharing a
+    # budget that cannot fit the packer's minimum excerpt across every row
+    # used to allocate <= 8 tokens to each row and then return no evidence.
+    minimum_useful_allocation = 9
+    max_rows = max(1, budget_tokens // minimum_useful_allocation)
+    selected = list(rows)[:max_rows]
     if not selected:
         return []
 
@@ -1757,8 +1805,6 @@ def _pack_protected_rows(
         text = str(row.get("text") or "")
         copy = dict(row)
         if conservative_token_count(text) > allocation:
-            if allocation <= 8:
-                break
             copy["text"] = _truncate_packed_row_text(
                 row,
                 allocation,
@@ -2584,7 +2630,10 @@ def _truncate_packed_row_text(
             query_terms.append(value)
     candidate_terms = [*exact_anchors, *query_terms]
     if not candidate_terms:
-        return truncate_to_token_limit(text, limit)
+        return (
+            truncate_to_token_limit(text, limit)
+            or _minimal_token_prefix(text, limit)
+        )
 
     best = ""
     best_score = -1
@@ -2620,7 +2669,30 @@ def _truncate_packed_row_text(
                 best_score = score
             start = anchor_end
             occurrences += 1
-    return best or truncate_to_token_limit(text, limit)
+    return (
+        best
+        or truncate_to_token_limit(text, limit)
+        or _minimal_token_prefix(text, limit)
+    )
+
+
+def _minimal_token_prefix(text: str, limit: int) -> str:
+    """Return a non-empty budget-fitting prefix when markers cannot fit."""
+
+    value = text.strip()
+    if not value or limit <= 0:
+        return ""
+    low, high = 1, len(value)
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = value[:middle].rstrip()
+        if candidate and conservative_token_count(candidate) <= limit:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
 
 
 def _bounded_anchor_excerpt(

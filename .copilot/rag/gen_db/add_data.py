@@ -378,6 +378,21 @@ def main() -> None:
     parser.add_argument("--reset-clean", action="store_true", help="Delete clean records and resume state before adding data")
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
     parser.add_argument(
+        "--extractor-backend-policy",
+        choices=["legacy", "auto", "docling"],
+        default="legacy",
+        help=(
+            "Extraction backend policy (default: legacy; use auto to opt in "
+            "to Phase 2 structured extraction)"
+        ),
+    )
+    parser.add_argument(
+        "--ingestion-workers",
+        type=int,
+        default=None,
+        help="Structured extraction worker count (auto-sized when omitted)",
+    )
+    parser.add_argument(
         "--chunk-max-chars",
         type=int,
         default=1400,
@@ -444,6 +459,8 @@ def main() -> None:
                 chunk_overlap=args.chunk_overlap,
                 resume=args.resume,
                 privacy_safe_root=args.privacy_safe_root,
+                extractor_backend_policy=args.extractor_backend_policy,
+                ingestion_workers=args.ingestion_workers,
             )
     finally:
         watcher.stop()
