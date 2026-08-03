@@ -9,8 +9,9 @@ import re
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
@@ -23,12 +24,12 @@ from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, requ
 from software_rag_tool.env import load_env
 from software_rag_tool import incremental as incremental_module
 from software_rag_tool.paths import dbs_dir
+from software_rag_tool.progress import ProgressWriter
 
 
 _PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
 _RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
 _LOCAL_SOURCE_KEY = re.compile(r"^src_[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{12}$")
-_PROGRESS_PATCH_MARKER = "_local_rag_exact_file_index_installed"
 
 
 class _ManagerProtocolWriter:
@@ -64,11 +65,11 @@ class _ManagerProtocolWriter:
         sys.stderr.flush()
 
 
-def _install_exact_file_index_progress() -> None:
-    """Add a producer-side file ordinal to every persisted ADD progress update."""
+def _install_exact_file_index_progress(
+    writer: ProgressWriter,
+) -> Any:
+    """Route one ADD run through its writer and return a restore callback."""
 
-    if bool(getattr(incremental_module, _PROGRESS_PATCH_MARKER, False)):
-        return
     original = incremental_module.write_progress
     current_file = ""
     current_index = 0
@@ -90,10 +91,22 @@ def _install_exact_file_index_progress() -> None:
             current_index += 1
         if current_index > 0:
             updates.setdefault("current_file_index", current_index)
-        return original(**updates)
+        return writer.write(**updates)
 
     incremental_module.write_progress = write_progress
-    setattr(incremental_module, _PROGRESS_PATCH_MARKER, True)
+
+    def restore() -> None:
+        if incremental_module.write_progress is write_progress:
+            incremental_module.write_progress = original
+
+    return restore
+
+
+def _pfast_progress_enabled() -> bool:
+    """Internal rollback seam; intentionally not exposed as a Manager option."""
+
+    value = str(os.getenv("LOCAL_RAG_PFAST_PROGRESS", "1")).strip().lower()
+    return value not in {"0", "false", "legacy", "no", "off"}
 
 
 class _AddProgressWatcher:
@@ -105,6 +118,7 @@ class _AddProgressWatcher:
         *,
         enabled: bool,
         estimated_total: int | None = None,
+        snapshot_reader: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self._path = Path(path)
         self._enabled = bool(enabled)
@@ -113,6 +127,7 @@ class _AddProgressWatcher:
             if estimated_total is not None
             else None
         )
+        self._snapshot_reader = snapshot_reader
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = time.monotonic()
@@ -175,6 +190,15 @@ class _AddProgressWatcher:
         self._last_emit = now
 
     def _read_snapshot(self) -> dict[str, Any] | None:
+        if self._snapshot_reader is not None:
+            try:
+                value = self._snapshot_reader()
+            except (OSError, RuntimeError):
+                return None
+            if not isinstance(value, dict):
+                return None
+            self._saw_current_run = True
+            return value
         try:
             stat_result = self._path.stat()
         except OSError:
@@ -412,41 +436,53 @@ def main() -> None:
         "CHROMA_COLLECTION",
         collection_name_for_db(db_name),
     )
-    _install_exact_file_index_progress()
     protocol_writer = _ManagerProtocolWriter()
     output_context = (
         contextlib.redirect_stdout(protocol_writer)
         if args.manager_protocol_v1
         else contextlib.nullcontext()
     )
-    watcher = _AddProgressWatcher(
-        db_root / "logs" / "progress.json",
-        enabled=args.manager_protocol_v1,
-        estimated_total=_preflight_estimated_documents(
-            db_root,
-            args.source_id,
-        ),
-    )
-    watcher.start()
-    try:
-        with output_context:
-            summary = incremental_module.add_or_update_root(
-                root=Path(args.root),
-                source_id=args.source_id,
-                scan_subdir=args.scan_subdir,
-                include_root_name_in_path=True,
-                batch_size_files=args.batch_size_files,
-                reset_db=args.reset_db,
-                reset_clean=args.reset_clean,
-                retry_errors=args.retry_errors,
-                operation=args.operation,
-                chunk_max_chars=args.chunk_max_chars,
-                chunk_overlap=args.chunk_overlap,
-                resume=args.resume,
-                privacy_safe_root=args.privacy_safe_root,
-            )
-    finally:
-        watcher.stop()
+    progress_file = db_root / "logs" / "progress.json"
+    with ProgressWriter(
+        progress_file,
+        run_id=uuid.uuid4().hex,
+        compact=_pfast_progress_enabled(),
+    ) as progress_writer:
+        restore_progress = _install_exact_file_index_progress(progress_writer)
+        watcher = _AddProgressWatcher(
+            progress_file,
+            enabled=args.manager_protocol_v1,
+            estimated_total=_preflight_estimated_documents(
+                db_root,
+                args.source_id,
+            ),
+            snapshot_reader=lambda: (
+                progress_writer.snapshot()
+                if progress_writer.write_count > 0
+                else None
+            ),
+        )
+        watcher.start()
+        try:
+            with output_context:
+                summary = incremental_module.add_or_update_root(
+                    root=Path(args.root),
+                    source_id=args.source_id,
+                    scan_subdir=args.scan_subdir,
+                    include_root_name_in_path=True,
+                    batch_size_files=args.batch_size_files,
+                    reset_db=args.reset_db,
+                    reset_clean=args.reset_clean,
+                    retry_errors=args.retry_errors,
+                    operation=args.operation,
+                    chunk_max_chars=args.chunk_max_chars,
+                    chunk_overlap=args.chunk_overlap,
+                    resume=args.resume,
+                    privacy_safe_root=args.privacy_safe_root,
+                )
+        finally:
+            watcher.stop()
+            restore_progress()
     if args.manager_protocol_v1:
         protocol_writer.flush()
         print(
