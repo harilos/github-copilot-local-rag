@@ -180,6 +180,55 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         self.assertNotIn("PERSON NAME", serialized)
         self.assertIn("<EXTERNAL_SOURCE_ROOT>", serialized)
 
+    def test_streaming_progress_redacts_external_root_before_callback(self) -> None:
+        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        observed: list[dict] = []
+
+        def run(arguments, *, progress_callback):
+            progress_callback(
+                {
+                    "event": "subprocess.log",
+                    "message": (
+                        "PermissionError: "
+                        + str(absolute / "locked.docx").upper()
+                    ),
+                }
+            )
+            source_id = arguments[arguments.index("--source-id") + 1]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        **_summary(source_id),
+                        "error_files": 0,
+                        "input_error_files": 0,
+                        "indexed_files": 2,
+                        "result_status": "success",
+                        "error_details": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                stderr="",
+            )
+
+        with mock.patch.object(runner, "run_streaming_process", side_effect=run):
+            result = runner._execute_add(
+                db_root=Path("fixture-rag"),
+                source={
+                    "local_source_key": "src_sharepoint-0123456789ab",
+                    "source_type": "sharepoint",
+                },
+                work=absolute,
+                python_executable=Path("python.exe"),
+                rag_root=Path("rag"),
+                command_runner=None,
+                progress_callback=lambda event: observed.append(dict(event)),
+            )
+        serialized = json.dumps(observed, ensure_ascii=False)
+        self.assertEqual("success", result["status"])
+        self.assertNotIn("PERSON NAME", serialized)
+        self.assertIn("<EXTERNAL_SOURCE_ROOT>", serialized)
+
     def test_partial_source_state_is_retryable_and_event_is_relative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

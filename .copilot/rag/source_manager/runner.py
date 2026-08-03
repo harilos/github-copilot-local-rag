@@ -1057,12 +1057,17 @@ def _execute_add(
     if privacy_safe_root:
         arguments.append("--privacy-safe-root")
     started = time.monotonic()
+    effective_progress_callback = progress_callback
+    if privacy_safe_root and progress_callback is not None:
+        def effective_progress_callback(event: Mapping[str, Any]) -> None:
+            progress_callback(_redact_external_root_data(event, work))
+
     completed = (
         command_runner(arguments)
         if command_runner is not None
         else run_streaming_process(
             arguments,
-            progress_callback=progress_callback,
+            progress_callback=effective_progress_callback,
         )
     )
     elapsed = time.monotonic() - started
@@ -1262,6 +1267,22 @@ def _redact_external_root(value: Any, root: Path) -> str:
                 flags=re.IGNORECASE,
             )
     return text
+
+
+def _redact_external_root_data(value: Any, root: Path) -> Any:
+    if isinstance(value, str):
+        return _redact_external_root(value, root)
+    if isinstance(value, Mapping):
+        return {
+            key: _redact_external_root_data(item, root)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _redact_external_root_data(item, root)
+            for item in value
+        ]
+    return value
 
 
 def _update_redmine_source(

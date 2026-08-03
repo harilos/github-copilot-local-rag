@@ -301,8 +301,16 @@ def add_or_update_root(
         )
         return summary
     except Exception as exc:
-        write_progress(status="failed", phase="failed", last_error=f"{type(exc).__name__}: {exc}")
-        emit_event("run_failed", error=f"{type(exc).__name__}: {exc}")
+        error_text = f"{type(exc).__name__}: {exc}"
+        if privacy_safe_root:
+            error_text = _redact_private_root_text(error_text, scope)
+        write_progress(status="failed", phase="failed", last_error=error_text)
+        emit_event("run_failed", error=error_text)
+        if privacy_safe_root:
+            # Prevent the uncaught child-process traceback from reintroducing
+            # the external SharePoint root after persisted diagnostics were
+            # sanitized above.
+            raise RuntimeError(error_text) from None
         raise
 
 
@@ -867,6 +875,25 @@ def _diagnostic_text(diagnostic: dict[str, Any]) -> str:
 def _private_root_identity(scope: IngestionScope) -> str:
     normalized = os.path.normcase(str(scope.resolved_root))
     return "sha256:" + sha256_text(normalized)
+
+
+def _redact_private_root_text(value: Any, scope: IngestionScope) -> str:
+    text = str(value or "")
+    roots = {str(scope.logical_root), str(scope.resolved_root)}
+    candidates = roots | {
+        item.replace("\\", "/") for item in roots
+    } | {
+        item.replace("/", "\\") for item in roots
+    }
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if candidate:
+            text = re.sub(
+                re.escape(candidate),
+                "<EXTERNAL_SOURCE_ROOT>",
+                text,
+                flags=re.IGNORECASE,
+            )
+    return text
 
 
 def _persistent_scope_fields(

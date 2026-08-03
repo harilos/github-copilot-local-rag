@@ -446,6 +446,42 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
                     document_token_budget=TOKEN_BUDGET,
                 )
 
+    def test_unexpected_failure_redacts_private_root_everywhere(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Person Name" / "SharePoint"
+            output = Path(temporary) / "db"
+            root.mkdir(parents=True)
+            (root / "fixture.txt").write_text("fixture", encoding="utf-8")
+            failure = RuntimeError(f"unexpected failure at {str(root).upper()}")
+            with (
+                mock.patch.dict(
+                    os.environ, {"RAG_OUTPUT_ROOT": str(output)}, clear=False
+                ),
+                mock.patch.object(incremental, "require_index_tokenizer"),
+                mock.patch.object(
+                    incremental, "validate_existing_index_tokenizer"
+                ),
+                mock.patch.object(
+                    incremental, "_prepare_file", side_effect=failure
+                ),
+                self.assertRaises(RuntimeError) as captured,
+            ):
+                incremental.add_or_update_root(
+                    root,
+                    "src_sharepoint",
+                    document_token_budget=TOKEN_BUDGET,
+                    privacy_safe_root=True,
+                )
+            persisted = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in (output / "logs").iterdir()
+                if path.suffix in {".json", ".jsonl"}
+            )
+        combined = persisted + str(captured.exception)
+        self.assertNotIn(str(root), combined)
+        self.assertNotIn("PERSON NAME", combined)
+        self.assertIn("<EXTERNAL_SOURCE_ROOT>", combined)
+
     def test_disappeared_candidate_is_partial_and_other_file_continues(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "source"
