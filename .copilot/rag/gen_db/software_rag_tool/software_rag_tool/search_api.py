@@ -17,6 +17,7 @@ from .dbs import require_db_name
 from .env import load_env
 from .paths import dbs_dir
 from .retrieval import (
+    _doc_key,
     adaptive_hybrid_query,
     cold_lexical_fast_path,
     hybrid_query_with_health,
@@ -130,6 +131,7 @@ def run_search_payload(
             additional_identifiers=list(
                 request.get("literal_identifiers") or []
             ),
+            known_catalog_error=_catalog_lane_failure_kind(lane_health),
         )
         payload.setdefault("identifier_diagnostics_enabled", True)
     else:
@@ -211,6 +213,9 @@ def run_adaptive_search_payload(
             precomputed_exact_rows=list(route.get("raw_exact_rows") or []),
             additional_identifiers=list(
                 request.get("literal_identifiers") or []
+            ),
+            known_catalog_error=_catalog_lane_failure_kind(
+                dict(route.get("lane_health") or {})
             ),
         )
         payload.setdefault("identifier_diagnostics_enabled", True)
@@ -377,6 +382,7 @@ def _finalize_search_payload(
     """
     _strip_source_uri_fields(payload)
     _normalize_public_source_paths(payload)
+    _strip_private_document_keys(payload)
     _strip_private_source_ids(payload)
     return normalize_search_contract(payload)
 
@@ -497,6 +503,31 @@ def _strip_private_source_ids(payload: dict[str, Any]) -> None:
                 source = item.get("source")
                 if isinstance(source, dict):
                     source.pop("_source_id", None)
+
+
+def _strip_private_document_keys(payload: dict[str, Any]) -> None:
+    """Remove opaque document-grouping keys after discovery has consumed them."""
+    for key in (
+        "evidence",
+        "contexts",
+        "background_context",
+        "related_context",
+        "document_results",
+        "_result_detail_items",
+    ):
+        for item in payload.get(key) or []:
+            if isinstance(item, dict):
+                item.pop("_document_key", None)
+
+
+def _catalog_lane_failure_kind(
+    lane_health: dict[str, dict[str, Any]],
+) -> str | None:
+    for lane in ("exact", "lexical", "metadata"):
+        error = str((lane_health.get(lane) or {}).get("error") or "")
+        if error:
+            return error
+    return None
 
 
 def _normalize_retrieval_mode(mode: str, *, use_dense: bool = True) -> str:
@@ -916,10 +947,10 @@ def _add_discovery_lane(
                 f"dense_discovery_error:{type(exc).__name__}"
             )
 
-    evidence_paths = {
-        str((item.get("source") or {}).get("path") or "")
+    evidence_document_keys = {
+        str(item.get("_document_key") or "")
         for item in payload.get("evidence") or []
-        if (item.get("source") or {}).get("path")
+        if item.get("_document_key")
     }
     evidence_texts = {
         str(item.get("text") or "")
@@ -936,9 +967,11 @@ def _add_discovery_lane(
             or metadata.get("doc_id")
             or chunk_id
         )
+        document_key = _doc_key(row)
         document = documents.setdefault(
-            path,
+            document_key,
             {
+                "identity": document_key,
                 "path": path,
                 "title": str(
                     metadata.get("title")
@@ -995,7 +1028,7 @@ def _add_discovery_lane(
             + min(0.006, 0.0015 * max(0, len(facets) - 1))
             + min(0.004, 0.0015 * max(0, len(signals) - 1))
         )
-        is_direct = document["path"] in evidence_paths
+        is_direct = document["identity"] in evidence_document_keys
         if is_direct:
             support_level = "direct"
         elif document["literal_identifiers"] or (
@@ -1034,14 +1067,14 @@ def _add_discovery_lane(
             if document["support_level"] != "weak"
         ]
     selected: list[dict[str, Any]] = []
-    selected_paths: set[str] = set()
+    selected_document_keys: set[str] = set()
 
     def select_document(document: dict[str, Any]) -> None:
-        path = str(document["path"])
-        if path in selected_paths or len(selected) >= target:
+        document_key = str(document["identity"])
+        if document_key in selected_document_keys or len(selected) >= target:
             return
         selected.append(document)
-        selected_paths.add(path)
+        selected_document_keys.add(document_key)
 
     for document in ranked_documents:
         if document["support_level"] == "direct":
@@ -1056,7 +1089,7 @@ def _add_discovery_lane(
                 (
                     document
                     for document in ranked_documents
-                    if document["path"] not in selected_paths
+                    if document["identity"] not in selected_document_keys
                     and facet[:100] in document["facets"]
                 ),
                 None,
@@ -1356,6 +1389,7 @@ def json_payload(rows: list[dict[str, Any]], question: str, db_name: str, max_ch
             truncated = True
         item: dict[str, Any] = {
             "id": f"R{row['rank']}",
+            "_document_key": _doc_key(row),
             "_source_id": str(
                 meta.get("source_id") or ""
             ),
@@ -1884,10 +1918,16 @@ def _anchored_neighbor_is_direct(
         return False
     if not _raw_identifier_occurs(anchor_result, anchor_term):
         return False
-    source_path = str((item.get("source") or {}).get("path") or "")
-    anchor_path = str((anchor_item.get("source") or {}).get("path") or "")
-    if not source_path or source_path.casefold() != anchor_path.casefold():
-        return False
+    item_document_key = str(item.get("_document_key") or "")
+    anchor_document_key = str(anchor_item.get("_document_key") or "")
+    if item_document_key and anchor_document_key:
+        if item_document_key != anchor_document_key:
+            return False
+    else:
+        source_path = str((item.get("source") or {}).get("path") or "")
+        anchor_path = str((anchor_item.get("source") or {}).get("path") or "")
+        if not source_path or source_path.casefold() != anchor_path.casefold():
+            return False
     independent = set(str(value) for value in item.get("independent_signals") or [])
     same_section = _same_evidence_section(item, anchor_item)
     if not (independent & {"dense", "lexical", "metadata"}) and not same_section:
@@ -1921,10 +1961,18 @@ def _raw_result_matches_context(
 ) -> bool:
     metadata = result.get("metadata") or {}
     source = item.get("source") or {}
+    item_document_key = str(item.get("_document_key") or "")
+    result_document_key = _doc_key(result)
+    if item_document_key and result_document_key:
+        same_document = item_document_key == result_document_key
+    else:
+        same_document = (
+            str(metadata.get("path") or "").casefold()
+            == str(source.get("path") or "").casefold()
+        )
     return bool(
         str(result.get("text") or "") == str(item.get("text") or "")
-        and str(metadata.get("path") or "").casefold()
-        == str(source.get("path") or "").casefold()
+        and same_document
     )
 
 
@@ -1937,6 +1985,7 @@ def _add_identifier_diagnostics(
     excluded_identifiers: set[str] | None = None,
     precomputed_exact_rows: list[dict[str, Any]] | None = None,
     additional_identifiers: list[str] | None = None,
+    known_catalog_error: str | None = None,
 ) -> None:
     excluded = {
         canonicalize(identifier)
@@ -1961,16 +2010,45 @@ def _add_identifier_diagnostics(
     unmatched = []
     matches = []
     diagnostic_errors = []
+    exact_cache: dict[str, list[dict[str, Any]]] = {}
+    blocked_error = str(known_catalog_error or "")
+    if blocked_error:
+        # A partial bundle collected before a catalog failure is not a complete
+        # diagnostic result. Do not misclassify it as a verified no-hit and do
+        # not retry the persistent store in this request.
+        precomputed_exact_rows = None
     for anchor in anchors:
         if precomputed_exact_rows is None:
-            try:
-                exact_rows = store.exact_search(anchor, top_k=1000, source=source)
-            except Exception as exc:
+            if blocked_error:
                 diagnostic_errors.append(
                     {
                         "identifier": anchor,
                         "operation": "exact_search",
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": blocked_error,
+                    }
+                )
+                matches.append(
+                    {
+                        "identifier": anchor,
+                        "matched": None,
+                        "candidate_count": None,
+                        "verified_candidate_count": None,
+                        "raw_occurrence_verified": False,
+                        "paths": [],
+                        "diagnostic_error": True,
+                    }
+                )
+                continue
+            try:
+                exact_rows = store.exact_search(anchor, top_k=1000, source=source)
+                exact_cache[anchor] = exact_rows
+            except Exception as exc:
+                blocked_error = type(exc).__name__
+                diagnostic_errors.append(
+                    {
+                        "identifier": anchor,
+                        "operation": "exact_search",
+                        "error": blocked_error,
                     }
                 )
                 matches.append(
@@ -2010,6 +2088,10 @@ def _add_identifier_diagnostics(
         )
     if precomputed_exact_rows is not None:
         exact_candidate_count = len(precomputed_exact_rows)
+    elif blocked_error:
+        exact_candidate_count = None
+    elif question in exact_cache:
+        exact_candidate_count = len(exact_cache[question])
     else:
         try:
             query_rows = store.exact_search(question, top_k=1000, source=source)
@@ -2020,7 +2102,7 @@ def _add_identifier_diagnostics(
                 {
                     "identifier": question,
                     "operation": "query_exact_search",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": type(exc).__name__,
                 }
             )
     payload["identifiers"] = {
@@ -2466,14 +2548,12 @@ def _project_document_results(
     explain: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     projected: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
     truncated = len(results) > limit
     for result in results:
         path = str(result.get("path") or "")[:400]
-        if not path or path in seen_paths:
+        if not path:
             truncated = True
             continue
-        seen_paths.add(path)
         item: dict[str, Any] = {
             "path": path,
             "title": str(result.get("title") or "")[:160],

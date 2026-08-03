@@ -574,6 +574,48 @@ class CatalogLaneHealthContractTests(unittest.TestCase):
         self.assertEqual(0, backend.calls["metadata"])
         self.assertEqual(0, backend.calls["anchor"])
 
+    def test_exact_failure_is_not_retried_by_default_identifier_diagnostics(self) -> None:
+        for mode in ("hybrid", "lexical"):
+            with self.subTest(mode=mode):
+                backend = CatalogExactFailingBackend()
+                fake_registry = SimpleNamespace(get=lambda _name: backend)
+                with (
+                    patch.object(search_api, "load_env"),
+                    patch.object(search_api, "registry", return_value=fake_registry),
+                ):
+                    payload = search_api.run_search_payload(
+                        db_name="fixture-rag",
+                        question="A2L evidence",
+                        top_k=2,
+                        retrieval_mode=mode,
+                        explain=False,
+                    )
+                self.assertEqual(1, backend.calls["exact"])
+                self.assertFalse(
+                    payload["identifiers"]["diagnostics_complete"]
+                )
+                self.assertEqual([], payload["unmatched_identifiers"])
+                self.assertIn("identifier_diagnostics_error", payload)
+                self.assertNotIn("private", str(payload))
+
+    def test_adaptive_exact_failure_is_not_retried_by_identifier_diagnostics(self) -> None:
+        backend = CatalogExactFailingBackend()
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_adaptive_search_payload(
+                db_name="fixture-rag",
+                question="A2L evidence",
+                top_k=2,
+                explain=False,
+            )
+        self.assertEqual(1, backend.calls["exact"])
+        self.assertFalse(payload["identifiers"]["diagnostics_complete"])
+        self.assertEqual([], payload["unmatched_identifiers"])
+        self.assertNotIn("private", str(payload))
+
     def test_metadata_sqlite_failure_keeps_earlier_lane_results(self) -> None:
         backend = CatalogMetadataFailingBackend()
         payload = self._payload(backend)
@@ -756,6 +798,104 @@ class SourceIdentityContractTests(unittest.TestCase):
         self.assertEqual(
             ["source-a-readme", "source-b-readme"],
             [row["id"] for row in selected],
+        )
+
+    def test_discovery_and_compact_results_keep_cross_source_same_path_documents(self) -> None:
+        source_a = self._sourced_row(
+            "source-a-readme",
+            source_id="source-a",
+            doc_id="document-a",
+            path="README.md",
+            text="Source A cooling evidence",
+        )
+        source_b = self._sourced_row(
+            "source-b-readme",
+            source_id="source-b",
+            doc_id="document-b",
+            path="README.md",
+            text="Source B cooling evidence",
+        )
+        backend = FakeBackend()
+        backend.dense_rows = [source_a, source_b]
+        backend.lexical_rows = [source_a, source_b]
+        backend.anchor_rows = []
+        request = {
+            "original_question": "cooling evidence",
+            "answer_goal": "survey",
+            "coverage": {
+                "policy": "wide",
+                "target_distinct_documents": 2,
+                "maximum_distinct_documents": 2,
+                "minimum_desired_documents": 2,
+            },
+        }
+        fake_registry = SimpleNamespace(get=lambda _name: backend)
+        with (
+            patch.object(search_api, "load_env"),
+            patch.object(search_api, "registry", return_value=fake_registry),
+        ):
+            payload = search_api.run_search_payload(
+                db_name="fixture-rag",
+                question="cooling evidence",
+                top_k=2,
+                explain=False,
+                identifier_diagnostics=False,
+                search_request=request,
+                dense_runtime_ready=True,
+            )
+        self.assertEqual(2, payload["coverage"]["candidate_documents"])
+        self.assertEqual(2, len(payload["document_results"]))
+        self.assertEqual(
+            ["README.md", "README.md"],
+            [item["path"] for item in payload["document_results"]],
+        )
+        self.assertNotIn("_document_key", str(payload))
+        compact = compact_search_contract(payload)
+        self.assertEqual(2, len(compact["document_results"]))
+
+    def test_anchored_neighbor_does_not_cross_source_on_same_path(self) -> None:
+        anchor = self._sourced_row(
+            "source-a-anchor",
+            source_id="source-a",
+            doc_id="document-a",
+            path="README.md",
+            text="A2L direct evidence",
+        )
+        anchor.update(
+            {
+                "rank": 1,
+                "signals": ["exact"],
+                "debug": {"exact_match": {"matched_terms": ["A2L"]}},
+            }
+        )
+        neighbor = self._sourced_row(
+            "source-b-neighbor",
+            source_id="source-b",
+            doc_id="document-b",
+            path="README.md",
+            text="A2L direct evidence",
+        )
+        neighbor.update(
+            {
+                "rank": 2,
+                "signals": ["neighbor"],
+                "support_kind": "anchored_neighbor",
+                "anchor_chunk_uid": "source-a-anchor",
+                "anchor_term": "A2L",
+                "neighbor_distance": 1,
+                "independent_signals": ["dense"],
+            }
+        )
+        payload = json_payload(
+            [anchor, neighbor],
+            "A2L",
+            "fixture-rag",
+            6_000,
+        )
+        self.assertEqual(["R1"], [item["id"] for item in payload["evidence"]])
+        self.assertEqual(
+            ["R2"],
+            [item["id"] for item in payload["background_context"]],
         )
 
     def test_same_source_document_chunks_share_the_cap(self) -> None:
