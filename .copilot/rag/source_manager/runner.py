@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -668,6 +669,7 @@ def update_all_sources(
                 len(source_items),
             )
     failed = [item for item in results if item.get("status") == "failed"]
+    partial = [item for item in results if item.get("status") == "partial"]
     blocking_skips = [
         item
         for item in results
@@ -687,7 +689,7 @@ def update_all_sources(
     return {
         "status": (
             "ok"
-            if not failed
+            if not failed and not partial
             else "partial"
         ),
         "source_count": len(results),
@@ -695,6 +697,7 @@ def update_all_sources(
         "completed_source_count": completed_source_count,
         "snapshot_marker_eligible": (
             not failed
+            and not partial
             and not blocking_skips
             and completed_source_count == len(updateable)
         ),
@@ -810,6 +813,8 @@ def confirm_add_success(
     local_source_key: str,
     *,
     source_id: str,
+    result_status: str = "success",
+    summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     store = SourceStore(db_root)
     loaded = store.read_source(local_source_key)
@@ -821,10 +826,26 @@ def confirm_add_success(
         expected_revision=loaded.revision,
         expected_etag=loaded.etag,
     )
+    status = str(result_status or "success")
+    event_payload: dict[str, Any] = {
+        "source_id": confirmed.payload["source_id"]
+    }
+    if status == "partial" and isinstance(summary, Mapping):
+        event_payload.update(
+            {
+                "result_status": "partial",
+                "indexed_files": int(summary.get("indexed_files") or 0),
+                "skipped_files": int(summary.get("skipped_files") or 0),
+                "input_error_files": int(
+                    summary.get("input_error_files") or 0
+                ),
+                "error_details": list(summary.get("error_details") or [])[:100],
+            }
+        )
     store.append_event(
         local_source_key,
-        "add.completed",
-        {"source_id": confirmed.payload["source_id"]},
+        "add.partial" if status == "partial" else "add.completed",
+        event_payload,
     )
     return _source_dto(store, confirmed)
 
@@ -1016,6 +1037,10 @@ def _execute_add(
     progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
     key = str(source["local_source_key"])
+    privacy_safe_root = (
+        str(source.get("source_type") or "").strip().lower()
+        == "sharepoint"
+    )
     arguments = [
         str(python_executable),
         str(rag_root / "gen_db" / "add_data.py"),
@@ -1029,6 +1054,8 @@ def _execute_add(
         "--retry-errors",
         "--manager-protocol-v1",
     ]
+    if privacy_safe_root:
+        arguments.append("--privacy-safe-root")
     started = time.monotonic()
     completed = (
         command_runner(arguments)
@@ -1041,12 +1068,20 @@ def _execute_add(
     elapsed = time.monotonic() - started
     returncode = int(getattr(completed, "returncode", 1))
     if returncode != 0:
-        stderr = sanitize_diagnostic(
+        raw_stderr = _redact_external_root(
             getattr(completed, "stderr", ""),
+            work,
+        ) if privacy_safe_root else str(getattr(completed, "stderr", "") or "")
+        raw_stdout = _redact_external_root(
+            getattr(completed, "stdout", ""),
+            work,
+        ) if privacy_safe_root else str(getattr(completed, "stdout", "") or "")
+        stderr = sanitize_diagnostic(
+            raw_stderr,
             max_chars=65_536,
         )
         stdout = sanitize_diagnostic(
-            getattr(completed, "stdout", ""),
+            raw_stdout,
             max_chars=65_536,
         )
         details: list[str] = []
@@ -1060,13 +1095,20 @@ def _execute_add(
             f"（終了コード: {returncode}）。{suffix}",
             stage="reflect.add",
         )
+        safe_arguments = list(arguments)
+        if privacy_safe_root:
+            try:
+                root_index = safe_arguments.index("--root") + 1
+                safe_arguments[root_index] = "<EXTERNAL_SOURCE_ROOT>"
+            except (ValueError, IndexError):
+                pass
         error.process_diagnostic = process_diagnostic(
-            arguments=arguments,
+            arguments=safe_arguments,
             cwd=rag_root,
             returncode=returncode,
             elapsed_seconds=elapsed,
-            stdout=getattr(completed, "stdout", ""),
-            stderr=getattr(completed, "stderr", ""),
+            stdout=raw_stdout,
+            stderr=raw_stderr,
         )
         raise error
 
@@ -1095,6 +1137,22 @@ def _execute_add(
                 or count < 0
             ):
                 return False
+        for field in ("input_error_files", "extract_error_files"):
+            if field not in value:
+                continue
+            count = value.get(field)
+            if (
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+            ):
+                return False
+        if "result_status" in value and value.get("result_status") not in {
+            "success",
+            "partial",
+            "failure",
+        }:
+            return False
         return True
 
     try:
@@ -1136,23 +1194,74 @@ def _execute_add(
             "ADD did not return the requested trusted source_id",
             stage="reflect.add",
         )
-    if int(summary.get("error_files") or 0) > 0:
+    error_files = int(summary.get("error_files") or 0)
+    input_error_files = int(summary.get("input_error_files") or 0)
+    extract_error_files = int(summary.get("extract_error_files") or 0)
+    result_status = str(summary.get("result_status") or "")
+    if not result_status:
+        result_status = "failure" if error_files else "success"
+    completed_files = int(summary.get("indexed_files") or 0) + int(
+        summary.get("skipped_files") or 0
+    )
+    valid_partial = (
+        result_status == "partial"
+        and error_files > 0
+        and input_error_files == error_files
+        and extract_error_files == 0
+        and completed_files > 0
+    )
+    if (
+        result_status == "failure"
+        or (result_status == "partial" and not valid_partial)
+        or (error_files > 0 and not valid_partial)
+    ):
         error = SourceManagerError(
             "ADD failed: "
-            f"{int(summary['error_files']):,}件のファイル抽出に失敗しました。"
+            f"{error_files:,}件のファイル処理に失敗しました。"
             "失敗ファイルは次回の再開時に再試行します。",
             stage="reflect.add",
         )
-        error.process_diagnostic = process_diagnostic(
-            arguments=arguments,
-            cwd=rag_root,
-            returncode=returncode,
-            elapsed_seconds=elapsed,
-            stdout=getattr(completed, "stdout", ""),
-            stderr=getattr(completed, "stderr", ""),
-        )
+        error.diagnostic = {
+            "result_status": "failure",
+            "error_files": error_files,
+            "input_error_files": input_error_files,
+            "extract_error_files": extract_error_files,
+            "error_details": list(summary.get("error_details") or [])[:100],
+        }
+        if not privacy_safe_root:
+            error.process_diagnostic = process_diagnostic(
+                arguments=arguments,
+                cwd=rag_root,
+                returncode=returncode,
+                elapsed_seconds=elapsed,
+                stdout=getattr(completed, "stdout", ""),
+                stderr=getattr(completed, "stderr", ""),
+            )
         raise error
-    return {"source_id": reported_source_id, "summary": summary}
+    return {
+        "source_id": reported_source_id,
+        "status": result_status,
+        "summary": summary,
+    }
+
+
+def _redact_external_root(value: Any, root: Path) -> str:
+    text = str(value or "")
+    candidates = {
+        str(root),
+        str(Path(os.path.abspath(root))),
+        str(root).replace("\\", "/"),
+        str(root).replace("/", "\\"),
+    }
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if candidate:
+            text = re.sub(
+                re.escape(candidate),
+                "<EXTERNAL_SOURCE_ROOT>",
+                text,
+                flags=re.IGNORECASE,
+            )
+    return text
 
 
 def _update_redmine_source(
@@ -2348,10 +2457,14 @@ def _reflect_and_sync(
             setattr(exc, "stage", "reflect.add")
         raise
 
+    add_summary = dict(add_result["summary"])
+    partial = str(add_result.get("status") or "") == "partial"
     confirmed = confirm_add_success(
         store.db_root,
         source.payload["local_source_key"],
         source_id=str(add_result["source_id"]),
+        result_status="partial" if partial else "success",
+        summary=add_summary,
     )
     _emit_progress(
         progress_callback,
@@ -2363,11 +2476,11 @@ def _reflect_and_sync(
             "total": int(state.payload.get("fetched_count") or 0),
             "unit": "件",
             "total_kind": "exact",
-            "status": "completed",
+            "status": "partial" if partial else "completed",
             "checkpoint_saved": True,
         },
     )
-    if initial_database_reflection:
+    if initial_database_reflection and not partial:
         _write_initial_snapshot_marker(store.db_root)
     confirmed_source = store.read_source(source.payload["local_source_key"])
     sync_result = _synchronize_metadata(
@@ -2387,7 +2500,7 @@ def _reflect_and_sync(
             "unit": "件",
             "total_kind": "exact",
             "status": (
-                "completed"
+                ("partial" if partial else "completed")
                 if not sync_result.get("metadata_sync_pending")
                 else "failed"
             ),
@@ -2396,15 +2509,25 @@ def _reflect_and_sync(
     )
     reflected = copy.deepcopy(state.payload)
     fetched_count = int(reflected.get("fetched_count") or 0)
+    input_error_files = int(add_summary.get("input_error_files") or 0)
+    confirmed_count = int(add_summary.get("indexed_files") or 0) + int(
+        add_summary.get("skipped_files") or 0
+    )
     reflected.update(
         {
-            "indexed_confirmed_count": fetched_count,
-            "pending_count": 0,
+            "indexed_confirmed_count": (
+                confirmed_count if partial else fetched_count
+            ),
+            "pending_count": input_error_files if partial else 0,
             "last_completed_item": fetched_count or None,
             "metadata_sync_pending": bool(
                 sync_result.get("metadata_sync_pending")
             ),
-            "last_error": sync_result.get("metadata_error"),
+            "last_error": (
+                add_summary.get("warning_ja")
+                if partial
+                else sync_result.get("metadata_error")
+            ),
         }
     )
     if sync_result.get("metadata_sync_pending"):
@@ -2415,6 +2538,18 @@ def _reflect_and_sync(
                 "can_resume": True,
             }
         )
+    elif partial:
+        reflected.update(
+            {
+                "status": "partial",
+                "phase": "reflect",
+                "can_resume": True,
+                "input_error_files": input_error_files,
+                "input_error_details": list(
+                    add_summary.get("error_details") or []
+                )[:100],
+            }
+        )
     else:
         reflected = complete_run(reflected)
     final_state = store.save_state(
@@ -2423,12 +2558,26 @@ def _reflect_and_sync(
         expected_revision=state.revision,
         expected_etag=state.etag,
     )
-    return {
+    result = {
         **confirmed,
         **sync_result,
         "state_revision": final_state.revision,
-        "add_summary": add_result["summary"],
+        "add_summary": add_summary,
     }
+    if partial and not sync_result.get("metadata_sync_pending"):
+        result.update(
+            {
+                "status": "partial",
+                "message": str(
+                    add_summary.get("warning_ja")
+                    or "一部のファイルを読み取れませんでした。次回自動再試行します。"
+                ),
+                "can_resume": True,
+            }
+        )
+    elif sync_result.get("metadata_sync_pending"):
+        result["status"] = "metadata_sync_pending"
+    return result
 
 
 def _record_initial_snapshot_candidate(

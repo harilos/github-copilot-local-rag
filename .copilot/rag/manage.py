@@ -558,7 +558,7 @@ class LocalRagManager:
         if not self._confirm("全DBの処理を開始しますか？"):
             self._print_info("処理を開始しませんでした。")
             return
-        completed = failed = skipped = 0
+        completed = partial = failed = skipped = 0
         for index, database in enumerate(databases, start=1):
             db_name = str(database.get("name") or "")
             self.output(
@@ -588,8 +588,10 @@ class LocalRagManager:
             self._show_source_update_result(result, db_name=db_name)
             groups = self._source_update_groups(result)
             failed_items = groups["failed"]
+            partial_items = groups["partial"]
             skipped_items = groups["skipped"]
             completed += len(groups["completed"])
+            partial += len(partial_items)
             failed += len(failed_items)
             skipped += len(skipped_items)
             if bool(result.get("snapshot_marker_eligible")):
@@ -599,6 +601,7 @@ class LocalRagManager:
                 )
         self.output("\n全DBの処理結果")
         self.output(f"成功: {completed} Source")
+        self.output(f"一部反映: {partial} Source")
         self.output(f"失敗: {failed} Source")
         self.output(f"スキップ: {skipped} Source")
 
@@ -612,6 +615,7 @@ class LocalRagManager:
         groups = self._source_update_groups(result)
         for key, label in (
             ("completed", "成功"),
+            ("partial", "一部反映"),
             ("failed", "失敗"),
             ("skipped", "スキップ"),
         ):
@@ -679,16 +683,21 @@ class LocalRagManager:
                     for value in values
                     if value.get("status") == "skipped"
                 ],
+                "partial": [
+                    value
+                    for value in values
+                    if value.get("status") == "partial"
+                ],
                 "failed": [
                     value
                     for value in values
                     if value.get("status") not in completed_statuses
-                    and value.get("status") != "skipped"
+                    and value.get("status") not in {"skipped", "partial"}
                 ],
             }
         return {
             key: list(result.get(key) or [])
-            for key in ("completed", "failed", "skipped")
+            for key in ("completed", "partial", "failed", "skipped")
         }
 
     def _write_content_snapshot(self, db_name: str, *, reason: str) -> None:
@@ -1130,6 +1139,28 @@ class LocalRagManager:
             "からそのまま再実行できます。"
         )
 
+    def _print_source_partial_result(
+        self,
+        result: dict[str, Any],
+    ) -> None:
+        summary = result.get("add_summary")
+        values = summary if isinstance(summary, dict) else {}
+        indexed = int(values.get("indexed_files") or 0)
+        skipped = int(values.get("skipped_files") or 0)
+        failed = int(values.get("input_error_files") or 0)
+        self._print_warning(
+            "Sourceは一部反映されました。"
+            f"反映: {indexed:,}件 / 未変更: {skipped:,}件 / "
+            f"読取り失敗: {failed:,}件"
+        )
+        self.output(
+            "読取りに失敗したファイルの以前の検索データは保持されています。"
+        )
+        self.output(
+            "対応: ファイルを読める状態に戻して同じSourceを更新すると、"
+            "失敗ファイルを自動的に再試行します。"
+        )
+
     def _print_screen_header(
         self,
         title: str,
@@ -1453,6 +1484,8 @@ class LocalRagManager:
                 self._print_success(
                     "Sourceを保存し、検索へ反映しました。"
                 )
+            elif status == "partial":
+                self._print_source_partial_result(result)
             elif status in {"failed", "error"}:
                 self._print_source_result_failure(
                     result,
@@ -3294,6 +3327,8 @@ class LocalRagManager:
             "updated",
         }:
             self._print_success("Sourceを検索へ反映しました。")
+        elif result_status == "partial":
+            self._print_source_partial_result(result)
         elif result_status in {"failed", "error"}:
             self._print_source_result_failure(
                 result,
