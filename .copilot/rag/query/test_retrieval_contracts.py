@@ -4,6 +4,7 @@ import sys
 import sqlite3
 import tempfile
 import unittest
+from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -803,6 +804,200 @@ class SourceIdentityContractTests(unittest.TestCase):
         key = _doc_key(row)
         self.assertTrue(key.startswith("doc:"))
         self.assertNotIn("private", key)
+
+
+class ContentDedupIntegrityContracts(unittest.TestCase):
+    @staticmethod
+    def _lane_row(
+        row_id: str,
+        lane: str,
+        *,
+        source_id: str,
+        path: str,
+        text: str,
+        rank: int = 1,
+        stored_hash: str = "shared-content",
+    ) -> dict[str, Any]:
+        row = result_row(
+            row_id,
+            text,
+            signals=[lane],
+            path=path,
+        )
+        row["metadata"].update(
+            {
+                "source_id": source_id,
+                "doc_id": f"{source_id}:{path}",
+                "chunk_hash": stored_hash,
+            }
+        )
+        weight = {
+            "exact": 1.4,
+            "lexical": 1.1,
+            "dense": 1.0,
+            "metadata": 0.7,
+        }[lane]
+        row["score"] = weight / (60 + rank)
+        row["debug"] = {
+            "family_ranks": {lane: rank},
+            "family_weights": {lane: weight},
+            "rrf_score": row["score"],
+        }
+        return row
+
+    def test_dense_first_does_not_discard_later_exact_anchor_or_source(self) -> None:
+        anchor = "EXACT-LATE-901"
+        text = ("repeated alpha alpha context " * 50) + anchor + " decisive"
+        dense = self._lane_row(
+            "dense-copy",
+            "dense",
+            source_id="source-dense",
+            path="dense.txt",
+            text=text,
+        )
+        dense["source_ranges"] = [{"kind": "matched", "owner": "dense"}]
+        exact = self._lane_row(
+            "exact-copy",
+            "exact",
+            source_id="source-exact",
+            path="exact.txt",
+            text=text,
+        )
+        exact["debug"]["exact_match"] = {"matched_terms": [anchor]}
+        exact["source_ranges"] = [{"kind": "matched", "owner": "exact"}]
+        selected = _dedupe_and_diversify(
+            [dense, exact],
+            top_k=2,
+            max_per_doc=2,
+        )
+        self.assertEqual(1, len(selected))
+        merged = selected[0]
+        self.assertEqual("exact-copy", merged["id"])
+        self.assertEqual(["dense", "exact"], merged["signals"])
+        self.assertEqual("source-exact", merged["metadata"]["source_id"])
+        self.assertEqual(2, len(merged["debug"]["content_duplicate_provenance"]))
+        merged["rank"] = 1
+        payload = json_payload([merged], anchor, "fixture-rag", 120)
+        evidence = payload["evidence"][0]
+        self.assertIn(anchor, evidence["text"])
+        self.assertEqual("exact.txt", evidence["source"]["path"])
+        self.assertEqual("exact", evidence["source_ranges"][0]["owner"])
+
+    def test_lane_merge_is_input_order_independent(self) -> None:
+        text = "identical evidence body"
+        dense = self._lane_row(
+            "z-dense",
+            "dense",
+            source_id="source-z",
+            path="z.txt",
+            text=text,
+        )
+        lexical = self._lane_row(
+            "m-lexical",
+            "lexical",
+            source_id="source-m",
+            path="m.txt",
+            text=text,
+        )
+        exact = self._lane_row(
+            "a-exact",
+            "exact",
+            source_id="source-a",
+            path="a.txt",
+            text=text,
+        )
+        exact["debug"]["exact_match"] = {"matched_terms": ["evidence"]}
+        other = self._lane_row(
+            "other-dense",
+            "dense",
+            source_id="source-other",
+            path="other.txt",
+            text="different content",
+            stored_hash="different-content",
+        )
+        canonical: set[tuple[Any, ...]] = set()
+        for ordering in permutations([dense, lexical, exact, other]):
+            selected = _dedupe_and_diversify(
+                list(ordering),
+                top_k=4,
+                max_per_doc=2,
+            )
+            merged = selected[0]
+            canonical.add(
+                (
+                    tuple(row["id"] for row in selected),
+                    merged["id"],
+                    merged["metadata"]["source_id"],
+                    tuple(merged["signals"]),
+                    round(float(merged["score"]), 12),
+                    tuple(sorted(merged["debug"]["family_ranks"].items())),
+                )
+            )
+        self.assertEqual(1, len(canonical))
+
+    def test_same_lane_duplicate_contributes_rrf_only_once(self) -> None:
+        first = self._lane_row(
+            "lexical-first",
+            "lexical",
+            source_id="source-a",
+            path="a.txt",
+            text="same lexical content",
+            rank=1,
+        )
+        second = self._lane_row(
+            "lexical-second",
+            "lexical",
+            source_id="source-b",
+            path="b.txt",
+            text="same lexical content",
+            rank=2,
+        )
+        merged = _dedupe_and_diversify(
+            [second, first],
+            top_k=2,
+            max_per_doc=2,
+        )[0]
+        self.assertAlmostEqual(1.1 / 61, merged["score"])
+        self.assertEqual({"lexical": 1}, merged["debug"]["family_ranks"])
+
+    def test_mocked_hash_collision_with_different_text_is_not_merged(self) -> None:
+        left = self._lane_row(
+            "collision-left",
+            "dense",
+            source_id="source-left",
+            path="left.txt",
+            text="left content",
+            stored_hash="forced-collision",
+        )
+        right = self._lane_row(
+            "collision-right",
+            "lexical",
+            source_id="source-right",
+            path="right.txt",
+            text="right content",
+            stored_hash="forced-collision",
+        )
+        selected = _dedupe_and_diversify(
+            [left, right],
+            top_k=2,
+            max_per_doc=2,
+        )
+        self.assertEqual(
+            ["collision-left", "collision-right"],
+            [row["id"] for row in selected],
+        )
+
+    def test_missing_hash_metadata_is_safe_and_not_implicitly_merged(self) -> None:
+        rows = [
+            result_row("missing-a", "same text", path="a.txt"),
+            result_row("missing-b", "same text", path="b.txt"),
+        ]
+        selected = _dedupe_and_diversify(
+            rows,
+            top_k=2,
+            max_per_doc=2,
+        )
+        self.assertEqual(2, len(selected))
 
 
 class HybridAnchorContractTests(unittest.TestCase):

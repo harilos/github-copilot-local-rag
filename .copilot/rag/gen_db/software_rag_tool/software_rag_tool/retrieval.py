@@ -775,7 +775,13 @@ def _weighted_rrf(families: list[tuple[str, float, list[dict[str, Any]]]]) -> di
             seen_in_family.add(chunk_id)
             item = fused.setdefault(
                 chunk_id,
-                {"id": chunk_id, "rrf_score": 0.0, "family_ranks": {}, "signals": set(), "best_row": row},
+                {
+                    "id": chunk_id,
+                    "rrf_score": 0.0,
+                    "family_ranks": {},
+                    "signals": set(),
+                    "best_row": row,
+                },
             )
             item["rrf_score"] += weight / (RRF_K + rank)
             item["family_ranks"][family] = rank
@@ -2220,16 +2226,29 @@ def _dedupe_and_diversify(
     max_per_doc: int,
     relaxed_doc_limits: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    seen_hashes: set[str] = set()
-    unique_rows: list[dict[str, Any]] = []
+    content_groups: dict[str, list[dict[str, Any]]] = {}
+    content_order: list[str] = []
+    unkeyed_rows: list[dict[str, Any]] = []
     for row in rows:
-        meta = row.get("metadata") or {}
-        chunk_hash = str(meta.get("chunk_hash") or meta.get("text_hash") or "")
-        if chunk_hash and chunk_hash in seen_hashes:
+        content_key = _content_dedup_key(row)
+        if not content_key:
+            unkeyed_rows.append(row)
             continue
-        if chunk_hash:
-            seen_hashes.add(chunk_hash)
-        unique_rows.append(row)
+        if content_key not in content_groups:
+            content_groups[content_key] = []
+            content_order.append(content_key)
+        content_groups[content_key].append(row)
+
+    duplicate_found = any(len(group) > 1 for group in content_groups.values())
+    if duplicate_found:
+        unique_rows = [
+            _merge_content_duplicate_rows(content_groups[key])
+            for key in content_order
+        ]
+        unique_rows.extend(unkeyed_rows)
+        unique_rows.sort(key=_deduped_candidate_order)
+    else:
+        unique_rows = list(rows)
 
     rows_by_doc: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, row in enumerate(unique_rows):
@@ -2270,6 +2289,153 @@ def _dedupe_and_diversify(
         if len(output) >= top_k:
             break
     return output
+
+
+def _content_dedup_key(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") or {}
+    stored_hash = str(
+        metadata.get("chunk_hash")
+        or metadata.get("text_hash")
+        or ""
+    )
+    if not stored_hash:
+        return ""
+    # A stored hash collision must not merge different content.
+    text_hash = hashlib.sha256(
+        str(row.get("text") or "").encode(
+            "utf-8",
+            errors="surrogatepass",
+        )
+    ).hexdigest()
+    return f"{stored_hash}:{text_hash}"
+
+
+def _merge_content_duplicate_rows(
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if len(rows) == 1:
+        return rows[0]
+    representative = min(rows, key=_content_representative_key)
+    merged = dict(representative)
+    merged["metadata"] = dict(representative.get("metadata") or {})
+    merged["signals"] = sorted(
+        {
+            str(signal)
+            for row in rows
+            for signal in row.get("signals") or []
+            if signal
+        }
+    )
+
+    family_ranks: dict[str, int] = {}
+    candidate_pool_sources: set[str] = set()
+    for row in rows:
+        debug = row.get("debug") or {}
+        for family, raw_rank in (debug.get("family_ranks") or {}).items():
+            try:
+                rank = int(raw_rank)
+            except (TypeError, ValueError):
+                continue
+            if rank <= 0:
+                continue
+            previous = family_ranks.get(str(family))
+            if previous is None or rank < previous:
+                family_ranks[str(family)] = rank
+        candidate_pool_sources.update(
+            str(value)
+            for value in debug.get("candidate_pool_sources") or []
+            if value
+        )
+
+    debug = dict(representative.get("debug") or {})
+    if family_ranks:
+        score = sum(
+            _default_family_weight(family) / (RRF_K + rank)
+            for family, rank in family_ranks.items()
+        )
+    else:
+        score = max(_finite_row_score(row) for row in rows)
+    merged["score"] = score
+    debug["rrf_score"] = score
+    debug["family_ranks"] = dict(sorted(family_ranks.items()))
+    if candidate_pool_sources:
+        debug["candidate_pool_sources"] = sorted(candidate_pool_sources)
+    debug["content_duplicate_provenance"] = sorted(
+        (
+            {
+                "chunk_uid": str(row.get("id") or ""),
+                "document_key": _doc_key(row),
+                "signals": sorted(
+                    str(signal)
+                    for signal in row.get("signals") or []
+                    if signal
+                ),
+            }
+            for row in rows
+        ),
+        key=lambda value: (
+            value["document_key"],
+            value["chunk_uid"],
+        ),
+    )
+    merged["debug"] = debug
+    return merged
+
+
+def _content_representative_key(
+    row: dict[str, Any],
+) -> tuple[int, float, str, str]:
+    return (
+        _explicit_evidence_priority(row),
+        -_finite_row_score(row),
+        _doc_key(row),
+        str(row.get("id") or ""),
+    )
+
+
+def _deduped_candidate_order(
+    row: dict[str, Any],
+) -> tuple[float, int, str, str]:
+    return (
+        -_finite_row_score(row),
+        _explicit_evidence_priority(row),
+        _doc_key(row),
+        str(row.get("id") or ""),
+    )
+
+
+def _explicit_evidence_priority(row: dict[str, Any]) -> int:
+    signals = set(str(value) for value in row.get("signals") or [])
+    debug = row.get("debug") or {}
+    if "exact" in signals or debug.get("exact_match"):
+        return 0
+    if "lexical_anchor" in signals or debug.get("lexical_anchor"):
+        return 1
+    if "lexical" in signals:
+        return 2
+    if "metadata" in signals:
+        return 3
+    if "dense" in signals:
+        return 4
+    return 5
+
+
+def _finite_row_score(row: dict[str, Any]) -> float:
+    try:
+        score = float(row.get("score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
+def _default_family_weight(family: str) -> float:
+    return {
+        "exact": 1.4,
+        "lexical": 1.1,
+        "anchor_candidate": 1.1,
+        "dense": 1.0,
+        "metadata": 0.7,
+    }.get(family, 1.0)
 
 
 def _is_protected_postprocess_candidate(row: dict[str, Any]) -> bool:
