@@ -1289,23 +1289,23 @@ def _execute_add(
 
 def _redact_external_root(value: Any, root: Path) -> str:
     text = str(value or "")
-    raw_candidates = {
+    roots = {
         str(root),
         str(Path(os.path.abspath(root))),
-        str(root).replace("\\", "/"),
-        str(root).replace("/", "\\"),
     }
-    candidates = raw_candidates | {
-        item.replace("\\", "\\\\") for item in raw_candidates
-    }
-    for candidate in sorted(candidates, key=len, reverse=True):
-        if candidate:
-            text = re.sub(
-                re.escape(candidate),
-                "<EXTERNAL_SOURCE_ROOT>",
-                text,
-                flags=re.IGNORECASE,
-            )
+    for candidate in sorted(roots, key=len, reverse=True):
+        parts = [
+            part for part in re.split(r"[\\/]+", candidate) if part
+        ]
+        if not parts:
+            continue
+        pattern = r"[\\/]+".join(re.escape(part) for part in parts)
+        text = re.sub(
+            pattern,
+            "<EXTERNAL_SOURCE_ROOT>",
+            text,
+            flags=re.IGNORECASE,
+        )
     return text
 
 

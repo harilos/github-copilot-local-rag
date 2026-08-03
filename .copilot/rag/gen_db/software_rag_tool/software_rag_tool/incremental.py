@@ -954,20 +954,17 @@ def _run_failure_text(
 def _redact_private_root_text(value: Any, scope: IngestionScope) -> str:
     text = str(value or "")
     roots = {str(scope.logical_root), str(scope.resolved_root)}
-    raw_candidates = roots | {
-        item.replace("\\", "/") for item in roots
-    } | {item.replace("/", "\\") for item in roots}
-    candidates = raw_candidates | {
-        item.replace("\\", "\\\\") for item in raw_candidates
-    }
-    for candidate in sorted(candidates, key=len, reverse=True):
-        if candidate:
-            text = re.sub(
-                re.escape(candidate),
-                "<EXTERNAL_SOURCE_ROOT>",
-                text,
-                flags=re.IGNORECASE,
-            )
+    for root in sorted(roots, key=len, reverse=True):
+        parts = [part for part in re.split(r"[\\/]+", root) if part]
+        if not parts:
+            continue
+        pattern = r"[\\/]+".join(re.escape(part) for part in parts)
+        text = re.sub(
+            pattern,
+            "<EXTERNAL_SOURCE_ROOT>",
+            text,
+            flags=re.IGNORECASE,
+        )
     return text
 
 
