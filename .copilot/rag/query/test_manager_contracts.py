@@ -405,6 +405,11 @@ class ManagerContractTests(unittest.TestCase):
                         "display_name": "B",
                         "skip_reason": "one_shot_source_complete",
                     },
+                    {
+                        "status": "partial",
+                        "display_name": "D",
+                        "message": "1件を読み取れませんでした。",
+                    },
                     {"status": "failed", "display_name": "C"},
                 ]
             }
@@ -414,6 +419,9 @@ class ManagerContractTests(unittest.TestCase):
         ])
         self.assertEqual(["B"], [
             item["display_name"] for item in groups["skipped"]
+        ])
+        self.assertEqual(["D"], [
+            item["display_name"] for item in groups["partial"]
         ])
         self.assertEqual(["C"], [
             item["display_name"] for item in groups["failed"]

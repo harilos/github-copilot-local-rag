@@ -57,6 +57,8 @@ class DocumentFilterTests(unittest.TestCase):
                 "model.asta",
                 "application.py",
                 "settings.yaml",
+                "~$draft.docx",
+                "budget$2026.docx",
             ):
                 (root / name).write_bytes(b"example document text")
 
@@ -72,10 +74,16 @@ class DocumentFilterTests(unittest.TestCase):
             estimated = count_document_files(root)
 
         self.assertEqual(
-            ["diagram.pu", "diagram.puml", "guide.md", "model.asta"],
+            [
+                "budget$2026.docx",
+                "diagram.pu",
+                "diagram.puml",
+                "guide.md",
+                "model.asta",
+            ],
             discovered,
         )
-        self.assertEqual(4, estimated)
+        self.assertEqual(5, estimated)
 
     def test_astah_fallback_indexes_filename_and_readable_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
