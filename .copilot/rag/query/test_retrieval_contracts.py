@@ -592,6 +592,51 @@ class CatalogLaneHealthContractTests(unittest.TestCase):
         self.assertEqual(1, backend.calls["metadata"])
         self.assertEqual(0, backend.calls["anchor"])
 
+    def test_catalog_failure_with_cross_source_duplicates_still_merges_safely(self) -> None:
+        backend = CatalogLexicalFailingBackend()
+        dense_a = result_row(
+            "dense-source-a",
+            "identical cross-source evidence",
+            signals=["dense"],
+            path="README.md",
+        )
+        dense_a["metadata"].update(
+            {
+                "source_id": "source-a",
+                "doc_id": "document-a",
+                "chunk_hash": "cross-source-content",
+            }
+        )
+        dense_b = result_row(
+            "dense-source-b",
+            "identical cross-source evidence",
+            signals=["dense"],
+            path="README.md",
+        )
+        dense_b["metadata"].update(
+            {
+                "source_id": "source-b",
+                "doc_id": "document-b",
+                "chunk_hash": "cross-source-content",
+            }
+        )
+        backend.dense_rows = [dense_a, dense_b]
+        rows, health = hybrid_query_with_health(
+            "ordinary cooling question",
+            top_k=2,
+            explain=True,
+            backend=backend,
+        )
+        self.assertEqual(1, len(rows))
+        self.assertEqual("LexicalSearchError", health["lexical"]["error"])
+        provenance = rows[0]["debug"]["content_duplicate_provenance"]
+        self.assertEqual(2, len(provenance))
+        self.assertEqual(2, len({item["document_key"] for item in provenance}))
+        self.assertEqual(
+            rows[0]["id"].split("-")[-1],
+            rows[0]["metadata"]["source_id"].split("-")[-1],
+        )
+
 
 class LexicalTokenizerFailureContractTests(unittest.TestCase):
 
