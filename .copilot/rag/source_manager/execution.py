@@ -1787,6 +1787,10 @@ def _validate_external_sharepoint_tree(root: Path) -> None:
                 raise SourceManagerError(
                     "external ADD root must not contain links or special files"
                 )
+            if name.casefold() in {".git", ".svn"}:
+                raise SourceManagerError(
+                    "external ADD root must not contain VCS metadata"
+                )
         for name in sorted(file_names):
             child = directory_path / name
             child_metadata = os.lstat(child)

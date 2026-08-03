@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from source_manager import SourceManagerError, SourceStore
-from source_manager import runner
+from source_manager import execution, runner
 from source_manager.diagnostics import exception_diagnostic
 from source_manager.subprocess_stream import RESULT_FRAME
 
@@ -177,6 +178,54 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                 progress_callback=None,
             )
 
+    def test_multiple_frames_are_rejected_even_if_one_is_valid(self) -> None:
+        source_id = "src_sharepoint-0123456789ab"
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=_framed({"status": "noise"})
+            + "\n"
+            + _framed(_summary(source_id)),
+            stderr="",
+        )
+        with self.assertRaisesRegex(SourceManagerError, "trusted JSON result"):
+            runner._execute_add(
+                db_root=Path("fixture-rag"),
+                source={
+                    "local_source_key": source_id,
+                    "source_type": "sharepoint",
+                },
+                work=Path("Shared Documents"),
+                python_executable=Path("python.exe"),
+                rag_root=Path("rag"),
+                command_runner=lambda _arguments: completed,
+                progress_callback=None,
+            )
+
+    def test_absolute_error_detail_path_is_rejected(self) -> None:
+        source_id = "src_sharepoint-0123456789ab"
+        unsafe = _summary(source_id)
+        unsafe["error_details"][0]["path"] = (
+            r"C:\Users\Person Name\SharePoint\locked.docx"
+        )
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=_framed(unsafe),
+            stderr="",
+        )
+        with self.assertRaisesRegex(SourceManagerError, "trusted JSON result"):
+            runner._execute_add(
+                db_root=Path("fixture-rag"),
+                source={
+                    "local_source_key": source_id,
+                    "source_type": "sharepoint",
+                },
+                work=Path("Shared Documents"),
+                python_executable=Path("python.exe"),
+                rag_root=Path("rag"),
+                command_runner=lambda _arguments: completed,
+                progress_callback=None,
+            )
+
     def test_nonzero_sharepoint_process_redacts_root_in_every_field(self) -> None:
         absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
         runtime = Path(r"C:\Users\Runtime User\Local RAG")
@@ -220,6 +269,131 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         self.assertIn("<PYTHON_EXECUTABLE>", serialized)
         self.assertIn("<RAG_RUNTIME>", serialized)
         self.assertIn("Traceback suppressed", serialized)
+
+    def test_sharepoint_process_invocation_failures_hide_all_arguments(self) -> None:
+        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        runtime = Path(r"C:\Users\Runtime User\Local RAG")
+
+        def launch_error(arguments: list[str]) -> SimpleNamespace:
+            error = OSError(2, "launch failed", str(absolute))
+            error.winerror = 2
+            raise error
+
+        def timeout_error(arguments: list[str]) -> SimpleNamespace:
+            raise subprocess.TimeoutExpired(
+                cmd=arguments,
+                timeout=30,
+                output=str(absolute),
+                stderr=str(runtime),
+            )
+
+        for command in (launch_error, timeout_error):
+            with self.subTest(command=command.__name__):
+                with self.assertRaises(SourceManagerError) as captured:
+                    runner._execute_add(
+                        db_root=Path("fixture-rag"),
+                        source={
+                            "local_source_key": "src_sharepoint-0123456789ab",
+                            "source_type": "sharepoint",
+                        },
+                        work=absolute,
+                        python_executable=runtime / "python.exe",
+                        rag_root=runtime / "rag",
+                        command_runner=command,
+                        progress_callback=None,
+                    )
+                diagnostic = exception_diagnostic(
+                    captured.exception,
+                    operation="SharePoint test",
+                    stage="reflect.add",
+                )
+                serialized = json.dumps(diagnostic, ensure_ascii=False)
+                self.assertNotIn("Person Name", serialized)
+                self.assertNotIn("Runtime User", serialized)
+                self.assertEqual(1, len(diagnostic["exception_chain"]))
+                self.assertIsNone(captured.exception.__cause__)
+                self.assertTrue(captured.exception.__suppress_context__)
+
+    def test_validation_oserror_hides_suppressed_exception_context(self) -> None:
+        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        inner = OSError(5, "access denied", str(absolute))
+        inner.winerror = 5
+        with (
+            mock.patch.object(
+                execution,
+                "_reject_unsafe_external_path_components",
+            ),
+            mock.patch.object(
+                execution,
+                "_validate_external_sharepoint_tree",
+                side_effect=inner,
+            ),
+        ):
+            with self.assertRaises(SourceManagerError) as captured:
+                execution.validate_external_add_root(absolute)
+        diagnostic = exception_diagnostic(
+            captured.exception,
+            operation="SharePoint test",
+            stage="fetch.sharepoint.validate",
+        )
+        serialized = json.dumps(diagnostic, ensure_ascii=False)
+        self.assertNotIn("Person Name", serialized)
+        self.assertNotIn("access denied", serialized)
+        self.assertEqual(1, len(diagnostic["exception_chain"]))
+        self.assertEqual(
+            getattr(inner, "errno", None),
+            diagnostic["operation_detail"]["errno"],
+        )
+        self.assertEqual(5, diagnostic["operation_detail"]["winerror"])
+
+    def test_reflection_rejects_vcs_metadata_before_add(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            db_root = root / "fixture-rag"
+            db_root.mkdir()
+            external = root / "SharePoint"
+            external.mkdir()
+            (external / ".git").mkdir()
+            source_key = "src_sharepoint-0123456789ab"
+            store = SourceStore(db_root)
+            source = store.create_source(
+                source_type="sharepoint",
+                display_name="Fixture SharePoint",
+                fetch={"root_env": "RAG_SHAREPOINT_ROOT"},
+                local_source_key=source_key,
+            )
+            state_value = runner.new_run_state(store.plan(source.payload))
+            state_value.update(
+                {
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 0,
+                    "pending_count": 0,
+                }
+            )
+            state = store.save_state(
+                source_key,
+                state_value,
+                expected_revision=0,
+                expected_etag=runner.MISSING_ETAG,
+            )
+            command = mock.Mock()
+            with self.assertRaisesRegex(
+                SourceManagerError,
+                "VCS metadata",
+            ):
+                runner._reflect_and_sync(
+                    store,
+                    source,
+                    state,
+                    add_root=external,
+                    command_runner=command,
+                    python_executable=Path("python.exe"),
+                    rag_root=root / "rag",
+                    metadata_publisher=lambda *_args: None,
+                    progress_callback=None,
+                )
+        command.assert_not_called()
 
     def test_streaming_progress_redacts_external_root_before_callback(self) -> None:
         absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")

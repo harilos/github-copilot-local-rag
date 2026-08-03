@@ -8,7 +8,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1066,14 +1066,38 @@ def _execute_add(
         def effective_progress_callback(event: Mapping[str, Any]) -> None:
             progress_callback(_privacy_safe_progress_event(event, work))
 
-    completed = (
-        command_runner(arguments)
-        if command_runner is not None
-        else run_streaming_process(
-            arguments,
-            progress_callback=effective_progress_callback,
+    try:
+        completed = (
+            command_runner(arguments)
+            if command_runner is not None
+            else run_streaming_process(
+                arguments,
+                progress_callback=effective_progress_callback,
+            )
         )
-    )
+    except Exception as exc:
+        if not privacy_safe_root:
+            raise
+        error = SourceManagerError(
+            "ADD failed: 検索反映プロセスを実行できませんでした。",
+            stage="reflect.add",
+        )
+        error.suppress_traceback = True
+        error.diagnostic = {
+            "stage": "reflect.add",
+            "error_type": type(exc).__name__,
+            **(
+                {"errno": int(exc.errno)}
+                if isinstance(getattr(exc, "errno", None), int)
+                else {}
+            ),
+            **(
+                {"winerror": int(exc.winerror)}
+                if isinstance(getattr(exc, "winerror", None), int)
+                else {}
+            ),
+        }
+        raise error from None
     elapsed = time.monotonic() - started
     returncode = int(getattr(completed, "returncode", 1))
     if returncode != 0:
@@ -1165,6 +1189,61 @@ def _execute_add(
             return False
         if not isinstance(value.get("error_details"), list):
             return False
+        if len(value["error_details"]) > 100:
+            return False
+        for detail in value["error_details"]:
+            if not isinstance(detail, Mapping):
+                return False
+            if set(detail) - {
+                "path",
+                "stage",
+                "error_type",
+                "retryable",
+                "errno",
+                "winerror",
+            }:
+                return False
+            path = detail.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or len(path) > 2_048
+                or "\\" in path
+            ):
+                return False
+            posix_path = PurePosixPath(path)
+            windows_path = PureWindowsPath(path)
+            if (
+                posix_path.is_absolute()
+                or windows_path.is_absolute()
+                or windows_path.drive
+                or ".." in posix_path.parts
+            ):
+                return False
+            if (
+                not isinstance(detail.get("stage"), str)
+                or not detail["stage"]
+                or len(detail["stage"]) > 80
+            ):
+                return False
+            if (
+                not isinstance(detail.get("error_type"), str)
+                or not detail["error_type"]
+                or len(detail["error_type"]) > 120
+            ):
+                return False
+            if not isinstance(detail.get("retryable"), bool):
+                return False
+            for optional_number in ("errno", "winerror"):
+                if optional_number not in detail:
+                    continue
+                number = detail[optional_number]
+                if (
+                    not isinstance(number, int)
+                    or isinstance(number, bool)
+                    or number < 0
+                ):
+                    return False
         file_count = int(value["file_count"])
         indexed = int(value["indexed_files"])
         skipped = int(value["skipped_files"])
@@ -1176,6 +1255,8 @@ def _execute_add(
             return False
         if errors != input_errors + extract_errors:
             return False
+        if errors > 0 and not value["error_details"]:
+            return False
         if result_status == "success":
             return errors == 0
         if result_status == "partial":
@@ -1184,6 +1265,10 @@ def _execute_add(
                 and input_errors == errors
                 and extract_errors == 0
                 and completed_files > 0
+                and all(
+                    bool(detail.get("retryable"))
+                    for detail in value["error_details"]
+                )
             )
         return errors > 0 and (
             completed_files == 0 or extract_errors > 0
@@ -1280,6 +1365,29 @@ def _execute_add(
                 stderr=getattr(completed, "stderr", ""),
             )
         raise error
+    if privacy_safe_root:
+        summary = {
+            field: summary[field]
+            for field in (
+                "operation",
+                "source_id",
+                "file_count",
+                "indexed_files",
+                "skipped_files",
+                "error_files",
+                "input_error_files",
+                "extract_error_files",
+                "error_details",
+                "upserted_records",
+                "deleted_records",
+                "result_status",
+            )
+        }
+        if summary["result_status"] == "partial":
+            summary["warning_ja"] = (
+                f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
+                "読めたファイルは反映済みで、失敗ファイルは次回自動再試行します。"
+            )
     return {
         "source_id": reported_source_id,
         "status": result_status,

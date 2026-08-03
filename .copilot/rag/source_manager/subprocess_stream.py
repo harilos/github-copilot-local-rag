@@ -572,6 +572,33 @@ def extract_json_result(
             diagnostics=diagnostics,
         ):
             valid_frames.append(decoded)
+    if require_frame:
+        if len(frames) == 1 and len(valid_frames) == 1:
+            return valid_frames[0]
+        if len(frames) > 1:
+            diagnostics.append(
+                {
+                    "stage": "frame",
+                    "error": "ambiguous_results",
+                    "frame_count": len(frames),
+                    "valid_count": len(valid_frames),
+                }
+            )
+            raise ResultExtractionError(
+                "expected exactly one framed result",
+                diagnostics=diagnostics,
+            )
+        diagnostics.append(
+            {
+                "stage": "selection",
+                "error": "no_valid_framed_result",
+                "frame_count": len(frames),
+            }
+        )
+        raise ResultExtractionError(
+            "no schema-valid framed result",
+            diagnostics=diagnostics,
+        )
     if len(valid_frames) == 1:
         return valid_frames[0]
     if len(valid_frames) > 1:
@@ -586,19 +613,6 @@ def extract_json_result(
             "multiple schema-valid framed results",
             diagnostics=diagnostics,
         )
-    if require_frame:
-        diagnostics.append(
-            {
-                "stage": "selection",
-                "error": "no_valid_framed_result",
-                "frame_count": len(frames),
-            }
-        )
-        raise ResultExtractionError(
-            "no schema-valid framed result",
-            diagnostics=diagnostics,
-        )
-
     stripped = stdout.strip()
     if stripped:
         decoded = _decode_candidate(

@@ -948,7 +948,16 @@ def _run_failure_text(
     privacy_safe_root: bool,
 ) -> str:
     text = f"{type(exc).__name__}: {exc}"
-    return _redact_private_root_text(text, scope) if privacy_safe_root else text
+    if not privacy_safe_root:
+        return text
+    values = [type(exc).__name__, "stage=run"]
+    error_number = getattr(exc, "errno", None)
+    if isinstance(error_number, int):
+        values.append(f"errno={error_number}")
+    windows_error = getattr(exc, "winerror", None)
+    if isinstance(windows_error, int):
+        values.append(f"winerror={windows_error}")
+    return " ".join(values)
 
 
 def _redact_private_root_text(value: Any, scope: IngestionScope) -> str:

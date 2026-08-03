@@ -127,6 +127,35 @@ class DocumentFilterTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 validate_with(0xA000000C)
 
+    def test_sharepoint_fetch_preflight_rejects_vcs_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve()
+            source = temporary_root / "SharePoint"
+            work = temporary_root / "work"
+            source.mkdir()
+            work.mkdir()
+            (source / ".svn").mkdir()
+            plan = {
+                "provider": "sharepoint",
+                "steps": [
+                    {
+                        "parameters": {
+                            "root_env": "RAG_SHAREPOINT_ROOT",
+                        }
+                    }
+                ],
+            }
+            with (
+                mock.patch.object(execution, "_is_windows", return_value=True),
+                self.assertRaisesRegex(Exception, "VCS metadata"),
+            ):
+                execution.execute_fetch_plan(
+                    plan,
+                    work,
+                    {},
+                    environment={"RAG_SHAREPOINT_ROOT": str(source)},
+                )
+
     def test_astah_fallback_indexes_filename_and_readable_labels(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "system-model.asta"

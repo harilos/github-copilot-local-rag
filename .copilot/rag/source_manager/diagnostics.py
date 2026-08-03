@@ -67,6 +67,7 @@ def exception_diagnostic(
     events_jsonl: str | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
+    suppress_traceback = bool(getattr(exc, "suppress_traceback", False))
     chains: list[dict[str, str]] = []
     current: BaseException | None = exc
     seen: set[int] = set()
@@ -81,10 +82,17 @@ def exception_diagnostic(
                 ),
             }
         )
-        current = current.__cause__ or current.__context__
+        if suppress_traceback:
+            current = None
+        elif current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
     formatted = (
         "Traceback suppressed for privacy-sensitive Source operation."
-        if bool(getattr(exc, "suppress_traceback", False))
+        if suppress_traceback
         else "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
