@@ -62,6 +62,17 @@ def chunker_version(config: dict[str, Any]) -> str:
     return ":".join(f"{key}={config[key]}" for key in keys)
 
 
+def is_office_temporary_file(path: Path | str) -> bool:
+    """Return whether *path* is an Office owner/lock file.
+
+    Office creates sibling files whose basename starts with the exact ``~$``
+    prefix while a document is open.  They are not source documents and may
+    be unreadable even when the real document is healthy.
+    """
+
+    return Path(path).name.startswith("~$")
+
+
 def iter_input_files(root: Path) -> Iterable[Path]:
     discovered: list[Path] = []
 
@@ -76,8 +87,15 @@ def iter_input_files(root: Path) -> Iterable[Path]:
     ):
         child_directories.sort()
         for filename in sorted(filenames):
+            if is_office_temporary_file(filename):
+                continue
             path = Path(directory) / filename
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            # ``os.walk`` already classified this name as a non-directory.
+            # Keep it as a candidate even if it disappears or becomes
+            # unreadable immediately afterwards so incremental ingestion can
+            # record a retryable per-file error instead of treating it as a
+            # confirmed deletion.
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 discovered.append(path)
     yield from sorted(discovered)
 

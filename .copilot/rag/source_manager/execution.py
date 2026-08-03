@@ -1657,8 +1657,12 @@ def _regular_file_count(
     provider: str = "",
 ) -> int:
     count = 0
+    from .document_filter_counts import is_office_temporary_file
+
     for directory, _children, files in os.walk(root, followlinks=False):
         for name in files:
+            if is_office_temporary_file(name):
+                continue
             if stat.S_ISREG(os.lstat(Path(directory) / name).st_mode):
                 count += 1
                 _emit_file_progress(

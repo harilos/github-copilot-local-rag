@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
@@ -36,6 +37,7 @@ def add_or_update_root(
     chunk_overlap: int = 160,
     resume: bool = False,
     document_token_budget: DocumentTokenBudget | None = None,
+    privacy_safe_root: bool = False,
 ) -> dict[str, Any]:
     if chunk_max_chars <= 0:
         raise ValueError("chunk_max_chars must be positive")
@@ -74,6 +76,20 @@ def add_or_update_root(
         state = _initial_state()
     else:
         state = _load_state()
+    persistent_scope_fields = _persistent_scope_fields(
+        scope,
+        source_id=source_id,
+        privacy_safe_root=privacy_safe_root,
+    )
+    if privacy_safe_root:
+        _migrate_private_scope_paths(
+            state,
+            scope=scope,
+            source_id=source_id,
+            persistent_root_identity=str(
+                persistent_scope_fields["resolved_root"]
+            ),
+        )
     effective_batch_size_files = _effective_batch_size_files(
         state,
         requested=batch_size_files,
@@ -85,9 +101,10 @@ def add_or_update_root(
             scope,
             source_id,
             effective_batch_size_files,
+            privacy_safe_root=privacy_safe_root,
         )
     state["ingestion"] = {
-        **scope.state_fields(source_id=source_id),
+        **persistent_scope_fields,
         "batch_size_files": effective_batch_size_files,
     }
     # Persist the effective scope before discovery.  If scanning is
@@ -95,7 +112,7 @@ def add_or_update_root(
     # root/source/scope that started the run.
     _save_state(state)
     scope_fields = {
-        **scope.state_fields(source_id=source_id),
+        **persistent_scope_fields,
         "batch_size_files": effective_batch_size_files,
     }
 
@@ -115,6 +132,8 @@ def add_or_update_root(
         indexed_files=0,
         skipped_files=0,
         error_files=0,
+        input_error_files=0,
+        extract_error_files=0,
         upserted_records=0,
         deleted_records=0,
         started_at=started_at,
@@ -136,7 +155,7 @@ def add_or_update_root(
 
     files = list(iter_input_files(scope.scan_root))
     discovered_keys = {
-        _state_key(source_id, scope.file(path).stored_path)
+        _state_key(source_id, _safe_stored_path(scope, path))
         for path in files
     }
     summary = {
@@ -146,6 +165,9 @@ def add_or_update_root(
         "indexed_files": 0,
         "skipped_files": 0,
         "error_files": 0,
+        "input_error_files": 0,
+        "extract_error_files": 0,
+        "error_details": [],
         "upserted_records": 0,
         "deleted_records": 0,
     }
@@ -155,7 +177,7 @@ def add_or_update_root(
         pending: list[dict[str, Any]] = []
         force_index = reset_db or reset_clean
         for path in files:
-            rel = scope.file(path).stored_path
+            rel = _safe_stored_path(scope, path)
             write_progress(status="running", phase="extract", current_file=rel)
             item = _prepare_file(
                 scope,
@@ -168,6 +190,9 @@ def add_or_update_root(
                 chunk_overlap=chunk_overlap,
                 document_token_budget=token_budget,
                 current_chunker_config=current_chunker_config,
+                persistent_root_identity=str(
+                    persistent_scope_fields["resolved_root"]
+                ),
             )
             status = item["status"]
             if status == "skip":
@@ -184,15 +209,31 @@ def add_or_update_root(
                 _record_error(state, item)
                 _save_state(state)
                 summary["error_files"] += 1
+                error_kind = str(item.get("error_kind") or "extract")
+                if error_kind == "input_read":
+                    summary["input_error_files"] += 1
+                else:
+                    summary["extract_error_files"] += 1
+                if len(summary["error_details"]) < 100:
+                    summary["error_details"].append(
+                        dict(item.get("diagnostic") or {})
+                    )
                 write_progress(
                     status="running",
                     phase="extract",
                     files_done=_files_done(summary),
                     error_files=summary["error_files"],
+                    input_error_files=summary["input_error_files"],
+                    extract_error_files=summary["extract_error_files"],
                     current_file=rel,
                     last_error=item["error"],
                 )
-                emit_event("file_failed", path=rel, error=item["error"])
+                emit_event(
+                    "file_failed",
+                    path=rel,
+                    error=item["error"],
+                    diagnostic=item.get("diagnostic") or {},
+                )
                 print(f"ERROR {item['rel']}: {item['error']}")
                 continue
 
@@ -215,6 +256,9 @@ def add_or_update_root(
             scope=scope,
             source_id=source_id,
             discovered_keys=discovered_keys,
+            persistent_root_identity=str(
+                persistent_scope_fields["resolved_root"]
+            ),
         )
         summary["deleted_records"] += reconciled["deleted_records"]
         summary["deleted_files"] = reconciled["deleted_files"]
@@ -227,17 +271,34 @@ def add_or_update_root(
         summary["collection_count"] = count
         summary["profile_updated"] = profile_updated
         summary["completed_at"] = datetime.now(timezone.utc).isoformat()
+        summary["result_status"] = _result_status(summary)
+        if summary["result_status"] == "partial":
+            summary["warning_ja"] = (
+                f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
+                "読めたファイルは反映済みで、失敗ファイルは次回自動再試行します。"
+            )
         _write_errors_report(state)
         write_progress(
-            status="completed",
+            status=summary["result_status"],
             phase="completed",
             files_done=_files_done(summary),
+            error_files=summary["error_files"],
+            input_error_files=summary["input_error_files"],
+            extract_error_files=summary["extract_error_files"],
+            result_status=summary["result_status"],
             collection_count=count,
             deleted_records=summary["deleted_records"],
             completed_at=summary["completed_at"],
             current_file="",
         )
-        emit_event("run_completed", **summary)
+        emit_event(
+            {
+                "success": "run_completed",
+                "partial": "run_partial",
+                "failure": "run_failed",
+            }[summary["result_status"]],
+            **summary,
+        )
         return summary
     except Exception as exc:
         write_progress(status="failed", phase="failed", last_error=f"{type(exc).__name__}: {exc}")
@@ -256,10 +317,10 @@ def _prepare_file(
     chunk_overlap: int = 160,
     document_token_budget: DocumentTokenBudget | None = None,
     current_chunker_config: dict[str, Any] | None = None,
+    persistent_root_identity: str | None = None,
 ) -> dict[str, Any]:
-    rel = scope.file(path).stored_path
+    rel = _safe_stored_path(scope, path)
     key = _state_key(source_id, rel)
-    content_hash = file_content_hash(path)
     prev = state["files"].get(key)
     token_budget = document_token_budget or get_document_token_budget()
     active_chunker_config = current_chunker_config or chunker_config(
@@ -267,17 +328,54 @@ def _prepare_file(
         chunk_overlap=chunk_overlap,
         document_token_budget=token_budget,
     )
+    root_identity = persistent_root_identity or str(scope.resolved_root)
+
+    try:
+        stored = scope.file(path)
+    except OSError as exc:
+        return _error_item(
+            key=key,
+            rel=rel,
+            source_id=source_id,
+            scope=scope,
+            root_identity=root_identity,
+            active_chunker_config=active_chunker_config,
+            previous=prev,
+            exc=exc,
+            stage="enumerate",
+            error_kind="input_read",
+        )
+
+    try:
+        content_hash = file_content_hash(stored.resolved_path)
+    except OSError as exc:
+        return _error_item(
+            key=key,
+            rel=rel,
+            source_id=source_id,
+            scope=scope,
+            root_identity=root_identity,
+            active_chunker_config=active_chunker_config,
+            previous=prev,
+            exc=exc,
+            stage="hash-read",
+            error_kind="input_read",
+        )
 
     if not force_index and prev and prev.get("content_hash") == content_hash and prev.get("chunker_config") == active_chunker_config:
         if prev.get("status") == "indexed":
             return {"status": "skip", "rel": rel}
-        if prev.get("status") == "error" and not retry_errors:
+        if (
+            prev.get("status") == "error"
+            and prev.get("error_kind") != "input_read"
+            and not retry_errors
+        ):
             return {"status": "skip", "rel": rel}
 
     try:
         records = build_records_for_file(
             scope.logical_root,
-            path,
+            stored.resolved_path,
             source_id=source_id,
             content_hash=content_hash,
             chunk_max_chars=chunk_max_chars,
@@ -285,22 +383,35 @@ def _prepare_file(
             ingestion_scope=scope,
             document_token_budget=token_budget,
         )
+    except OSError as exc:
+        input_read_error = _is_input_read_oserror(exc, stored.resolved_path)
+        return _error_item(
+            key=key,
+            rel=rel,
+            source_id=source_id,
+            scope=scope,
+            root_identity=root_identity,
+            active_chunker_config=active_chunker_config,
+            previous=prev,
+            exc=exc,
+            stage="extract-open" if input_read_error else "extract",
+            error_kind="input_read" if input_read_error else "extract",
+            failed_content_hash=content_hash,
+        )
     except Exception as exc:
-        return {
-            "status": "error",
-            "key": key,
-            "rel": rel,
-            "source_id": source_id,
-            "scan_subdir": scope.scan_subdir,
-            "resolved_root": str(scope.resolved_root),
-            "content_hash": content_hash,
-            "chunker_config": active_chunker_config,
-            "previous_chunker_config": dict(
-                (prev or {}).get("chunker_config") or {}
-            ),
-            "previous_record_ids": list((prev or {}).get("record_ids") or []),
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        return _error_item(
+            key=key,
+            rel=rel,
+            source_id=source_id,
+            scope=scope,
+            root_identity=root_identity,
+            active_chunker_config=active_chunker_config,
+            previous=prev,
+            exc=exc,
+            stage="extract",
+            error_kind="extract",
+            failed_content_hash=content_hash,
+        )
 
     return {
         "status": "ready",
@@ -308,11 +419,56 @@ def _prepare_file(
         "rel": rel,
         "source_id": source_id,
         "scan_subdir": scope.scan_subdir,
-        "resolved_root": str(scope.resolved_root),
+        "resolved_root": root_identity,
         "content_hash": content_hash,
         "chunker_config": active_chunker_config,
         "previous_record_ids": list((prev or {}).get("record_ids") or []),
         "records": records,
+    }
+
+
+def _error_item(
+    *,
+    key: str,
+    rel: str,
+    source_id: str,
+    scope: IngestionScope,
+    root_identity: str,
+    active_chunker_config: dict[str, Any],
+    previous: Any,
+    exc: BaseException,
+    stage: str,
+    error_kind: str,
+    failed_content_hash: str = "",
+) -> dict[str, Any]:
+    previous_value = previous if isinstance(previous, dict) else {}
+    diagnostic = _safe_file_diagnostic(
+        rel=rel,
+        exc=exc,
+        stage=stage,
+        retryable=error_kind == "input_read",
+    )
+    return {
+        "status": "error",
+        "key": key,
+        "rel": rel,
+        "source_id": source_id,
+        "scan_subdir": scope.scan_subdir,
+        "resolved_root": root_identity,
+        "content_hash": str(previous_value.get("content_hash") or ""),
+        "failed_content_hash": failed_content_hash,
+        "chunker_config": active_chunker_config,
+        "previous_chunker_config": dict(
+            previous_value.get("chunker_config") or {}
+        ),
+        "previous_record_ids": list(
+            previous_value.get("record_ids") or []
+        ),
+        "previous_entry": dict(previous_value),
+        "error_kind": error_kind,
+        "retryable": error_kind == "input_read",
+        "diagnostic": diagnostic,
+        "error": _diagnostic_text(diagnostic),
     }
 
 
@@ -390,13 +546,16 @@ def _flush_batch(
 
 
 def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
-    state["files"][item["key"]] = {
+    previous = item.get("previous_entry")
+    value = dict(previous) if isinstance(previous, dict) else {}
+    value.update({
         "source_id": item["source_id"],
         "path": item["rel"],
         "stored_path": item["rel"],
         "scan_subdir": item.get("scan_subdir") or ".",
         "resolved_root": item.get("resolved_root") or "",
         "content_hash": item["content_hash"],
+        "failed_content_hash": item.get("failed_content_hash") or "",
         "chunker_config": (
             item.get("previous_chunker_config")
             if item.get("previous_record_ids")
@@ -408,8 +567,12 @@ def _record_error(state: dict[str, Any], item: dict[str, Any]) -> None:
         "record_count": len(item["previous_record_ids"]),
         "status": "error",
         "error": item["error"],
+        "error_kind": item.get("error_kind") or "extract",
+        "retryable": bool(item.get("retryable")),
+        "diagnostic": dict(item.get("diagnostic") or {}),
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    })
+    state["files"][item["key"]] = value
 
 
 def _initial_state() -> dict[str, Any]:
@@ -509,11 +672,16 @@ def _validate_resume_state(
     scope: IngestionScope,
     source_id: str,
     batch_size_files: int | None = None,
+    privacy_safe_root: bool = False,
 ) -> None:
     saved = state.get("ingestion")
     if not isinstance(saved, dict) or not saved:
         return
-    expected = scope.state_fields(source_id=source_id)
+    expected = _persistent_scope_fields(
+        scope,
+        source_id=source_id,
+        privacy_safe_root=privacy_safe_root,
+    )
     if batch_size_files is not None:
         expected["batch_size_files"] = batch_size_files
     keys = ["resolved_root", "source_id", "scan_subdir"]
@@ -537,6 +705,7 @@ def _reconcile_missing_files(
     scope: IngestionScope,
     source_id: str,
     discovered_keys: set[str],
+    persistent_root_identity: str | None = None,
 ) -> dict[str, int]:
     missing_keys: list[str] = []
     record_ids: list[str] = []
@@ -550,7 +719,7 @@ def _reconcile_missing_files(
         if (
             str(item.get("source_id") or "") != source_id
             or str(item.get("resolved_root") or "")
-            != str(scope.resolved_root)
+            != str(persistent_root_identity or scope.resolved_root)
             or not scope.contains_stored_path(stored_path)
             or key in discovered_keys
         ):
@@ -609,3 +778,147 @@ def _progress_line(summary: dict[str, Any]) -> str:
 
 def _files_done(summary: dict[str, Any]) -> int:
     return int(summary["indexed_files"]) + int(summary["skipped_files"]) + int(summary["error_files"])
+
+
+def _result_status(summary: dict[str, Any]) -> str:
+    errors = int(summary.get("error_files") or 0)
+    if errors == 0:
+        return "success"
+    completed = int(summary.get("indexed_files") or 0) + int(
+        summary.get("skipped_files") or 0
+    )
+    if int(summary.get("extract_error_files") or 0) > 0 or completed == 0:
+        return "failure"
+    return "partial"
+
+
+def _safe_stored_path(scope: IngestionScope, path: Path) -> str:
+    """Build the normal portable path without opening or resolving the file."""
+
+    candidate = Path(os.path.abspath(Path(path)))
+    try:
+        relative = candidate.relative_to(scope.resolved_root)
+    except ValueError:
+        relative = Path(candidate.name)
+    return PurePosixPath(scope.root_display_name, *relative.parts).as_posix()
+
+
+def _safe_file_diagnostic(
+    *,
+    rel: str,
+    exc: BaseException,
+    stage: str,
+    retryable: bool,
+) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "path": str(rel)[:2_048],
+        "stage": str(stage)[:80],
+        "error_type": type(exc).__name__[:120],
+        "retryable": bool(retryable),
+    }
+    error_number = getattr(exc, "errno", None)
+    if isinstance(error_number, int):
+        diagnostic["errno"] = error_number
+    windows_error = getattr(exc, "winerror", None)
+    if isinstance(windows_error, int):
+        diagnostic["winerror"] = windows_error
+    return diagnostic
+
+
+def _is_input_read_oserror(exc: OSError, source_path: Path) -> bool:
+    """Distinguish source-open failures from extractor workspace failures."""
+
+    filenames = [
+        value
+        for value in (
+            getattr(exc, "filename", None),
+            getattr(exc, "filename2", None),
+        )
+        if value
+    ]
+    if not filenames:
+        # Some Windows sharing and Files-on-Demand errors omit filename even
+        # though they were raised while reading the supplied source file.
+        return True
+    expected = os.path.normcase(os.path.abspath(os.fspath(source_path)))
+    for value in filenames:
+        try:
+            candidate = os.path.normcase(os.path.abspath(os.fsdecode(value)))
+        except (TypeError, ValueError):
+            continue
+        if candidate == expected:
+            return True
+    return False
+
+
+def _diagnostic_text(diagnostic: dict[str, Any]) -> str:
+    values = [
+        str(diagnostic.get("error_type") or "OSError"),
+        f"stage={diagnostic.get('stage') or 'input-read'}",
+        f"path={diagnostic.get('path') or ''}",
+    ]
+    if "errno" in diagnostic:
+        values.append(f"errno={diagnostic['errno']}")
+    if "winerror" in diagnostic:
+        values.append(f"winerror={diagnostic['winerror']}")
+    return " ".join(values)
+
+
+def _private_root_identity(scope: IngestionScope) -> str:
+    normalized = os.path.normcase(str(scope.resolved_root))
+    return "sha256:" + sha256_text(normalized)
+
+
+def _persistent_scope_fields(
+    scope: IngestionScope,
+    *,
+    source_id: str,
+    privacy_safe_root: bool,
+) -> dict[str, Any]:
+    if not privacy_safe_root:
+        return scope.state_fields(source_id=source_id)
+    identity = _private_root_identity(scope)
+    return {
+        "root": "<EXTERNAL_SOURCE_ROOT>",
+        "resolved_root": identity,
+        "root_display_name": scope.root_display_name,
+        "scan_subdir": scope.scan_subdir,
+        "scan_root": scope.scan_subdir,
+        "stored_path_prefix": scope.stored_path_prefix,
+        "include_root_name_in_path": True,
+        "source_id": source_id,
+        "privacy_safe_root": True,
+    }
+
+
+def _migrate_private_scope_paths(
+    state: dict[str, Any],
+    *,
+    scope: IngestionScope,
+    source_id: str,
+    persistent_root_identity: str,
+) -> None:
+    """Remove the current external root from state while retaining identity."""
+
+    raw_root = str(scope.resolved_root)
+    ingestion = state.get("ingestion")
+    if isinstance(ingestion, dict) and str(
+        ingestion.get("source_id") or ""
+    ) == source_id:
+        ingestion.update(
+            _persistent_scope_fields(
+                scope,
+                source_id=source_id,
+                privacy_safe_root=True,
+            )
+        )
+    for item in state.get("files", {}).values():
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("source_id") or "") != source_id:
+            continue
+        if str(item.get("resolved_root") or "") in {
+            raw_root,
+            persistent_root_identity,
+        }:
+            item["resolved_root"] = persistent_root_identity

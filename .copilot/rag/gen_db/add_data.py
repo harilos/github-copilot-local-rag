@@ -395,6 +395,11 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--privacy-safe-root",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.resume and (args.reset_db or args.reset_clean):
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
@@ -438,6 +443,7 @@ def main() -> None:
                 chunk_max_chars=args.chunk_max_chars,
                 chunk_overlap=args.chunk_overlap,
                 resume=args.resume,
+                privacy_safe_root=args.privacy_safe_root,
             )
     finally:
         watcher.stop()

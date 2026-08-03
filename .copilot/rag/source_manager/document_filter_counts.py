@@ -28,6 +28,10 @@ DOCUMENT_ONLY_EXTENSIONS = frozenset(
 _MARKER = "_local_rag_document_filter_count_runtime_installed"
 
 
+def is_office_temporary_file(path: Path | str) -> bool:
+    return Path(path).name.startswith("~$")
+
+
 def install_document_filter_count_runtime() -> None:
     """Align the approximate preflight count with the selected file set."""
 
@@ -83,6 +87,8 @@ def count_document_files(root: Path) -> int:
             if not (current / name).is_symlink()
         )
         for filename in sorted(filenames):
+            if is_office_temporary_file(filename):
+                continue
             path = current / filename
             if (
                 not path.is_symlink()
@@ -109,5 +115,6 @@ def _plan_selection(plan: Mapping[str, Any]) -> str:
 __all__ = [
     "DOCUMENT_ONLY_EXTENSIONS",
     "count_document_files",
+    "is_office_temporary_file",
     "install_document_filter_count_runtime",
 ]
