@@ -18,6 +18,7 @@ from software_rag_tool import catalog
 from software_rag_tool.retrieval import (
     _decorate_anchored_neighbor,
     _dedupe_and_diversify,
+    _doc_key,
     _expand_and_pack,
     _is_identifier_only_lookup,
     _packed_rows_token_count,
@@ -49,8 +50,10 @@ def result_row(
     chunk_index: int | None = None,
     debug: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    resolved_path = path or f"{row_id}.txt"
     metadata: dict[str, Any] = {
-        "path": path or f"{row_id}.txt",
+        "path": resolved_path,
+        "doc_id": resolved_path,
         "section_path": section,
     }
     if chunk_index is not None:
@@ -664,6 +667,143 @@ class SourceIdentityContractTests(unittest.TestCase):
         )
         self.assertEqual("", payload["evidence"][0]["_source_id"])
 
+    @staticmethod
+    def _sourced_row(
+        row_id: str,
+        *,
+        source_id: str | None,
+        doc_id: str | None,
+        path: str,
+        text: str | None = None,
+    ) -> dict[str, Any]:
+        row = result_row(row_id, text or row_id, path=path)
+        if source_id is not None:
+            row["metadata"]["source_id"] = source_id
+        if doc_id is None:
+            row["metadata"].pop("doc_id", None)
+        else:
+            row["metadata"]["doc_id"] = doc_id
+        return row
+
+    def test_same_path_in_two_sources_remains_two_documents(self) -> None:
+        rows = [
+            self._sourced_row(
+                "source-a-readme",
+                source_id="source-a",
+                doc_id=None,
+                path="docs/README.md",
+                text="Source A evidence",
+            ),
+            self._sourced_row(
+                "source-b-readme",
+                source_id="source-b",
+                doc_id=None,
+                path="docs/README.md",
+                text="Source B evidence",
+            ),
+        ]
+        selected = _dedupe_and_diversify(
+            rows,
+            top_k=2,
+            max_per_doc=1,
+        )
+        self.assertEqual(
+            ["source-a-readme", "source-b-readme"],
+            [row["id"] for row in selected],
+        )
+
+    def test_same_source_document_chunks_share_the_cap(self) -> None:
+        rows = [
+            self._sourced_row(
+                "doc-a-1",
+                source_id="source-a",
+                doc_id="document-a",
+                path="docs/a.md",
+            ),
+            self._sourced_row(
+                "doc-a-2",
+                source_id="source-a",
+                doc_id="document-a",
+                path="docs/a-renamed.md",
+            ),
+            self._sourced_row(
+                "doc-b-1",
+                source_id="source-a",
+                doc_id="document-b",
+                path="docs/b.md",
+            ),
+        ]
+        selected = _dedupe_and_diversify(
+            rows,
+            top_k=3,
+            max_per_doc=1,
+        )
+        self.assertEqual(
+            ["doc-a-1", "doc-b-1"],
+            [row["id"] for row in selected],
+        )
+
+    def test_source_id_is_opaque_and_path_separators_are_source_local(self) -> None:
+        variants = [
+            self._sourced_row(
+                f"variant-{index}",
+                source_id=source_id,
+                doc_id=None,
+                path="docs/README.md",
+            )
+            for index, source_id in enumerate(
+                ("source", "Source", " source", "ｓｏｕｒｃｅ")
+            )
+        ]
+        self.assertEqual(4, len({_doc_key(row) for row in variants}))
+        windows = self._sourced_row(
+            "windows",
+            source_id="source",
+            doc_id=None,
+            path="docs\\README.md",
+        )
+        posix = self._sourced_row(
+            "posix",
+            source_id="source",
+            doc_id=None,
+            path="docs/README.md",
+        )
+        self.assertEqual(_doc_key(windows), _doc_key(posix))
+
+    def test_legacy_missing_source_id_does_not_group_by_path_only(self) -> None:
+        rows = [
+            self._sourced_row(
+                "legacy-a",
+                source_id=None,
+                doc_id=None,
+                path="README.md",
+            ),
+            self._sourced_row(
+                "legacy-b",
+                source_id=None,
+                doc_id=None,
+                path="README.md",
+            ),
+        ]
+        self.assertNotEqual(_doc_key(rows[0]), _doc_key(rows[1]))
+        selected = _dedupe_and_diversify(
+            rows,
+            top_k=2,
+            max_per_doc=1,
+        )
+        self.assertEqual(2, len(selected))
+
+    def test_internal_document_key_does_not_expose_raw_source_id(self) -> None:
+        row = self._sourced_row(
+            "secret-source-row",
+            source_id="private-source-secret",
+            doc_id="private-document-secret",
+            path="private/path.md",
+        )
+        key = _doc_key(row)
+        self.assertTrue(key.startswith("doc:"))
+        self.assertNotIn("private", key)
+
 
 class HybridAnchorContractTests(unittest.TestCase):
     def test_postprocess_pool_preserves_retriever_floors_and_exact_rows(self) -> None:
@@ -1032,7 +1172,7 @@ class HybridAnchorContractTests(unittest.TestCase):
             [*anchored, *ordinary],
             top_k=8,
             max_per_doc=2,
-            relaxed_doc_limits={"anchored.txt": 4},
+            relaxed_doc_limits={_doc_key(anchored[0]): 4},
         )
         self.assertEqual(4, sum(row["metadata"]["path"] == "anchored.txt" for row in selected))
         self.assertEqual(2, sum(row["metadata"]["path"] == "ordinary.txt" for row in selected))
@@ -1502,7 +1642,7 @@ class HybridAnchorContractTests(unittest.TestCase):
         anchor = {
             "anchor_chunk_uid": "anchor",
             "anchor_term": "OH-58A",
-            "document_key": "report.pdf",
+            "document_key": _doc_key(primary),
         }
         unrelated = _decorate_anchored_neighbor(
             neighbor,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -2164,7 +2165,52 @@ def _same_doc(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def _doc_key(row: dict[str, Any]) -> str:
     meta = row.get("metadata") or {}
-    return str(meta.get("path") or meta.get("doc_id") or row.get("id") or "")
+    source_id_value = meta.get("source_id")
+    source_id = "" if source_id_value is None else str(source_id_value)
+    doc_id = str(meta.get("doc_id") or "")
+    path = _canonical_document_identity_path(meta.get("path"))
+    row_id = str(row.get("id") or "")
+    if source_id:
+        if doc_id:
+            return _hashed_document_identity("source-doc", source_id, doc_id)
+        if path:
+            return _hashed_document_identity("source-path", source_id, path)
+        return _hashed_document_identity("source-row", source_id, row_id)
+
+    # Legacy rows without source_id must not collide merely because they have
+    # the same path. A stable doc_id may still group chunks from one legacy
+    # document; otherwise the record identity is the collision-free boundary.
+    legacy_scope = next(
+        (
+            str(meta.get(key))
+            for key in ("source", "root", "uri")
+            if meta.get(key) not in (None, "")
+        ),
+        "",
+    )
+    if doc_id:
+        return _hashed_document_identity("legacy-doc", legacy_scope, doc_id)
+    if row_id:
+        return _hashed_document_identity("legacy-row", row_id)
+    return ""
+
+
+def _canonical_document_identity_path(value: Any) -> str:
+    parts = [
+        part
+        for part in str(value or "").replace("\\", "/").split("/")
+        if part not in {"", "."}
+    ]
+    return "/".join(parts)
+
+
+def _hashed_document_identity(kind: str, *values: str) -> str:
+    digest = hashlib.sha256()
+    for value in (kind, *values):
+        encoded = value.encode("utf-8", errors="surrogatepass")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return f"doc:{digest.hexdigest()}"
 
 
 def _dedupe_and_diversify(
@@ -2187,8 +2233,7 @@ def _dedupe_and_diversify(
 
     rows_by_doc: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, row in enumerate(unique_rows):
-        meta = row.get("metadata") or {}
-        doc_key = str(meta.get("path") or meta.get("doc_id") or row.get("id"))
+        doc_key = _doc_key(row)
         rows_by_doc.setdefault(doc_key, []).append((index, row))
 
     replacements: dict[int, dict[str, Any]] = {}
