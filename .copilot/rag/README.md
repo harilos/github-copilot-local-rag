@@ -183,9 +183,10 @@ See [Local RAG Manager 日本語操作ガイド](docs/local-rag-manager-guide-ja
 The Manager provides two distinct package types:
 
 - Distribution package: a ZIP for read-only search clients. It contains the
-  public wrappers, runtime code, all current databases, and model
-  assets needed by the selected package contract. After extraction, run
-  `sh ./install.sh` on macOS/Linux or `.\install.ps1` in Windows PowerShell.
+  public wrappers, selected databases, model assets, and on Windows x64 a
+  fixed Python runtime with locked search dependencies. The administrator's
+  Python and network are used only while building the ZIP. After extraction,
+  the recipient runs `install.cmd` without system Python, pip, or network.
 - Management-PC transfer: a resumable folder for another management computer.
   It also carries all current databases, administration code, and Source
   acquisition state.
@@ -193,7 +194,9 @@ The Manager provides two distinct package types:
 Package creation takes no global Local RAG lock. It reads files defensively
 and aborts if a source file changes during the copy. The validated manifest
 uses relative paths and SHA-256 checksums. Temporary files, runtime locks,
-virtual environments, credentials, and `source-links.json.bak` are excluded.
+credentials, and `source-links.json.bak` are excluded. A Windows distribution
+contains only the newly assembled fixed `.venv`; the administrator's active
+virtual environment is never copied as-is.
 The active Source metadata sidecar can contain internal URLs, so every package
 must be handled as sensitive local data.
 

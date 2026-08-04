@@ -1,0 +1,17 @@
+{
+  "schema": "local-rag.windows-runtime-lock.v1",
+  "platform": {
+    "os": "windows",
+    "arch": "amd64",
+    "minimum_windows": "10"
+  },
+  "python": {
+    "version": "3.13.5",
+    "url": "https://www.python.org/ftp/python/3.13.5/python-3.13.5-embed-amd64.zip",
+    "sha256": "7d2650fd9d1b9d002d4a315d5f354247fd6a44f30517c7ef577b08f57a0fb6d9",
+    "spdx_url": "https://www.python.org/ftp/python/3.13.5/python-3.13.5-embed-amd64.zip.spdx.json"
+  },
+  "default_profile": "search-only",
+  "setup_network_operations": 0,
+  "repair_source": "redistributed-zip"
+}

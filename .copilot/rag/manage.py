@@ -812,14 +812,22 @@ class LocalRagManager:
         try:
             from source_manager.packages import (
                 create_admin_transfer_package,
-                create_distribution_package,
             )
 
             if is_distribution:
-                result = create_distribution_package(
+                if not sys.platform.startswith("win"):
+                    raise RuntimeError(
+                        "利用者向けoffline packageはWindows x64の管理者PCで作成してください。"
+                    )
+                from source_manager.windows_distribution import (
+                    create_windows_distribution_package,
+                )
+
+                result = create_windows_distribution_package(
                     self.rag_root.parent,
                     output,
                     db_names=db_names,
+                    progress=self.output,
                 )
             else:
                 result = create_admin_transfer_package(
@@ -834,11 +842,17 @@ class LocalRagManager:
                 stage="package.create",
                 can_resume=not is_distribution,
             )
+            self.output("=== Package creation: FAILED ===")
             self.output(
                 "作成途中の内容は完成パッケージとして公開されていません。"
             )
             return
+        self.output("=== Package creation: SUCCESS ===")
         self._print_success(f"{label}を作成しました。")
+        if result.get("platform") == "windows-amd64-offline":
+            self.output("利用者PCのPython: 不要")
+            self.output("利用者PCのnetwork: 不要")
+            self.output("package内容検証: PASS")
         manifest = result.get("manifest") or {}
         total = manifest.get("total") if isinstance(manifest, dict) else {}
         if isinstance(total, dict):

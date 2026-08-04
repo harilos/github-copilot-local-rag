@@ -8,7 +8,9 @@ from pathlib import Path
 
 from source_manager.packages import (
     PackageError,
-    create_distribution_package,
+)
+from source_manager.windows_distribution import (
+    create_windows_distribution_package,
 )
 
 
@@ -40,12 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        result = create_distribution_package(
+        if not sys.platform.startswith("win"):
+            raise PackageError(
+                "windows_offline_package_requires_windows"
+            )
+        result = create_windows_distribution_package(
             arguments.copilot_home,
             arguments.output,
             db_names=arguments.databases,
+            progress=lambda message: print(message, file=sys.stderr),
         )
     except PackageError as exc:
+        print("=== Package creation: FAILED ===", file=sys.stderr)
         print(
             json.dumps(
                 {"status": "error", "error": str(exc)},
@@ -54,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
+    print("=== Package creation: SUCCESS ===", file=sys.stderr)
     print(
         json.dumps(
             result,

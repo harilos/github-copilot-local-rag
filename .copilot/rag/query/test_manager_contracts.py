@@ -168,17 +168,41 @@ class ManagerContractTests(unittest.TestCase):
             root = self.make_db(name)
             (root / "db.json").write_text("{}", encoding="utf-8")
         summaries = [{"name": "one-rag"}, {"name": "two-rag"}]
-        for kind, function_name in (("distribution", "create_distribution_package"), ("admin", "create_admin_transfer_package")):
-            manager = self.manager(["2", "c"])
-            target = self.base / f"{kind}-output"
-            with (
-                mock.patch.object(manager, "_database_summaries", return_value=summaries),
-                mock.patch.object(manager, "_prompt_preserving_value", return_value=str(target)),
-                mock.patch.object(manager, "_confirm", return_value=True),
-                mock.patch.object(source_packages, function_name, return_value={"manifest": {"total": {"files": 0, "bytes": 0}}}) as create,
-            ):
-                manager._create_portable_package(kind)
-            self.assertEqual(("one-rag",), create.call_args.kwargs["db_names"])
+        manager = self.manager(["2", "c"])
+        target = self.base / "distribution-output.zip"
+        with (
+            mock.patch.object(manager, "_database_summaries", return_value=summaries),
+            mock.patch.object(manager, "_prompt_preserving_value", return_value=str(target)),
+            mock.patch.object(manager, "_confirm", return_value=True),
+            mock.patch.object(manage.sys, "platform", "win32"),
+            mock.patch(
+                "source_manager.windows_distribution.create_windows_distribution_package",
+                return_value={"manifest": {"total": {"files": 0, "bytes": 0}}},
+            ) as create_distribution,
+        ):
+            manager._create_portable_package("distribution")
+        self.assertEqual(
+            ("one-rag",),
+            create_distribution.call_args.kwargs["db_names"],
+        )
+
+        manager = self.manager(["2", "c"])
+        target = self.base / "admin-output"
+        with (
+            mock.patch.object(manager, "_database_summaries", return_value=summaries),
+            mock.patch.object(manager, "_prompt_preserving_value", return_value=str(target)),
+            mock.patch.object(manager, "_confirm", return_value=True),
+            mock.patch.object(
+                source_packages,
+                "create_admin_transfer_package",
+                return_value={"manifest": {"total": {"files": 0, "bytes": 0}}},
+            ) as create_admin,
+        ):
+            manager._create_portable_package("admin")
+        self.assertEqual(
+            ("one-rag",),
+            create_admin.call_args.kwargs["db_names"],
+        )
 
     def test_fixed_human_menu_contract(self) -> None:
         self.assertEqual(

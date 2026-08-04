@@ -1,21 +1,84 @@
 param(
-    [string]$Target = (Join-Path $HOME ".copilot")
+    [string]$Target = (Join-Path $HOME ".copilot"),
+    [string]$BootstrapPython = "",
+    [switch]$ConfigureVSCodeAutoApprove
 )
 
 $ErrorActionPreference = "Stop"
 
 $Payload = Join-Path $PSScriptRoot ".copilot"
-
-if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
-    throw "Missing install payload: $Payload"
-}
-
-New-Item -ItemType Directory -Force -Path $Target | Out-Null
-
 $QueryRoot = Join-Path $Target "rag\query"
 $RuntimePython = Join-Path $QueryRoot ".venv\Scripts\python.exe"
 $LegacyMarker = Join-Path $QueryRoot ".venv\.rag-deps-installed"
 $LegacyBackup = $null
+
+function Resolve-BootstrapPython {
+    param([string]$Requested)
+
+    $Candidates = @()
+    if ($Requested) {
+        $Candidates += [PSCustomObject]@{
+            Command = $Requested
+            Prefix = @()
+        }
+    } else {
+        $Candidates += [PSCustomObject]@{
+            Command = "py"
+            Prefix = @("-3")
+        }
+        $Candidates += [PSCustomObject]@{
+            Command = "python"
+            Prefix = @()
+        }
+        $Candidates += [PSCustomObject]@{
+            Command = "python3"
+            Prefix = @()
+        }
+    }
+
+    foreach ($Candidate in $Candidates) {
+        $Command = [string]$Candidate.Command
+        $Prefix = @($Candidate.Prefix)
+        try {
+            & $Command @Prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 3)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return [PSCustomObject]@{
+                    Command = $Command
+                    Prefix = $Prefix
+                }
+            }
+        } catch {
+            # Continue to the next conventional Windows Python entry point.
+        }
+    }
+
+    throw (
+        "setup_required: Python 3.10 or newer was not found. " +
+        "Install Python, or rerun with -BootstrapPython C:\path\to\python.exe."
+    )
+}
+
+function Invoke-Setup {
+    param(
+        [Parameter(Mandatory = $true)]$PythonCommand,
+        [string[]]$PrefixArguments = @(),
+        [string[]]$SetupArguments = @()
+    )
+
+    $SetupScript = Join-Path $Target "rag\query\setup.py"
+    $SetupOutput = & $PythonCommand @PrefixArguments -B $SetupScript @SetupArguments
+    $SetupExitCode = $LASTEXITCODE
+    if ($SetupExitCode -ne 0) {
+        if ($SetupOutput) {
+            Write-Host ($SetupOutput -join [Environment]::NewLine)
+        }
+        throw (
+            "setup_required: Local RAG runtime setup failed. " +
+            "Review the sanitized setup diagnostics above."
+        )
+    }
+}
+
 function Move-CompletionMarker {
     param([string]$Marker, [string]$Label)
     if (-not (Test-Path -LiteralPath $Marker -PathType Leaf)) { return $null }
@@ -53,6 +116,21 @@ function Remove-CompletionMarkerBackups {
         throw
     }
 }
+
+$InstallStage = "validate_payload"
+$RuntimeStatus = "NOT_READY"
+$DatabaseListStatus = "NOT_CHECKED"
+$VSCodeStatus = "NOT_REQUESTED"
+
+try {
+if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
+    throw "Missing install payload: $Payload"
+}
+
+$InstallStage = "create_target"
+New-Item -ItemType Directory -Force -Path $Target | Out-Null
+
+$InstallStage = "copy_payload"
 
 try {
 $LegacyBackup = Move-CompletionMarker -Marker $LegacyMarker -Label "legacy"
@@ -103,6 +181,14 @@ function Test-InstallPayloadExcluded {
         return $true
     }
     $Parts = @($Normalized -split "\\")
+    if (
+        ($Parts.Length -ge 2) -and
+        ($Parts[0] -ieq "rag") -and
+        ($Parts[1] -ieq "dbs")
+    ) {
+        # A source clone must never replace or add files inside the user's DB root.
+        return $true
+    }
     if (
         ($Parts -icontains ".venv") -or
         ($Parts -icontains "__pycache__")
@@ -166,17 +252,91 @@ if (
 }
 
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
-    & $RuntimePython (Join-Path $Target "rag\query\setup.py") --refresh-completion-marker --format json | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw ("setup_required: existing RAG runtime verification failed; " + "run Local RAG setup before lookup.") }
-} elseif ($null -ne $LegacyBackup) {
-    throw ("setup_required: the existing Local RAG runtime Python is missing " + "after update.")
+    $InstallStage = "runtime_refresh"
+    try {
+        Invoke-Setup `
+            -PythonCommand $RuntimePython `
+            -SetupArguments @("--refresh-completion-marker", "--format", "json")
+    } catch {
+        Write-Warning (
+            "The existing runtime needs dependency or model repair; " +
+            "running normal setup once."
+        )
+        Invoke-Setup `
+            -PythonCommand $RuntimePython `
+            -SetupArguments @("--format", "json")
+    }
+} else {
+    $InstallStage = "runtime_create"
+    $Bootstrap = Resolve-BootstrapPython -Requested $BootstrapPython
+    Write-Host "Creating the Local RAG runtime from the source clone..."
+    Invoke-Setup `
+        -PythonCommand $Bootstrap.Command `
+        -PrefixArguments @($Bootstrap.Prefix) `
+        -SetupArguments @("--format", "json")
+    if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
+        throw "setup_required: setup completed without creating the RAG runtime Python."
+    }
 }
 Remove-CompletionMarkerBackups -Backups @($LegacyBackup)
+$RuntimeStatus = "READY"
 } catch {
     Close-CompletionMarkerGate -Markers @($LegacyMarker)
     throw
 }
 
+$InstallStage = "list_dbs"
+& $RuntimePython -B (Join-Path $Target "rag\list_dbs.py") --format json | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "setup_required: the installed list_dbs command failed."
+}
+$DatabaseListStatus = "READY"
+
+if ($ConfigureVSCodeAutoApprove) {
+    $InstallStage = "vscode_auto_approve"
+    $VSCodeResult = & $RuntimePython `
+        -B `
+        (Join-Path $Target "rag\query\vscode_settings.py") `
+        --copilot-home $Target
+    if ($LASTEXITCODE -ne 0) {
+        throw "VS Code Local RAG auto-approve configuration failed."
+    }
+    try {
+        $VSCodeStatus = ($VSCodeResult | ConvertFrom-Json).status
+    } catch {
+        throw "VS Code Local RAG auto-approve returned invalid status output."
+    }
+    if ($VSCodeStatus -notin @("configured_on_disk", "already_configured")) {
+        throw (
+            "VS Code Local RAG auto-approve needs manual action: " +
+            "$VSCodeStatus. The Local RAG runtime itself is ready."
+        )
+    }
+    Write-Host "VS Code Local RAG auto-approve: $VSCodeStatus"
+    Write-Host "Restart VS Code before testing the Local RAG command."
+} else {
+    Write-Host (
+        "VS Code auto-approve was not changed. " +
+        "Rerun with -ConfigureVSCodeAutoApprove to allow only the fixed Local RAG commands."
+    )
+}
+
+$InstallStage = "complete"
 Write-Host "Installed Copilot Local RAG files to: $Target"
 Write-Host "Existing copilot-instructions.md was not overwritten by this repository."
+Write-Host "Existing databases were not overwritten by this source-clone install."
 Write-Host "Existing machine-local network and Source connection settings were preserved."
+Write-Host ""
+Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
+Write-Host "Runtime: $RuntimeStatus"
+Write-Host "Database list command: $DatabaseListStatus"
+Write-Host "VS Code auto-approve: $VSCodeStatus"
+} catch {
+    Write-Host ""
+    Write-Host "=== Local RAG install: FAILED ===" -ForegroundColor Red
+    Write-Host "Failed stage: $InstallStage"
+    Write-Host "Runtime: $RuntimeStatus"
+    Write-Host "Database list command: $DatabaseListStatus"
+    Write-Host "VS Code auto-approve: $VSCodeStatus"
+    throw
+}

@@ -60,6 +60,14 @@ class ListDbsContractTests(unittest.TestCase):
             output = self._run_main(["--format", "json"], patch_root=False)
         self.assertEqual({"databases": []}, json.loads(output))
 
+    def test_list_dbs_runs_with_network_connections_forbidden(self) -> None:
+        with mock.patch(
+            "socket.create_connection",
+            side_effect=AssertionError("list_dbs must stay offline"),
+        ):
+            payload = json.loads(self._run_main(["--format", "json"]))
+        self.assertEqual("ac-rag", payload["databases"][0]["name"])
+
     def test_json_errors_are_structured_and_stdout_remains_json(self) -> None:
         (self.dbs_root / "ac-rag" / "db.json").write_text("{", encoding="utf-8")
         output = io.StringIO()

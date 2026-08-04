@@ -123,8 +123,20 @@ bash ./install.sh
 Windows PowerShell:
 
 ```powershell
-.\install.ps1
+.\install.ps1 -ConfigureVSCodeAutoApprove
 ```
+
+管理者・開発者がsource cloneからWindowsへinstallする場合は、
+`%USERPROFILE%\.copilot\rag\query\.venv`
+がなければ`py -3`、`python`、`python3`の順にPython 3.10以上を検出し、
+`.venv`、依存package、model検証、`list_dbs`確認まで同じコマンドで行います。
+このsource clone経路では`.venv`をrepositoryからコピーせず、管理者PC上で作成します。
+PATH外のPythonを使う場合は
+`-BootstrapPython "C:\path\to\python.exe"`を追加してください。
+既存の`%USERPROFILE%\.copilot\rag\dbs`はsource cloneの内容で上書きしません。
+`-ConfigureVSCodeAutoApprove`は固定されたLocal RAGの`list_dbs`／`search`コマンド
+だけをVS Code設定へ追加します。既存設定はbackupを作ってからJSONCとしてmergeします。
+完了時は`Local RAG install: SUCCESS`、失敗時は`FAILED`と停止工程を表示します。
 
 既存の`~/.copilot/copilot-instructions.md`には次の1行を追加してください。
 
@@ -136,10 +148,9 @@ For requests to use RAG, local documents, internal or company information, or in
 
 <!-- markdownlint-enable MD013 -->
 
-installerはLocal RAGのファイルを`~/.copilot/`へ配置しますが、完全な新規
-インストールでは検索用Python環境を作りません。通常は、インストール後に
-Copilotへ`ローカルRAGの初期設定をして`と依頼します。手動で行う場合は次を
-実行します。
+installerはLocal RAGのファイルを`~/.copilot/`へ配置します。macOS/Linuxでは、
+完全な新規インストール後にCopilotへ`ローカルRAGの初期設定をして`と依頼します。
+手動で行う場合は次を実行します。
 
 macOS/Linux:
 
@@ -147,13 +158,7 @@ macOS/Linux:
 python3 -B ~/.copilot/rag/setup.py --format human
 ```
 
-Windows PowerShell:
-
-```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
-```
+Windowsのsource cloneでは上記`install.ps1`が初期設定まで完了します。
 
 Windows x64の公式copy-ready ZIPには固定Python、依存package、ONNX modelが
 含まれます。初期設定はvenv作成、pip、model download／変換、system Pythonへの
@@ -286,14 +291,23 @@ Managerは用途の異なる2種類を作成します。
 
 | 種類 | 用途 | 形式 |
 |---|---|---|
-| 利用者向け検索package | 現在の全DBを別PCで検索する | ZIP |
+| 利用者向け検索package | 現在の全DBを別PCで検索する | Windows x64 offline ZIP |
 | 管理PC引っ越しpackage | 現在の全DBとSource再開情報を含めて管理を移す | 再開可能なfolder |
 
-利用者向けpackageの受取側はZIPを展開し、Windowsでは`.\install.ps1`、
-macOS/Linuxでは`sh ./install.sh`を実行します。スクリプトは中の`.copilot`
-本体を自分のhome directoryへ統合copyし、既存のPython環境や端末固有設定を
-削除しません。その端末で初期設定がまだなら、Copilotへ
-`ローカルRAGの初期設定をして`と依頼します。また、
+WindowsでManagerが利用者向けpackageを作るとき、管理者PCのPythonとnetworkを
+使って固定Python、検索用依存package、準備済みONNX model、選択DBをZIPへ
+組み込みます。完成前には固定Pythonの構造・AMD64、依存ファイル、modelの
+必須ファイル、DB snapshot、manifestとchecksumを検証します。`list_dbs`や
+実検索の実行はrelease／回帰test側で行い、package作成のたびには実行しません。
+どれかが失敗した場合はZIPを公開せず
+`Package creation: FAILED`、全て合格した場合だけ`SUCCESS`を表示します。
+
+利用者はZIPを展開して`install.cmd`を実行します。利用者PCにはPython、pip、
+network、PATH変更、管理者権限は不要です。installerも最終結果を
+`Local RAG install: SUCCESS`または`FAILED`で表示します。既存のPython環境や
+端末固有設定は削除しません。固定されたLocal RAGコマンドだけのVS Code
+auto-approveを既定でmergeし、不要なら`install.cmd -SkipVSCodeAutoApprove`で
+無効化できます。また、
 `~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
 追加します。管理PC引っ越しpackageは、Managerの
 `パッケージを取り込む・検証する`から取り込みます。

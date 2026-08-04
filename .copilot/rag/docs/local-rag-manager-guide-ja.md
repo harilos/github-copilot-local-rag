@@ -372,18 +372,20 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 
 ### 利用者向け検索package
 
-- ZIP
+- Windows x64 offline ZIP（Windows x64の管理者PCで作成）
 - 現在の全DB
-- 公開wrapperと検索runtime
+- 公開wrapperと新規に組み立てた固定Python・検索runtime
 - 必要なmodel
 - 現行schemaとして検証済みのSource Metadata全体
 - 管理用取得stateは含めない
 
-受取側はZIPを展開し、Windowsでは`.\install.ps1`、macOS/Linuxでは
-`sh ./install.sh`を実行します。スクリプトは中の`.copilot`本体をhome
-directoryへ統合copyし、既存のPython環境や端末固有設定を削除しません。
-その端末の検索用Python環境が未設定なら、Copilotへ
-`ローカルRAGの初期設定をして`と依頼します。
+作成時だけ管理者PCのPythonとnetworkを使います。受取側はZIPを展開して
+`install.cmd`を実行します。利用者PCのPython、pip、network、PATH変更、
+管理者権限は不要です。実検索はpackage作成中には行わず、release／回帰test側で
+確認します。`list_dbs`の起動確認も同じくtest側で行います。固定されたLocal RAG
+コマンドだけのVS Code auto-approveは既定で
+mergeされ、`install.cmd -SkipVSCodeAutoApprove`で無効化できます。Managerと
+installerは最終結果を`SUCCESS`または`FAILED`で表示します。
 
 ### 管理PC引っ越しpackage
 
@@ -403,7 +405,7 @@ package作成日時は内容更新日時と分けて記録します。配布、c
 
 除外対象:
 
-- `.venv`
+- 管理者PCで使用中の`.venv`（利用者向けには新しい固定runtimeだけを含める）
 - daemon/run state
 - `*.lock`、SQLite WAL/journal、temporary file
 - credential、secret、private key
