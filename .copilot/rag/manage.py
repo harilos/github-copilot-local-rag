@@ -398,6 +398,26 @@ class LocalRagManager:
                 timeout_seconds=10.0,
             )
         except Exception as exc:
+            if is_distribution:
+                from source_manager.windows_tokenizer_contract import (
+                    DatabaseTokenizerCompatibilityError,
+                )
+
+                if isinstance(exc, DatabaseTokenizerCompatibilityError):
+                    self.output(
+                        "Windows offline package の作成を安全のため中止しました。"
+                    )
+                    self.output(f"対象DB: {exc.database}")
+                    self.output(
+                        "配布runtimeとDBのtokenizer fingerprintが一致しないため、"
+                        "このDBは現在の配布物では検索できません。"
+                    )
+                    self.output(
+                        "canonical tokenizer環境でDBを再構築してください。"
+                    )
+                    self.output(
+                        "package、既存DB、既存install先は変更していません。"
+                    )
             self._print_internal_diagnostic(
                 exc,
                 operation="検索daemonの終了",

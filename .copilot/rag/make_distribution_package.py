@@ -12,6 +12,9 @@ from source_manager.packages import (
 from source_manager.windows_distribution import (
     create_windows_distribution_package,
 )
+from source_manager.windows_tokenizer_contract import (
+    DatabaseTokenizerCompatibilityError,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,11 +55,25 @@ def main(argv: list[str] | None = None) -> int:
             db_names=arguments.databases,
             progress=lambda message: print(message, file=sys.stderr),
         )
-    except PackageError as exc:
+    except (PackageError, DatabaseTokenizerCompatibilityError) as exc:
         print("=== Package creation: FAILED ===", file=sys.stderr)
+        payload = {"status": "error", "error": str(exc)}
+        if isinstance(exc, DatabaseTokenizerCompatibilityError):
+            payload.update(
+                {
+                    "error": "windows_offline_database_tokenizer_mismatch",
+                    "database": exc.database,
+                    "expected": exc.expected,
+                    "actual": exc.actual,
+                    "action": "rebuild_database_with_distribution_tokenizer",
+                    "package_changed": False,
+                    "database_changed": False,
+                    "install_changed": False,
+                }
+            )
         print(
             json.dumps(
-                {"status": "error", "error": str(exc)},
+                payload,
                 ensure_ascii=True,
                 separators=(",", ":"),
             )

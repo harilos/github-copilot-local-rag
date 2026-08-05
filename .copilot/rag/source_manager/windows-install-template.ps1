@@ -262,6 +262,34 @@ if (@($DatabaseNames | ForEach-Object { $_.ToLowerInvariant() } |
     Sort-Object -Unique).Count -ne $DatabaseNames.Count) {
     throw "portable package database names collide after case folding"
 }
+
+$InstallStage = "verify_database_compatibility"
+$Verifier = Join-Path $SourceQuery "verify_windows_distribution_databases.py"
+if (-not (Test-Path -LiteralPath $Verifier -PathType Leaf)) {
+    throw "portable database compatibility verifier is missing"
+}
+$VerificationText = (& (Join-Path $SourceRuntime "Scripts\python.exe") -B (
+    $Verifier
+) --rag-root (Join-Path $Payload "rag") | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw ("portable database compatibility verification failed: " +
+        $VerificationText.Trim())
+}
+try {
+    $VerificationResult = $VerificationText | ConvertFrom-Json
+} catch {
+    throw "portable database compatibility verifier returned invalid JSON"
+}
+if (
+    ([string]$VerificationResult.status) -ine "pass" -or
+    ([string]$VerificationResult.database_tokenizer_compatibility) -ine "pass" -or
+    [bool]$VerificationResult.list_dbs_executed -or
+    [bool]$VerificationResult.real_search_executed -or
+    [bool]$VerificationResult.dense_inference_executed
+) {
+    throw "portable database compatibility verifier rejected the package"
+}
+$DatabaseStatus = "COMPATIBLE"
 foreach ($Name in $DatabaseNames) {
     $Existing = Join-Path $TargetDbs $Name
     Assert-NoReparsePath -Path $Existing
