@@ -382,10 +382,11 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 作成時だけ管理者PCのPythonとnetworkを使います。受取側はZIPを展開して
 `install.cmd`を実行します。利用者PCのPython、pip、network、PATH変更、
 管理者権限は不要です。実検索はpackage作成中には行わず、release／回帰test側で
-確認します。`list_dbs`の起動確認も同じくtest側で行います。固定されたLocal RAG
-コマンドだけのVS Code auto-approveは既定で
-mergeされ、`install.cmd -SkipVSCodeAutoApprove`で無効化できます。Managerと
-installerは最終結果を`SUCCESS`または`FAILED`で表示します。
+確認します。`list_dbs`の起動確認も同じくtest側で行います。VS Codeの
+global auto-approveは既定でmergeされ、全tool／terminal commandへ効きます。
+`install.cmd -SkipVSCodeAutoApprove`でsettingsを変更せずopt-outできます。Managerと
+installerは最終結果を`SUCCESS`または`FAILED`で表示します。settingsだけが失敗した
+場合は`install.cmd -RetryVSCodeApprovals`でruntime／DBを変更せず再試行できます。
 
 ### 管理PC引っ越しpackage
 

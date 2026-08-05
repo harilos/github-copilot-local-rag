@@ -2,6 +2,7 @@
 param(
     [switch]$ConfigureVSCodeAutoApprove,
     [switch]$SkipVSCodeAutoApprove,
+    [switch]$RetryVSCodeApprovals,
     [switch]$ReplaceExistingDatabases
 )
 
@@ -41,7 +42,8 @@ $ModelPublished = $false
 $InstallStage = "validate_package"
 $RuntimeStatus = "NOT_READY"
 $DatabaseStatus = "NOT_CHECKED"
-$VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "NOT_REQUESTED" }
+$VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "SKIPPED_BY_USER" }
+$PolicyEffectiveness = "UNKNOWN"
 
 trap {
     Write-Host ""
@@ -49,7 +51,8 @@ trap {
     Write-Host ("Failed stage: " + $InstallStage)
     Write-Host ("Runtime: " + $RuntimeStatus)
     Write-Host ("Databases: " + $DatabaseStatus)
-    Write-Host ("VS Code auto-approve: " + $VSCodeStatus)
+    Write-Host ("VS Code approvals: " + $VSCodeStatus)
+    Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)
     Write-Host ("Reason: " + $_.Exception.Message)
     exit 1
 }
@@ -233,6 +236,33 @@ function Backup-ProductFile {
     $script:ProductBackedUp += $Relative
 }
 
+function Invoke-VSCodeApprovalConfiguration {
+    $script:InstallStage = "vscode_approvals"
+    $script:VSCodeStatus = "FAILED"
+    $VscodeText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
+        Join-Path $TargetQuery "vscode_settings.py"
+    ) --copilot-home $Target | Out-String)
+    $VscodeExitCode = $LASTEXITCODE
+    try {
+        $VscodeResult = $VscodeText | ConvertFrom-Json
+    } catch {
+        throw "VS Code approval configuration returned invalid JSON."
+    }
+    if (
+        $VscodeExitCode -ne 0 -or
+        @("configured_on_disk", "already_configured") -inotcontains (
+            [string]$VscodeResult.status
+        )
+    ) {
+        throw (
+            "VS Code global auto-approve configuration failed. " +
+            "Correct the reported settings problem and rerun " +
+            "install.cmd -RetryVSCodeApprovals."
+        )
+    }
+    $script:VSCodeStatus = "CONFIGURED_ON_DISK"
+}
+
 Assert-NoReparsePath -Path $Target
 Assert-NoReparsePath -Path $TargetDbs
 Assert-NoReparsePath -Path $TargetQuery
@@ -242,7 +272,10 @@ Assert-NoReparseTree -Path $Payload
 Assert-NoReparseTree -Path $SourceRuntime
 Assert-NoReparseTree -Path $SourceModel
 Assert-Amd64PortableRuntime -Runtime $SourceRuntime
-if (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf) {
+if (
+    -not $RetryVSCodeApprovals -and
+    (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf)
+) {
     throw "stop the owned Local RAG daemon before updating"
 }
 
@@ -261,6 +294,38 @@ if (Test-Path -LiteralPath $SourceDbs -PathType Container) {
 if (@($DatabaseNames | ForEach-Object { $_.ToLowerInvariant() } |
     Sort-Object -Unique).Count -ne $DatabaseNames.Count) {
     throw "portable package database names collide after case folding"
+}
+if ($RetryVSCodeApprovals) {
+    if (-not $ConfigureVSCodeAutoApprove -or $SkipVSCodeAutoApprove) {
+        throw "-RetryVSCodeApprovals requires VS Code approval opt-in."
+    }
+    if (
+        -not (Test-Path -LiteralPath (
+            Join-Path $TargetRuntime "Scripts\python.exe"
+        ) -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (
+            Join-Path $TargetQuery "vscode_settings.py"
+        ) -PathType Leaf)
+    ) {
+        throw "installed Local RAG runtime is unavailable for approval retry."
+    }
+    foreach ($Name in $DatabaseNames) {
+        if (-not (Test-Path -LiteralPath (
+            Join-Path $TargetDbs $Name
+        ) -PathType Container)) {
+            throw ("installed Local RAG database is unavailable: " + $Name)
+        }
+    }
+    $RuntimeStatus = "READY"
+    $DatabaseStatus = "READY"
+    Invoke-VSCodeApprovalConfiguration
+    Write-Host ""
+    Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
+    Write-Host ("Runtime: " + $RuntimeStatus)
+    Write-Host ("Databases: " + $DatabaseStatus)
+    Write-Host ("VS Code approvals: " + $VSCodeStatus)
+    Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)
+    exit 0
 }
 foreach ($Name in $DatabaseNames) {
     $Existing = Join-Path $TargetDbs $Name
@@ -379,36 +444,6 @@ try {
     }
     $DatabaseStatus = "READY"
 
-    if ($ConfigureVSCodeAutoApprove) {
-        $InstallStage = "vscode_auto_approve"
-        $VscodeText = (& (Join-Path $StageRuntime "Scripts\python.exe") -B (
-            Join-Path $TargetQuery "vscode_settings.py"
-        ) --copilot-home $Target | Out-String)
-        if ($LASTEXITCODE -ne 0) {
-            throw (
-                "explicit VS Code auto-approve opt-in did not complete: " +
-                $VscodeText.Trim()
-            )
-        }
-        try {
-            $VscodeResult = $VscodeText | ConvertFrom-Json
-        } catch {
-            throw (
-                "explicit VS Code auto-approve opt-in returned invalid JSON: " +
-                $VscodeText.Trim()
-            )
-        }
-        if (@("configured_on_disk", "already_configured") -inotcontains (
-            [string]$VscodeResult.status
-        )) {
-            throw (
-                "explicit VS Code auto-approve opt-in did not complete: " +
-                $VscodeText.Trim()
-            )
-        }
-        $VSCodeStatus = [string]$VscodeResult.status
-    }
-
     $InstallStage = "publish_runtime"
     [System.IO.Directory]::Move($StageRuntime, $TargetRuntime)
     $RuntimePublished = $true
@@ -494,6 +529,10 @@ foreach ($Path in @(
     }
 }
 
+if ($ConfigureVSCodeAutoApprove) {
+    Invoke-VSCodeApprovalConfiguration
+}
+
 Write-Host ("Installed Local RAG Windows portable runtime to: " + $Target)
 Write-Host "Use Agent mode and enable runInTerminal in Configure Tools."
 Write-Host "Enable readFile when using file result delivery."
@@ -501,4 +540,5 @@ Write-Host ""
 Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
 Write-Host ("Runtime: " + $RuntimeStatus)
 Write-Host ("Databases: " + $DatabaseStatus)
-Write-Host ("VS Code auto-approve: " + $VSCodeStatus)
+Write-Host ("VS Code approvals: " + $VSCodeStatus)
+Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)

@@ -134,8 +134,13 @@ Windows PowerShell:
 PATH外のPythonを使う場合は
 `-BootstrapPython "C:\path\to\python.exe"`を追加してください。
 既存の`%USERPROFILE%\.copilot\rag\dbs`はsource cloneの内容で上書きしません。
-`-ConfigureVSCodeAutoApprove`は固定されたLocal RAGの`list_dbs`／`search`コマンド
-だけをVS Code設定へ追加します。既存設定はbackupを作ってからJSONCとしてmergeします。
+`-ConfigureVSCodeAutoApprove`はVS Code公式の
+`chat.tools.global.autoApprove: true`を明示的に設定します。これは全workspaceの
+全tool／terminal commandへ効く緩い設定です。既存設定はbackupを作ってから
+JSONCとしてmergeし、policyによる実効性は`UNKNOWN`として報告します。
+[VS Codeのapproval仕様](https://code.visualstudio.com/docs/agents/run/approvals)と
+[custom instructions仕様](https://code.visualstudio.com/docs/agent-customization/custom-instructions)
+に従います。
 完了時は`Local RAG install: SUCCESS`、失敗時は`FAILED`と停止工程を表示します。
 
 既存の`~/.copilot/copilot-instructions.md`には次の1行を追加してください。
@@ -164,7 +169,10 @@ Windows x64の公式copy-ready ZIPには固定Python、依存package、ONNX mode
 含まれます。初期設定はvenv作成、pip、model download／変換、system Pythonへの
 fallbackを行いません。VS Code Copilot ChatをAgentにし、Configure Toolsで
 `runInTerminal`をONにしてください。file deliveryを使う場合は`readFile`も
-ONにします。global auto-approve、Bypass Approvals、Autopilotは前提ではありません。
+ONにします。toolの有効化とapprovalは別概念です。Windows ZIPのinstallerは
+global auto-approveを既定で設定し、`install.cmd -SkipVSCodeAutoApprove`で
+settingsを1 byteも変更せずopt-outできます。Copilotによる実地受入はinstallerや
+製品testでは実行しません。
 
 既存のCopilot instructions、作成済みDB、Python環境、検索daemonの状態、
 端末固有のnetwork設定、Source接続設定はinstallerで不用意に上書きしません。
@@ -305,9 +313,12 @@ WindowsでManagerが利用者向けpackageを作るとき、管理者PCのPython
 利用者はZIPを展開して`install.cmd`を実行します。利用者PCにはPython、pip、
 network、PATH変更、管理者権限は不要です。installerも最終結果を
 `Local RAG install: SUCCESS`または`FAILED`で表示します。既存のPython環境や
-端末固有設定は削除しません。固定されたLocal RAGコマンドだけのVS Code
-auto-approveを既定でmergeし、不要なら`install.cmd -SkipVSCodeAutoApprove`で
-無効化できます。また、
+端末固有設定は削除しません。VS Codeのglobal auto-approveを既定でmergeします。
+これは全tool／terminal commandへ効くため、不要なら
+`install.cmd -SkipVSCodeAutoApprove`で完全にopt-outできます。toolの有効化は
+別途必要で、`runInTerminal`とfile delivery用の`readFile`を利用可能にします。
+settingsだけが失敗した場合は、原因を修正して
+`install.cmd -RetryVSCodeApprovals`を実行するとruntime／DBを置換せず再試行できます。また、
 `~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
 追加します。管理PC引っ越しpackageは、Managerの
 `パッケージを取り込む・検証する`から取り込みます。

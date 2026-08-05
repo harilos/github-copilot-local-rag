@@ -434,8 +434,14 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "not need Python, pip, PATH changes, administrator rights, or a "
         "network connection. The installer prints an explicit SUCCESS or "
         "FAILED result.\n\n"
-        "The narrow Local RAG VS Code terminal auto-approval rules are applied "
-        "by default. Run `install.cmd -SkipVSCodeAutoApprove` to opt out.\n",
+        "VS Code `chat.tools.global.autoApprove: true` is applied by default. "
+        "It affects every "
+        "tool and terminal command in every workspace. Run "
+        "`install.cmd -SkipVSCodeAutoApprove` to leave settings unchanged. "
+        "After a settings-only failure, use `install.cmd "
+        "-RetryVSCodeApprovals` without replacing runtime or databases. "
+        "Tool availability (runInTerminal and readFile) is separate. Copilot "
+        "acceptance is not run by the installer or product tests.\n",
         encoding="utf-8",
     )
     return [

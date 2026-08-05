@@ -30,8 +30,10 @@ or convert a model, or fall back to system Python.
 
 After setup, tell the human to use VS Code Copilot Chat in Agent mode and open
 Configure Tools. `runInTerminal` is required. `readFile` is also required
-for file result delivery. Global auto-approve, Bypass Approvals, and Autopilot
-are not Local RAG requirements.
+for file result delivery. Tool availability and approval are separate. The
+Windows installer can explicitly configure VS Code global auto-approve, which
+affects every tool and terminal command in every workspace; use
+`install.cmd -SkipVSCodeAutoApprove` to opt out.
 
 ## macOS/Linux
 

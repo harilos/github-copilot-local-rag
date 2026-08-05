@@ -440,8 +440,14 @@ unrelated databases are preserved. Replacing a same-name database requires
 `install.cmd -ReplaceExistingDatabases`.
 
 In VS Code Copilot Chat, select Agent and enable runInTerminal in Configure
-Tools. Enable readFile when using file result delivery. Global auto-approve,
-Bypass Approvals, and Autopilot are not Local RAG requirements.
+Tools. Enable readFile when using file result delivery. Tool availability and
+approval are separate. The installer enables VS Code global auto-approve by
+setting `chat.tools.global.autoApprove: true` for all tools and terminal
+commands in all workspaces by default. Run
+`install.cmd -SkipVSCodeAutoApprove` to leave VS Code settings unchanged.
+After a settings-only failure, correct the settings problem and run
+`install.cmd -RetryVSCodeApprovals` without replacing runtime or databases.
+Copilot acceptance is never run by the installer or product tests.
 """
 
 

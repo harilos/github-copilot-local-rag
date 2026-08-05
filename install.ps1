@@ -120,7 +120,8 @@ function Remove-CompletionMarkerBackups {
 $InstallStage = "validate_payload"
 $RuntimeStatus = "NOT_READY"
 $DatabaseListStatus = "NOT_CHECKED"
-$VSCodeStatus = "NOT_REQUESTED"
+$VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "SKIPPED_BY_USER" }
+$PolicyEffectiveness = "UNKNOWN"
 
 try {
 if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
@@ -293,31 +294,33 @@ if ($LASTEXITCODE -ne 0) {
 $DatabaseListStatus = "READY"
 
 if ($ConfigureVSCodeAutoApprove) {
-    $InstallStage = "vscode_auto_approve"
+    $InstallStage = "vscode_approvals"
+    $VSCodeStatus = "FAILED"
     $VSCodeResult = & $RuntimePython `
         -B `
         (Join-Path $Target "rag\query\vscode_settings.py") `
         --copilot-home $Target
-    if ($LASTEXITCODE -ne 0) {
-        throw "VS Code Local RAG auto-approve configuration failed."
-    }
+    $VSCodeExitCode = $LASTEXITCODE
     try {
-        $VSCodeStatus = ($VSCodeResult | ConvertFrom-Json).status
+        $VSCodePayload = $VSCodeResult | ConvertFrom-Json
     } catch {
-        throw "VS Code Local RAG auto-approve returned invalid status output."
+        throw "VS Code global auto-approve returned invalid status output."
     }
-    if ($VSCodeStatus -notin @("configured_on_disk", "already_configured")) {
-        throw (
-            "VS Code Local RAG auto-approve needs manual action: " +
-            "$VSCodeStatus. The Local RAG runtime itself is ready."
+    if (
+        $VSCodeExitCode -ne 0 -or
+        @("configured_on_disk", "already_configured") -inotcontains (
+            [string]$VSCodePayload.status
         )
+    ) {
+        throw "VS Code global auto-approve configuration failed."
     }
-    Write-Host "VS Code Local RAG auto-approve: $VSCodeStatus"
+    $VSCodeStatus = "CONFIGURED_ON_DISK"
+    Write-Host "VS Code global auto-approve: $VSCodeStatus"
     Write-Host "Restart VS Code before testing the Local RAG command."
 } else {
     Write-Host (
-        "VS Code auto-approve was not changed. " +
-        "Rerun with -ConfigureVSCodeAutoApprove to allow only the fixed Local RAG commands."
+        "VS Code approvals were not changed. " +
+        "Rerun with -ConfigureVSCodeAutoApprove to enable global auto-approve."
     )
 }
 
@@ -329,14 +332,16 @@ Write-Host "Existing machine-local network and Source connection settings were p
 Write-Host ""
 Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
 Write-Host "Runtime: $RuntimeStatus"
-Write-Host "Database list command: $DatabaseListStatus"
-Write-Host "VS Code auto-approve: $VSCodeStatus"
+Write-Host "Databases: $DatabaseListStatus"
+Write-Host "VS Code approvals: $VSCodeStatus"
+Write-Host "Policy effectiveness: $PolicyEffectiveness"
 } catch {
     Write-Host ""
     Write-Host "=== Local RAG install: FAILED ===" -ForegroundColor Red
     Write-Host "Failed stage: $InstallStage"
     Write-Host "Runtime: $RuntimeStatus"
-    Write-Host "Database list command: $DatabaseListStatus"
-    Write-Host "VS Code auto-approve: $VSCodeStatus"
+    Write-Host "Databases: $DatabaseListStatus"
+    Write-Host "VS Code approvals: $VSCodeStatus"
+    Write-Host "Policy effectiveness: $PolicyEffectiveness"
     throw
 }
