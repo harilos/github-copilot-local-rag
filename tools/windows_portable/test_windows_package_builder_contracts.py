@@ -143,6 +143,12 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 names = set(archive.namelist())
                 prefix = "local-rag-windows-x64-1.2.3/"
                 self.assertIn(prefix + "install.cmd", names)
+                launcher = archive.read(prefix + "install.cmd").decode("utf-8")
+                self.assertIn(
+                    '"%~dp0internal\\install.ps1" '
+                    "-ConfigureVSCodeAutoApprove %*",
+                    launcher,
+                )
                 self.assertIn(prefix + "internal/install.ps1", names)
                 self.assertIn(
                     prefix + ".copilot/rag/query/.venv/Scripts/python.exe",
@@ -204,11 +210,22 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer.index("$PayloadRoot ="),
                 )
                 self.assertGreater(
+                    installer.rindex("if ($ConfigureVSCodeAutoApprove)"),
                     installer.index(
                         "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
                     ),
-                    installer.index("if ($ConfigureVSCodeAutoApprove)"),
                 )
+                readme = archive.read(prefix + "README-WINDOWS.md").decode(
+                    "utf-8"
+                )
+                normalized_readme = " ".join(readme.split())
+                self.assertIn("global auto-approve", readme)
+                self.assertIn(
+                    "all tools and terminal commands", normalized_readme
+                )
+                self.assertIn("-SkipVSCodeAutoApprove", readme)
+                self.assertIn("leave VS Code settings unchanged", readme)
+                self.assertIn("-RetryVSCodeApprovals", readme)
 
     def test_builds_zero_one_two_and_five_database_packages(self) -> None:
         for count in (0, 1, 2, 5):
@@ -467,7 +484,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 (unrelated / "keep.txt").read_text(encoding="utf-8"),
             )
 
-    def test_failure_after_publication_rolls_back_changed_targets(self) -> None:
+    def test_vscode_failure_keeps_published_runtime_and_databases_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -493,20 +510,19 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "-ConfigureVSCodeAutoApprove",
             )
             self.assertNotEqual(0, completed.returncode)
+            self.assertFalse((runtime / "old.txt").exists())
+            self.assertTrue((runtime / "Scripts" / "python.exe").is_file())
+            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                "old-runtime\n",
-                (runtime / "old.txt").read_text(encoding="utf-8"),
-            )
-            self.assertEqual(
-                b"old-model", (model / "model.onnx").read_bytes()
-            )
-            self.assertEqual(
-                b"old-db", (database / "catalog.sqlite").read_bytes()
-            )
-            self.assertEqual(
-                "old-product\n",
+                "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
+            self.assertIn("=== Local RAG install: FAILED ===", completed.stdout)
+            self.assertIn("Runtime: READY", completed.stdout)
+            self.assertIn("Databases: READY", completed.stdout)
+            self.assertIn("VS Code approvals: FAILED", completed.stdout)
+            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
 
     def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -517,7 +533,84 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode)
             self.assertFalse((profile / ".copilot").exists())
 
-    def test_logical_vscode_opt_in_failure_rolls_back(self) -> None:
+    def test_skip_vscode_auto_approve_leaves_settings_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            settings = (
+                profile
+                / "AppData"
+                / "Roaming"
+                / "Code"
+                / "User"
+                / "settings.json"
+            )
+            settings.parent.mkdir(parents=True)
+            original = b'\xef\xbb\xbf{\r\n  // keep\r\n  "x": false,\r\n}\r\n'
+            settings.write_bytes(original)
+            package = self._package(root)
+            completed = self._run(
+                package, profile, "-SkipVSCodeAutoApprove"
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(original, settings.read_bytes())
+            self.assertEqual(
+                [], list(settings.parent.glob("*.local-rag-backup-*"))
+            )
+            self.assertIn(
+                "VS Code approvals: SKIPPED_BY_USER", completed.stdout
+            )
+            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+
+    def test_opt_in_configures_global_setting_and_reports_unknown_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            settings = (
+                profile
+                / "AppData"
+                / "Roaming"
+                / "Code"
+                / "User"
+                / "settings.json"
+            )
+            settings.parent.mkdir(parents=True)
+            original = (
+                b'{\r\n  // keep\r\n  '
+                b'"chat.tools.global.autoApprove": false,\r\n}\r\n'
+            )
+            settings.write_bytes(original)
+            package = self._package(root, executable_python=True)
+            shutil.copy2(
+                HERE.parents[1]
+                / ".copilot"
+                / "rag"
+                / "query"
+                / "vscode_settings.py",
+                package
+                / ".copilot"
+                / "rag"
+                / "query"
+                / "vscode_settings.py",
+            )
+            completed = self._run(
+                package, profile, "-ConfigureVSCodeAutoApprove"
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            rendered = settings.read_bytes()
+            self.assertIn(b"// keep\r\n", rendered)
+            self.assertIn(
+                b'"chat.tools.global.autoApprove": true,\r\n', rendered
+            )
+            backups = list(settings.parent.glob("*.local-rag-backup-*"))
+            self.assertEqual(1, len(backups))
+            self.assertEqual(original, backups[0].read_bytes())
+            self.assertIn(
+                "VS Code approvals: CONFIGURED_ON_DISK", completed.stdout
+            )
+            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+
+    def test_logical_vscode_opt_in_failure_is_retryable_without_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -549,14 +642,46 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "-ConfigureVSCodeAutoApprove",
             )
             self.assertNotEqual(0, completed.returncode)
+            self.assertFalse((runtime / "old.txt").exists())
+            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                "old-runtime\n", (runtime / "old.txt").read_text(encoding="utf-8")
-            )
-            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
-            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
-            self.assertEqual(
-                "old-product\n",
+                "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
+            )
+            self.assertIn("=== Local RAG install: FAILED ===", completed.stdout)
+            self.assertIn("Runtime: READY", completed.stdout)
+            self.assertIn("Databases: READY", completed.stdout)
+            self.assertIn("VS Code approvals: FAILED", completed.stdout)
+            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+
+            installed_vscode = target / "query" / "vscode_settings.py"
+            installed_vscode.write_text(
+                "import json\n"
+                "print(json.dumps({'status': 'configured_on_disk'}))\n",
+                encoding="utf-8",
+            )
+            runtime_before = (runtime / "Scripts" / "python.exe").read_bytes()
+            model_before = (model / "model.onnx").read_bytes()
+            database_before = (database / "catalog.sqlite").read_bytes()
+            retried = self._run(
+                package,
+                profile,
+                "-ConfigureVSCodeAutoApprove",
+                "-RetryVSCodeApprovals",
+            )
+            self.assertEqual(0, retried.returncode, retried.stderr)
+            self.assertEqual(
+                runtime_before, (runtime / "Scripts" / "python.exe").read_bytes()
+            )
+            self.assertEqual(model_before, (model / "model.onnx").read_bytes())
+            self.assertEqual(
+                database_before, (database / "catalog.sqlite").read_bytes()
+            )
+            self.assertIn("Runtime: READY", retried.stdout)
+            self.assertIn("Databases: READY", retried.stdout)
+            self.assertIn(
+                "VS Code approvals: CONFIGURED_ON_DISK", retried.stdout
             )
 
 

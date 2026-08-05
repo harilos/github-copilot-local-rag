@@ -1,3 +1,9 @@
+---
+name: Local RAG Routing
+description: Routes explicit Local RAG lookup requests through the public Local RAG skill and entry points.
+applyTo: "**"
+---
+
 # Local RAG Routing
 
 Use the `local-rag` Skill only when the human explicitly asks to answer from
@@ -13,6 +19,14 @@ Ordinary Local RAG access is read-only and has exactly two public operations:
 1. list available databases and the kinds of material they contain;
 2. search one selected database, or read cached detail through the same search
    entry point.
+
+The public commands are already known. Before ordinary lookup, do not Read,
+list, probe, or analyze `.copilot/rag`, `.venv`, either public script, private
+modules, or the Local RAG directory tree to check that they exist. On Windows,
+run only the documented command for the current terminal shell: PowerShell
+syntax in PowerShell or Git Bash syntax in Git Bash. If a public command fails,
+do not fall back to private-file inspection; return the bounded failure to the
+human.
 
 Do not inspect or invoke Local RAG's private implementation files or lower-level
 commands merely to bypass those public entry points. This restriction does not

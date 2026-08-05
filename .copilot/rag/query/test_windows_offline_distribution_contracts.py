@@ -193,10 +193,59 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             "Failed stage:",
             "Runtime:",
             "Databases:",
-            "VS Code auto-approve:",
+            "VS Code approvals:",
+            "Policy effectiveness:",
+            '"CONFIGURED_ON_DISK"',
+            '"SKIPPED_BY_USER"',
+            '"FAILED"',
+            '"UNKNOWN"',
         ):
             self.assertIn(fragment, template)
+        settings_index = template.rindex("if ($ConfigureVSCodeAutoApprove) {")
+        self.assertLess(
+            template.index(
+                "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
+            ),
+            settings_index,
+        )
+        self.assertLess(template.index('$DatabaseStatus = "READY"'), settings_index)
+        self.assertNotIn("$VscodeText.Trim()", template)
         self.assertNotIn("list_dbs.py", template)
+
+        source_installer = (RAG_ROOT.parents[1] / "install.ps1").read_text(
+            encoding="utf-8"
+        )
+        for fragment in (
+            "Runtime:",
+            "Databases:",
+            "VS Code approvals:",
+            "Policy effectiveness:",
+            '"CONFIGURED_ON_DISK"',
+            '"SKIPPED_BY_USER"',
+            '"FAILED"',
+            '"UNKNOWN"',
+        ):
+            self.assertIn(fragment, source_installer)
+
+    def test_readmes_describe_global_scope_opt_out_and_tool_boundary(self) -> None:
+        repository = RAG_ROOT.parents[1]
+        documents = (
+            (repository / "README.md").read_text(encoding="utf-8"),
+            (
+                repository
+                / "tools"
+                / "windows_portable"
+                / "windows_package_builder.py"
+            ).read_text(encoding="utf-8"),
+            Path(windows_distribution.__file__).read_text(encoding="utf-8"),
+        )
+        combined = "\n".join(documents)
+        self.assertIn("chat.tools.global.autoApprove", combined)
+        self.assertIn("全tool／terminal command", combined)
+        self.assertIn("-SkipVSCodeAutoApprove", combined)
+        self.assertIn("runInTerminal", combined)
+        self.assertIn("readFile", combined)
+        self.assertIn("Copilotによる実地受入はinstallerや", combined)
 
     def test_manager_routes_windows_distribution_to_offline_builder(self) -> None:
         manager = (RAG_ROOT / "manage.py").read_text(encoding="utf-8")

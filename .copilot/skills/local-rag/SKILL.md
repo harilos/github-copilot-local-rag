@@ -17,6 +17,12 @@ This Skill exposes only:
 - `~/.copilot/rag/list_dbs.py`
 - `~/.copilot/rag/search.py`
 
+These entry points are already known. Before ordinary lookup, do not Read,
+list, probe, or analyze `.copilot/rag`, `.venv`, either public script, private
+modules, or the Local RAG directory tree to confirm that they exist. If a
+public command fails, return the bounded failure; never inspect private files
+as a fallback.
+
 Do not inspect or invoke Local RAG's private implementation files, lower-level
 commands, or Source acquisition modules merely to bypass these public entry
 points. This does not prohibit reading the human's workspace files, repository
@@ -168,6 +174,13 @@ falls back to PATH-based Python.
 ```bash
 "$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
   -B \
+  "$HOME/.copilot/rag/list_dbs.py" \
+  --format json
+```
+
+```bash
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" \
+  -B \
   "$HOME/.copilot/rag/search.py" \
   --db <selected-db> \
   --include-db-hint \
@@ -176,6 +189,9 @@ falls back to PATH-based Python.
   --format json \
   "<semantic-question-or-distinct-subquestion>"
 ```
+
+On Windows, use only the example for the current terminal shell. Do not put
+PowerShell syntax in Git Bash or Git Bash syntax in PowerShell.
 
 On Windows, do not use `cmd.exe /c`, `cmd /c`, `Start-Process`, a batch wrapper,
 nested PowerShell, PATH-based Python discovery, or an stdin pipeline for

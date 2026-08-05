@@ -842,7 +842,11 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
                 "VS Code: use Copilot Chat in Agent mode; in Configure Tools "
                 "enable runInTerminal and enable readFile for file delivery."
             )
-            print("Global auto-approve, Bypass Approvals, and Autopilot are not required.")
+            print(
+                "Tool availability and approval are separate. The Windows "
+                "installer can configure global auto-approve for every tool "
+                "and terminal command; use -SkipVSCodeAutoApprove to opt out."
+            )
 
         return
     print(
