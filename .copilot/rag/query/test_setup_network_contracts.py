@@ -972,7 +972,10 @@ class SetupNetworkContractTests(unittest.TestCase):
         chroma_count: int,
     ) -> None:
         from software_rag_tool.embeddings import embedding_fingerprint
-        from software_rag_tool.tokenize import tokenizer_fingerprint
+        from software_rag_tool.tokenize import (
+            tokenizer_fingerprint,
+            tokenizer_runtime_descriptor,
+        )
 
         root = dbs_root / "test-rag"
         chroma = root / "index" / "chroma"
@@ -988,6 +991,8 @@ class SetupNetworkContractTests(unittest.TestCase):
                     "schema": "local-rag.db-version.v1",
                     "collection": collection,
                     "embedding": embedding_fingerprint(),
+                    "tokenizer": tokenizer_fingerprint(),
+                    "tokenizer_config": tokenizer_runtime_descriptor(),
                 }
             ),
             encoding="utf-8",
@@ -998,6 +1003,7 @@ class SetupNetworkContractTests(unittest.TestCase):
                     "collection": collection,
                     "catalog_schema_version": 2,
                     "tokenizer": tokenizer_fingerprint(),
+                    "tokenizer_config": tokenizer_runtime_descriptor(),
                     "record_count": chroma_count,
                     **embedding_fingerprint(),
                 }
