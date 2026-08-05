@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -292,9 +293,13 @@ def _insert_property(
     rendered: str,
 ) -> str:
     value_end = _last_property_value_end(text, object_start, object_end)
+    had_trailing_comma = False
     if value_end is not None:
         following = _skip_ws_comments(text, value_end)
-        if following >= object_end or text[following] != ",":
+        had_trailing_comma = (
+            following < object_end and text[following] == ","
+        )
+        if not had_trailing_comma:
             text = text[:value_end] + "," + text[value_end:]
             object_end += 1
     before = text[:object_end]
@@ -302,7 +307,8 @@ def _insert_property(
     stripped = before.rstrip()
     indent = "  "
     newline = "\r\n" if "\r\n" in text else "\n"
-    return stripped + newline + indent + rendered + newline + tail
+    suffix = "," if had_trailing_comma else ""
+    return stripped + newline + indent + rendered + suffix + newline + tail
 
 
 def _upsert_object_entry(text: str, object_start: int, object_end: int, key: str, value: str) -> str:
@@ -317,6 +323,11 @@ def _upsert_object_entry(text: str, object_start: int, object_end: int, key: str
 
 
 def scoped_command_rules(copilot_home: Path) -> tuple[str, str]:
+    """Return legacy Local RAG terminal rules for compatibility only.
+
+    configure_vscode deliberately does not call this function. Global
+    auto-approve is the current installation contract.
+    """
     query = copilot_home / "rag" / "query"
     python = query / ".venv" / "Scripts" / "python.exe"
     list_script = copilot_home / "rag" / "list_dbs.py"
@@ -376,71 +387,43 @@ def _rule_is_explicit_allow(text: str, bounds: tuple[int, int]) -> bool:
     )
 
 
+GLOBAL_AUTO_APPROVE_KEY = "chat.tools.global.autoApprove"
+
+
 def patch_settings_with_status(
-    text: str, command_rules: tuple[str, ...]
-) -> tuple[str, bool]:
+    text: str, command_rules: tuple[str, ...] | None = None
+) -> tuple[str, bool | None]:
+    # ``command_rules`` remains an ignored compatibility argument for callers
+    # from older Local RAG releases. Exact command-line regexes are no longer
+    # an installation success condition.
+    del command_rules
     if not text.strip():
         text = "{}\n"
     _validated_jsonc(text)
     root_start, root_end = _object_bounds(text)
-    enable = _find_property(
-        text, root_start, root_end, "chat.tools.terminal.enableAutoApprove"
-    )
-    if enable is not None:
-        enabled = text[enable[0] : enable[1]].strip()
-        if enabled != "true":
-            return text, True
-    root_start, root_end = _object_bounds(text)
-    found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
-    rule_value = json.dumps(
-        {"approve": True, "matchCommandLine": True}, separators=(",", ":")
-    )
-    rendered_rules = ",\n".join(
-        "    \"" + rule.replace("\\", "\\\\").replace('"', '\\"') + "\": " + rule_value
-        for rule in command_rules
-    )
+    found = _find_property(text, root_start, root_end, GLOBAL_AUTO_APPROVE_KEY)
     if found is None:
-        return _insert_property(
-            text,
-            root_start,
-            root_end,
-            f'"chat.tools.terminal.autoApprove": {{\n{rendered_rules}\n  }}',
-        ), False
+        return (
+            _insert_property(
+                text,
+                root_start,
+                root_end,
+                f'"{GLOBAL_AUTO_APPROVE_KEY}": true',
+            ),
+            None,
+        )
     value_start, value_end = found
-    container_start = _skip_ws_comments(text, value_start)
-    if text[container_start] != "{":
-        raise PolicyManualAction(
-            "chat.tools.terminal.autoApprove exists but is not an object"
-        )
-    container_end = _scan_value(text, container_start) - 1
-    manual = False
-    for command in command_rules:
-        root_start, root_end = _object_bounds(text)
-        found = _find_property(text, root_start, root_end, "chat.tools.terminal.autoApprove")
-        value_start, value_end = found
-        container_start = _skip_ws_comments(text, value_start)
-        container_end = _scan_value(text, container_start) - 1
-        try:
-            existing = _find_property(
-                text, container_start, container_end, command
-            )
-            explicit_allow = (
-                existing is not None
-                and _rule_is_explicit_allow(text, existing)
-            )
-        except ValueError as exc:
-            raise PolicyManualAction(str(exc)) from exc
-        if existing is not None:
-            if not explicit_allow:
-                manual = True
-            continue
-        text = _upsert_object_entry(
-            text, container_start, container_end, command, rule_value
-        )
-    return text, manual
+    previous = text[value_start:value_end].strip()
+    if previous == "true":
+        return text, True
+    if previous == "false":
+        return text[:value_start] + "true" + text[value_end:], False
+    raise ValueError(f"{GLOBAL_AUTO_APPROVE_KEY} must be a boolean")
 
 
-def patch_settings(text: str, command_rules: tuple[str, ...]) -> str:
+def patch_settings(
+    text: str, command_rules: tuple[str, ...] | None = None
+) -> str:
     return patch_settings_with_status(text, command_rules)[0]
 
 
@@ -465,12 +448,29 @@ def candidate_settings(appdata: Path) -> list[Path]:
     stable = appdata / "Code" / "User"
     insiders = appdata / "Code - Insiders" / "User"
     for base in (stable, insiders):
-        if not base.is_dir() or _is_reparse(base):
+        if not base.exists():
             continue
         values.append(base / "settings.json")
+        if _is_reparse(base):
+            continue
         profiles = base / "profiles"
+        if not profiles.exists():
+            continue
+        if _is_reparse(profiles):
+            # Include a sentinel child so configure_vscode reports the reparse
+            # point without traversing it.
+            values.append(profiles / "settings.json")
+            continue
         if profiles.is_dir():
-            values.extend(sorted(profiles.glob("*/settings.json")))
+            for profile in sorted(
+                profiles.iterdir(), key=lambda value: value.name.casefold()
+            ):
+                if profile.is_dir():
+                    values.append(profile / "settings.json")
+    return _dedupe_settings_paths(values)
+
+
+def _dedupe_settings_paths(values: list[Path]) -> list[Path]:
     output: list[Path] = []
     seen: set[str] = set()
     for value in values:
@@ -480,31 +480,38 @@ def candidate_settings(appdata: Path) -> list[Path]:
             output.append(value)
     return output
 
-def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
-    command_rules = scoped_command_rules(copilot_home)
+
+def configure_vscode(
+    copilot_home: Path, appdata: Path, *, enabled: bool = True
+) -> dict[str, object]:
+    del copilot_home
+    if not enabled:
+        return {
+            "status": "skipped_by_user",
+            "targets_checked": 0,
+            "targets_changed": 0,
+            "policy_effectiveness": "unknown",
+            "previous_values": [],
+            "error_kinds": [],
+        }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     checked = 0
     changed = 0
-    manual = False
     errors: list[str] = []
+    previous_values: list[bool | None] = []
     for path in candidate_settings(appdata):
         checked += 1
         try:
-            if path.exists() and _is_reparse(path):
+            if _path_has_reparse(path, appdata):
                 raise ValueError("settings target is a symlink or reparse point")
+            if path.is_file() and _is_read_only(path):
+                raise PermissionError("settings target is read-only")
             original_bytes = path.read_bytes() if path.is_file() else b"{}\n"
             if original_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
                 raise ValueError("unsupported settings encoding")
             had_bom = original_bytes.startswith(b"\xef\xbb\xbf")
             original = original_bytes.decode("utf-8-sig")
-            try:
-                patched, target_manual = patch_settings_with_status(
-                    original, command_rules
-                )
-            except PolicyManualAction:
-                manual = True
-                continue
-            manual = manual or target_manual
+            patched, previous_value = patch_settings_with_status(original)
             if patched == original:
                 continue
             if path.is_file():
@@ -518,19 +525,15 @@ def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
                 encoded = b"\xef\xbb\xbf" + encoded
             _atomic_write_bytes(path, encoded)
             changed += 1
+            previous_values.append(previous_value)
         except (OSError, UnicodeError, ValueError) as exc:
-            if isinstance(exc, ValueError) and "duplicate " in str(exc):
-                manual = True
-            else:
-                errors.append(type(exc).__name__)
+            errors.append(type(exc).__name__)
     if checked == 0:
         status = "not_detected"
     elif errors and changed:
         status = "partial_failure"
     elif errors:
         status = "error"
-    elif manual:
-        status = "manual_action_required"
     elif changed:
         status = "configured_on_disk"
     else:
@@ -540,6 +543,7 @@ def configure_vscode(copilot_home: Path, appdata: Path) -> dict[str, object]:
         "targets_checked": checked,
         "targets_changed": changed,
         "policy_effectiveness": "unknown",
+        "previous_values": previous_values,
         "error_kinds": sorted(set(errors)),
     }
 
@@ -567,6 +571,32 @@ def _is_reparse(path: Path) -> bool:
     attributes = getattr(path.lstat(), "st_file_attributes", 0)
     return path.is_symlink() or bool(attributes & 0x400)
 
+
+def _path_has_reparse(path: Path, boundary: Path) -> bool:
+    current = path if _path_lexists(path) else path.parent
+    boundary = Path(os.path.abspath(boundary))
+    while True:
+        if _path_lexists(current) and _is_reparse(current):
+            return True
+        if current == boundary or current.parent == current:
+            return False
+        current = current.parent
+
+
+def _path_lexists(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _is_read_only(path: Path) -> bool:
+    metadata = path.stat()
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(attributes & 0x1) or not bool(metadata.st_mode & stat.S_IWUSR)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--copilot-home", required=True)
@@ -576,7 +606,11 @@ def main() -> int:
         raise SystemExit("APPDATA is unavailable")
     result = configure_vscode(Path(args.copilot_home), Path(appdata))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 1 if result["status"] == "error" else 0
+    return (
+        0
+        if result["status"] in {"configured_on_disk", "already_configured"}
+        else 1
+    )
 
 
 if __name__ == "__main__":
