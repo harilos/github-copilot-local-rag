@@ -143,6 +143,12 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 names = set(archive.namelist())
                 prefix = "local-rag-windows-x64-1.2.3/"
                 self.assertIn(prefix + "install.cmd", names)
+                launcher = archive.read(prefix + "install.cmd").decode("utf-8")
+                self.assertIn(
+                    '"%~dp0internal\\install.ps1" '
+                    "-ConfigureVSCodeAutoApprove %*",
+                    launcher,
+                )
                 self.assertIn(prefix + "internal/install.ps1", names)
                 self.assertIn(
                     prefix + ".copilot/rag/query/.venv/Scripts/python.exe",

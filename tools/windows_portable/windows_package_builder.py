@@ -414,7 +414,7 @@ def _install_cmd() -> str:
         "setlocal\n"
         "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        "\"%~dp0internal\\install.ps1\" %*\n"
+        "\"%~dp0internal\\install.ps1\" -ConfigureVSCodeAutoApprove %*\n"
         "set \"local_rag_rc=%ERRORLEVEL%\"\n"
         "if not \"%local_rag_rc%\"==\"0\" (\n"
         "  echo Local RAG installation failed with error code %local_rag_rc%.\n"
