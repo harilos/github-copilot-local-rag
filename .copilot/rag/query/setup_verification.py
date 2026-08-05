@@ -381,10 +381,6 @@ def _verify_database(name: str) -> None:
         raise ValueError("unsupported catalog schema version in manifest")
     if manifest.get("tokenizer") != tokenizer_fingerprint():
         raise ValueError("unsupported tokenizer version in manifest")
-    if version.get("tokenizer") != tokenizer_fingerprint():
-        raise ValueError("unsupported tokenizer version in VERSION.json")
-    if version.get("tokenizer_config") != manifest.get("tokenizer_config"):
-        raise ValueError("tokenizer configuration mismatch in VERSION.json")
     validate_embedding_manifest(
         manifest,
         collection=collection_name,

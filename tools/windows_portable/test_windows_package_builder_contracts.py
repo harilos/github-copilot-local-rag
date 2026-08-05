@@ -367,7 +367,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         machine: int = 0x8664,
         database_content: bytes = b"new-db",
         product_content: str = "new\n",
-        executable_python: bool = True,
+        executable_python: bool = False,
     ) -> Path:
         package = root / "package"
         internal = package / "internal"
@@ -375,26 +375,15 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         shutil.copy2(HERE / "install-template.ps1", internal / "install.ps1")
         query = package / ".copilot" / "rag" / "query"
         python = query / ".venv" / "Scripts" / "python.exe"
-        if executable_python and machine == 0x8664:
+        if executable_python:
             python.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(Path(sys.executable), python)
         else:
             _write_pe(python, machine)
-        if not executable_python or machine != 0x8664:
+        if not executable_python:
             (python.parent / "python313._pth").write_text(
                 "..\\..\nimport site\n", encoding="utf-8"
             )
-        (query / "verify_windows_distribution_databases.py").write_text(
-            "import json\n"
-            "print(json.dumps({"
-            "'status':'pass',"
-            "'database_tokenizer_compatibility':'pass',"
-            "'list_dbs_executed':False,"
-            "'real_search_executed':False,"
-            "'dense_inference_executed':False"
-            "}))\n",
-            encoding="utf-8",
-        )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
         model = (

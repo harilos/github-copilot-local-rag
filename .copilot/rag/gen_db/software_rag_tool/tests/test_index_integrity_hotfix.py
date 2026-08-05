@@ -11,7 +11,6 @@ from unittest import mock
 
 from software_rag_tool import (
     catalog,
-    dbs,
     db_runtime,
     incremental,
     manifest,
@@ -674,21 +673,6 @@ class TokenizerRuntimeIntegrityContracts(unittest.TestCase):
         self.assertNotEqual("unknown", descriptor["implementation_version"])
         self.assertNotEqual("custom", descriptor["dictionary"])
         self.assertNotEqual("unknown", descriptor["dictionary_version"])
-
-    def test_new_database_version_records_the_exact_tokenizer_contract(self) -> None:
-        tokenize._sudachi.cache_clear()
-        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
-            os.environ,
-            {tokenize.TOKENIZER_MODE_ENV: "sudachi"},
-        ):
-            root = Path(temporary) / "fixture-rag"
-            root.mkdir()
-            payload = dbs.ensure_db_version(root, "fixture-rag")
-        self.assertEqual(tokenizer_fingerprint(), payload["tokenizer"])
-        self.assertEqual(
-            tokenize.tokenizer_runtime_descriptor(),
-            payload["tokenizer_config"],
-        )
 
 
 class SourceDeleteCrossStoreContracts(unittest.TestCase):

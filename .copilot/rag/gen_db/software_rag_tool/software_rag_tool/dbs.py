@@ -12,7 +12,6 @@ from typing import Any
 
 from .config import DEFAULT_EMBEDDING_MODEL
 from .embeddings import embedding_fingerprint
-from .tokenize import tokenizer_fingerprint, tokenizer_runtime_descriptor
 
 DB_NAME_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_.-]*-rag)(?![A-Za-z0-9_.-])")
 
@@ -137,16 +136,12 @@ def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc).isoformat()
     tool_hash = _tool_hash()
     embedding = embedding_fingerprint()
-    tokenizer = tokenizer_fingerprint()
-    tokenizer_config = tokenizer_runtime_descriptor()
     seed = {
         "db_name": db_name,
         "created_at": created_at,
         "collection": collection_name_for_db(db_name),
         "tool_hash": tool_hash,
         "embedding": embedding,
-        "tokenizer": tokenizer,
-        "tokenizer_config": tokenizer_config,
     }
     db_hash = hashlib.sha256(json.dumps(seed, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     payload = {
@@ -157,8 +152,6 @@ def ensure_db_version(db_root: Path, db_name: str) -> dict[str, Any]:
         "db_hash": db_hash,
         "collection": collection_name_for_db(db_name),
         "embedding": embedding,
-        "tokenizer": tokenizer,
-        "tokenizer_config": tokenizer_config,
         "tool": {
             "name": "software-rag-tool",
             "version": "0.1.0",

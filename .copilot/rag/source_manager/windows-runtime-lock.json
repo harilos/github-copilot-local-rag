@@ -11,24 +11,6 @@
     "sha256": "7d2650fd9d1b9d002d4a315d5f354247fd6a44f30517c7ef577b08f57a0fb6d9",
     "spdx_url": "https://www.python.org/ftp/python/3.13.5/python-3.13.5-embed-amd64.zip.spdx.json"
   },
-  "tokenizer": {
-    "implementation": {
-      "distribution": "SudachiPy",
-      "version": "0.6.10"
-    },
-    "dictionary": {
-      "distribution": "SudachiDict-core",
-      "version": "20250515"
-    },
-    "split_mode": "A",
-    "occurrences": "preserved",
-    "fingerprint_schema": "sudachi-a-v3-tf",
-    "fingerprint": "sudachi-a-v3-tf:sudachipy-0.6.10:sudachidict-core-20250515"
-  },
-  "database_contract": {
-    "version_schema": "local-rag.db-version.v1",
-    "catalog_schema_version": 2
-  },
   "default_profile": "search-only",
   "setup_network_operations": 0,
   "repair_source": "redistributed-zip"

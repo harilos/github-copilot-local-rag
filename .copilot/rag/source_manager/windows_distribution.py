@@ -11,17 +11,10 @@ import sys
 import tempfile
 import uuid
 import zipfile
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
 from . import packages
-from .windows_tokenizer_contract import (
-    DatabaseTokenizerCompatibilityError,
-    WindowsTokenizerContractError,
-    load_tokenizer_contract,
-    validate_distribution_databases,
-)
 
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -82,25 +75,9 @@ def create_windows_distribution_package(
             db_names=db_names,
             distribution=True,
         )
-        # The generic package path uses SQLite's backup API. A read-only
-        # connection to a WAL-mode source can still create -shm/-wal sidecars,
-        # which violates the Windows distribution's no-source-mutation gate.
-        # The compatibility validators around staging reject non-checkpointed
-        # state, so a stable byte copy is both sufficient and strictly read-only.
-        database_entries = [
-            replace(entry, mode="copy") if entry.mode == "sqlite" else entry
-            for entry in database_entries
-        ]
-        database_names = [str(item["name"]) for item in databases]
-        validate_distribution_databases(
-            home / "rag" / "dbs",
-            database_names,
-            lock_path=LOCK_PATH,
-        )
         entries.extend(database_entries)
         entries.extend(_runtime_entries(runtime))
         entries.extend(_generated_installer_entries(work))
-        entries.extend(_tokenizer_contract_entries())
         entries = packages._dedupe_entries(entries)
 
         emit("[3/5] package manifestとZIPを作成しています。")
@@ -119,13 +96,6 @@ def create_windows_distribution_package(
         )
 
         emit("[4/5] runtime・model・DBの同梱構造を確認しています。")
-        # Re-read the source after staging so a WAL or metadata change that
-        # races the stable copy cannot be silently omitted from the package.
-        validate_distribution_databases(
-            home / "rag" / "dbs",
-            database_names,
-            lock_path=LOCK_PATH,
-        )
         verification = _verify_staged_structure(stage, databases)
 
         packages._write_zip(stage, archive_tmp)
@@ -147,10 +117,6 @@ def create_windows_distribution_package(
             "manifest": manifest,
             "verification": verification,
         }
-    except DatabaseTokenizerCompatibilityError:
-        raise
-    except WindowsTokenizerContractError as exc:
-        raise packages.PackageError(str(exc)) from exc
     except packages.PackageError:
         raise
     except Exception as exc:
@@ -292,10 +258,6 @@ def _load_lock() -> dict[str, Any]:
         )
     ):
         raise packages.PackageError("windows_runtime_lock_invalid")
-    try:
-        load_tokenizer_contract(LOCK_PATH)
-    except WindowsTokenizerContractError as exc:
-        raise packages.PackageError("windows_runtime_tokenizer_lock_invalid") from exc
     return payload
 
 
@@ -493,22 +455,6 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
     ]
 
 
-def _tokenizer_contract_entries() -> list[packages._Entry]:
-    module = Path(__file__).with_name("windows_tokenizer_contract.py")
-    return [
-        packages._Entry(
-            module,
-            ".copilot/rag/query/windows_tokenizer_contract.py",
-            source_root=module.parent,
-        ),
-        packages._Entry(
-            LOCK_PATH,
-            ".copilot/rag/query/windows-runtime-lock.json",
-            source_root=LOCK_PATH.parent,
-        ),
-    ]
-
-
 def _verify_staged_structure(
     stage: Path,
     databases: Sequence[dict[str, Any]],
@@ -529,27 +475,13 @@ def _verify_staged_structure(
     )
     if packaged != expected:
         raise packages.PackageError("windows_offline_database_layout_mismatch")
-    compatibility = validate_distribution_databases(
-        dbs_root,
-        sorted(packaged, key=str.casefold),
-        lock_path=stage
-        / ".copilot"
-        / "rag"
-        / "query"
-        / "windows-runtime-lock.json",
-    )
-    contract = load_tokenizer_contract(LOCK_PATH)
     return {
         "runtime_layout": "pass",
         "model_required_files": "pass",
         "packaged_databases": sorted(packaged, key=str.casefold),
         "manifest": "pass",
-        "database_tokenizer_compatibility": "pass",
-        "portable_tokenizer_fingerprint": contract.fingerprint,
-        "database_tokenizer_results": compatibility,
         "list_dbs_executed": False,
         "real_search_executed": False,
-        "dense_inference_executed": False,
     }
 
 

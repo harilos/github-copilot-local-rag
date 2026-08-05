@@ -1035,7 +1035,6 @@ def _product_entries(
         "query/result_detail.py",
         "query/search.py",
         "query/setup.py",
-        "gen_db/software_rag_tool/scripts/query.py",
         "gen_db/software_rag_tool/pyproject.toml",
         "gen_db/software_rag_tool/software_rag_tool/__init__.py",
     ]

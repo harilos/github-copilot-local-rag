@@ -140,10 +140,6 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             )
             self.assertIn(".copilot/rag/list_dbs.py", names)
             self.assertIn(".copilot/rag/query/list_dbs.py", names)
-            self.assertIn(
-                ".copilot/rag/gen_db/software_rag_tool/scripts/query.py",
-                names,
-            )
             with zipfile.ZipFile(output) as archive:
                 install_cmd = archive.read("install.cmd").decode("ascii")
             self.assertIn("-ConfigureVSCodeAutoApprove", install_cmd)
