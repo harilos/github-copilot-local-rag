@@ -9,6 +9,7 @@ import unicodedata
 from pathlib import Path
 
 from .chunking import DocumentTokenBudget, TextSection, chunk_text, normalize_text
+from .openxml_text import extract_docx_text, extract_pptx_slide_texts
 
 SUPPORTED_EXTENSIONS = {
     ".md",
@@ -98,32 +99,14 @@ def _extract_pdf(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_
 
 
 def _extract_docx(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
-    from docx import Document
-
-    doc = Document(str(path))
-    parts: list[str] = []
-    for paragraph in doc.paragraphs:
-        if paragraph.text.strip():
-            parts.append(paragraph.text)
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                parts.append(" | ".join(cells))
-    return chunk_text(path.name, "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
+    text = extract_docx_text(path)
+    return chunk_text(path.name, text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path)
 
 
 def _extract_pptx(path: Path, *, chunk_max_chars: int, chunk_overlap: int, token_budget: DocumentTokenBudget | None = None, embedding_path: str = "") -> list[TextSection]:
-    from pptx import Presentation
-
-    prs = Presentation(str(path))
     sections: list[TextSection] = []
-    for i, slide in enumerate(prs.slides, start=1):
-        parts: list[str] = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text.strip():
-                parts.append(shape.text)
-        sections.extend(chunk_text(f"Slide {i}", "\n".join(parts), max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path))
+    for i, text in enumerate(extract_pptx_slide_texts(path), start=1):
+        sections.extend(chunk_text(f"Slide {i}", text, max_chars=chunk_max_chars, overlap=chunk_overlap, token_budget=token_budget, embedding_path=embedding_path))
     return sections
 
 
