@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -138,14 +139,22 @@ class ConverterOutputDecodingTests(unittest.TestCase):
 
         self.assertEqual("Markdown 正常系", sections[0].text)
 
-    def test_docx_path_is_unchanged(self) -> None:
-        fake_docx = types.ModuleType("docx")
-        fake_docx.Document = lambda _path: types.SimpleNamespace(
-            paragraphs=[types.SimpleNamespace(text="DOCX 正常系")],
-            tables=[],
-        )
-        with mock.patch.dict(sys.modules, {"docx": fake_docx}):
-            sections = extractors.extract_sections(Path("control.docx"))
+    def test_docx_path_is_independent_from_legacy_converter(self) -> None:
+        document_xml = """\
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>DOCX 正常系</w:t></w:r></w:p></w:body>
+</w:document>
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "control.docx"
+            with zipfile.ZipFile(path, "w") as package:
+                package.writestr("word/document.xml", document_xml)
+            with mock.patch.object(
+                extractors,
+                "_convert_with_libreoffice",
+                side_effect=AssertionError("DOCX used the legacy converter"),
+            ):
+                sections = extractors.extract_sections(path)
 
         self.assertEqual("DOCX 正常系", sections[0].text)
 
