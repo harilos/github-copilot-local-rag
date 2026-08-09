@@ -183,7 +183,7 @@ class SvnRecentValidationTests(unittest.TestCase):
         self.assertTrue(route.command_runner.supports_stdout_sink)
         run.assert_called_once_with(
             ["svn", "info"],
-            timeout=300,
+            timeout=1800.0,
             env={"ROUTE": "selected"},
             progress_callback=None,
             stdout_sink=sink,

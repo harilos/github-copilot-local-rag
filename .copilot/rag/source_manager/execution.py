@@ -41,7 +41,11 @@ from .github_content import (
     fetch_github_issues,
     parse_github_repository_url,
 )
-from .networking import is_gitlab_token_request, reject_http_redirects
+from .networking import (
+    is_gitlab_token_request,
+    reject_http_redirects,
+    source_command_timeout_seconds,
+)
 from .redmine_contract import REDMINE_ADD_BATCH_SIZE
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
 from .security import validate_environment_name
@@ -1980,7 +1984,7 @@ def _run_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=300,
+        timeout=source_command_timeout_seconds(),
         check=False,
     )
     result.elapsed_seconds = time.monotonic() - started
