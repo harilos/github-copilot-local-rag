@@ -411,15 +411,53 @@ def _install_bootstrap() -> str:
 def _install_cmd() -> str:
     return (
         "@echo off\n"
-        "setlocal\n"
+        "setlocal EnableExtensions DisableDelayedExpansion\n"
+        'set "local_rag_no_pause=0"\n'
+        'set "local_rag_skip="\n'
+        'set "local_rag_retry="\n'
+        'set "local_rag_replace="\n'
+        'set "local_rag_argument_error="\n'
+        ":local_rag_parse\n"
+        'if "%~1"=="" goto local_rag_run\n'
+        'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\n'
+        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_mark_skip\n'
+        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_mark_retry\n'
+        'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\n'
+        'set "local_rag_argument_error=-LauncherArgumentError"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_ignore\n"
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_mark_no_pause\n"
+        'set "local_rag_no_pause=1"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_mark_skip\n"
+        'set "local_rag_skip=-SkipVSCodeAutoApprove"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_mark_retry\n"
+        'set "local_rag_retry=-RetryVSCodeApprovals"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_mark_replace\n"
+        'set "local_rag_replace=-ReplaceExistingDatabases"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_run\n"
         "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        "\"%~dp0internal\\install.ps1\" -ConfigureVSCodeAutoApprove %*\n"
+        "\"%~dp0internal\\install.ps1\" -ConfigureVSCodeAutoApprove "
+        "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
+        "%local_rag_argument_error%\n"
         "set \"local_rag_rc=%ERRORLEVEL%\"\n"
-        "if not \"%local_rag_rc%\"==\"0\" (\n"
-        "  echo Local RAG installation failed with error code %local_rag_rc%.\n"
-        "  pause\n"
-        ")\n"
+        'if "%local_rag_no_pause%"=="1" goto local_rag_exit\n'
+        "echo.\n"
+        "echo Press any key to close this window . . .\n"
+        "pause >nul\n"
+        ":local_rag_exit\n"
         "exit /b %local_rag_rc%\n"
     )
 
@@ -433,7 +471,14 @@ are not required.
 
 Extract the ZIP to a local folder and double-click `install.cmd`. The launcher
 uses Windows PowerShell 5.1 with a process-scoped execution-policy bypass and
-returns the installer's exit code. It pauses only when installation fails.
+returns the installer's exit code. Normal mode waits exactly once after either
+success or failure. Add `-NoPause` anywhere in the `install.cmd` arguments for
+automation; the launcher consumes it, does not forward it to PowerShell, and
+does not print the wait prompt.
+
+PowerShell writes exactly one log per run under
+`%LOCALAPPDATA%\LocalRAG\logs` (falling back to TEMP), prints a Japanese result
+summary, and shows the absolute log path. PowerShell never waits for input.
 
 The package contains only the databases selected by the builder. Existing
 unrelated databases are preserved. Replacing a same-name database requires

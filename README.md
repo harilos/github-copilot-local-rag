@@ -390,6 +390,14 @@ checks only that the embedded Windows binaries are AMD64 before changing the
 target. Existing unrelated databases are preserved, and a selected same-name
 database is replaced only with `-ReplaceExistingDatabases`.
 
+The launcher waits exactly once after both success and failure in normal mode.
+For automation, `-NoPause` may appear anywhere in the `install.cmd` arguments;
+the launcher consumes it before PowerShell and emits no wait prompt. Every run
+writes one `portable-install-<timestamp>-<pid>.log` under
+`%LOCALAPPDATA%\LocalRAG\logs` with a TEMP fallback. The PowerShell installer
+prints a Japanese result summary and the absolute log path, but never waits for
+input.
+
 Package hashes, closed-set manifests, model or database health checks, internal
 `list_dbs`, and search smoke tests are not part of installation. Release or
 acceptance automation must exercise the public commands from outside the

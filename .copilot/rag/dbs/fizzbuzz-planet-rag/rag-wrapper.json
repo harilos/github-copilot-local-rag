@@ -1,5 +1,1 @@
-{
-  "content_snapshot_at": "2026-08-01T14:45:08Z",
-  "reason": "database_copy",
-  "schema_version": "local-rag.wrapper.v1"
-}
+{"schema_version":"local-rag.wrapper.v1","content_snapshot_at":"2026-08-01T04:17:07Z","packaged_at":"2026-08-08T17:24:30Z"}

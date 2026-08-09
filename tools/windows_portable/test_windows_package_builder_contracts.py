@@ -146,9 +146,13 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 launcher = archive.read(prefix + "install.cmd").decode("utf-8")
                 self.assertIn(
                     '"%~dp0internal\\install.ps1" '
-                    "-ConfigureVSCodeAutoApprove %*",
+                    "-ConfigureVSCodeAutoApprove",
                     launcher,
                 )
+                self.assertIn('if /I "%~1"=="-NoPause"', launcher)
+                self.assertIn("shift", launcher)
+                self.assertEqual(1, launcher.count("pause >nul"))
+                self.assertNotIn("%*", launcher)
                 self.assertIn(prefix + "internal/install.ps1", names)
                 self.assertIn(
                     prefix + ".copilot/rag/query/.venv/Scripts/python.exe",
@@ -226,6 +230,10 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("-SkipVSCodeAutoApprove", readme)
                 self.assertIn("leave VS Code settings unchanged", readme)
                 self.assertIn("-RetryVSCodeApprovals", readme)
+                self.assertIn("-NoPause", readme)
+                self.assertIn("waits exactly once", readme)
+                self.assertIn("%LOCALAPPDATA%\\LocalRAG\\logs", readme)
+                self.assertIn("absolute log path", readme)
 
     def test_builds_zero_one_two_and_five_database_packages(self) -> None:
         for count in (0, 1, 2, 5):
@@ -409,6 +417,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["USERPROFILE"] = str(profile)
         environment["APPDATA"] = str(profile / "AppData" / "Roaming")
+        environment["LOCALAPPDATA"] = str(profile / "AppData" / "Local")
         powershell = (
             Path(os.environ.get("SystemRoot", r"C:\Windows"))
             / "System32"
@@ -442,6 +451,17 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             package = self._package(root)
             completed = self._run(package, profile)
             self.assertEqual(0, completed.returncode, completed.stderr)
+            logs = list(
+                (profile / "AppData" / "Local" / "LocalRAG" / "logs").glob(
+                    "portable-install-*.log"
+                )
+            )
+            self.assertEqual(1, len(logs))
+            self.assertIn(str(logs[0].resolve()), completed.stdout)
+            self.assertIn(
+                "Local RAG インストール結果: 成功 (SUCCESS)",
+                completed.stdout,
+            )
             target = profile / ".copilot" / "rag"
             self.assertEqual(
                 b"new-db",
@@ -507,11 +527,14 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
-            self.assertIn("=== Local RAG install: FAILED ===", completed.stdout)
-            self.assertIn("Runtime: READY", completed.stdout)
-            self.assertIn("Databases: READY", completed.stdout)
-            self.assertIn("VS Code approvals: FAILED", completed.stdout)
-            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+            self.assertIn(
+                "Local RAG インストール結果: 失敗 (FAILED)",
+                completed.stdout,
+            )
+            self.assertIn("ランタイム: READY", completed.stdout)
+            self.assertIn("データベース: READY", completed.stdout)
+            self.assertIn("VS Code 承認設定: FAILED", completed.stdout)
+            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
 
     def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -521,6 +544,17 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             completed = self._run(package, profile)
             self.assertNotEqual(0, completed.returncode)
             self.assertFalse((profile / ".copilot").exists())
+            logs = list(
+                (profile / "AppData" / "Local" / "LocalRAG" / "logs").glob(
+                    "portable-install-*.log"
+                )
+            )
+            self.assertEqual(1, len(logs))
+            self.assertIn(str(logs[0].resolve()), completed.stdout)
+            self.assertIn(
+                "Local RAG インストール結果: 失敗 (FAILED)",
+                completed.stdout,
+            )
 
     def test_skip_vscode_auto_approve_leaves_settings_byte_identical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -547,9 +581,9 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 [], list(settings.parent.glob("*.local-rag-backup-*"))
             )
             self.assertIn(
-                "VS Code approvals: SKIPPED_BY_USER", completed.stdout
+                "VS Code 承認設定: SKIPPED_BY_USER", completed.stdout
             )
-            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
 
     def test_opt_in_configures_global_setting_and_reports_unknown_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -595,9 +629,9 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             self.assertEqual(1, len(backups))
             self.assertEqual(original, backups[0].read_bytes())
             self.assertIn(
-                "VS Code approvals: CONFIGURED_ON_DISK", completed.stdout
+                "VS Code 承認設定: CONFIGURED_ON_DISK", completed.stdout
             )
-            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
 
     def test_logical_vscode_opt_in_failure_is_retryable_without_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -638,11 +672,14 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
-            self.assertIn("=== Local RAG install: FAILED ===", completed.stdout)
-            self.assertIn("Runtime: READY", completed.stdout)
-            self.assertIn("Databases: READY", completed.stdout)
-            self.assertIn("VS Code approvals: FAILED", completed.stdout)
-            self.assertIn("Policy effectiveness: UNKNOWN", completed.stdout)
+            self.assertIn(
+                "Local RAG インストール結果: 失敗 (FAILED)",
+                completed.stdout,
+            )
+            self.assertIn("ランタイム: READY", completed.stdout)
+            self.assertIn("データベース: READY", completed.stdout)
+            self.assertIn("VS Code 承認設定: FAILED", completed.stdout)
+            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
 
             installed_vscode = target / "query" / "vscode_settings.py"
             installed_vscode.write_text(
@@ -667,10 +704,10 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 database_before, (database / "catalog.sqlite").read_bytes()
             )
-            self.assertIn("Runtime: READY", retried.stdout)
-            self.assertIn("Databases: READY", retried.stdout)
+            self.assertIn("ランタイム: READY", retried.stdout)
+            self.assertIn("データベース: READY", retried.stdout)
             self.assertIn(
-                "VS Code approvals: CONFIGURED_ON_DISK", retried.stdout
+                "VS Code 承認設定: CONFIGURED_ON_DISK", retried.stdout
             )
 
 

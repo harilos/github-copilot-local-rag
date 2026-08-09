@@ -143,6 +143,10 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 install_cmd = archive.read("install.cmd").decode("ascii")
             self.assertIn("-ConfigureVSCodeAutoApprove", install_cmd)
+            self.assertIn('if /I "%~1"=="-NoPause"', install_cmd)
+            self.assertIn("shift", install_cmd)
+            self.assertEqual(1, install_cmd.count("pause >nul"))
+            self.assertNotIn("%*", install_cmd)
             self.assertIn(
                 "$SkipVSCodeAutoApprove",
                 windows_distribution.INSTALL_TEMPLATE.read_text(
@@ -184,13 +188,21 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(repository_template, template)
         for fragment in (
-            "=== Local RAG install: SUCCESS ===",
-            "=== Local RAG install: FAILED ===",
-            "Failed stage:",
-            "Runtime:",
-            "Databases:",
-            "VS Code approvals:",
-            "Policy effectiveness:",
+            "[Text.Encoding]::UTF8",
+            "5oiQ5Yqf",
+            "5aSx5pWX",
+            "PT09IExvY2FsIFJBRyDjgqTjg7Pjgrnjg4jjg7zjg6vntZDmnpw6",
+            "5Yem55CG5q616ZqOOiA=",
+            "44Op44Oz44K/44Kk44OgOiA=",
+            "44OH44O844K/44OZ44O844K5OiA=",
+            "VlMgQ29kZSDmib/oqo3oqK3lrpo6IA==",
+            "44Od44Oq44K344O85pyJ5Yq55oCnOiA=",
+            "44Ot44KwOiA=",
+            "Start-Transcript",
+            "Stop-Transcript",
+            "portable-install-{0}-{1}.log",
+            '$env:LOCALAPPDATA',
+            '$env:TEMP',
             '"CONFIGURED_ON_DISK"',
             '"SKIPPED_BY_USER"',
             '"FAILED"',
@@ -207,6 +219,8 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         self.assertLess(template.index('$DatabaseStatus = "READY"'), settings_index)
         self.assertNotIn("$VscodeText.Trim()", template)
         self.assertNotIn("list_dbs.py", template)
+        self.assertNotIn("Read-Host", template)
+        self.assertNotIn("Pause", template)
 
         source_installer = (RAG_ROOT.parents[1] / "install.ps1").read_text(
             encoding="utf-8"
@@ -241,6 +255,9 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         self.assertIn("-SkipVSCodeAutoApprove", combined)
         self.assertIn("runInTerminal", combined)
         self.assertIn("readFile", combined)
+        self.assertIn("-NoPause", combined)
+        self.assertIn("portable-install-<timestamp>-<pid>.log", combined)
+        self.assertIn("%LOCALAPPDATA%\\LocalRAG\\logs", combined)
         self.assertIn("Copilotによる実地受入はinstallerや", combined)
 
     def test_manager_routes_windows_distribution_to_offline_builder(self) -> None:

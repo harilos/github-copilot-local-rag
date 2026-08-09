@@ -1,0 +1,215 @@
+{"at": "2026-08-08T17:23:07.718376+00:00", "batch_size_files": 5, "chunk_max_chars": 1400, "chunk_overlap": 160, "event": "run_started", "include_root_name_in_path": true, "operation": "build", "privacy_safe_root": true, "reset_clean": true, "reset_db": true, "resolved_root": "sha256:caf4ad662312438dec4351c0464f445e85412a53e072746f81e4d4154a576521", "root": "<EXTERNAL_SOURCE_ROOT>", "root_display_name": "fizzbuzz-source", "scan_root": ".", "scan_subdir": ".", "source_id": "src_doc-fizzbuzz-planet-docs-2ab224f5d3e9", "stored_path_prefix": "fizzbuzz-source/"}
+{"at": "2026-08-08T17:23:07.719134+00:00", "event": "collection_reset"}
+{"at": "2026-08-08T17:23:07.767022+00:00", "event": "file_extracted", "path": "fizzbuzz-source/00_START_HERE_maybe/README_old.md", "records": 1}
+{"at": "2026-08-08T17:23:07.785726+00:00", "event": "file_extracted", "path": "fizzbuzz-source/00_START_HERE_maybe/本当の最新版はこちら.txt", "records": 1}
+{"at": "2026-08-08T17:23:08.029306+00:00", "event": "file_extracted", "path": "fizzbuzz-source/00_START_HERE_maybe/読む順番_暫定_v7.docx", "records": 2}
+{"at": "2026-08-08T17:23:08.041093+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_build_notes/artifact_tool_fallback.txt", "records": 1}
+{"at": "2026-08-08T17:23:08.060737+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_build_notes/validation_report.json", "records": 1}
+{"at": "2026-08-08T17:23:09.760173+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 6}
+{"at": "2026-08-08T17:23:09.851964+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_rag_eval/canonical_facts.json", "records": 10}
+{"at": "2026-08-08T17:23:10.085300+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_rag_eval/canonical_facts.xlsx", "records": 7}
+{"at": "2026-08-08T17:23:10.107055+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_rag_eval/contradiction_registry.json", "records": 2}
+{"at": "2026-08-08T17:23:10.154688+00:00", "event": "file_extracted", "path": "fizzbuzz-source/_rag_eval/contradiction_registry.xlsx", "records": 6}
+{"at": "2026-08-08T17:23:10.208216+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/参照されているので消せない/観測史と廃止仮説.docx", "records": 3}
+{"at": "2026-08-08T17:23:10.960041+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 28}
+{"at": "2026-08-08T17:23:27.898824+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/Old_Gravity_Survey_5_49ms2.doc", "records": 1}
+{"at": "2026-08-08T17:23:27.910023+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/RTF変換メモ.txt", "records": 1}
+{"at": "2026-08-08T17:23:38.847727+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/Règle_de_contact_abrogée.doc", "records": 1}
+{"at": "2026-08-08T17:23:49.157261+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/事故報告_2187_番号誤記.doc", "records": 1}
+{"at": "2026-08-08T17:23:59.480761+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/採掘許可済みという誤報.doc", "records": 1}
+{"at": "2026-08-08T17:23:59.628058+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:10.434631+00:00", "event": "file_extracted", "path": "fizzbuzz-source/archive/旧/探査記録_2179_地表文明説.doc", "records": 1}
+{"at": "2026-08-08T17:24:10.564717+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/archive_new/学校教材版.pptx", "records": 12}
+{"at": "2026-08-08T17:24:10.600782+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final/フィズバス惑星系総合ブリーフ.pptx", "records": 12}
+{"at": "2026-08-08T17:24:10.646030+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final/一般市民向け広報.pptx", "records": 12}
+{"at": "2026-08-08T17:24:10.696187+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final/蒸気谷フィールドマニュアル.docx", "records": 2}
+{"at": "2026-08-08T17:24:11.287468+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 39}
+{"at": "2026-08-08T17:24:11.346286+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final2/Manuel des vallées de vapeur.docx", "records": 3}
+{"at": "2026-08-08T17:24:11.396159+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final2/Station Evacuation Plan.pptx", "records": 12}
+{"at": "2026-08-08T17:24:11.438935+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/final2/研究者向け安全説明.pptx", "records": 12}
+{"at": "2026-08-08T17:24:11.484469+00:00", "event": "file_extracted", "path": "fizzbuzz-source/briefing/旧版だが削除禁止/Legacy Surface-Civilization Hypothesis.pptx", "records": 12}
+{"at": "2026-08-08T17:24:11.505579+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/01_惑星系.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.163690+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 40}
+{"at": "2026-08-08T17:24:12.190195+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/02_衛星軌道.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.209213+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/03_地下海断面.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.227873+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/06_氷堤水路.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.246041+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/07_言語打音.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.266299+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/09_保護法審査.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.422931+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:12.446579+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/11_文書参照関係.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.465734+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/13_磁気圏危険.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.485379+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/14_研究派閥.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.504273+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/17_暦と季節.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.524299+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/18_蒸気谷危険.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.687819+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:12.715433+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/19_別名解決.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.735754+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/21_予算承認.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.755245+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/current/22_内部告発.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.778064+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/deprecated_current/04_地下海食物網.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.798477+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/deprecated_current/08_連邦組織.puml", "records": 1}
+{"at": "2026-08-08T17:24:12.968472+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:12.995845+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/deprecated_current/12_観測基地撤収.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.015199+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/deprecated_current/16_集落親族.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.034084+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/deprecated_current/20_正史判定.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.053424+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/generated/05_ダム族集落.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.072158+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/generated/10_事件2187時系列.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.234252+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:13.258773+00:00", "event": "file_extracted", "path": "fizzbuzz-source/diagrams/generated/15_密輸経路.puml", "records": 1}
+{"at": "2026-08-08T17:24:13.304611+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/committees/第7小委員会/Réponse civique à l’extraction.pptx", "records": 12}
+{"at": "2026-08-08T17:24:13.348325+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/committees/第7小委員会/保護委員会公聴会.pptx", "records": 12}
+{"at": "2026-08-08T17:24:13.397653+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/committees/第7小委員会/公聴会証言要旨.docx", "records": 3}
+{"at": "2026-08-08T17:24:13.441635+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/leaked-or-not/Proposition d’extraction industrielle.pptx", "records": 12}
+{"at": "2026-08-08T17:24:14.198166+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 40}
+{"at": "2026-08-08T17:24:14.258523+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/leaked-or-not/企業採掘提案への反対意見.docx", "records": 3}
+{"at": "2026-08-08T17:24:14.313737+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/protection-office/Guide to Non-Contact Observation.docx", "records": 3}
+{"at": "2026-08-08T17:24:14.369713+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/protection-office/保護官倫理ハンドブック.docx", "records": 2}
+{"at": "2026-08-08T17:24:14.424432+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/protection-office/連邦予算.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:14.467238+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/protection-office/銀河連邦保護政策.pptx", "records": 12}
+{"at": "2026-08-08T17:24:15.127614+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 27}
+{"at": "2026-08-08T17:24:15.198877+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/法務/Règlement de protection annoté.docx", "records": 3}
+{"at": "2026-08-08T17:24:15.256476+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/法務/銀河連邦保護法施行細則.docx", "records": 3}
+{"at": "2026-08-08T17:24:15.300037+00:00", "event": "file_extracted", "path": "fizzbuzz-source/federation/法務/非接触規則研修.pptx", "records": 12}
+{"at": "2026-08-08T17:24:15.320950+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-031.md", "records": 1}
+{"at": "2026-08-08T17:24:15.340068+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-032.md", "records": 1}
+{"at": "2026-08-08T17:24:15.801922+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 20}
+{"at": "2026-08-08T17:24:15.825880+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-033.md", "records": 1}
+{"at": "2026-08-08T17:24:15.844896+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-034.md", "records": 1}
+{"at": "2026-08-08T17:24:15.864740+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-035.md", "records": 1}
+{"at": "2026-08-08T17:24:15.883666+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-036.md", "records": 1}
+{"at": "2026-08-08T17:24:15.902216+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-037.md", "records": 1}
+{"at": "2026-08-08T17:24:16.058325+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:16.084459+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/en/fragment-038.md", "records": 1}
+{"at": "2026-08-08T17:24:16.103424+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-039.md", "records": 1}
+{"at": "2026-08-08T17:24:16.122655+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-040.md", "records": 1}
+{"at": "2026-08-08T17:24:16.141678+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-041.md", "records": 1}
+{"at": "2026-08-08T17:24:16.159926+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-042.md", "records": 1}
+{"at": "2026-08-08T17:24:16.323065+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:16.350227+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-043.md", "records": 1}
+{"at": "2026-08-08T17:24:16.371830+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-044.md", "records": 1}
+{"at": "2026-08-08T17:24:16.391926+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/fr/fragment-045.md", "records": 1}
+{"at": "2026-08-08T17:24:16.411813+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-001.md", "records": 1}
+{"at": "2026-08-08T17:24:16.431670+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-002.md", "records": 1}
+{"at": "2026-08-08T17:24:16.598337+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:16.622425+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-003.md", "records": 1}
+{"at": "2026-08-08T17:24:16.641593+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-004.md", "records": 1}
+{"at": "2026-08-08T17:24:16.660095+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-005.md", "records": 1}
+{"at": "2026-08-08T17:24:16.678360+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-006.md", "records": 1}
+{"at": "2026-08-08T17:24:16.697151+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-007.md", "records": 1}
+{"at": "2026-08-08T17:24:16.860295+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:16.884579+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-008.md", "records": 1}
+{"at": "2026-08-08T17:24:16.903948+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-009.md", "records": 1}
+{"at": "2026-08-08T17:24:16.922069+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-010.md", "records": 1}
+{"at": "2026-08-08T17:24:16.940417+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-011.md", "records": 1}
+{"at": "2026-08-08T17:24:16.958963+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-012.md", "records": 1}
+{"at": "2026-08-08T17:24:17.125676+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:17.151231+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-013.md", "records": 1}
+{"at": "2026-08-08T17:24:17.169346+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-014.md", "records": 1}
+{"at": "2026-08-08T17:24:17.186686+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-015.md", "records": 1}
+{"at": "2026-08-08T17:24:17.206303+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-016.md", "records": 1}
+{"at": "2026-08-08T17:24:17.224975+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-017.md", "records": 1}
+{"at": "2026-08-08T17:24:17.390421+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:17.414553+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-018.md", "records": 1}
+{"at": "2026-08-08T17:24:17.434062+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-019.md", "records": 1}
+{"at": "2026-08-08T17:24:17.454037+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-020.md", "records": 1}
+{"at": "2026-08-08T17:24:17.473546+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-021.md", "records": 1}
+{"at": "2026-08-08T17:24:17.494429+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-022.md", "records": 1}
+{"at": "2026-08-08T17:24:17.672967+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:17.696658+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-023.md", "records": 1}
+{"at": "2026-08-08T17:24:17.715396+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-024.md", "records": 1}
+{"at": "2026-08-08T17:24:17.735397+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-025.md", "records": 1}
+{"at": "2026-08-08T17:24:17.754277+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-026.md", "records": 1}
+{"at": "2026-08-08T17:24:17.773451+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-027.md", "records": 1}
+{"at": "2026-08-08T17:24:17.930957+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:17.955758+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-028.md", "records": 1}
+{"at": "2026-08-08T17:24:17.975416+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-029.md", "records": 1}
+{"at": "2026-08-08T17:24:18.002481+00:00", "event": "file_extracted", "path": "fizzbuzz-source/fragments/ja/fragment-030.md", "records": 1}
+{"at": "2026-08-08T17:24:18.052535+00:00", "event": "file_extracted", "path": "fizzbuzz-source/incidents/2187_artifact/2187遺物事故報告.docx", "records": 2}
+{"at": "2026-08-08T17:24:18.096585+00:00", "event": "file_extracted", "path": "fizzbuzz-source/incidents/2187_artifact/密輸遺物事件調査.pptx", "records": 12}
+{"at": "2026-08-08T17:24:18.626672+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 17}
+{"at": "2026-08-08T17:24:18.692385+00:00", "event": "file_extracted", "path": "fizzbuzz-source/incidents/2187_artifact/接触事件台帳.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:18.743860+00:00", "event": "file_extracted", "path": "fizzbuzz-source/incidents/closed-but-open/Audition sur l’incident 2187.pptx", "records": 12}
+{"at": "2026-08-08T17:24:18.807210+00:00", "event": "file_extracted", "path": "fizzbuzz-source/incidents/closed-but-open/Incident 2187 Legal Review.docx", "records": 3}
+{"at": "2026-08-08T17:24:18.827969+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-001.txt", "records": 1}
+{"at": "2026-08-08T17:24:18.847679+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-002.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.441465+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 24}
+{"at": "2026-08-08T17:24:19.468146+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-003.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.487929+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-004.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.505601+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-005.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.524558+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-006.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.544501+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-007.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.713646+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:19.739813+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-008.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.759134+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-009.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.776714+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-010.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.795047+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-011.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.814048+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-012.txt", "records": 1}
+{"at": "2026-08-08T17:24:19.996162+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:20.024533+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-013.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.045122+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-014.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.064432+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/attachments_found_later/att-015.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.108607+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/minutes/Correction Workshop_ Names and Units.pptx", "records": 12}
+{"at": "2026-08-08T17:24:20.127772+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-002.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.450632+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 16}
+{"at": "2026-08-08T17:24:20.475519+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-003.md", "records": 1}
+{"at": "2026-08-08T17:24:20.494014+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-004.json", "records": 1}
+{"at": "2026-08-08T17:24:20.513475+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-006.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.532638+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-007.md", "records": 1}
+{"at": "2026-08-08T17:24:20.552429+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-008.json", "records": 1}
+{"at": "2026-08-08T17:24:20.726353+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:20.751700+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-010.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.771362+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-011.md", "records": 1}
+{"at": "2026-08-08T17:24:20.790341+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-012.json", "records": 1}
+{"at": "2026-08-08T17:24:20.809317+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-014.txt", "records": 1}
+{"at": "2026-08-08T17:24:20.828552+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-015.md", "records": 1}
+{"at": "2026-08-08T17:24:20.992092+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:21.016938+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-016.json", "records": 1}
+{"at": "2026-08-08T17:24:21.036900+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-018.txt", "records": 1}
+{"at": "2026-08-08T17:24:21.056510+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-019.md", "records": 1}
+{"at": "2026-08-08T17:24:21.076591+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-020.json", "records": 1}
+{"at": "2026-08-08T17:24:21.098465+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-022.txt", "records": 1}
+{"at": "2026-08-08T17:24:21.295386+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:21.321780+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-023.md", "records": 1}
+{"at": "2026-08-08T17:24:21.341618+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-024.json", "records": 1}
+{"at": "2026-08-08T17:24:21.360950+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-026.txt", "records": 1}
+{"at": "2026-08-08T17:24:21.379894+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-027.md", "records": 1}
+{"at": "2026-08-08T17:24:21.399450+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-028.json", "records": 1}
+{"at": "2026-08-08T17:24:21.579151+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:21.605285+00:00", "event": "file_extracted", "path": "fizzbuzz-source/meetings/teams-export/thread-030.txt", "records": 1}
+{"at": "2026-08-08T17:24:21.649020+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/gravity_5_49/巨大磁気圏と航行危険.pptx", "records": 12}
+{"at": "2026-08-08T17:24:21.692327+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/processed_old/大気・気象観測報告.pptx", "records": 12}
+{"at": "2026-08-08T17:24:21.756003+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/processed_old/気象観測時系列.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:21.803589+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/衛星/buzz/バズ地下海調査報告.docx", "records": 2}
+{"at": "2026-08-08T17:24:22.594722+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 34}
+{"at": "2026-08-08T17:24:22.649340+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/衛星/buzz/衛星バズ地下海モデル.pptx", "records": 12}
+{"at": "2026-08-08T17:24:22.708453+00:00", "event": "file_extracted", "path": "fizzbuzz-source/planetary_data/衛星/BZ-01/Buzz Ocean Field Notes.docx", "records": 3}
+{"at": "2026-08-08T17:24:22.732394+00:00", "event": "file_extracted", "path": "fizzbuzz-source/README.md", "records": 1}
+{"at": "2026-08-08T17:24:22.790483+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/Étude du Peuple-Barrage.docx", "records": 3}
+{"at": "2026-08-08T17:24:22.841597+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/ダム族文化記録 第四稿.docx", "records": 2}
+{"at": "2026-08-08T17:24:23.496887+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 21}
+{"at": "2026-08-08T17:24:23.567390+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/ダム族生物学概説.pptx", "records": 12}
+{"at": "2026-08-08T17:24:23.614416+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/ダム族集落建築.pptx", "records": 12}
+{"at": "2026-08-08T17:24:23.654252+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/氷堤工学の発達.pptx", "records": 12}
+{"at": "2026-08-08T17:24:23.707200+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/dam-folk/氷堤測量記録.docx", "records": 3}
+{"at": "2026-08-08T17:24:23.751914+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/言語班/Field Lexicon for BZ-01.pptx", "records": 12}
+{"at": "2026-08-08T17:24:24.793958+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 51}
+{"at": "2026-08-08T17:24:24.852308+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/言語班/打音言語学論文.docx", "records": 2}
+{"at": "2026-08-08T17:24:24.900487+00:00", "event": "file_extracted", "path": "fizzbuzz-source/species/言語班/言語・打音通信入門.pptx", "records": 12}
+{"at": "2026-08-08T17:24:24.949999+00:00", "event": "file_extracted", "path": "fizzbuzz-source/spreadsheets/master/ダム族集落人口推計.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:24.999899+00:00", "event": "file_extracted", "path": "fizzbuzz-source/spreadsheets/master/個体・集落・研究者ID対応表.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:25.050493+00:00", "event": "file_extracted", "path": "fizzbuzz-source/spreadsheets/master/惑星・衛星諸元.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:26.113980+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 35}
+{"at": "2026-08-08T17:24:26.172691+00:00", "event": "file_extracted", "path": "fizzbuzz-source/spreadsheets/master/用語・別名・誤訳対応表.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:26.222265+00:00", "event": "file_extracted", "path": "fizzbuzz-source/spreadsheets/誰か確認してください/文書版管理台帳.xlsx", "records": 7}
+{"at": "2026-08-08T17:24:26.295404+00:00", "event": "file_extracted", "path": "fizzbuzz-source/tools/generate_pptx.py", "records": 10}
+{"at": "2026-08-08T17:24:26.491769+00:00", "event": "file_extracted", "path": "fizzbuzz-source/tools/generate_text_docx.py", "records": 28}
+{"at": "2026-08-08T17:24:26.566539+00:00", "event": "file_extracted", "path": "fizzbuzz-source/tools/generate_xlsx_doc.py", "records": 9}
+{"at": "2026-08-08T17:24:28.559185+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 61}
+{"at": "2026-08-08T17:24:28.588291+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/Débat-politique-budget-et-protection.md", "records": 1}
+{"at": "2026-08-08T17:24:28.608481+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/Home.md", "records": 1}
+{"at": "2026-08-08T17:24:28.629779+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/Policy-debate-non-contact-versus-rescue.md", "records": 1}
+{"at": "2026-08-08T17:24:28.647799+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/国政討論-保護区予算と採掘税.md", "records": 1}
+{"at": "2026-08-08T17:24:28.665393+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/委員会後の廊下雑談.md", "records": 1}
+{"at": "2026-08-08T17:24:28.882303+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 5, "records": 5}
+{"at": "2026-08-08T17:24:28.909275+00:00", "event": "file_extracted", "path": "fizzbuzz-source/wiki/訂正履歴-2187事件.md", "records": 1}
+{"at": "2026-08-08T17:24:29.077117+00:00", "deleted_records": 0, "event": "batch_upserted", "files": 1, "records": 1}
+{"at": "2026-08-08T17:24:30.772148+00:00", "batch_size_files": 5, "collection_count": 560, "completed_at": "2026-08-08T17:24:30.770380+00:00", "deleted_files": 0, "deleted_records": 0, "error_details": [], "error_files": 0, "event": "run_completed", "extract_error_files": 0, "file_count": 176, "include_root_name_in_path": true, "indexed_files": 176, "input_error_files": 0, "operation": "build", "privacy_safe_root": true, "profile_updated": true, "resolved_root": "sha256:caf4ad662312438dec4351c0464f445e85412a53e072746f81e4d4154a576521", "result_status": "success", "root": "<EXTERNAL_SOURCE_ROOT>", "root_display_name": "fizzbuzz-source", "scan_root": ".", "scan_subdir": ".", "skipped_files": 0, "source_id": "src_doc-fizzbuzz-planet-docs-2ab224f5d3e9", "stored_path_prefix": "fizzbuzz-source/", "upserted_records": 560}

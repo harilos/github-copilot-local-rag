@@ -70,6 +70,10 @@ class DistributionPackageSmokeTests(unittest.TestCase):
                 ".copilot/rag/gen_db/software_rag_tool/"
                 "software_rag_tool/records.py"
             ),
+            (
+                ".copilot/rag/gen_db/software_rag_tool/"
+                "scripts/query.py"
+            ),
             ".copilot/rag/docs/local-rag-manager-guide-ja.md",
             ".copilot/skills/local-rag/SKILL.md",
             ".copilot/skills/local-rag-setup/SKILL.md",
@@ -82,6 +86,13 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             (
                 ".copilot/rag/gen_db/software_rag_tool/"
                 "scripts/index_build.py"
+            ),
+            paths,
+        )
+        self.assertNotIn(
+            (
+                ".copilot/rag/gen_db/software_rag_tool/"
+                "scripts/prepare.py"
             ),
             paths,
         )
