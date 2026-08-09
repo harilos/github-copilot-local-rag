@@ -394,6 +394,33 @@ class SvnRecentFetchTests(unittest.TestCase):
         self.assertFalse(any("--xml" in command for command in commands))
         self.assertNotIn("eligible_documents", outcome)
 
+    def test_same_revision_skips_only_without_cutoff(self) -> None:
+        files = [("all.md", "all", "2026-07-30T00:00:00Z")]
+        plan = self._plan(recursive=True, updated_within_days=None)
+        execute_fetch_plan(
+            plan,
+            self.work,
+            {},
+            command_runner=self._runner(files),
+        )
+        unchanged = execute_fetch_plan(
+            plan,
+            self.work,
+            {},
+            command_runner=self._runner(files),
+            previous_run_complete=True,
+        )
+        self.assertTrue(unchanged["no_change"])
+
+        cutoff_result = execute_fetch_plan(
+            self._plan(recursive=True, updated_within_days=30),
+            self.work,
+            {"started_at": "2026-07-30T12:00:00Z"},
+            command_runner=self._runner(files),
+            previous_run_complete=True,
+        )
+        self.assertNotIn("no_change", cutoff_result)
+
     def test_large_xml_uses_complete_stdout_sink(self) -> None:
         files = [
             ("recent.md", "recent", "2026-07-30T00:00:00Z"),

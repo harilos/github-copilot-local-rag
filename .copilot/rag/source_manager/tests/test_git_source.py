@@ -240,6 +240,109 @@ class GenericGitSourceTests(unittest.TestCase):
                     command[:3],
                 )
 
+    @unittest.skipUnless(shutil.which("git"), "git command is required")
+    def test_no_change_skips_but_change_and_delete_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            self.run_git("init", "-q", str(repository))
+            self.run_git("-C", str(repository), "config", "user.email", "test@example.com")
+            self.run_git("-C", str(repository), "config", "user.name", "Test")
+            tracked = repository / "tracked.md"
+            tracked.write_text("v1", encoding="utf-8")
+            self.run_git("-C", str(repository), "add", ".")
+            self.run_git("-C", str(repository), "commit", "-qm", "initial")
+            remote = root / "remote.git"
+            self.run_git("clone", "-q", "--bare", str(repository), str(remote))
+            self.run_git("-C", str(repository), "remote", "add", "origin", str(remote))
+
+            work = (
+                root / "db" / "sources" / "src_git-000000000000"
+                / "work" / "ingest" / "src_git-000000000000"
+            )
+            work.mkdir(parents=True)
+            settings = {
+                "repository_url": str(remote),
+                "include_paths": [],
+                "updated_within_days": None,
+            }
+            first = _git_fetch(
+                settings,
+                work,
+                execution._run_command,
+                updated_on_cutoff=None,
+                execution=execution,
+            )
+            unchanged = _git_fetch(
+                settings,
+                work,
+                execution._run_command,
+                updated_on_cutoff=None,
+                execution=execution,
+                previous_run_complete=True,
+            )
+            self.assertNotIn("no_change", first)
+            self.assertTrue(unchanged["no_change"])
+
+            tracked.write_text("v2", encoding="utf-8")
+            self.run_git("-C", str(repository), "add", ".")
+            self.run_git("-C", str(repository), "commit", "-qm", "change")
+            self.run_git("-C", str(repository), "push", "-q", "origin", "HEAD")
+            changed = _git_fetch(
+                settings,
+                work,
+                execution._run_command,
+                updated_on_cutoff=None,
+                execution=execution,
+                previous_run_complete=True,
+            )
+            self.assertNotIn("no_change", changed)
+            self.assertEqual("v2", (work / "tracked.md").read_text(encoding="utf-8"))
+
+            tracked.unlink()
+            self.run_git("-C", str(repository), "add", "-A")
+            self.run_git("-C", str(repository), "commit", "-qm", "delete")
+            self.run_git("-C", str(repository), "push", "-q", "origin", "HEAD")
+            deleted = _git_fetch(
+                settings,
+                work,
+                execution._run_command,
+                updated_on_cutoff=None,
+                execution=execution,
+                previous_run_complete=True,
+            )
+            self.assertNotIn("no_change", deleted)
+            self.assertFalse((work / "tracked.md").exists())
+
+    @unittest.skipUnless(shutil.which("git"), "git command is required")
+    def test_cutoff_disables_revision_only_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            self.run_git("init", "-q", str(repository))
+            self.run_git("-C", str(repository), "config", "user.email", "test@example.com")
+            self.run_git("-C", str(repository), "config", "user.name", "Test")
+            (repository / "tracked.md").write_text("v1", encoding="utf-8")
+            self.run_git("-C", str(repository), "add", ".")
+            self.run_git("-C", str(repository), "commit", "-qm", "initial")
+            remote = root / "remote.git"
+            self.run_git("clone", "-q", "--bare", str(repository), str(remote))
+            work = root / "db" / "sources" / "src" / "work" / "ingest" / "src"
+            work.mkdir(parents=True)
+            settings = {"repository_url": str(remote), "include_paths": []}
+            _git_fetch(
+                settings, work, execution._run_command,
+                updated_on_cutoff=None, execution=execution,
+            )
+            result = _git_fetch(
+                settings, work, execution._run_command,
+                updated_on_cutoff=datetime(2000, 1, 1, tzinfo=timezone.utc),
+                execution=execution, previous_run_complete=True,
+            )
+            self.assertNotIn("no_change", result)
+
     def run_git(
         self,
         *arguments: str,

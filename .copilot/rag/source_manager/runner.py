@@ -331,6 +331,11 @@ def update_source(
         )
     plan = store.plan(source.payload)
     state_stored = existing_state
+    previous_run_complete = _previous_success_matches_plan(
+        source.payload,
+        state_stored.payload,
+        plan.plan_etag,
+    )
     if (
         state_stored.payload
         and state_stored.payload.get("phase") == "reflect"
@@ -391,6 +396,7 @@ def update_source(
                 environment=provider_environment,
                 clock=clock,
                 progress_callback=progress_callback,
+                previous_run_complete=previous_run_complete,
             )
         )
     if effective_executor is None:
@@ -478,6 +484,53 @@ def update_source(
             ).events_jsonl,
         }
 
+    if outcome.get("no_change") is True:
+        if not previous_run_complete:
+            raise SourceManagerError(
+                "no-change skip requires a matching completed Source run",
+                stage=f"fetch.{source.payload['source_type']}",
+            )
+        for field in ("fetched_count", "indexed_confirmed_count"):
+            runtime_state[field] = int(state_stored.payload.get(field) or 0)
+        completed = complete_run(runtime_state)
+        skipped = store.save_state(
+            local_source_key,
+            completed,
+            expected_revision=saved_state.revision,
+            expected_etag=saved_state.etag,
+        )
+        revision = str(outcome.get("revision") or "")
+        store.append_event(
+            local_source_key,
+            "fetch.no_change_skipped",
+            {
+                "provider": source.payload["source_type"],
+                "revision": revision,
+            },
+        )
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": f"{source.payload['source_type']}.reflect",
+                "label_ja": "変更なしのため検索反映を省略",
+                "provider": source.payload["source_type"],
+                "completed": 0,
+                "total": 0,
+                "unit": "件",
+                "total_kind": "exact",
+                "status": "skipped",
+                "checkpoint_saved": True,
+            },
+        )
+        return {
+            **_source_dto(store, source),
+            "status": "skipped",
+            "skip_reason": "repository_revision_unchanged",
+            "message": "リポジトリに変更がないため検索反映を省略しました。",
+            "revision": revision,
+            "state_revision": skipped.revision,
+        }
+
     source, link_pending = _apply_fetch_metadata(store, source, outcome)
     if source.payload["source_type"] == "other":
         runtime_state["runtime"] = {
@@ -553,6 +606,21 @@ def update_source(
             progress_callback=progress_callback,
         )
     return result
+
+
+def _previous_success_matches_plan(
+    source: Mapping[str, Any],
+    state: Mapping[str, Any],
+    plan_etag: str,
+) -> bool:
+    return bool(
+        source.get("source_id")
+        and state.get("status") == "complete"
+        and state.get("phase") == "complete"
+        and state.get("plan_etag") == plan_etag
+        and not state.get("metadata_sync_pending")
+        and int(state.get("pending_count") or 0) == 0
+    )
 
 
 def update_all_sources(

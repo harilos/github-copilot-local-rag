@@ -83,6 +83,7 @@ def execute_fetch_plan(
     inventory_snapshot_callback: InventorySnapshotCallback | None = None,
     clock: Callable[[], datetime] | None = None,
     progress_callback: HttpProgressCallback | None = None,
+    previous_run_complete: bool = False,
 ) -> dict[str, Any]:
     runner = command_runner or _run_command
     getter = http_get or _http_get
@@ -131,6 +132,7 @@ def execute_fetch_plan(
                 runner,
                 updated_on_cutoff=cutoff,
                 progress_callback=progress_callback,
+                previous_run_complete=previous_run_complete,
             )
         elif provider == "redmine":
             cutoff = redmine_updated_on_cutoff(
@@ -348,12 +350,22 @@ def _svn(
     *,
     updated_on_cutoff: datetime | None,
     progress_callback: HttpProgressCallback | None = None,
+    previous_run_complete: bool = False,
 ) -> dict[str, Any]:
     depth = "infinity" if settings.get("recursive", True) else "files"
     checkout = work.parent.parent / "provider" / ".svn-worktree"
     _ensure_real_directory(checkout.parent)
     metadata = checkout / ".svn"
+    previous_revision = ""
     if metadata.is_dir() and not metadata.is_symlink():
+        if previous_run_complete:
+            previous_result = runner(
+                ["svn", "info", "--show-item", "revision", str(checkout)]
+            )
+            if int(getattr(previous_result, "returncode", 1)) == 0:
+                previous_revision = str(
+                    getattr(previous_result, "stdout", "") or ""
+                ).strip()
         _checked(
             runner(
                 [
@@ -376,6 +388,26 @@ def _svn(
             operation="SVNリポジトリの取得",
             stage="fetch.svn",
         )
+    revision_result = _checked(
+        runner(
+            ["svn", "info", "--show-item", "revision", str(checkout)]
+        ),
+        operation="SVNリビジョンの確認",
+        stage="fetch.svn",
+    )
+    revision = str(getattr(revision_result, "stdout", "") or "").strip()
+    if (
+        previous_run_complete
+        and updated_on_cutoff is None
+        and previous_revision
+        and revision == previous_revision
+    ):
+        return {
+            "status": "ok",
+            "documents": _regular_file_count(work),
+            "revision": revision,
+            "no_change": True,
+        }
     if updated_on_cutoff is None:
         if settings.get("recursive", True):
             _replace_materialized_tree(
@@ -413,16 +445,6 @@ def _svn(
         )
         inventory_documents = len(inventory)
         eligible_documents = len(eligible)
-    revision_result = _checked(
-        runner(
-            [
-                "svn", "info", "--show-item", "revision", str(checkout),
-            ]
-        ),
-        operation="SVNリビジョンの確認",
-        stage="fetch.svn",
-    )
-    revision = str(getattr(revision_result, "stdout", "") or "").strip()
     result: dict[str, Any] = {
         "status": "ok",
         "documents": _regular_file_count(work),

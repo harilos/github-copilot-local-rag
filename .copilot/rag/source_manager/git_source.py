@@ -143,6 +143,9 @@ def _install_execution_contract(execution: Any, runner_module: Any) -> None:
         provider = str(plan.get("provider") or "").strip().lower()
         if provider != _GIT_SOURCE_TYPE:
             return original(plan, work_directory, state, **kwargs)
+        previous_run_complete = bool(
+            kwargs.pop("previous_run_complete", False)
+        )
         command_runner = kwargs.get("command_runner") or execution._run_command
         progress_callback = kwargs.get("progress_callback")
         clock = kwargs.get("clock")
@@ -169,6 +172,7 @@ def _install_execution_contract(execution: Any, runner_module: Any) -> None:
                 updated_on_cutoff=cutoff,
                 execution=execution,
                 progress_callback=progress_callback,
+                previous_run_complete=previous_run_complete,
             )
         except Exception as exc:
             execution._emit_provider_progress(
@@ -249,6 +253,7 @@ def _git_fetch(
     updated_on_cutoff: datetime | None,
     execution: Any,
     progress_callback: Any = None,
+    previous_run_complete: bool = False,
 ) -> dict[str, Any]:
     repository = str(settings["repository_url"])
     include_paths = [
@@ -256,6 +261,7 @@ def _git_fetch(
     ]
     control = work.parent.parent / "provider" / ".git"
     execution._ensure_real_directory(control.parent)
+    previous_revision = ""
     if control.exists() or control.is_symlink():
         metadata = os.lstat(control)
         if (
@@ -266,6 +272,19 @@ def _git_fetch(
                 "Git control directory is unsafe",
                 stage="fetch.github",
             )
+        if previous_run_complete:
+            previous_result = command_runner(
+                _git_command(
+                    f"--git-dir={control}",
+                    f"--work-tree={work}",
+                    "rev-parse",
+                    "HEAD",
+                )
+            )
+            if int(getattr(previous_result, "returncode", 1)) == 0:
+                previous_revision = str(
+                    getattr(previous_result, "stdout", "") or ""
+                ).strip()
         execution._checked(
             command_runner(
                 _git_command(
@@ -335,6 +354,35 @@ def _git_fetch(
             stage="fetch.github",
         )
     remote_branch = f"refs/remotes/origin/{branch}"
+    revision_result = execution._checked(
+        command_runner(
+            _git_command(
+                f"--git-dir={control}",
+                "rev-parse",
+                remote_branch,
+            )
+        ),
+        operation="Gitリビジョンの確認",
+        stage="fetch.github",
+    )
+    revision = str(getattr(revision_result, "stdout", "") or "").strip()
+    if (
+        previous_run_complete
+        and updated_on_cutoff is None
+        and previous_revision
+        and revision == previous_revision
+    ):
+        files = _git_work_files(work, execution=execution)
+        return {
+            "status": "ok",
+            "default_branch": branch,
+            "documents": len(files),
+            "inventory_documents": len(files),
+            "eligible_documents": len(files),
+            "include_paths": include_paths,
+            "revision": revision,
+            "no_change": True,
+        }
 
     if include_paths:
         execution._checked(
@@ -469,6 +517,7 @@ def _git_fetch(
         "inventory_documents": inventory_documents,
         "eligible_documents": len(final_files),
         "include_paths": include_paths,
+        "revision": revision,
     }
     if updated_on_cutoff is not None:
         result["updated_on_cutoff"] = updated_on_cutoff.isoformat().replace(
