@@ -418,12 +418,53 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
     readme = generated / "README-WINDOWS.md"
     install_cmd.write_text(
         "@echo off\r\n"
-        "setlocal\r\n"
+        "setlocal EnableExtensions DisableDelayedExpansion\r\n"
+        'set "local_rag_no_pause=0"\r\n'
+        'set "local_rag_skip="\r\n'
+        'set "local_rag_retry="\r\n'
+        'set "local_rag_replace="\r\n'
+        'set "local_rag_argument_error="\r\n'
+        ":local_rag_parse\r\n"
+        'if "%~1"=="" goto local_rag_run\r\n'
+        'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\r\n'
+        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\r\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_mark_skip\r\n'
+        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_mark_retry\r\n'
+        'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\r\n'
+        'set "local_rag_argument_error=-LauncherArgumentError"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_ignore\r\n"
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_mark_no_pause\r\n"
+        'set "local_rag_no_pause=1"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_mark_skip\r\n"
+        'set "local_rag_skip=-SkipVSCodeAutoApprove"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_mark_retry\r\n"
+        'set "local_rag_retry=-RetryVSCodeApprovals"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_mark_replace\r\n"
+        'set "local_rag_replace=-ReplaceExistingDatabases"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_run\r\n"
         '"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        '"%~dp0internal\\install.ps1" -ConfigureVSCodeAutoApprove %*\r\n'
+        '"%~dp0internal\\install.ps1" -ConfigureVSCodeAutoApprove '
+        "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
+        "%local_rag_argument_error%\r\n"
         'set "local_rag_rc=%ERRORLEVEL%"\r\n'
-        'if not "%local_rag_rc%"=="0" pause\r\n'
+        'if "%local_rag_no_pause%"=="1" goto local_rag_exit\r\n'
+        "echo.\r\n"
+        "echo Press any key to close this window . . .\r\n"
+        "pause >nul\r\n"
+        ":local_rag_exit\r\n"
         "exit /b %local_rag_rc%\r\n",
         encoding="ascii",
         newline="",
@@ -432,8 +473,13 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "# Local RAG Windows x64 offline package\n\n"
         "Extract this ZIP and double-click `install.cmd`. The recipient does "
         "not need Python, pip, PATH changes, administrator rights, or a "
-        "network connection. The installer prints an explicit SUCCESS or "
-        "FAILED result.\n\n"
+        "network connection. The PowerShell installer writes one run log, "
+        "prints a Japanese SUCCESS or FAILED summary, and shows the absolute "
+        "log path. Normal mode waits exactly once after either result. Add "
+        "`-NoPause` anywhere in the `install.cmd` arguments for automation; "
+        "the launcher removes it before PowerShell and does not print a wait "
+        "prompt. Logs are written under "
+        "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback.\n\n"
         "VS Code `chat.tools.global.autoApprove: true` is applied by default. "
         "It affects every "
         "tool and terminal command in every workspace. Run "

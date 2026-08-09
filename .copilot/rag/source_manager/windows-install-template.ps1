@@ -3,7 +3,8 @@ param(
     [switch]$ConfigureVSCodeAutoApprove,
     [switch]$SkipVSCodeAutoApprove,
     [switch]$RetryVSCodeApprovals,
-    [switch]$ReplaceExistingDatabases
+    [switch]$ReplaceExistingDatabases,
+    [switch]$LauncherArgumentError
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,17 +45,120 @@ $RuntimeStatus = "NOT_READY"
 $DatabaseStatus = "NOT_CHECKED"
 $VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "SKIPPED_BY_USER" }
 $PolicyEffectiveness = "UNKNOWN"
+$InstallLogPath = ""
+$InstallTranscriptStarted = $false
+
+function Start-InstallTranscript {
+    $FileName = "portable-install-{0}-{1}.log" -f (
+        Get-Date -Format "yyyyMMdd-HHmmss"
+    ), $PID
+    $Directories = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $Directories += Join-Path $env:LOCALAPPDATA "LocalRAG\logs"
+    }
+    $TempRoot = $env:TEMP
+    if ([string]::IsNullOrWhiteSpace($TempRoot)) {
+        $TempRoot = [System.IO.Path]::GetTempPath()
+    }
+    $Directories += Join-Path $TempRoot "LocalRAG\logs"
+
+    foreach ($Directory in @($Directories | Select-Object -Unique)) {
+        $Candidate = ""
+        try {
+            New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+            $Candidate = [System.IO.Path]::GetFullPath(
+                (Join-Path $Directory $FileName)
+            )
+            Start-Transcript -Path $Candidate -Force | Out-Null
+            $script:InstallLogPath = $Candidate
+            $script:InstallTranscriptStarted = $true
+            return
+        } catch {
+            if (
+                -not [string]::IsNullOrWhiteSpace($Candidate) -and
+                (Test-Path -LiteralPath $Candidate -PathType Leaf)
+            ) {
+                Remove-Item -LiteralPath $Candidate -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    throw "portable installer could not create its run log"
+}
+
+function Stop-InstallTranscript {
+    if (-not $script:InstallTranscriptStarted) {
+        return
+    }
+    try {
+        Stop-Transcript | Out-Null
+    } catch {
+        Write-Warning "portable installer could not finalize its run log"
+    } finally {
+        $script:InstallTranscriptStarted = $false
+    }
+}
+
+function Write-InstallSummary {
+    param(
+        [bool]$Succeeded,
+        [string]$Reason = ""
+    )
+    $Utf8 = [Text.Encoding]::UTF8
+    $OutcomeJa = if ($Succeeded) {
+        $Utf8.GetString([Convert]::FromBase64String("5oiQ5Yqf"))
+    } else {
+        $Utf8.GetString([Convert]::FromBase64String("5aSx5pWX"))
+    }
+    $OutcomeCode = if ($Succeeded) { "SUCCESS" } else { "FAILED" }
+    $Color = if ($Succeeded) { "Green" } else { "Red" }
+    $SummaryFormat = $Utf8.GetString([Convert]::FromBase64String(
+        "PT09IExvY2FsIFJBRyDjgqTjg7Pjgrnjg4jjg7zjg6vntZDmnpw6IHswfSAoezF9KSA9PT0="
+    ))
+    Write-Host ""
+    Write-Host (
+        $SummaryFormat -f (
+            $OutcomeJa,
+            $OutcomeCode
+        )
+    ) -ForegroundColor $Color
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "5Yem55CG5q616ZqOOiA="
+    ))) + $InstallStage)
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "44Op44Oz44K/44Kk44OgOiA="
+    ))) + $RuntimeStatus)
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "44OH44O844K/44OZ44O844K5OiA="
+    ))) + $DatabaseStatus)
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "VlMgQ29kZSDmib/oqo3oqK3lrpo6IA=="
+    ))) + $VSCodeStatus)
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "44Od44Oq44K344O85pyJ5Yq55oCnOiA="
+    ))) + $PolicyEffectiveness)
+    if (-not $Succeeded -and -not [string]::IsNullOrWhiteSpace($Reason)) {
+        Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+            "55CG55SxOiA="
+        ))) + $Reason)
+    }
+    $DisplayedLogPath = if (
+        [string]::IsNullOrWhiteSpace($InstallLogPath)
+    ) { "UNAVAILABLE" } else { $InstallLogPath }
+    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
+        "44Ot44KwOiA="
+    ))) + $DisplayedLogPath)
+}
 
 trap {
-    Write-Host ""
-    Write-Host "=== Local RAG install: FAILED ===" -ForegroundColor Red
-    Write-Host ("Failed stage: " + $InstallStage)
-    Write-Host ("Runtime: " + $RuntimeStatus)
-    Write-Host ("Databases: " + $DatabaseStatus)
-    Write-Host ("VS Code approvals: " + $VSCodeStatus)
-    Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)
-    Write-Host ("Reason: " + $_.Exception.Message)
+    $FailureReason = $_.Exception.Message
+    Write-InstallSummary -Succeeded $false -Reason $FailureReason
+    Stop-InstallTranscript
     exit 1
+}
+
+Start-InstallTranscript
+if ($LauncherArgumentError) {
+    throw "install.cmd received an unsupported argument"
 }
 
 function Assert-ChildPath {
@@ -319,12 +423,9 @@ if ($RetryVSCodeApprovals) {
     $RuntimeStatus = "READY"
     $DatabaseStatus = "READY"
     Invoke-VSCodeApprovalConfiguration
-    Write-Host ""
-    Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
-    Write-Host ("Runtime: " + $RuntimeStatus)
-    Write-Host ("Databases: " + $DatabaseStatus)
-    Write-Host ("VS Code approvals: " + $VSCodeStatus)
-    Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)
+    $InstallStage = "completed"
+    Write-InstallSummary -Succeeded $true
+    Stop-InstallTranscript
     exit 0
 }
 foreach ($Name in $DatabaseNames) {
@@ -536,9 +637,7 @@ if ($ConfigureVSCodeAutoApprove) {
 Write-Host ("Installed Local RAG Windows portable runtime to: " + $Target)
 Write-Host "Use Agent mode and enable runInTerminal in Configure Tools."
 Write-Host "Enable readFile when using file result delivery."
-Write-Host ""
-Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
-Write-Host ("Runtime: " + $RuntimeStatus)
-Write-Host ("Databases: " + $DatabaseStatus)
-Write-Host ("VS Code approvals: " + $VSCodeStatus)
-Write-Host ("Policy effectiveness: " + $PolicyEffectiveness)
+$InstallStage = "completed"
+Write-InstallSummary -Succeeded $true
+Stop-InstallTranscript
+exit 0

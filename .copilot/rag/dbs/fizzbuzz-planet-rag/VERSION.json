@@ -1,7 +1,7 @@
 {
   "collection": "fizzbuzz_planet_rag_ruri3_30m_int8_v1",
-  "created_at": "2026-08-01T05:23:36.151318+00:00",
-  "db_hash": "33aa4466e08ec5b5084411c432853b60e2e5c4a1868f0c4c0a86c7bc2d7253c3",
+  "created_at": "2026-08-08T17:22:16.037042+00:00",
+  "db_hash": "a2d052eeceece8fcda5eb0b65f197a85da6abbd8056d1ff782dc7cdff9dd31d7",
   "db_name": "fizzbuzz-planet-rag",
   "embedding": {
     "document_prefix": "検索文書: ",
@@ -14,7 +14,7 @@
   "hash_algorithm": "sha256",
   "schema": "local-rag.db-version.v1",
   "tool": {
-    "hash": "c7331f0897ca51422e7eb6f47a34acb5d8bd14c70837361c3c4f5c56ade4aaea",
+    "hash": "56553f7e8f0933c78999596cc1ac61c291631ae6c31adc5be109255c1e0c6215",
     "name": "software-rag-tool",
     "version": "0.1.0"
   }

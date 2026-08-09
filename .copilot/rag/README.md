@@ -187,6 +187,11 @@ The Manager provides two distinct package types:
   fixed Python runtime with locked search dependencies. The administrator's
   Python and network are used only while building the ZIP. After extraction,
   the recipient runs `install.cmd` without system Python, pip, or network.
+  Normal mode waits exactly once after both success and failure. For automation,
+  add `-NoPause` anywhere in the launcher arguments; it is consumed before
+  PowerShell. Each run writes one timestamp-and-PID log under
+  `%LOCALAPPDATA%\LocalRAG\logs` with a TEMP fallback, and prints the absolute
+  log path in the Japanese result summary.
 - Management-PC transfer: a resumable folder for another management computer.
   It also carries all current databases, administration code, and Source
   acquisition state.
