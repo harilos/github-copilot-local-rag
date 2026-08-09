@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import os
+import re
 import shutil
 import sqlite3
 import struct
@@ -17,6 +19,13 @@ from windows_package_builder import BuildRequest, build_package
 
 
 HERE = Path(__file__).resolve().parent
+
+
+def _decoded_banner(launcher: str) -> str:
+    match = re.search(r"FromBase64String\('([^']+)'\)", launcher)
+    if match is None:
+        raise AssertionError("encoded Windows banner is missing")
+    return base64.b64decode(match.group(1)).decode("utf-8")
 
 
 def _write_pe(path: Path, machine: int = 0x8664) -> None:
@@ -149,6 +158,23 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     "-ConfigureVSCodeAutoApprove",
                     launcher,
                 )
+                self.assertLess(
+                    launcher.index("Local-RAG"),
+                    launcher.index(":local_rag_parse"),
+                )
+                localized_banner = _decoded_banner(launcher)
+                for fragment in (
+                    "秘密等級: xxxx",
+                    "開発者: harlos",
+                    "辞書メンテナンス: yyyy",
+                    "配布用:",
+                    "受領済みDB",
+                    "管理用:",
+                    "DBやSourceの追加・更新",
+                    "自分で資料を追加・更新",
+                    "https://github.com/harilos/github-copilot-local-rag",
+                ):
+                    self.assertIn(fragment, localized_banner)
                 self.assertIn('if /I "%~1"=="-NoPause"', launcher)
                 self.assertIn("shift", launcher)
                 self.assertEqual(1, launcher.count("pause >nul"))
@@ -234,6 +260,67 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("waits exactly once", readme)
                 self.assertIn("%LOCALAPPDATA%\\LocalRAG\\logs", readme)
                 self.assertIn("absolute log path", readme)
+
+    def test_standalone_banner_values_are_replaceable_at_build_time(self) -> None:
+        custom = {
+            "classification": "internal",
+            "developer": "alice",
+            "dictionary_maintenance": "team-z",
+        }
+        with mock.patch.dict(
+            package_builder._WINDOWS_BANNER_MODULE.WINDOWS_BANNER,
+            custom,
+            clear=True,
+        ):
+            launcher = package_builder._install_cmd()
+        localized_banner = _decoded_banner(launcher)
+        for value in custom.values():
+            self.assertIn(value, localized_banner)
+        self.assertIn("Local-RAG", launcher)
+
+    @unittest.skipUnless(os.name == "nt", "install.cmd requires Windows")
+    def test_launcher_renders_utf8_banner_before_installer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            internal = package / "internal"
+            internal.mkdir()
+            (package / "install.cmd").write_text(
+                package_builder._install_cmd(),
+                encoding="utf-8",
+                newline="\r\n",
+            )
+            (internal / "install.ps1").write_text(
+                "param(\n"
+                "  [switch]$ConfigureVSCodeAutoApprove,\n"
+                "  [switch]$SkipVSCodeAutoApprove,\n"
+                "  [switch]$RetryVSCodeApprovals,\n"
+                "  [switch]$ReplaceExistingDatabases,\n"
+                "  [switch]$LauncherArgumentError\n"
+                ")\n"
+                "exit 0\n",
+                encoding="ascii",
+            )
+            completed = subprocess.run(
+                [
+                    os.environ.get("ComSpec", "cmd.exe"),
+                    "/d",
+                    "/c",
+                    "install.cmd",
+                    "-NoPause",
+                ],
+                cwd=package,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("Local-RAG", completed.stdout)
+        self.assertIn("秘密等級: xxxx", completed.stdout)
+        self.assertIn("開発者: harlos", completed.stdout)
+        self.assertIn("辞書メンテナンス: yyyy", completed.stdout)
+        self.assertNotIn("Press any key", completed.stdout)
 
     def test_builds_zero_one_two_and_five_database_packages(self) -> None:
         for count in (0, 1, 2, 5):

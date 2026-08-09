@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
-from . import packages
+from . import packages, windows_banner
 
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -419,7 +419,8 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
     install_cmd.write_text(
         "@echo off\r\n"
         "setlocal EnableExtensions DisableDelayedExpansion\r\n"
-        'set "local_rag_no_pause=0"\r\n'
+        + windows_banner.install_cmd_banner()
+        + 'set "local_rag_no_pause=0"\r\n'
         'set "local_rag_skip="\r\n'
         'set "local_rag_retry="\r\n'
         'set "local_rag_replace="\r\n'
