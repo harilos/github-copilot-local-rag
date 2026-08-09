@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -9,6 +11,30 @@ from typing import Any, BinaryIO, Mapping
 
 from .errors import SourceManagerError
 from .subprocess_stream import ProgressCallback, run_streaming_process
+
+
+DEFAULT_SOURCE_COMMAND_TIMEOUT_SECONDS = 1800.0
+SOURCE_COMMAND_TIMEOUT_ENV = "LOCAL_RAG_SOURCE_CMD_TIMEOUT_SECONDS"
+
+
+def source_command_timeout_seconds(
+    environment: Mapping[str, Any] | None = None,
+) -> float:
+    env = os.environ if environment is None else environment
+    raw = str(env.get(SOURCE_COMMAND_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_SOURCE_COMMAND_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise SourceManagerError(
+            f"{SOURCE_COMMAND_TIMEOUT_ENV} must be a positive number"
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise SourceManagerError(
+            f"{SOURCE_COMMAND_TIMEOUT_ENV} must be a positive number"
+        )
+    return timeout
 
 
 class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -84,6 +110,7 @@ def resolve_source_network_route(
             "Source network configuration could not be resolved"
         ) from exc
     effective_environment = dict(resolution.environment)
+    command_timeout = source_command_timeout_seconds(effective_environment)
     opener = resolution.build_url_opener()
     gitlab_opener: urllib.request.OpenerDirector | None = None
 
@@ -94,7 +121,7 @@ def resolve_source_network_route(
     ):
         return run_streaming_process(
             arguments,
-            timeout=300,
+            timeout=command_timeout,
             env=effective_environment,
             progress_callback=progress_callback,
             stdout_sink=stdout_sink,

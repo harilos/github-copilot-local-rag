@@ -61,6 +61,7 @@ _stub_module(
     "networking",
     is_gitlab_token_request=lambda *args, **kwargs: False,
     reject_http_redirects=lambda *args, **kwargs: None,
+    source_command_timeout_seconds=lambda *args, **kwargs: 1800.0,
 )
 _stub_module(
     "redmine",

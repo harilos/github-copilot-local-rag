@@ -20,6 +20,7 @@ _MANAGER_HOOK_MARKER = "_local_rag_generic_git_manager_hook_installed"
 _MANAGER_CLASS_MARKER = "_local_rag_generic_git_manager_installed"
 _MAX_INCLUDE_PATHS = 100
 _GIT_SOURCE_TYPE = "github"  # Persistent compatibility identifier.
+_GIT_LONG_PATHS_CONFIG = ("-c", "core.longpaths=true")
 
 
 def install_git_source_runtime() -> None:
@@ -91,6 +92,12 @@ def _install_provider_contract(providers: Any, runner: Any, store_module: Any) -
 def _normalize_include_paths(value: Any, *, providers: Any) -> list[str]:
     if value in (None, ""):
         return []
+    if isinstance(value, str):
+        value = [
+            item.strip()
+            for item in re.split(r"\s+/\s+", value.strip())
+            if item.strip()
+        ]
     if not isinstance(value, (list, tuple)):
         raise SourceManagerError("include_paths must be an array of Git folders")
     if len(value) > _MAX_INCLUDE_PATHS:
@@ -261,28 +268,26 @@ def _git_fetch(
             )
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     f"--git-dir={control}",
                     "remote",
                     "set-url",
                     "origin",
                     repository,
-                ]
+                )
             ),
             operation="Git取得URLの更新",
             stage="fetch.github",
         )
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     f"--git-dir={control}",
                     f"--work-tree={work}",
                     "fetch",
                     "--prune",
                     "origin",
-                ]
+                )
             ),
             operation="Gitの更新",
             stage="fetch.github",
@@ -295,30 +300,28 @@ def _git_fetch(
             )
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     "clone",
                     "--no-checkout",
                     f"--separate-git-dir={control}",
                     "--",
                     repository,
                     str(work),
-                ]
+                )
             ),
             operation="Gitリポジトリの取得",
             stage="fetch.github",
         )
-        _remove_git_pointer(work, execution=execution)
+    _remove_git_pointer(work, execution=execution)
 
     branch_result = execution._checked(
         command_runner(
-            [
-                "git",
+            _git_command(
                 f"--git-dir={control}",
                 "symbolic-ref",
                 "--short",
                 "refs/remotes/origin/HEAD",
-            ]
+            )
         ),
         operation="Gitの既定ブランチ確認",
         stage="fetch.github",
@@ -336,22 +339,20 @@ def _git_fetch(
     if include_paths:
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     f"--git-dir={control}",
                     f"--work-tree={work}",
                     "sparse-checkout",
                     "init",
                     "--cone",
-                ]
+                )
             ),
             operation="Git部分取得の準備",
             stage="fetch.github",
         )
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     f"--git-dir={control}",
                     f"--work-tree={work}",
                     "sparse-checkout",
@@ -359,7 +360,7 @@ def _git_fetch(
                     "--cone",
                     "--",
                     *include_paths,
-                ]
+                )
             ),
             operation="Git取得フォルダの設定",
             stage="fetch.github",
@@ -367,13 +368,12 @@ def _git_fetch(
     else:
         execution._checked(
             command_runner(
-                [
-                    "git",
+                _git_command(
                     f"--git-dir={control}",
                     f"--work-tree={work}",
                     "sparse-checkout",
                     "disable",
-                ]
+                )
             ),
             operation="Git全体取得への切り替え",
             stage="fetch.github",
@@ -381,27 +381,25 @@ def _git_fetch(
 
     execution._checked(
         command_runner(
-            [
-                "git",
+            _git_command(
                 f"--git-dir={control}",
                 f"--work-tree={work}",
                 "reset",
                 "--hard",
                 remote_branch,
-            ]
+            )
         ),
         operation="Git作業ファイルの反映",
         stage="fetch.github",
     )
     execution._checked(
         command_runner(
-            [
-                "git",
+            _git_command(
                 f"--git-dir={control}",
                 f"--work-tree={work}",
                 "clean",
                 "-ffdqx",
-            ]
+            )
         ),
         operation="Git作業ファイルの整理",
         stage="fetch.github",
@@ -495,6 +493,10 @@ def _remove_git_pointer(work: Path, *, execution: Any) -> None:
     pointer.unlink()
 
 
+def _git_command(*arguments: str) -> list[str]:
+    return ["git", *_GIT_LONG_PATHS_CONFIG, *arguments]
+
+
 def _git_work_files(
     work: Path,
     *,
@@ -561,8 +563,7 @@ def _git_changed_paths_since(
     command_runner: Any,
     execution: Any,
 ) -> set[PurePosixPath]:
-    arguments = [
-        "git",
+    arguments = _git_command(
         f"--git-dir={control}",
         "-c",
         "core.quotepath=false",
@@ -576,7 +577,7 @@ def _git_changed_paths_since(
         remote_branch,
         "--",
         *include_paths,
-    ]
+    )
     with tempfile.TemporaryFile(mode="w+b") as stdout_sink:
         if bool(getattr(command_runner, "supports_stdout_sink", False)):
             completed = command_runner(arguments, stdout_sink=stdout_sink)

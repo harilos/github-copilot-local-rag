@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from source_manager import execution, providers
+from source_manager import execution, networking, providers
 from source_manager.errors import SourceManagerError
 from source_manager.git_source import _git_fetch, git_updated_on_cutoff
 
@@ -49,6 +51,47 @@ class GenericGitSourceTests(unittest.TestCase):
                     "updated_within_days": 0,
                 },
             )
+
+    def test_provider_accepts_legacy_joined_include_paths(self) -> None:
+        value = providers.validate_provider_config(
+            "github",
+            {
+                "repository_url": "https://git.example/group/project.git",
+                "include_paths": "docs / specifications/api / src",
+                "updated_within_days": None,
+            },
+        )
+
+        self.assertEqual(
+            ["docs", "specifications/api", "src"],
+            value["include_paths"],
+        )
+
+    def test_source_command_timeout_defaults_and_honors_environment(self) -> None:
+        self.assertEqual(1800.0, networking.source_command_timeout_seconds({}))
+        self.assertEqual(
+            2400.0,
+            networking.source_command_timeout_seconds(
+                {"LOCAL_RAG_SOURCE_CMD_TIMEOUT_SECONDS": "2400"}
+            ),
+        )
+
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.dict(
+                execution.os.environ,
+                {"LOCAL_RAG_SOURCE_CMD_TIMEOUT_SECONDS": "2400"},
+                clear=False,
+            ),
+            mock.patch.object(
+                execution.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            execution._run_command(["git", "--version"])
+
+        self.assertEqual(2400.0, run.call_args.kwargs["timeout"])
 
     def test_cutoff_uses_saved_run_start_time(self) -> None:
         cutoff = git_updated_on_cutoff(
@@ -143,6 +186,59 @@ class GenericGitSourceTests(unittest.TestCase):
             self.assertEqual(["docs/new.md"], files)
             self.assertEqual(2, result["inventory_documents"])
             self.assertEqual(1, result["eligible_documents"])
+
+    def test_fetch_removes_legacy_pointer_and_enables_long_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = (
+                root
+                / "db"
+                / "sources"
+                / "src_git-000000000000"
+                / "work"
+                / "ingest"
+                / "src_git-000000000000"
+            )
+            work.mkdir(parents=True)
+            control = work.parent.parent / "provider" / ".git"
+            control.mkdir(parents=True)
+            (work / ".git").write_text(
+                f"gitdir: {control}\n",
+                encoding="utf-8",
+            )
+            commands: list[list[str]] = []
+
+            def runner(arguments, **_kwargs):
+                command = list(arguments)
+                commands.append(command)
+                stdout = "origin/main\n" if "symbolic-ref" in command else ""
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+            result = _git_fetch(
+                {
+                    "repository_url": "https://git.example/group/project.git",
+                    "include_paths": [],
+                    "updated_within_days": 30,
+                },
+                work,
+                runner,
+                updated_on_cutoff=datetime(
+                    2026,
+                    7,
+                    1,
+                    tzinfo=timezone.utc,
+                ),
+                execution=execution,
+            )
+
+            self.assertEqual(0, result["documents"])
+            self.assertFalse((work / ".git").exists())
+            self.assertGreater(len(commands), 0)
+            for command in commands:
+                self.assertEqual(
+                    ["git", "-c", "core.longpaths=true"],
+                    command[:3],
+                )
 
     def run_git(
         self,
