@@ -20,24 +20,26 @@ SOURCE_MANAGER_ROOT = (
 )
 
 
-def _load_snapshot_module():
+def _load_source_manager_module(name: str):
     package_name = "_windows_portable_source_manager"
-    package = types.ModuleType(package_name)
-    package.__path__ = [str(SOURCE_MANAGER_ROOT)]
-    sys.modules[package_name] = package
-    module_name = f"{package_name}.packages"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(SOURCE_MANAGER_ROOT)]
+        sys.modules[package_name] = package
+    module_name = f"{package_name}.{name}"
     spec = importlib.util.spec_from_file_location(
-        module_name, SOURCE_MANAGER_ROOT / "packages.py"
+        module_name, SOURCE_MANAGER_ROOT / f"{name}.py"
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError("database snapshot module is unavailable")
+        raise RuntimeError(f"source manager module is unavailable: {name}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
 
-_SNAPSHOT_MODULE = _load_snapshot_module()
+_SNAPSHOT_MODULE = _load_source_manager_module("packages")
+_WINDOWS_BANNER_MODULE = _load_source_manager_module("windows_banner")
 PackageError = _SNAPSHOT_MODULE.PackageError
 stage_search_database_snapshots = (
     _SNAPSHOT_MODULE.stage_search_database_snapshots
@@ -412,7 +414,8 @@ def _install_cmd() -> str:
     return (
         "@echo off\n"
         "setlocal EnableExtensions DisableDelayedExpansion\n"
-        'set "local_rag_no_pause=0"\n'
+        + _WINDOWS_BANNER_MODULE.install_cmd_banner(newline="\n")
+        + 'set "local_rag_no_pause=0"\n'
         'set "local_rag_skip="\n'
         'set "local_rag_retry="\n'
         'set "local_rag_replace="\n'

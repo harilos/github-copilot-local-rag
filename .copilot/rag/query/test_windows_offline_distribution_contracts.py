@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import re
 import struct
 import sys
 import tempfile
@@ -15,6 +17,13 @@ if str(RAG_ROOT) not in sys.path:
     sys.path.insert(0, str(RAG_ROOT))
 
 from source_manager import windows_distribution  # noqa: E402
+
+
+def _decoded_banner(launcher: str) -> str:
+    match = re.search(r"FromBase64String\('([^']+)'\)", launcher)
+    if match is None:
+        raise AssertionError("encoded Windows banner is missing")
+    return base64.b64decode(match.group(1)).decode("utf-8")
 
 
 def _write_amd64_pe(path: Path) -> None:
@@ -143,6 +152,23 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 install_cmd = archive.read("install.cmd").decode("ascii")
             self.assertIn("-ConfigureVSCodeAutoApprove", install_cmd)
+            self.assertLess(
+                install_cmd.index("Local-RAG"),
+                install_cmd.index(":local_rag_parse"),
+            )
+            localized_banner = _decoded_banner(install_cmd)
+            for fragment in (
+                "秘密等級: xxxx",
+                "開発者: harlos",
+                "辞書メンテナンス: yyyy",
+                "配布用:",
+                "受領済みDB",
+                "管理用:",
+                "DBやSourceの追加・更新",
+                "自分で資料を追加・更新",
+                "https://github.com/harilos/github-copilot-local-rag",
+            ):
+                self.assertIn(fragment, localized_banner)
             self.assertIn('if /I "%~1"=="-NoPause"', install_cmd)
             self.assertIn("shift", install_cmd)
             self.assertEqual(1, install_cmd.count("pause >nul"))
