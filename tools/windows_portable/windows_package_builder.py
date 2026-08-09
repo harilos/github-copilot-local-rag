@@ -450,12 +450,17 @@ def _install_cmd() -> str:
         "shift\n"
         "goto local_rag_parse\n"
         ":local_rag_run\n"
+        'if not exist "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" goto local_rag_powershell_unavailable\n'
         "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
         "\"%~dp0internal\\install.ps1\" -ConfigureVSCodeAutoApprove "
         "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
         "%local_rag_argument_error%\n"
         "set \"local_rag_rc=%ERRORLEVEL%\"\n"
+        'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\n'
+        "goto local_rag_finish\n"
+        + _WINDOWS_BANNER_MODULE.install_cmd_powershell_failure(newline="\n")
+        + ":local_rag_finish\n"
         'if "%local_rag_no_pause%"=="1" goto local_rag_exit\n'
         "echo.\n"
         "echo Press any key to close this window . . .\n"
@@ -478,6 +483,9 @@ returns the installer's exit code. Normal mode waits exactly once after either
 success or failure. Add `-NoPause` anywhere in the `install.cmd` arguments for
 automation; the launcher consumes it, does not forward it to PowerShell, and
 does not print the wait prompt.
+
+If Windows PowerShell cannot start, the cmd launcher itself prints Japanese
+failure guidance and writes an actual run log before returning a nonzero code.
 
 PowerShell writes exactly one log per run under
 `%LOCALAPPDATA%\LocalRAG\logs` (falling back to TEMP), prints a Japanese result

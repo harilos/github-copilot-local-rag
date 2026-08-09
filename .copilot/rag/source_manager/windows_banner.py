@@ -46,3 +46,30 @@ def install_cmd_banner(
         f"[Convert]::FromBase64String('{payload}')))\"\n"
         "echo.\n"
     ).replace("\n", newline)
+
+
+def install_cmd_powershell_failure(*, newline: str = "\r\n") -> str:
+    """Return the cmd-only failure path used when PowerShell cannot start."""
+
+    return (
+        ':local_rag_powershell_unavailable\n'
+        'if not defined local_rag_rc set "local_rag_rc=9009"\n'
+        'chcp 65001 >nul\n'
+        'set "local_rag_log_dir=%LOCALAPPDATA%\\LocalRAG\\logs"\n'
+        'if not defined LOCALAPPDATA set "local_rag_log_dir=%TEMP%\\LocalRAG\\logs"\n'
+        '2>nul mkdir "%local_rag_log_dir%"\n'
+        'set "local_rag_log=%local_rag_log_dir%\\portable-install-launcher-%RANDOM%-%RANDOM%.log"\n'
+        '>"%local_rag_log%" echo Local RAG インストール結果: 失敗 ^(FAILED^)\n'
+        'if exist "%local_rag_log%" goto local_rag_launcher_log_ready\n'
+        'set "local_rag_log_dir=%TEMP%\\LocalRAG\\logs"\n'
+        '2>nul mkdir "%local_rag_log_dir%"\n'
+        'set "local_rag_log=%local_rag_log_dir%\\portable-install-launcher-%RANDOM%-%RANDOM%.log"\n'
+        '>"%local_rag_log%" echo Local RAG インストール結果: 失敗 ^(FAILED^)\n'
+        ':local_rag_launcher_log_ready\n'
+        '>>"%local_rag_log%" echo PowerShellを起動できませんでした。Windows PowerShell 5.1 が利用可能か確認してください。\n'
+        'for %%I in ("%local_rag_log%") do set "local_rag_log=%%~fI"\n'
+        'echo Local RAG インストール結果: 失敗 ^(FAILED^)\n'
+        'echo PowerShellを起動できませんでした。Windows PowerShell 5.1 が利用可能か確認してください。\n'
+        'echo ログ: %local_rag_log%\n'
+        'goto local_rag_finish\n'
+    ).replace("\n", newline)

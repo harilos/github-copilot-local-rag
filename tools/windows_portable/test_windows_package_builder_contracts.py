@@ -179,6 +179,16 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("shift", launcher)
                 self.assertEqual(1, launcher.count("pause >nul"))
                 self.assertNotIn("%*", launcher)
+                self.assertIn(":local_rag_powershell_unavailable", launcher)
+                self.assertIn(
+                    'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1"',
+                    launcher,
+                )
+                self.assertIn("PowerShellを起動できませんでした。", launcher)
+                self.assertIn(
+                    "portable-install-launcher-%RANDOM%-%RANDOM%.log",
+                    launcher,
+                )
                 self.assertIn(prefix + "internal/install.ps1", names)
                 self.assertIn(
                     prefix + ".copilot/rag/query/.venv/Scripts/python.exe",
@@ -321,6 +331,112 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
         self.assertIn("開発者: harlos", completed.stdout)
         self.assertIn("辞書メンテナンス: yyyy", completed.stdout)
         self.assertNotIn("Press any key", completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "install.cmd requires Windows")
+    def test_launcher_logs_japanese_failure_when_powershell_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package"
+            profile = root / "profile"
+            package.mkdir()
+            profile.mkdir()
+            (package / "install.cmd").write_text(
+                package_builder._install_cmd(),
+                encoding="utf-8",
+                newline="\r\n",
+            )
+            environment = os.environ.copy()
+            environment["SystemRoot"] = str(root / "missing-windows")
+            environment["LOCALAPPDATA"] = str(profile / "AppData" / "Local")
+            environment["TEMP"] = str(root / "temp")
+            (root / "temp").mkdir()
+            completed = subprocess.run(
+                [
+                    os.environ.get("ComSpec", "cmd.exe"),
+                    "/d",
+                    "/c",
+                    "install.cmd",
+                    "-NoPause",
+                ],
+                cwd=package,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+            )
+            logs = list(
+                (profile / "AppData" / "Local" / "LocalRAG" / "logs").glob(
+                    "portable-install-launcher-*.log"
+                )
+            )
+            self.assertEqual(1, len(logs))
+            log_path = logs[0].resolve()
+            log_text = logs[0].read_text(encoding="utf-8")
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("Local RAG インストール結果: 失敗 (FAILED)", completed.stdout)
+        self.assertIn("PowerShellを起動できませんでした。", completed.stdout)
+        self.assertNotIn("Press any key", completed.stdout)
+        self.assertIn("Local RAG インストール結果: 失敗 (FAILED)", log_text)
+        self.assertIn("PowerShellを起動できませんでした。", log_text)
+        self.assertIn(str(log_path), completed.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "install.cmd requires Windows")
+    def test_launcher_logs_failure_when_powershell_cannot_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package"
+            profile = root / "profile"
+            fake_windows = root / "fake-windows"
+            powershell = (
+                fake_windows
+                / "System32"
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            )
+            package.mkdir()
+            profile.mkdir()
+            powershell.parent.mkdir(parents=True)
+            powershell.write_bytes(b"not a Windows executable")
+            (package / "install.cmd").write_text(
+                package_builder._install_cmd(),
+                encoding="utf-8",
+                newline="\r\n",
+            )
+            environment = os.environ.copy()
+            environment["SystemRoot"] = str(fake_windows)
+            environment["LOCALAPPDATA"] = str(profile / "AppData" / "Local")
+            environment["TEMP"] = str(root / "temp")
+            (root / "temp").mkdir()
+            completed = subprocess.run(
+                [
+                    os.environ.get("ComSpec", "cmd.exe"),
+                    "/d",
+                    "/c",
+                    "install.cmd",
+                    "-NoPause",
+                ],
+                cwd=package,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+            )
+            logs = list(
+                (profile / "AppData" / "Local" / "LocalRAG" / "logs").glob(
+                    "portable-install-launcher-*.log"
+                )
+            )
+            self.assertEqual(1, len(logs))
+            log_text = logs[0].read_text(encoding="utf-8")
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("PowerShellを起動できませんでした。", completed.stdout)
+        self.assertNotIn("Press any key", completed.stdout)
+        self.assertIn("PowerShellを起動できませんでした。", log_text)
 
     def test_builds_zero_one_two_and_five_database_packages(self) -> None:
         for count in (0, 1, 2, 5):

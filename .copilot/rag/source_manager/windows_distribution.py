@@ -455,19 +455,24 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "shift\r\n"
         "goto local_rag_parse\r\n"
         ":local_rag_run\r\n"
+        'if not exist "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" goto local_rag_powershell_unavailable\r\n'
         '"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
         '"%~dp0internal\\install.ps1" -ConfigureVSCodeAutoApprove '
         "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
         "%local_rag_argument_error%\r\n"
         'set "local_rag_rc=%ERRORLEVEL%"\r\n'
+        'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\r\n'
+        'goto local_rag_finish\r\n'
+        + windows_banner.install_cmd_powershell_failure()
+        + ':local_rag_finish\r\n'
         'if "%local_rag_no_pause%"=="1" goto local_rag_exit\r\n'
         "echo.\r\n"
         "echo Press any key to close this window . . .\r\n"
         "pause >nul\r\n"
         ":local_rag_exit\r\n"
         "exit /b %local_rag_rc%\r\n",
-        encoding="ascii",
+        encoding="utf-8",
         newline="",
     )
     readme.write_text(
@@ -480,7 +485,9 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "`-NoPause` anywhere in the `install.cmd` arguments for automation; "
         "the launcher removes it before PowerShell and does not print a wait "
         "prompt. Logs are written under "
-        "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback.\n\n"
+        "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback. If Windows "
+        "PowerShell cannot start, the cmd launcher itself prints Japanese "
+        "failure guidance and writes the same class of run log.\n\n"
         "VS Code `chat.tools.global.autoApprove: true` is applied by default. "
         "It affects every "
         "tool and terminal command in every workspace. Run "

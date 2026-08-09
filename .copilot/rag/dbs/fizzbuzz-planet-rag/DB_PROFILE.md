@@ -6,9 +6,9 @@
 
 ## Build Profile
 
-- Source: GitHub `harilos/fizzbuzz-planet-docs`
+- Sources: GitHub `harilos/fizzbuzz-planet-docs` and its GitHub Issues
 - Source commit: `e936dae1fe79f5e8e885c768ffaf7b42dc6fb74b`
-- Indexed documents: 176
-- Indexed records: 560
+- Indexed documents: 186 (repository: 176, Issues: 10)
+- Indexed records: 570
 - Tokenizer: SudachiPy 0.6.10 / SudachiDict-core 20250515 / split mode A
 - Embedding: `cl-nagoya/ruri-v3-30m` / ONNX int8 / 256 dimensions

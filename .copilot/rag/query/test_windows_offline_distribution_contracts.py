@@ -150,7 +150,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             self.assertIn(".copilot/rag/list_dbs.py", names)
             self.assertIn(".copilot/rag/query/list_dbs.py", names)
             with zipfile.ZipFile(output) as archive:
-                install_cmd = archive.read("install.cmd").decode("ascii")
+                install_cmd = archive.read("install.cmd").decode("utf-8")
             self.assertIn("-ConfigureVSCodeAutoApprove", install_cmd)
             self.assertLess(
                 install_cmd.index("Local-RAG"),
@@ -173,6 +173,13 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             self.assertIn("shift", install_cmd)
             self.assertEqual(1, install_cmd.count("pause >nul"))
             self.assertNotIn("%*", install_cmd)
+            self.assertIn(":local_rag_powershell_unavailable", install_cmd)
+            self.assertIn(
+                'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1"',
+                install_cmd,
+            )
+            self.assertIn("PowerShellを起動できませんでした。", install_cmd)
+            self.assertIn("portable-install-launcher-%RANDOM%-%RANDOM%.log", install_cmd)
             self.assertIn(
                 "$SkipVSCodeAutoApprove",
                 windows_distribution.INSTALL_TEMPLATE.read_text(

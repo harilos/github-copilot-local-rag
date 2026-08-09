@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-08-08T17:24:29.177741+00:00",
+  "generated_at": "2026-08-09T10:35:19.609557+00:00",
   "db_root": ".",
-  "record_count": 560,
+  "record_count": 570,
   "collection": "fizzbuzz_planet_rag_ruri3_30m_int8_v1",
   "chroma_space": "cosine",
   "chunker_version": "jp-ruri-token-v2",
