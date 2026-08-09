@@ -15,7 +15,14 @@ from .manifest import validate_existing_index_tokenizer, write_manifest
 from .paths import clean_dir, logs_dir
 from .profile import update_profile_from_clean
 from .progress import emit_event, write_progress
-from .records import build_records_for_file, file_content_hash, iter_input_files, sha256_text
+from .records import (
+    SUPPORTED_EXTENSIONS,
+    build_records_for_file,
+    file_content_hash,
+    is_office_temporary_file,
+    iter_input_files,
+    sha256_text,
+)
 from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
 from .config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from .embeddings import DocumentTokenBudget, get_document_token_budget
@@ -156,6 +163,7 @@ def add_or_update_root(
 
     try:
         files = list(iter_input_files(scope.scan_root))
+        unsupported_paths = _unsupported_input_paths(scope)
     except Exception as exc:
         error_text = _run_failure_text(
             exc,
@@ -181,6 +189,14 @@ def add_or_update_root(
         "input_error_files": 0,
         "extract_error_files": 0,
         "error_details": [],
+        "ingestion_diagnostics": {
+            "unsupported": {
+                "count": len(unsupported_paths),
+                "paths": unsupported_paths[:100],
+            },
+            "zero_text": {"count": 0, "paths": []},
+            "extraction_error": {"count": 0, "paths": []},
+        },
         "upserted_records": 0,
         "deleted_records": 0,
     }
@@ -227,6 +243,12 @@ def add_or_update_root(
                     summary["input_error_files"] += 1
                 else:
                     summary["extract_error_files"] += 1
+                    diagnostic = summary["ingestion_diagnostics"][
+                        "extraction_error"
+                    ]
+                    diagnostic["count"] += 1
+                    if len(diagnostic["paths"]) < 100:
+                        diagnostic["paths"].append(rel)
                 if len(summary["error_details"]) < 100:
                     summary["error_details"].append(
                         dict(item.get("diagnostic") or {})
@@ -250,6 +272,11 @@ def add_or_update_root(
                 print(f"ERROR {item['rel']}: {item['error']}")
                 continue
 
+            if not item["records"]:
+                diagnostic = summary["ingestion_diagnostics"]["zero_text"]
+                diagnostic["count"] += 1
+                if len(diagnostic["paths"]) < 100:
+                    diagnostic["paths"].append(rel)
             pending.append(item)
             emit_event("file_extracted", path=rel, records=len(item["records"]))
             if len(pending) >= effective_batch_size_files:
@@ -327,6 +354,30 @@ def add_or_update_root(
             # sanitized above.
             raise RuntimeError(error_text) from None
         raise
+
+
+def _unsupported_input_paths(scope: IngestionScope) -> list[str]:
+    paths: list[str] = []
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, child_directories, filenames in os.walk(
+        scope.scan_root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        child_directories[:] = sorted(
+            name for name in child_directories if name not in {".git", ".svn"}
+        )
+        for filename in sorted(filenames):
+            if is_office_temporary_file(filename):
+                continue
+            path = Path(directory) / filename
+            if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                paths.append(_safe_stored_path(scope, path))
+    return sorted(paths)
 
 
 def _prepare_file(

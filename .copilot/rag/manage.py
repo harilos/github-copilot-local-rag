@@ -1101,6 +1101,9 @@ class LocalRagManager:
                 else None
             ),
         )
+        raw_diagnostic = getattr(exc, "diagnostic", None)
+        if isinstance(raw_diagnostic, dict):
+            self._print_ingestion_diagnostics(raw_diagnostic)
         self.output(
             "失敗段階: " + self._source_failure_stage_label(stage)
         )
@@ -1174,6 +1177,40 @@ class LocalRagManager:
             "対応: ファイルを読める状態に戻して同じSourceを更新すると、"
             "失敗ファイルを自動的に再試行します。"
         )
+        self._print_ingestion_diagnostics(values)
+
+    def _print_ingestion_diagnostics(self, values: dict[str, Any]) -> None:
+        diagnostics = values.get("ingestion_diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        labels = {
+            "unsupported": "未対応形式",
+            "zero_text": "抽出結果0文字",
+            "extraction_error": "抽出失敗",
+        }
+        visible = []
+        for key, label in labels.items():
+            category = diagnostics.get(key)
+            if not isinstance(category, dict):
+                continue
+            count = int(category.get("count") or 0)
+            if count <= 0:
+                continue
+            paths = [
+                str(path)
+                for path in category.get("paths") or []
+                if str(path).strip()
+            ]
+            visible.append((label, count, paths))
+        if not visible:
+            return
+        self._print_warning("取り込み対象外・未反映ファイルがあります。")
+        for label, count, paths in visible:
+            self.output(f"{label}: {count:,}件")
+            for path in paths:
+                self.output(f"  - {path}")
+            if count > len(paths):
+                self.output(f"  - ほか {count - len(paths):,}件")
 
     def _print_screen_header(
         self,
@@ -1498,6 +1535,9 @@ class LocalRagManager:
                 self._print_success(
                     "Sourceを保存し、検索へ反映しました。"
                 )
+                summary = result.get("add_summary")
+                if isinstance(summary, dict):
+                    self._print_ingestion_diagnostics(summary)
             elif status == "partial":
                 self._print_source_partial_result(result)
             elif status in {"failed", "error"}:
@@ -3341,6 +3381,9 @@ class LocalRagManager:
             "updated",
         }:
             self._print_success("Sourceを検索へ反映しました。")
+            summary = result.get("add_summary")
+            if isinstance(summary, dict):
+                self._print_ingestion_diagnostics(summary)
         elif result_status == "partial":
             self._print_source_partial_result(result)
         elif result_status in {"failed", "error"}:

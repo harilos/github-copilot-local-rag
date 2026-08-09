@@ -83,6 +83,43 @@ class ManagerJapaneseUiTests(unittest.TestCase):
         self.assertNotIn("\033[", plain_outputs[0])
         self.assertEqual("[エラー] 入力が不正です。", plain_outputs[0])
 
+    def test_ingestion_diagnostics_show_categories_counts_and_paths(self) -> None:
+        manager, outputs = self.manager()
+        manager._print_ingestion_diagnostics(
+            {
+                "ingestion_diagnostics": {
+                    "unsupported": {"count": 1, "paths": ["src/archive.bin"]},
+                    "zero_text": {"count": 1, "paths": ["src/empty.pdf"]},
+                    "extraction_error": {
+                        "count": 1,
+                        "paths": ["src/broken.docx"],
+                    },
+                }
+            }
+        )
+        rendered = "\n".join(outputs)
+        for value in (
+            "未対応形式",
+            "archive.bin",
+            "抽出結果0文字",
+            "empty.pdf",
+            "抽出失敗",
+            "broken.docx",
+        ):
+            self.assertIn(value, rendered)
+
+    def test_empty_ingestion_diagnostics_remain_silent(self) -> None:
+        manager, outputs = self.manager()
+        manager._print_ingestion_diagnostics(
+            {
+                "ingestion_diagnostics": {
+                    key: {"count": 0, "paths": []}
+                    for key in ("unsupported", "zero_text", "extraction_error")
+                }
+            }
+        )
+        self.assertEqual([], outputs)
+
     def test_required_field_retries_and_shows_example(self) -> None:
         manager, outputs = self.manager(["", "main"])
         value = manager._prompt_preserving_value(

@@ -1189,6 +1189,12 @@ def _execute_add(
             return False
         if not isinstance(value.get("error_details"), list):
             return False
+        ingestion_diagnostics = value.get("ingestion_diagnostics")
+        if (
+            ingestion_diagnostics is not None
+            and not _valid_ingestion_diagnostics(ingestion_diagnostics)
+        ):
+            return False
         if len(value["error_details"]) > 100:
             return False
         for detail in value["error_details"]:
@@ -1324,6 +1330,7 @@ def _execute_add(
     error_files = int(summary.get("error_files") or 0)
     input_error_files = int(summary.get("input_error_files") or 0)
     extract_error_files = int(summary.get("extract_error_files") or 0)
+    ingestion_diagnostics = summary.get("ingestion_diagnostics")
     result_status = str(summary.get("result_status") or "")
     completed_files = int(summary.get("indexed_files") or 0) + int(
         summary.get("skipped_files") or 0
@@ -1352,6 +1359,7 @@ def _execute_add(
             "input_error_files": input_error_files,
             "extract_error_files": extract_error_files,
             "error_details": list(summary.get("error_details") or [])[:100],
+            "ingestion_diagnostics": summary.get("ingestion_diagnostics"),
         }
         if privacy_safe_root:
             error.suppress_traceback = True
@@ -1383,6 +1391,8 @@ def _execute_add(
                 "result_status",
             )
         }
+        if ingestion_diagnostics is not None:
+            summary["ingestion_diagnostics"] = ingestion_diagnostics
         if summary["result_status"] == "partial":
             summary["warning_ja"] = (
                 f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
@@ -1393,6 +1403,41 @@ def _execute_add(
         "status": result_status,
         "summary": summary,
     }
+
+
+def _valid_ingestion_diagnostics(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if set(value) != {"unsupported", "zero_text", "extraction_error"}:
+        return False
+    for category in value.values():
+        if not isinstance(category, Mapping):
+            return False
+        count = category.get("count")
+        paths = category.get("paths")
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+            or not isinstance(paths, list)
+            or len(paths) > 100
+            or count < len(paths)
+        ):
+            return False
+        for path in paths:
+            if not isinstance(path, str) or not path or len(path) > 2_048:
+                return False
+            posix_path = PurePosixPath(path)
+            windows_path = PureWindowsPath(path)
+            if (
+                "\\" in path
+                or posix_path.is_absolute()
+                or windows_path.is_absolute()
+                or windows_path.drive
+                or ".." in posix_path.parts
+            ):
+                return False
+    return True
 
 
 def _redact_external_root(value: Any, root: Path) -> str:
