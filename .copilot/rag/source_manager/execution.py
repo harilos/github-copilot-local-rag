@@ -458,29 +458,44 @@ def _svn(
 
 
 def _svn_has_externals(runner: CommandRunner, checkout: Path) -> bool:
-    result = runner(
-        [
-            "svn",
-            "propget",
-            "svn:externals",
-            "--recursive",
-            "--xml",
-            str(checkout),
-        ]
-    )
-    if int(getattr(result, "returncode", 1)) != 0:
-        return True
+    arguments = [
+        "svn",
+        "propget",
+        "svn:externals",
+        "--recursive",
+        "--xml",
+        "--",
+        str(checkout),
+    ]
     try:
-        root = ElementTree.fromstring(
-            str(getattr(result, "stdout", "") or "")
-        )
-    except ElementTree.ParseError:
+        if bool(getattr(runner, "supports_stdout_sink", False)):
+            with tempfile.TemporaryFile(mode="w+b") as stdout_sink:
+                result = runner(arguments, stdout_sink=stdout_sink)
+                if int(getattr(result, "returncode", 1)) != 0:
+                    return True
+                stdout_sink.flush()
+                stdout_sink.seek(0)
+                raw_xml: bytes | str = stdout_sink.read()
+        else:
+            result = runner(arguments)
+            if (
+                int(getattr(result, "returncode", 1)) != 0
+                or bool(getattr(result, "stdout_truncated", False))
+            ):
+                return True
+            raw_xml = getattr(result, "stdout", "") or ""
+        root = ElementTree.fromstring(raw_xml)
+    except (ElementTree.ParseError, OSError, TypeError, ValueError):
         return True
-    return any(
-        element.tag.rsplit("}", 1)[-1] == "property"
-        and element.attrib.get("name") == "svn:externals"
-        for element in root.iter()
-    )
+    if _xml_local_name(root.tag) != "properties":
+        return True
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "property":
+            continue
+        name = element.attrib.get("name")
+        if name is None or name == "svn:externals":
+            return True
+    return False
 
 
 def _svn_updated_on_cutoff(

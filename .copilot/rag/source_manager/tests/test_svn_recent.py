@@ -400,6 +400,141 @@ class SvnRecentFetchTests(unittest.TestCase):
         self.assertFalse(any("--xml" in command for command in commands))
         self.assertNotIn("eligible_documents", outcome)
 
+    def test_external_probe_allows_only_complete_empty_properties(self) -> None:
+        cases = (
+            (
+                "empty",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout="<?xml version='1.0'?><properties/>",
+                    stderr="",
+                ),
+                False,
+            ),
+            (
+                "directory_external",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "<properties><target path='.'>"
+                        "<property name='svn:externals'>"
+                        "^/directory nested"
+                        "</property></target></properties>"
+                    ),
+                    stderr="",
+                ),
+                True,
+            ),
+            (
+                "file_external",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "<properties><target path='.'>"
+                        "<property name='svn:externals'>"
+                        "^/README.md README.md"
+                        "</property></target></properties>"
+                    ),
+                    stderr="",
+                ),
+                True,
+            ),
+            (
+                "nonzero",
+                SimpleNamespace(returncode=1, stdout="", stderr="error"),
+                True,
+            ),
+            (
+                "truncated",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout="<properties/>",
+                    stdout_truncated=True,
+                    stderr="",
+                ),
+                True,
+            ),
+            (
+                "malformed",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout="<properties>",
+                    stderr="",
+                ),
+                True,
+            ),
+            (
+                "unexpected_root",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout="<info/>",
+                    stderr="",
+                ),
+                True,
+            ),
+            (
+                "missing_property_name",
+                SimpleNamespace(
+                    returncode=0,
+                    stdout="<properties><property/></properties>",
+                    stderr="",
+                ),
+                True,
+            ),
+        )
+        expected_arguments = [
+            "svn",
+            "propget",
+            "svn:externals",
+            "--recursive",
+            "--xml",
+            "--",
+            str(self.checkout),
+        ]
+        for name, result, expected in cases:
+            with self.subTest(name=name):
+                commands: list[list[str]] = []
+
+                def runner(arguments):
+                    commands.append(list(arguments))
+                    return result
+
+                self.assertEqual(
+                    expected,
+                    execution_module._svn_has_externals(
+                        runner,
+                        self.checkout,
+                    ),
+                )
+                self.assertEqual([expected_arguments], commands)
+
+    def test_external_probe_uses_complete_stdout_sink(self) -> None:
+        expected_arguments = [
+            "svn",
+            "propget",
+            "svn:externals",
+            "--recursive",
+            "--xml",
+            "--",
+            str(self.checkout),
+        ]
+
+        def runner(arguments, *, stdout_sink=None):
+            self.assertEqual(expected_arguments, list(arguments))
+            self.assertIsNotNone(stdout_sink)
+            stdout_sink.write(b"<properties/>")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="<bounded-output>",
+                stdout_truncated=True,
+                stderr="",
+            )
+
+        runner.supports_stdout_sink = True
+        self.assertFalse(
+            execution_module._svn_has_externals(runner, self.checkout)
+        )
+
     def test_same_revision_skips_only_without_cutoff(self) -> None:
         files = [("all.md", "all", "2026-07-30T00:00:00Z")]
         plan = self._plan(recursive=True, updated_within_days=None)
