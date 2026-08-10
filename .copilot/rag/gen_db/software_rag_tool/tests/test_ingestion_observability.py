@@ -29,7 +29,13 @@ TOKEN_BUDGET = DocumentTokenBudget(
 
 
 class IngestionObservabilityTests(unittest.TestCase):
-    def _run(self, root: Path, output: Path) -> dict:
+    def _run(
+        self,
+        root: Path,
+        output: Path,
+        *,
+        retry_errors: bool = False,
+    ) -> dict:
         def records_for(_root: Path, path: Path, *_args, **_kwargs):
             if path.name == "broken.txt":
                 raise ValueError("fixture extraction failure")
@@ -69,6 +75,7 @@ class IngestionObservabilityTests(unittest.TestCase):
             return incremental.add_or_update_root(
                 root,
                 "src_fixture",
+                retry_errors=retry_errors,
                 document_token_budget=TOKEN_BUDGET,
             )
 
@@ -99,8 +106,8 @@ class IngestionObservabilityTests(unittest.TestCase):
 
         diagnostics = result["ingestion_diagnostics"]
         self.assertEqual("failure", result["result_status"])
-        self.assertEqual(2, result["indexed_files"])
-        self.assertEqual(1, result["extract_error_files"])
+        self.assertEqual(1, result["indexed_files"])
+        self.assertEqual(2, result["extract_error_files"])
         self.assertEqual(1, diagnostics["unsupported"]["count"])
         self.assertIn("unsupported.bin", diagnostics["unsupported"]["paths"][0])
         self.assertEqual(1, diagnostics["zero_text"]["count"])
@@ -116,6 +123,66 @@ class IngestionObservabilityTests(unittest.TestCase):
             "broken.txt",
             repeated_diagnostics["extraction_error"]["paths"][0],
         )
+        self.assertEqual("failure", repeated["result_status"])
+        self.assertEqual(0, repeated["indexed_files"])
+        self.assertEqual(1, repeated["skipped_files"])
+        self.assertEqual(2, repeated["error_files"])
+
+    def test_zero_text_only_never_becomes_indexed_or_successful(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "documents"
+            output = Path(temporary) / "db"
+            root.mkdir()
+            (root / "empty.txt").write_text("", encoding="utf-8")
+
+            first = self._run(root, output, retry_errors=True)
+            repeated = self._run(root, output, retry_errors=True)
+            state = json.loads(
+                (output / "logs" / "index_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            entry = next(iter(state["files"].values()))
+
+        for result in (first, repeated):
+            self.assertEqual("failure", result["result_status"])
+            self.assertEqual(0, result["indexed_files"])
+            self.assertEqual(0, result["upserted_records"])
+            self.assertEqual(1, result["error_files"])
+            self.assertEqual(1, result["extract_error_files"])
+            self.assertEqual(
+                1,
+                result["ingestion_diagnostics"]["zero_text"]["count"],
+            )
+        self.assertEqual("error", entry["status"])
+        self.assertEqual("zero_text", entry["error_kind"])
+        self.assertEqual(0, entry["record_count"])
+
+    def test_legacy_indexed_zero_record_state_is_migrated_to_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "documents"
+            output = Path(temporary) / "db"
+            root.mkdir()
+            (root / "empty.txt").write_text("", encoding="utf-8")
+            self._run(root, output)
+            state_path = output / "logs" / "index_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            entry = next(iter(state["files"].values()))
+            entry["status"] = "indexed"
+            entry.pop("error_kind", None)
+            entry.pop("error", None)
+            entry.pop("diagnostic", None)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            result = self._run(root, output)
+            migrated = json.loads(state_path.read_text(encoding="utf-8"))
+            migrated_entry = next(iter(migrated["files"].values()))
+
+        self.assertEqual("failure", result["result_status"])
+        self.assertEqual(0, result["indexed_files"])
+        self.assertEqual(1, result["error_files"])
+        self.assertEqual("error", migrated_entry["status"])
+        self.assertEqual("zero_text", migrated_entry["error_kind"])
 
     def test_clean_run_has_zero_diagnostics_and_ignores_vcs_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

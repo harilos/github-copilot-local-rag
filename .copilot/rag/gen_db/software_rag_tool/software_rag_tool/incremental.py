@@ -225,28 +225,49 @@ def add_or_update_root(
             )
             status = item["status"]
             if status == "skip":
-                previous = state["files"].get(_state_key(source_id, rel)) or {}
+                key = _state_key(source_id, rel)
+                previous = state["files"].get(key) or {}
                 if (
                     previous.get("status") == "indexed"
                     and int(previous.get("record_count") or 0) == 0
                 ):
                     _add_ingestion_diagnostic(summary, "zero_text", rel)
+                    _mark_legacy_zero_text(previous, rel)
+                    state["files"][key] = previous
+                    _save_state(state)
                 elif (
                     previous.get("status") == "error"
                     and previous.get("error_kind") != "input_read"
                 ):
-                    _add_ingestion_diagnostic(
-                        summary,
-                        "extraction_error",
-                        rel,
+                    category = (
+                        "zero_text"
+                        if previous.get("error_kind") == "zero_text"
+                        else "extraction_error"
                     )
-                summary["skipped_files"] += 1
+                    _add_ingestion_diagnostic(summary, category, rel)
+                else:
+                    summary["skipped_files"] += 1
+                    write_progress(
+                        status="running",
+                        phase="extract",
+                        files_done=_files_done(summary),
+                        skipped_files=summary["skipped_files"],
+                        current_file=rel,
+                    )
+                    continue
+                _record_persisted_ingestion_failure(
+                    summary,
+                    previous,
+                    rel,
+                )
                 write_progress(
                     status="running",
                     phase="extract",
                     files_done=_files_done(summary),
-                    skipped_files=summary["skipped_files"],
+                    error_files=summary["error_files"],
+                    extract_error_files=summary["extract_error_files"],
                     current_file=rel,
+                    last_error=str(previous.get("error") or ""),
                 )
                 continue
             if status == "error":
@@ -288,6 +309,31 @@ def add_or_update_root(
 
             if not item["records"]:
                 _add_ingestion_diagnostic(summary, "zero_text", rel)
+                diagnostic = _zero_text_diagnostic(rel)
+                deleted = _record_zero_text(state, item, diagnostic)
+                _save_state(state)
+                summary["deleted_records"] += deleted
+                summary["error_files"] += 1
+                summary["extract_error_files"] += 1
+                if len(summary["error_details"]) < 100:
+                    summary["error_details"].append(diagnostic)
+                write_progress(
+                    status="running",
+                    phase="extract",
+                    files_done=_files_done(summary),
+                    error_files=summary["error_files"],
+                    extract_error_files=summary["extract_error_files"],
+                    deleted_records=summary["deleted_records"],
+                    current_file=rel,
+                    last_error="No searchable text was extracted.",
+                )
+                emit_event(
+                    "file_failed",
+                    path=rel,
+                    error="No searchable text was extracted.",
+                    diagnostic=diagnostic,
+                )
+                continue
             pending.append(item)
             emit_event("file_extracted", path=rel, records=len(item["records"]))
             if len(pending) >= effective_batch_size_files:
@@ -400,6 +446,77 @@ def _add_ingestion_diagnostic(
     diagnostic["count"] += 1
     if len(diagnostic["paths"]) < 100:
         diagnostic["paths"].append(path)
+
+
+def _zero_text_diagnostic(path: str) -> dict[str, Any]:
+    return {
+        "path": str(path)[:2_048],
+        "stage": "extract",
+        "error_type": "ZeroText",
+        "retryable": False,
+    }
+
+
+def _mark_legacy_zero_text(previous: dict[str, Any], path: str) -> None:
+    previous.update(
+        {
+            "status": "error",
+            "error": "No searchable text was extracted.",
+            "error_kind": "zero_text",
+            "retryable": False,
+            "diagnostic": _zero_text_diagnostic(path),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+def _record_persisted_ingestion_failure(
+    summary: dict[str, Any],
+    previous: dict[str, Any],
+    path: str,
+) -> None:
+    summary["error_files"] += 1
+    summary["extract_error_files"] += 1
+    diagnostic = previous.get("diagnostic")
+    if not isinstance(diagnostic, dict):
+        diagnostic = (
+            _zero_text_diagnostic(path)
+            if previous.get("error_kind") == "zero_text"
+            else {"path": str(path)[:2_048], "stage": "extract"}
+        )
+    if len(summary["error_details"]) < 100:
+        summary["error_details"].append(dict(diagnostic))
+
+
+def _record_zero_text(
+    state: dict[str, Any],
+    item: dict[str, Any],
+    diagnostic: dict[str, Any],
+) -> int:
+    previous_record_ids = list(item.get("previous_record_ids") or [])
+    deleted = delete_ids(previous_record_ids)
+    delete_catalog_chunks(previous_record_ids)
+    record_path = _record_jsonl_path(item["source_id"], item["rel"])
+    write_jsonl(record_path, [])
+    state["files"][item["key"]] = {
+        "source_id": item["source_id"],
+        "path": item["rel"],
+        "stored_path": item["rel"],
+        "scan_subdir": item.get("scan_subdir") or ".",
+        "resolved_root": item.get("resolved_root") or "",
+        "content_hash": item["content_hash"],
+        "chunker_config": item.get("chunker_config") or {},
+        "record_ids": [],
+        "record_count": 0,
+        "records_path": record_path.relative_to(clean_dir()).as_posix(),
+        "status": "error",
+        "error": "No searchable text was extracted.",
+        "error_kind": "zero_text",
+        "retryable": False,
+        "diagnostic": dict(diagnostic),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return deleted
 
 
 def _prepare_file(
