@@ -250,6 +250,12 @@ class SvnRecentFetchTests(unittest.TestCase):
                     target = self.checkout / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(contents, encoding="utf-8")
+            if "propget" in values:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="<?xml version='1.0'?><properties/>",
+                    stderr="",
+                )
             if "--xml" in values:
                 return SimpleNamespace(
                     returncode=0,
@@ -420,6 +426,54 @@ class SvnRecentFetchTests(unittest.TestCase):
             previous_run_complete=True,
         )
         self.assertNotIn("no_change", cutoff_result)
+
+    def test_same_primary_revision_with_external_refreshes_work_tree(self) -> None:
+        plan = self._plan(recursive=True, updated_within_days=None)
+
+        def runner(arguments):
+            values = list(arguments)
+            if "checkout" in values:
+                (self.checkout / ".svn").mkdir(parents=True)
+                (self.checkout / "external.md").write_text(
+                    "external-v1",
+                    encoding="utf-8",
+                )
+            elif "update" in values:
+                (self.checkout / "external.md").write_text(
+                    "external-v2",
+                    encoding="utf-8",
+                )
+            if "propget" in values:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "<?xml version='1.0'?><properties><target path='.'>"
+                        "<property name='svn:externals'>"
+                        "^/external external.md"
+                        "</property></target></properties>"
+                    ),
+                    stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0,
+                stdout="42\n" if "--show-item" in values else "",
+                stderr="",
+            )
+
+        execute_fetch_plan(plan, self.work, {}, command_runner=runner)
+        unchanged_primary = execute_fetch_plan(
+            plan,
+            self.work,
+            {},
+            command_runner=runner,
+            previous_run_complete=True,
+        )
+
+        self.assertNotIn("no_change", unchanged_primary)
+        self.assertEqual(
+            "external-v2",
+            (self.work / "external.md").read_text(encoding="utf-8"),
+        )
 
     def test_large_xml_uses_complete_stdout_sink(self) -> None:
         files = [

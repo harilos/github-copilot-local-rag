@@ -9,6 +9,7 @@ from source_manager.checkpoints import complete_run, new_run_state
 from source_manager.runner import (
     _previous_success_matches_plan,
     register_source,
+    update_all_sources,
     update_source,
 )
 from source_manager.store import MISSING_ETAG, SourceStore
@@ -45,16 +46,23 @@ class SourceNoChangeSkipTests(unittest.TestCase):
             )
             progress: list[dict] = []
 
-            result = update_source(
-                db_root,
-                key,
-                executor=lambda _plan, _work, _state: {
+            def unchanged_executor(_plan, _work, _state):
+                return {
                     "status": "ok",
                     "documents": 3,
                     "revision": "abc123",
                     "no_change": True,
-                },
+                }
+
+            result = update_source(
+                db_root,
+                key,
+                executor=unchanged_executor,
                 progress_callback=lambda event: progress.append(dict(event)),
+            )
+            update_all_result = update_all_sources(
+                db_root,
+                executor=unchanged_executor,
             )
 
             final = store.read_state(key).payload
@@ -66,11 +74,15 @@ class SourceNoChangeSkipTests(unittest.TestCase):
             ]
         self.assertEqual("skipped", result["status"])
         self.assertEqual("repository_revision_unchanged", result["skip_reason"])
+        self.assertEqual(registered["revision"], result["revision"])
+        self.assertEqual(registered["etag"], result["etag"])
         self.assertEqual("complete", final["status"])
         self.assertEqual(3, final["fetched_count"])
         self.assertEqual(3, final["indexed_confirmed_count"])
         self.assertIn("fetch.no_change_skipped", {event["event"] for event in events})
         self.assertTrue(any(event.get("status") == "skipped" for event in progress))
+        self.assertEqual(1, update_all_result["completed_source_count"])
+        self.assertTrue(update_all_result["snapshot_marker_eligible"])
 
     def test_failed_or_changed_plan_cannot_authorize_skip(self) -> None:
         source = {"source_id": "src_fixture-0123456789ab"}

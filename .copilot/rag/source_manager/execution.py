@@ -401,6 +401,7 @@ def _svn(
         and updated_on_cutoff is None
         and previous_revision
         and revision == previous_revision
+        and not _svn_has_externals(runner, checkout)
     ):
         return {
             "status": "ok",
@@ -454,6 +455,32 @@ def _svn(
         result["inventory_documents"] = inventory_documents
         result["eligible_documents"] = eligible_documents
     return result
+
+
+def _svn_has_externals(runner: CommandRunner, checkout: Path) -> bool:
+    result = runner(
+        [
+            "svn",
+            "propget",
+            "svn:externals",
+            "--recursive",
+            "--xml",
+            str(checkout),
+        ]
+    )
+    if int(getattr(result, "returncode", 1)) != 0:
+        return True
+    try:
+        root = ElementTree.fromstring(
+            str(getattr(result, "stdout", "") or "")
+        )
+    except ElementTree.ParseError:
+        return True
+    return any(
+        element.tag.rsplit("}", 1)[-1] == "property"
+        and element.attrib.get("name") == "svn:externals"
+        for element in root.iter()
+    )
 
 
 def _svn_updated_on_cutoff(

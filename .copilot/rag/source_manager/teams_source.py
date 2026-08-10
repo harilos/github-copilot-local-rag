@@ -337,7 +337,10 @@ def normalize_update_all_result(result: Mapping[str, Any]) -> dict[str, Any]:
     ]
     successful = {"updated", "complete", "success"}
     completed = sum(
-        1 for item in updateable if item.get("status") in successful
+        1
+        for item in updateable
+        if item.get("status") in successful
+        or item.get("skip_reason") == "repository_revision_unchanged"
     )
     value.update(
         {

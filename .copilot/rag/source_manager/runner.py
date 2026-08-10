@@ -527,7 +527,6 @@ def update_source(
             "status": "skipped",
             "skip_reason": "repository_revision_unchanged",
             "message": "リポジトリに変更がないため検索反映を省略しました。",
-            "revision": revision,
             "state_revision": skipped.revision,
         }
 
@@ -757,6 +756,7 @@ def update_all_sources(
         1
         for item in updateable
         if item.get("status") in successful_statuses
+        or item.get("skip_reason") == "repository_revision_unchanged"
     )
     return {
         "status": (
