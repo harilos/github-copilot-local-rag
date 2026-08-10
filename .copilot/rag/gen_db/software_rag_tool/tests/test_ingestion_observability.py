@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -82,6 +83,19 @@ class IngestionObservabilityTests(unittest.TestCase):
             (root / "unsupported.bin").write_bytes(b"binary")
 
             result = self._run(root, output)
+            state_path = output / "logs" / "index_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            broken = next(
+                value
+                for value in state["files"].values()
+                if str(value.get("path") or "").endswith("broken.txt")
+            )
+            broken["content_hash"] = broken["failed_content_hash"]
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            repeated = self._run(root, output)
 
         diagnostics = result["ingestion_diagnostics"]
         self.assertEqual("failure", result["result_status"])
@@ -93,6 +107,15 @@ class IngestionObservabilityTests(unittest.TestCase):
         self.assertIn("empty.txt", diagnostics["zero_text"]["paths"][0])
         self.assertEqual(1, diagnostics["extraction_error"]["count"])
         self.assertIn("broken.txt", diagnostics["extraction_error"]["paths"][0])
+        repeated_diagnostics = repeated["ingestion_diagnostics"]
+        self.assertEqual(1, repeated_diagnostics["unsupported"]["count"])
+        self.assertEqual(1, repeated_diagnostics["zero_text"]["count"])
+        self.assertIn("empty.txt", repeated_diagnostics["zero_text"]["paths"][0])
+        self.assertEqual(1, repeated_diagnostics["extraction_error"]["count"])
+        self.assertIn(
+            "broken.txt",
+            repeated_diagnostics["extraction_error"]["paths"][0],
+        )
 
     def test_clean_run_has_zero_diagnostics_and_ignores_vcs_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

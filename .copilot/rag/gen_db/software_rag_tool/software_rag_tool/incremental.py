@@ -225,6 +225,21 @@ def add_or_update_root(
             )
             status = item["status"]
             if status == "skip":
+                previous = state["files"].get(_state_key(source_id, rel)) or {}
+                if (
+                    previous.get("status") == "indexed"
+                    and int(previous.get("record_count") or 0) == 0
+                ):
+                    _add_ingestion_diagnostic(summary, "zero_text", rel)
+                elif (
+                    previous.get("status") == "error"
+                    and previous.get("error_kind") != "input_read"
+                ):
+                    _add_ingestion_diagnostic(
+                        summary,
+                        "extraction_error",
+                        rel,
+                    )
                 summary["skipped_files"] += 1
                 write_progress(
                     status="running",
@@ -243,12 +258,11 @@ def add_or_update_root(
                     summary["input_error_files"] += 1
                 else:
                     summary["extract_error_files"] += 1
-                    diagnostic = summary["ingestion_diagnostics"][
-                        "extraction_error"
-                    ]
-                    diagnostic["count"] += 1
-                    if len(diagnostic["paths"]) < 100:
-                        diagnostic["paths"].append(rel)
+                    _add_ingestion_diagnostic(
+                        summary,
+                        "extraction_error",
+                        rel,
+                    )
                 if len(summary["error_details"]) < 100:
                     summary["error_details"].append(
                         dict(item.get("diagnostic") or {})
@@ -273,10 +287,7 @@ def add_or_update_root(
                 continue
 
             if not item["records"]:
-                diagnostic = summary["ingestion_diagnostics"]["zero_text"]
-                diagnostic["count"] += 1
-                if len(diagnostic["paths"]) < 100:
-                    diagnostic["paths"].append(rel)
+                _add_ingestion_diagnostic(summary, "zero_text", rel)
             pending.append(item)
             emit_event("file_extracted", path=rel, records=len(item["records"]))
             if len(pending) >= effective_batch_size_files:
@@ -378,6 +389,17 @@ def _unsupported_input_paths(scope: IngestionScope) -> list[str]:
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 paths.append(_safe_stored_path(scope, path))
     return sorted(paths)
+
+
+def _add_ingestion_diagnostic(
+    summary: dict[str, Any],
+    category: str,
+    path: str,
+) -> None:
+    diagnostic = summary["ingestion_diagnostics"][category]
+    diagnostic["count"] += 1
+    if len(diagnostic["paths"]) < 100:
+        diagnostic["paths"].append(path)
 
 
 def _prepare_file(
