@@ -444,6 +444,7 @@ class LocalRagManager:
                     ("2", "処理状況と最近のエラーを見る"),
                     ("3", "検索を修復する"),
                     ("4", "技術情報を表示する"),
+                    ("5", "全件取り直しが必要な状態にする【危険】"),
                     ("0", "戻る"),
                 ),
             )
@@ -458,8 +459,46 @@ class LocalRagManager:
                 self._repair_search_automatically(db_name)
             elif choice == "4":
                 self._show_status(db_name)
+            elif choice == "5":
+                self._request_full_reingest(db_name)
             else:
-                self._invalid_selection("0～4")
+                self._invalid_selection("0～5")
+
+    def _request_full_reingest(self, db_name: str) -> None:
+        if not self._guard_valid_database_target(db_name):
+            return
+        root = self._validated_database_root(db_name)
+        self._print_screen_header("全件取り直しが必要な状態にする【危険】", db_name=db_name)
+        self._print_warning(
+            f"DB名: {db_name}\n"
+            "保持: DB名・説明、Source設定・接続参照・イベント・作業ファイル\n"
+            "削除: 抽出済みデータ、検索索引、進捗・再開状態\n"
+            "この操作だけでは再取得や検索索引の作成を開始しません。\n"
+            "完了後に『このDBの全Sourceを更新・再開する』を実行してください。"
+        )
+        if not self._confirm(f"DB「{db_name}」を全件取り直しが必要な状態にしますか？"):
+            self._print_info("状態を変更しませんでした。")
+            return
+        try:
+            from source_manager.daemon_control import stop_search_daemon
+            from source_manager.full_reingest import request_full_reingest
+            daemon = stop_search_daemon(self.rag_root, timeout_seconds=10.0)
+            if daemon.get("status") not in {"not_running", "stopped"}:
+                raise ManagerError("検索daemonを安全に解放できませんでした。")
+            result = request_full_reingest(root)
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc, operation="全件取り直し要求",
+                stage=str(getattr(exc, "stage", None) or "full_reingest.request"),
+                db_name=db_name, can_resume=True)
+            self._print_error(
+                "全件取り直し要求を完了できませんでした。"
+                "要求マーカーがある場合は削除せず、同じ操作を再実行してください。"
+            )
+            return
+        self._print_success("全件取り直しが必要な状態にしました。"
+                            f"無効化した生成物: {len(result.get('deleted') or []):,}件")
+        self.output("次に『このDBの全Sourceを更新・再開する』を実行してください。")
 
     def _repair_search_automatically(self, db_name: str) -> None:
         self._print_screen_header("検索を修復する", db_name=db_name)

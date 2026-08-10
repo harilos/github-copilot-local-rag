@@ -62,6 +62,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         lower = rag_root / "query" / "search.py"
         child_arguments = _internal_search_arguments(arguments)
         explicit_root = _database_root(rag_root, str(parsed.db or ""))
+        if (
+            explicit_root is not None
+            and (explicit_root / "full-reingest-required.json").is_file()
+        ):
+            _print_full_reingest_required(str(parsed.db or ""))
+            return 2
         catalog_before = (
             _catalog_fingerprint(explicit_root)
             if explicit_root is not None
@@ -115,6 +121,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not isinstance(payload, dict):
         _write_bytes(sys.stdout, completed.stdout)
         return int(completed.returncode)
+    if mode == "search":
+        selected_db = _payload_database_name(payload, parsed.db)
+        selected_root = _database_root(rag_root, selected_db)
+        if selected_root is not None and (
+            selected_root / "full-reingest-required.json"
+        ).is_file():
+            _print_full_reingest_required(selected_db)
+            return 2
     if deadline is not None and time.monotonic() >= deadline:
         timeout_payload = _wrapper_timeout_payload(
             mode,
@@ -225,6 +239,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _print_json(output, ascii_safe=_is_pointer(output))
     return int(completed.returncode)
+
+
+def _print_full_reingest_required(db_name: str) -> None:
+    _print_json(
+        {
+            "status": "full_reingest_required", "db": db_name,
+            "full_reingest_required": True,
+            "error": "全件取り直しが必要です。ManagerでこのDBの全Sourceを更新してください。",
+        },
+        ascii_safe=False,
+    )
 
 
 def _parse_arguments(
