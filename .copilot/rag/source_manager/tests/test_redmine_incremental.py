@@ -392,7 +392,7 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
             def batch(*_args):
                 counts["batch"] += 1
 
-            def run() -> dict[str, object]:
+            def run(force: bool = False) -> dict[str, object]:
                 return execute_fetch_plan(
                     plan,
                     work,
@@ -400,6 +400,7 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
                     http_get=getter,
                     environment={"REDMINE_TEST_KEY": "[REDACTED]"},
                     batch_callback=batch,
+                    _force_full_materialization=force,
                 )
 
             first = run()
@@ -419,14 +420,19 @@ class RedmineIncrementalRefreshTests(unittest.TestCase):
             self.assertEqual(400, counts["detail"])
             self.assertEqual(8, counts["batch"])
 
+            forced = run(True)
+            self.assertEqual(400, forced["fetched_this_run"])
+            self.assertEqual(800, counts["detail"])
+            self.assertEqual(16, counts["batch"])
+
             updated[301] = "2026-07-29T01:00:01Z"
             changed = run()
             self.assertEqual(1, changed["fetched_this_run"])
-            self.assertEqual(401, counts["detail"])
-            self.assertEqual(9, counts["batch"])
+            self.assertEqual(801, counts["detail"])
+            self.assertEqual(17, counts["batch"])
             run()
-            self.assertEqual(401, counts["detail"])
-            self.assertEqual(9, counts["batch"])
+            self.assertEqual(801, counts["detail"])
+            self.assertEqual(17, counts["batch"])
 
     def test_localhost_http_refresh_keeps_credentials_out_of_output(self) -> None:
         secret = "LOCAL-TEST-SECRET-DO-NOT-LOG-7f2a4c9e"

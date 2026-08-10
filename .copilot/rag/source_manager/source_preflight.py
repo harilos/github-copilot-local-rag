@@ -207,6 +207,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
         inventory_callback: Any,
         updated_on_cutoff: str | None,
         progress_callback: Any,
+        _force_full_materialization: bool = False,
     ) -> dict[str, Any]:
         required = bool(
             getattr(progress_callback, _REDMINE_REQUIRED_ATTR, False)
@@ -224,6 +225,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=updated_on_cutoff,
                 progress_callback=progress_callback,
+                **({"_force_full_materialization": True} if _force_full_materialization else {}),
             )
 
         # A resumed first import already has a stable issue inventory. Confirm
@@ -246,6 +248,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=updated_on_cutoff,
                 progress_callback=progress_callback,
+                **({"_force_full_materialization": True} if _force_full_materialization else {}),
             )
 
         # A new first import learns the approximate count from the inventory.
@@ -272,6 +275,7 @@ def _install_redmine_preflight(execution: Any, runner: Any) -> None:
             inventory_callback=confirmed_inventory,
             updated_on_cutoff=updated_on_cutoff,
             progress_callback=progress_callback,
+            **({"_force_full_materialization": True} if _force_full_materialization else {}),
         )
 
     execution._redmine = redmine
@@ -347,6 +351,7 @@ def _install_gitlab_issues_preflight(
         updated_after: str | None,
         progress_callback: Any,
         no_change_callback: Any = None,
+        _force_full_materialization: bool = False,
     ) -> dict[str, Any]:
         required = bool(
             getattr(progress_callback, _REDMINE_REQUIRED_ATTR, False)
@@ -366,6 +371,7 @@ def _install_gitlab_issues_preflight(
                 updated_after=updated_after,
                 progress_callback=progress_callback,
                 no_change_callback=no_change_callback,
+                **({"_force_full_materialization": True} if _force_full_materialization else {}),
             )
 
         if stable_issue_ids is not None:
@@ -395,6 +401,7 @@ def _install_gitlab_issues_preflight(
                 updated_after=updated_after,
                 progress_callback=progress_callback,
                 no_change_callback=no_change_callback,
+                **({"_force_full_materialization": True} if _force_full_materialization else {}),
             )
 
         def confirmed_inventory(
@@ -430,6 +437,7 @@ def _install_gitlab_issues_preflight(
             updated_after=updated_after,
             progress_callback=progress_callback,
             no_change_callback=no_change_callback,
+            **({"_force_full_materialization": True} if _force_full_materialization else {}),
         )
 
     execution.fetch_gitlab_issues = gitlab_issues

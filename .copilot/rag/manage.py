@@ -444,6 +444,7 @@ class LocalRagManager:
                     ("2", "処理状況と最近のエラーを見る"),
                     ("3", "検索を修復する"),
                     ("4", "技術情報を表示する"),
+                    ("5", "全件取り直しが必要な状態にする【危険】"),
                     ("0", "戻る"),
                 ),
             )
@@ -458,8 +459,40 @@ class LocalRagManager:
                 self._repair_search_automatically(db_name)
             elif choice == "4":
                 self._show_status(db_name)
+            elif choice == "5":
+                self._reset_derived_artifacts(db_name)
             else:
-                self._invalid_selection("0～4")
+                self._invalid_selection("0～5")
+
+    def _reset_derived_artifacts(self, db_name: str) -> None:
+        if not self._guard_valid_database_target(db_name):
+            return
+        self._print_screen_header("全件取り直しが必要な状態にする【危険】", db_name=db_name)
+        self.output(
+            "Source設定・取得済みwork・イベント・Source Link・DB情報は保持します。\n"
+            "clean data、catalog、検索index、取込stateを削除します。\n"
+            "この操作だけでは取得・ADD・embedding・再構築・再試行を開始しません。"
+        )
+        self._print_warning("別のManagerでSource更新や再構築を実行していないことを確認してください。")
+        if not self._confirm(f"DB「{db_name}」をリセットしますか？"):
+            self._print_info("リセットを開始しませんでした。")
+            return
+        try:
+            from source_manager.artifact_reset import reset_derived_artifacts
+            from source_manager.daemon_control import stop_search_daemon
+            stopped = stop_search_daemon(self.rag_root, timeout_seconds=10.0)
+            result = reset_derived_artifacts(
+                self._database_root(db_name), daemon_status=str(stopped.get("status") or "")
+            )
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc, operation="派生成果物のリセット",
+                stage=str(getattr(exc, "stage", None) or "artifact_reset"),
+                db_name=db_name, can_resume=True,
+            )
+            return
+        self._print_success(f"派生成果物をリセットしました（削除: {len(result['removed'])}件）。")
+        self._print_info("次回の全Source更新で現在範囲を全件取り直します。")
 
     def _repair_search_automatically(self, db_name: str) -> None:
         self._print_screen_header("検索を修復する", db_name=db_name)

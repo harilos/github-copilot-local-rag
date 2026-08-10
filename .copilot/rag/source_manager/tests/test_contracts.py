@@ -1994,8 +1994,10 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             fetch={"root_env": "RAG_SHAREPOINT_ROOT"},
         )
         with mock.patch(
-            "source_manager.runner._is_windows",
-            return_value=False,
+            "source_manager.runner._is_windows", return_value=False
+        ), mock.patch(
+            "source_manager.runner._search_artifacts_ready_for_all_sources",
+            return_value=True,
         ):
             result = update_all_sources(self.db_root)
         self.assertEqual("ok", result["status"])

@@ -350,6 +350,7 @@ class GitLabIssueSourceContracts(unittest.TestCase):
         updated_after: str | None = None,
         progress_callback: Any = None,
         settings: Mapping[str, Any] | None = None,
+        force_full_materialization: bool = False,
     ) -> dict[str, Any]:
         return fetch_gitlab_issues(
             dict(settings or _settings()),
@@ -365,7 +366,19 @@ class GitLabIssueSourceContracts(unittest.TestCase):
             updated_after=updated_after,
             progress_callback=progress_callback,
             no_change_callback=no_change_callback,
+            _force_full_materialization=force_full_materialization,
         )
+
+    def test_force_full_materialization_fetches_unchanged_inventory(self) -> None:
+        first = _GitLabApi({1: [_summary(1)]})
+        self.fetch(first)
+        unchanged = _GitLabApi({1: [_summary(1)]})
+        self.fetch(unchanged)
+        self.assertEqual([], unchanged.detail_iids())
+        forced = _GitLabApi({1: [_summary(1)]})
+        result = self.fetch(forced, force_full_materialization=True)
+        self.assertEqual([1], forced.detail_iids())
+        self.assertEqual(1, result["fetched_this_run"])
 
     def test_project_path_is_encoded_and_open_and_closed_inventory_is_complete(
         self,

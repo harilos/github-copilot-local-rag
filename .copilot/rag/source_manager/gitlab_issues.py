@@ -313,6 +313,7 @@ def fetch_gitlab_issues(
     updated_after: str | None,
     progress_callback: ProgressCallback | None,
     no_change_callback: ItemCallback | None = None,
+    _force_full_materialization: bool = False,
 ) -> dict[str, Any]:
     """Fetch Issue details and discussions serially, five Issues per ADD batch."""
 
@@ -371,10 +372,14 @@ def fetch_gitlab_issues(
             progress_callback=progress_callback,
         )
         inventory_count = len(inventory)
-        changed = _changed_issue_iids(
-            inventory,
-            issues_directory,
-            updated_after=updated_after,
+        changed = (
+            [item.iid for item in inventory]
+            if _force_full_materialization
+            else _changed_issue_iids(
+                inventory,
+                issues_directory,
+                updated_after=updated_after,
+            )
         )
         # Freeze the update queue in one state-file compare-and-swap.
         if inventory_snapshot_callback is not None:

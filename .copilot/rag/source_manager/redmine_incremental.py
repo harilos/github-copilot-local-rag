@@ -244,9 +244,10 @@ def install_redmine_incremental_refresh() -> None:
         inventory_callback: Any,
         updated_on_cutoff: str | None,
         progress_callback: Any,
+        _force_full_materialization: bool = False,
     ) -> dict[str, Any]:
         # Interrupted runs must resume against their frozen inventory unchanged.
-        if stable_issue_ids is not None or resume_count:
+        if _force_full_materialization or stable_issue_ids is not None or resume_count:
             return original(
                 settings,
                 work,

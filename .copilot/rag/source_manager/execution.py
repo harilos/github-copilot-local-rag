@@ -84,6 +84,7 @@ def execute_fetch_plan(
     clock: Callable[[], datetime] | None = None,
     progress_callback: HttpProgressCallback | None = None,
     previous_run_complete: bool = False,
+    _force_full_materialization: bool = False,
 ) -> dict[str, Any]:
     runner = command_runner or _run_command
     getter = http_get or _http_get
@@ -152,6 +153,7 @@ def execute_fetch_plan(
                 inventory_callback=inventory_callback,
                 updated_on_cutoff=cutoff,
                 progress_callback=progress_callback,
+                _force_full_materialization=_force_full_materialization,
             )
         elif provider == "gitlab_issues":
             updated_after = gitlab_issues_updated_after(
@@ -187,6 +189,7 @@ def execute_fetch_plan(
                 updated_after=updated_after,
                 progress_callback=progress_callback,
                 no_change_callback=no_change_callback,
+                _force_full_materialization=_force_full_materialization,
             )
         elif provider == "sharepoint":
             if not _is_windows():

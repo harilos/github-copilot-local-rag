@@ -8,6 +8,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import closing
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Mapping
@@ -57,6 +58,7 @@ from .subprocess_stream import (
 FetchExecutor = Callable[[dict[str, Any], Path, dict[str, Any]], Mapping[str, Any]]
 CommandRunner = Callable[[list[str]], Any]
 MetadataPublisher = Callable[[Path, Mapping[str, Any], Path], None]
+_FORCE_FULL_MATERIALIZATION = ContextVar("force_full_materialization", default=False)
 
 
 def _emit_progress(
@@ -253,6 +255,7 @@ def update_source(
     provider_command_runner = command_runner
     provider_http_get = http_get
     provider_environment = environment
+    force_full_materialization = _FORCE_FULL_MATERIALIZATION.get()
     existing_state = store.read_state(local_source_key)
     if (
         source.payload.get("source_id")
@@ -310,6 +313,7 @@ def update_source(
             metadata_publisher=metadata_publisher,
             clock=clock,
             progress_callback=progress_callback,
+            force_full_materialization=force_full_materialization,
         )
     if (
         source.payload.get("source_type") == "gitlab_issues"
@@ -329,19 +333,21 @@ def update_source(
             metadata_publisher=metadata_publisher,
             clock=clock,
             progress_callback=progress_callback,
+            force_full_materialization=force_full_materialization,
         )
     plan = store.plan(source.payload)
     state_stored = existing_state
-    previous_run_complete = _previous_success_matches_plan(
-        source.payload,
-        state_stored.payload,
-        plan.plan_etag,
+    previous_run_complete = not force_full_materialization and (
+        _previous_success_matches_plan(
+            source.payload, state_stored.payload, plan.plan_etag
+        )
     )
     if (
         state_stored.payload
         and state_stored.payload.get("phase") == "reflect"
         and int(state_stored.payload.get("pending_count") or 0) > 0
         and source.payload.get("source_type") != "sharepoint"
+        and not force_full_materialization
     ):
         return _resume_add_only(
             store,
@@ -382,7 +388,11 @@ def update_source(
         },
     )
     effective_executor = executor
-    if (
+    if force_full_materialization and source.payload.get("source_type") == "other":
+        effective_executor = lambda _plan, work, _state: {
+            "status": "ok", "documents": _managed_work_document_count(work)
+        }
+    elif (
         effective_executor is None
         and python_executable is not None
         and rag_root is not None
@@ -398,6 +408,7 @@ def update_source(
                 clock=clock,
                 progress_callback=progress_callback,
                 previous_run_complete=previous_run_complete,
+                _force_full_materialization=force_full_materialization,
             )
         )
     if effective_executor is None:
@@ -699,6 +710,36 @@ def _search_artifacts_match_completed_source(
     )
 
 
+def _managed_work_document_count(work: Path) -> int:
+    return sum(1 for path in Path(work).rglob("*") if path.is_file() and not path.is_symlink())
+
+
+def _search_artifacts_ready_for_all_sources(db_root: Path, items: list[dict[str, Any]]) -> bool:
+    if not Path(db_root).is_dir():
+        return False
+    store = SourceStore(db_root)
+    def ready(item: dict[str, Any]) -> bool:
+        key = str(item.get("local_source_key") or "")
+        if not key or item.get("status") == "invalid":
+            return False
+        try:
+            source, state = store.read_source(key), store.read_state(key)
+        except (OSError, SourceManagerError):
+            return False
+        return _search_artifacts_match_completed_source(
+            Path(db_root), source.payload, state.payload
+        )
+    return bool(items) and all(ready(item) for item in items)
+
+
+def _update_source_for_run(db_root: Path, key: str, force: bool, **kwargs: Any) -> dict[str, Any]:
+    token = _FORCE_FULL_MATERIALIZATION.set(force)
+    try:
+        return update_source(db_root, key, **kwargs)
+    finally:
+        _FORCE_FULL_MATERIALIZATION.reset(token)
+
+
 def _previous_success_matches_plan(
     source: Mapping[str, Any],
     state: Mapping[str, Any],
@@ -729,6 +770,10 @@ def update_all_sources(
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     source_items = list_sources(db_root)
+    force_full_materialization = not _search_artifacts_ready_for_all_sources(
+        Path(db_root),
+        source_items,
+    )
     for source_index, item in enumerate(source_items, start=1):
         key = str(item.get("local_source_key") or "")
         if not key or item.get("status") == "invalid":
@@ -744,6 +789,7 @@ def update_all_sources(
             item.get("source_type") == "other"
             and item.get("source_id")
             and not item.get("metadata_sync_pending")
+            and not force_full_materialization
         ):
             results.append(
                 {
@@ -776,9 +822,10 @@ def update_all_sources(
             continue
         try:
             results.append(
-                update_source(
+                _update_source_for_run(
                     db_root,
                     key,
+                    force_full_materialization,
                     executor=executor,
                     python_executable=python_executable,
                     rag_root=rag_root,
@@ -1661,6 +1708,7 @@ def _update_redmine_source(
     metadata_publisher: MetadataPublisher | None,
     clock: Callable[[], datetime] | None,
     progress_callback: ProgressCallback | None,
+    force_full_materialization: bool,
 ) -> dict[str, Any]:
     """Fetch Redmine serially and reflect each stable ADD batch."""
     plan = store.plan(source.payload)
@@ -1910,6 +1958,7 @@ def _update_redmine_source(
             inventory_callback=inventory_checkpoint,
             clock=clock,
             progress_callback=redmine_progress,
+            _force_full_materialization=force_full_materialization,
         )
     except Exception as exc:
         stored = state_holder[0]
@@ -2053,6 +2102,7 @@ def _update_gitlab_issues_source(
     metadata_publisher: MetadataPublisher | None,
     clock: Callable[[], datetime] | None,
     progress_callback: ProgressCallback | None,
+    force_full_materialization: bool,
 ) -> dict[str, Any]:
     """Fetch GitLab Issues serially and reflect stable batches of five."""
 
@@ -2347,6 +2397,7 @@ def _update_gitlab_issues_source(
             inventory_snapshot_callback=inventory_snapshot,
             clock=clock,
             progress_callback=gitlab_progress,
+            _force_full_materialization=force_full_materialization,
         )
     except Exception as exc:
         stored = state_holder[0]
