@@ -40,7 +40,6 @@ from .github_content import (
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
 from .providers import validate_provider_config
-from .full_reingest import finish_full_reingest, full_reingest_required
 from .redmine import (
     REDMINE_CUTOFF_STATE_KEY,
     redmine_updated_on_cutoff,
@@ -333,8 +332,7 @@ def update_source(
         )
     plan = store.plan(source.payload)
     state_stored = existing_state
-    reingest_required = full_reingest_required(Path(db_root))
-    previous_run_complete = not reingest_required and _previous_success_matches_plan(
+    previous_run_complete = _previous_success_matches_plan(
         source.payload,
         state_stored.payload,
         plan.plan_etag,
@@ -384,13 +382,6 @@ def update_source(
         },
     )
     effective_executor = executor
-    if (effective_executor is None and reingest_required
-            and source.payload.get("source_type") == "other"):
-        effective_executor = lambda _plan, work_value, _state: {
-            "status": "ok",
-            "documents": sum(1 for path in work_value.rglob("*")
-                             if path.is_file() and not path.is_symlink()),
-        }
     if (
         effective_executor is None
         and python_executable is not None
@@ -737,7 +728,6 @@ def update_all_sources(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
-    reingest_required = full_reingest_required(Path(db_root))
     source_items = list_sources(db_root)
     for source_index, item in enumerate(source_items, start=1):
         key = str(item.get("local_source_key") or "")
@@ -754,7 +744,6 @@ def update_all_sources(
             item.get("source_type") == "other"
             and item.get("source_id")
             and not item.get("metadata_sync_pending")
-            and not reingest_required
         ):
             results.append(
                 {
@@ -861,7 +850,7 @@ def update_all_sources(
         if item.get("status") in successful_statuses
         or item.get("skip_reason") == "repository_revision_unchanged"
     )
-    output = {
+    return {
         "status": (
             "ok"
             if not failed and not partial
@@ -878,24 +867,6 @@ def update_all_sources(
         ),
         "results": results,
     }
-    if reingest_required:
-        store = SourceStore(Path(db_root))
-        artifacts_complete = bool(
-            output["snapshot_marker_eligible"]
-            and all(
-                _search_artifacts_match_completed_source(
-                    Path(db_root),
-                    store.read_source(str(item["local_source_key"])).payload,
-                    store.read_state(str(item["local_source_key"])).payload,
-                )
-                for item in results
-                if item.get("local_source_key")
-            )
-        )
-        output["full_reingest_completed"] = finish_full_reingest(
-            Path(db_root), output, artifacts_complete=artifacts_complete)
-        output["full_reingest_required"] = full_reingest_required(Path(db_root))
-    return output
 
 
 def _emit_source_count_progress(

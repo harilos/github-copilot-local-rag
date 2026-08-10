@@ -142,16 +142,6 @@ def main() -> None:
             scan_subdir,
         ),
     }
-    if (db_root / "full-reingest-required.json").is_file():
-        output.update(
-            {
-                "status": "full_reingest_required", "phase": "awaiting_all_source_update",
-                "full_reingest_required": True,
-                "appears_active": False,
-                "can_resume": False,
-                "resume_command": None,
-            }
-        )
 
     if args.json:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
@@ -294,8 +284,6 @@ def _print_human(output: dict[str, Any]) -> None:
     if version:
         print(f"Version: created_at={version.get('created_at')} db_hash={version.get('db_hash')}")
     print(f"Status: {output['status']} phase={output['phase']} updated_at={output['updated_at']}")
-    if output.get("full_reingest_required"):
-        print("Action: ManagerでこのDBの全Sourceを更新・再開してください。")
     print(f"Root:                {output['root']}")
     print(f"Root display name:   {output['root_display_name']}")
     print(f"Scan subdirectory:   {output['scan_subdir']}")

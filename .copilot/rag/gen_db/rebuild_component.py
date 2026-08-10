@@ -20,7 +20,6 @@ from software_rag_tool.incremental import add_or_update_root
 from software_rag_tool.jsonl import read_jsonl
 from software_rag_tool.manifest import write_manifest
 from software_rag_tool.paths import clean_dir, dbs_dir, logs_dir
-from software_rag_tool.progress import write_progress
 from software_rag_tool.store import collection_count, load_records, reset_collection, upsert_records
 
 
@@ -36,19 +35,7 @@ def main() -> None:
     args = parser.parse_args()
 
     db_name = require_db_name(args.db)
-    db_root = ensure_db_layout(dbs_dir(), db_name)
-    os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
-    write_progress(
-        status="running", phase=f"rebuild.{args.component}",
-        operation="rebuild", operation_pid=os.getpid(),
-    )
-    try:
-        _rebuild(args, db_name)
-    except BaseException as exc:
-        write_progress(status="failed", phase="rebuild.failed", last_error=type(exc).__name__, operation_pid=0)
-        raise
-    else:
-        write_progress(status="completed", phase="rebuild.complete", last_error="", operation_pid=0)
+    _rebuild(args, db_name)
 
 
 def _rebuild(args: argparse.Namespace, db_name: str) -> None:

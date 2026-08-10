@@ -147,15 +147,6 @@ def _public_database(item: dict[str, Any], dbs_root: Path) -> dict[str, Any]:
     output["name"] = name
     output["title"] = str(item.get("title") or name)
     output["query_hint"] = str(item.get("query_hint") or "")
-    if root is not None and (root / "full-reingest-required.json").is_file():
-        output.update(
-            {
-                "full_reingest_required": True, "content_summary": (
-                    "全件取り直しが必要です。Managerで全Sourceを更新してください。"
-                ),
-                "content_summary_status": "full_reingest_required",
-            }
-        )
     return output
 
 
