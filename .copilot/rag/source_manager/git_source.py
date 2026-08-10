@@ -281,7 +281,20 @@ def _git_fetch(
                     "HEAD",
                 )
             )
-            if int(getattr(previous_result, "returncode", 1)) == 0:
+            worktree_result = command_runner(
+                _git_command(
+                    f"--git-dir={control}",
+                    f"--work-tree={work}",
+                    "diff-index",
+                    "--quiet",
+                    "HEAD",
+                    "--",
+                )
+            )
+            if (
+                int(getattr(previous_result, "returncode", 1)) == 0
+                and int(getattr(worktree_result, "returncode", 1)) == 0
+            ):
                 previous_revision = str(
                     getattr(previous_result, "stdout", "") or ""
                 ).strip()

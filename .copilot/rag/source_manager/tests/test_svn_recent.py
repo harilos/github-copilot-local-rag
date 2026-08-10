@@ -553,6 +553,20 @@ class SvnRecentFetchTests(unittest.TestCase):
         )
         self.assertTrue(unchanged["no_change"])
 
+        (self.work / "all.md").unlink()
+        restored = execute_fetch_plan(
+            plan,
+            self.work,
+            {},
+            command_runner=self._runner(files),
+            previous_run_complete=True,
+        )
+        self.assertNotIn("no_change", restored)
+        self.assertEqual(
+            "all",
+            (self.work / "all.md").read_text(encoding="utf-8"),
+        )
+
         cutoff_result = execute_fetch_plan(
             self._plan(recursive=True, updated_within_days=30),
             self.work,

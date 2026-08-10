@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Mapping
@@ -490,6 +491,14 @@ def update_source(
                 "no-change skip requires a matching completed Source run",
                 stage=f"fetch.{source.payload['source_type']}",
             )
+    if (
+        outcome.get("no_change") is True
+        and _search_artifacts_match_completed_source(
+            Path(db_root),
+            source.payload,
+            state_stored.payload,
+        )
+    ):
         for field in ("fetched_count", "indexed_confirmed_count"):
             runtime_state[field] = int(state_stored.payload.get(field) or 0)
         completed = complete_run(runtime_state)
@@ -605,6 +614,89 @@ def update_source(
             progress_callback=progress_callback,
         )
     return result
+
+
+def _search_artifacts_match_completed_source(
+    db_root: Path,
+    source: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    source_id = str(source.get("source_id") or "").strip()
+    catalog_path = db_root / "catalog.sqlite"
+    manifest_path = db_root / "index" / "manifest.json"
+    chroma_path = db_root / "index" / "chroma" / "chroma.sqlite3"
+    db_config_path = db_root / "db.json"
+    required = (
+        catalog_path,
+        manifest_path,
+        chroma_path,
+        db_config_path,
+    )
+    if not source_id or any(
+        not path.is_file() or path.is_symlink() for path in required
+    ):
+        return False
+    try:
+        expected_documents = int(state.get("indexed_confirmed_count") or 0)
+        if expected_documents < 0:
+            return False
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        db_config = json.loads(db_config_path.read_text(encoding="utf-8"))
+        collection = str(db_config.get("collection") or "").strip()
+        if not isinstance(manifest, dict) or not collection:
+            return False
+        manifest_count = int(manifest.get("record_count") or 0)
+        if manifest_count < 0:
+            return False
+
+        catalog_uri = f"{catalog_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(catalog_uri, uri=True)) as connection:
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(document)")
+            }
+            if not {"doc_pk", "source_id"}.issubset(columns):
+                return False
+            visibility = (
+                "AND visible_until IS NULL"
+                if "visible_until" in columns
+                else ""
+            )
+            source_documents = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT doc_pk) FROM document "
+                    f"WHERE source_id = ? {visibility}",
+                    (source_id,),
+                ).fetchone()[0]
+            )
+            catalog_chunks = int(
+                connection.execute("SELECT COUNT(*) FROM chunk").fetchone()[0]
+            )
+
+        chroma_uri = f"{chroma_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(chroma_uri, uri=True)) as connection:
+            collection_row = connection.execute(
+                "SELECT id FROM collections WHERE name = ?",
+                (collection,),
+            ).fetchone()
+            if collection_row is None:
+                return False
+            chroma_chunks = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM embeddings AS e "
+                    "JOIN segments AS s ON s.id = e.segment_id "
+                    "WHERE s.collection = ?",
+                    (collection_row[0],),
+                ).fetchone()[0]
+            )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error):
+        return False
+    return bool(
+        source_documents == expected_documents
+        and (expected_documents == 0 or catalog_chunks > 0)
+        and catalog_chunks == chroma_chunks
+        and manifest_count in {0, chroma_chunks}
+    )
 
 
 def _previous_success_matches_plan(

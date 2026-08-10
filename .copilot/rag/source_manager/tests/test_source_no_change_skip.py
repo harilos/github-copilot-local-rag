@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from source_manager.checkpoints import complete_run, new_run_state
@@ -44,6 +46,11 @@ class SourceNoChangeSkipTests(unittest.TestCase):
                 expected_revision=0,
                 expected_etag=MISSING_ETAG,
             )
+            self._create_search_artifacts(
+                db_root,
+                source_id="src_fixture-0123456789ab",
+                document_count=3,
+            )
             progress: list[dict] = []
 
             def unchanged_executor(_plan, _work, _state):
@@ -84,6 +91,56 @@ class SourceNoChangeSkipTests(unittest.TestCase):
         self.assertEqual(1, update_all_result["completed_source_count"])
         self.assertTrue(update_all_result["snapshot_marker_eligible"])
 
+    def test_missing_or_inconsistent_index_artifacts_force_reflection(self) -> None:
+        for damage in ("catalog_missing", "source_count_mismatch"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as temporary:
+                db_root = Path(temporary) / "example-rag"
+                db_root.mkdir()
+                registered = register_source(
+                    db_root,
+                    source_type="github",
+                    display_name="fixture",
+                    fetch={
+                        "repository_url": "https://example.invalid/repository.git",
+                        "include_paths": [],
+                        "updated_within_days": None,
+                    },
+                    source_id="src_fixture-0123456789ab",
+                )
+                key = registered["local_source_key"]
+                store = SourceStore(db_root)
+                source = store.read_source(key)
+                state = new_run_state(store.plan(source.payload))
+                state["fetched_count"] = 3
+                state["indexed_confirmed_count"] = 3
+                store.save_state(
+                    key,
+                    complete_run(state),
+                    expected_revision=0,
+                    expected_etag=MISSING_ETAG,
+                )
+                self._create_search_artifacts(
+                    db_root,
+                    source_id="src_fixture-0123456789ab",
+                    document_count=2 if damage == "source_count_mismatch" else 3,
+                )
+                if damage == "catalog_missing":
+                    (db_root / "catalog.sqlite").unlink()
+
+                result = update_source(
+                    db_root,
+                    key,
+                    executor=lambda *_: {
+                        "status": "ok",
+                        "documents": 3,
+                        "revision": "abc123",
+                        "no_change": True,
+                    },
+                )
+
+                self.assertEqual("fetched", result["status"])
+                self.assertNotIn("skip_reason", result)
+
     def test_failed_or_changed_plan_cannot_authorize_skip(self) -> None:
         source = {"source_id": "src_fixture-0123456789ab"}
         complete = {
@@ -110,6 +167,64 @@ class SourceNoChangeSkipTests(unittest.TestCase):
         self.assertFalse(
             _previous_success_matches_plan({}, complete, "same")
         )
+
+    @staticmethod
+    def _create_search_artifacts(
+        db_root: Path,
+        *,
+        source_id: str,
+        document_count: int,
+    ) -> None:
+        collection = "example-rag"
+        (db_root / "db.json").write_text(
+            json.dumps({"collection": collection}),
+            encoding="utf-8",
+        )
+        index = db_root / "index"
+        chroma = index / "chroma"
+        chroma.mkdir(parents=True)
+        (index / "manifest.json").write_text(
+            json.dumps({"record_count": document_count}),
+            encoding="utf-8",
+        )
+        with closing(sqlite3.connect(db_root / "catalog.sqlite")) as connection:
+            connection.execute(
+                "CREATE TABLE document ("
+                "doc_pk TEXT, source_id TEXT, visible_until TEXT)"
+            )
+            connection.execute("CREATE TABLE chunk (chunk_pk TEXT)")
+            connection.executemany(
+                "INSERT INTO document VALUES (?, ?, NULL)",
+                [
+                    (f"doc-{index}", source_id)
+                    for index in range(document_count)
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO chunk VALUES (?)",
+                [(f"chunk-{index}",) for index in range(document_count)],
+            )
+            connection.commit()
+        with closing(sqlite3.connect(chroma / "chroma.sqlite3")) as connection:
+            connection.execute("CREATE TABLE collections (id TEXT, name TEXT)")
+            connection.execute("CREATE TABLE segments (id TEXT, collection TEXT)")
+            connection.execute("CREATE TABLE embeddings (id TEXT, segment_id TEXT)")
+            connection.execute(
+                "INSERT INTO collections VALUES (?, ?)",
+                ("collection-id", collection),
+            )
+            connection.execute(
+                "INSERT INTO segments VALUES (?, ?)",
+                ("segment-id", "collection-id"),
+            )
+            connection.executemany(
+                "INSERT INTO embeddings VALUES (?, ?)",
+                [
+                    (f"embedding-{index}", "segment-id")
+                    for index in range(document_count)
+                ],
+            )
+            connection.commit()
 
 
 if __name__ == "__main__":

@@ -285,6 +285,21 @@ class GenericGitSourceTests(unittest.TestCase):
             self.assertNotIn("no_change", first)
             self.assertTrue(unchanged["no_change"])
 
+            (work / "tracked.md").unlink()
+            restored = _git_fetch(
+                settings,
+                work,
+                execution._run_command,
+                updated_on_cutoff=None,
+                execution=execution,
+                previous_run_complete=True,
+            )
+            self.assertNotIn("no_change", restored)
+            self.assertEqual(
+                "v1",
+                (work / "tracked.md").read_text(encoding="utf-8"),
+            )
+
             tracked.write_text("v2", encoding="utf-8")
             self.run_git("-C", str(repository), "add", ".")
             self.run_git("-C", str(repository), "commit", "-qm", "change")

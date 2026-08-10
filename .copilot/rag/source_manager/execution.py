@@ -402,6 +402,11 @@ def _svn(
         and previous_revision
         and revision == previous_revision
         and not _svn_has_externals(runner, checkout)
+        and _svn_materialized_tree_matches(
+            checkout,
+            work,
+            recursive=bool(settings.get("recursive", True)),
+        )
     ):
         return {
             "status": "ok",
@@ -455,6 +460,53 @@ def _svn(
         result["inventory_documents"] = inventory_documents
         result["eligible_documents"] = eligible_documents
     return result
+
+
+def _svn_materialized_tree_matches(
+    checkout: Path,
+    work: Path,
+    *,
+    recursive: bool,
+) -> bool:
+    def inventory(root: Path, *, skip_metadata: bool) -> dict[str, int] | None:
+        values: dict[str, int] = {}
+        try:
+            if recursive:
+                walker = os.walk(root, topdown=True, followlinks=False)
+                for directory, child_names, file_names in walker:
+                    if skip_metadata:
+                        child_names[:] = [
+                            name
+                            for name in child_names
+                            if name.casefold() != ".svn"
+                        ]
+                    directory_path = Path(directory)
+                    for name in file_names:
+                        candidate = directory_path / name
+                        metadata = os.lstat(candidate)
+                        if (
+                            _is_link_or_reparse(candidate, metadata)
+                            or not stat.S_ISREG(metadata.st_mode)
+                        ):
+                            return None
+                        relative = candidate.relative_to(root).as_posix()
+                        values[relative] = int(metadata.st_size)
+            else:
+                for candidate in root.iterdir():
+                    if skip_metadata and candidate.name.casefold() == ".svn":
+                        continue
+                    metadata = os.lstat(candidate)
+                    if stat.S_ISREG(metadata.st_mode):
+                        if _is_link_or_reparse(candidate, metadata):
+                            return None
+                        values[candidate.name] = int(metadata.st_size)
+        except (OSError, ValueError):
+            return None
+        return values
+
+    checkout_files = inventory(checkout, skip_metadata=True)
+    work_files = inventory(work, skip_metadata=False)
+    return checkout_files is not None and checkout_files == work_files
 
 
 def _svn_has_externals(runner: CommandRunner, checkout: Path) -> bool:
