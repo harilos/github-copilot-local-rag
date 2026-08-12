@@ -104,7 +104,7 @@ DBの内容更新から30日以上たっている場合は、同じチャット�
 ### 必要なもの
 
 - macOS、Linux、またはWindows x64
-- macOS/Linuxと管理用build端末ではPython 3.10以上
+- source installと管理用build端末ではCPython 3.13.x（>=3.13,<3.14）
 - Windows一般利用者向けZIPではsystem Python、`py` launcher、PATH変更は不要
 - ローカルコマンドを実行できるGitHub Copilot環境
 - macOS/Linuxの初期設定時に依存packageとmodelを取得できるnetwork
@@ -128,7 +128,7 @@ Windows PowerShell:
 
 管理者・開発者がsource cloneからWindowsへinstallする場合は、
 `%USERPROFILE%\.copilot\rag\query\.venv`
-がなければ`py -3`、`python`、`python3`の順にPython 3.10以上を検出し、
+がなければ`py -3`、`python`、`python3`の順にCPython 3.13.xを検出し、
 `.venv`、依存package、model検証、`list_dbs`確認まで同じコマンドで行います。
 このsource clone経路では`.venv`をrepositoryからコピーせず、管理者PC上で作成します。
 PATH外のPythonを使う場合は

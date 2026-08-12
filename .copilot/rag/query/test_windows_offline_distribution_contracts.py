@@ -50,6 +50,10 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         self.assertEqual(repository_lock, lock)
         self.assertEqual("amd64", lock["platform"]["arch"])
         self.assertTrue(lock["python"]["url"].startswith("https://www.python.org/"))
+        self.assertEqual(
+            "requirements-windows-search.lock",
+            windows_distribution.SEARCH_REQUIREMENTS.name,
+        )
         requirements = windows_distribution.SEARCH_REQUIREMENTS.read_text(
             encoding="utf-8"
         )

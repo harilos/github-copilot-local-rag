@@ -81,14 +81,19 @@ def verify_installation() -> dict[str, Any]:
         return _result(runtime, [], [], warnings, failed_check, error_kind)
 
     try:
-        checked_requirements = _verify_declared_requirements(
-            (
+        declared_requirements = [
                 RAG_ROOT / "query" / "requirements.txt",
                 RAG_ROOT
                 / "gen_db"
                 / "software_rag_tool"
                 / "requirements.txt",
+        ]
+        if sys.platform.startswith("win"):
+            declared_requirements.append(
+                RAG_ROOT / "query" / "requirements-windows-admin.lock"
             )
+        checked_requirements = _verify_declared_requirements(
+            tuple(declared_requirements)
         )
         runtime["requirements"] = "pass"
         runtime["requirements_checked"] = checked_requirements

@@ -21,7 +21,9 @@ RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 LOCK_PATH = Path(__file__).with_name("windows-runtime-lock.json")
 INSTALL_TEMPLATE = Path(__file__).with_name("windows-install-template.ps1")
-SEARCH_REQUIREMENTS = RAG_ROOT / "query" / "requirements-search.txt"
+SEARCH_REQUIREMENTS = (
+    RAG_ROOT / "query" / "requirements-windows-search.lock"
+)
 MODEL_NAME = "ruri-v3-30m-onnx-int8"
 MODEL_REQUIRED = (
     "model.onnx",

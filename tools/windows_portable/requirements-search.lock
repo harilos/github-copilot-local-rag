@@ -1,10 +1,2 @@
-# Direct runtime capability lock for the search-only profile.
-# Runtime dependencies are resolved when the portable runtime is assembled.
-packaging==25.0
-chromadb==1.0.20
-numpy==2.3.2
-onnxruntime==1.22.1
-transformers==4.55.2
-sentencepiece==0.2.1
-SudachiPy==0.6.10
-SudachiDict-core==20250515
+# Compatibility entry point. The product lock is the single source of truth.
+-r ../../.copilot/rag/query/requirements-windows-search.lock

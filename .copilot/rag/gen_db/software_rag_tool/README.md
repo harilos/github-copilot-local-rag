@@ -6,10 +6,12 @@ This implementation is newly written and keeps the public command-line interface
 
 ## Usage
 
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
+Windows source builds use the checked-in CPython 3.13 amd64 admin lock:
+
+```powershell
+py -3.13 -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install `
+  -r ..\..\query\requirements-windows-admin.lock
 cp .env.example .env
 
 python scripts/prepare.py --root /path/to/input

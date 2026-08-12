@@ -1,10 +1,2 @@
-# Direct runtime capability lock for the admin-full profile.
-# Runtime dependencies are resolved when the portable runtime is assembled.
--r requirements-search.lock
-sentence-transformers==5.1.0
-optimum[onnxruntime]==1.27.0
-pypdf==6.0.0
-cryptography==45.0.6
-python-docx==1.2.0
-python-pptx==1.0.2
-openpyxl==3.1.5
+# Compatibility entry point. The product lock is the single source of truth.
+-r ../../.copilot/rag/query/requirements-windows-admin.lock

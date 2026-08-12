@@ -762,10 +762,10 @@ class SetupNetworkContractTests(unittest.TestCase):
         ):
             self.assertEqual(0, SETUP.main())
         self.assertEqual(1, resolve.call_count)
-        self.assertGreaterEqual(len(calls), 3)
+        self.assertGreaterEqual(len(calls), 2)
         for command, child_env, phase in calls:
             self.assertNotIn("secret", " ".join(command))
-            if phase in {"pip_upgrade", "dependencies", "model_prepare"}:
+            if phase in {"dependencies", "model_prepare"}:
                 self.assertEqual(secret_proxy, child_env["HTTPS_PROXY"])
 
     def test_child_failure_redacts_proxy_credentials(self) -> None:

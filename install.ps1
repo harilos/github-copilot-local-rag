@@ -40,7 +40,7 @@ function Resolve-BootstrapPython {
         $Command = [string]$Candidate.Command
         $Prefix = @($Candidate.Prefix)
         try {
-            & $Command @Prefix -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 3)" 2>$null
+            & $Command @Prefix -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and (3, 13) <= sys.version_info[:2] < (3, 14) else 3)" 2>$null
             if ($LASTEXITCODE -eq 0) {
                 return [PSCustomObject]@{
                     Command = $Command
@@ -53,7 +53,7 @@ function Resolve-BootstrapPython {
     }
 
     throw (
-        "setup_required: Python 3.10 or newer was not found. " +
+        "setup_required: CPython 3.13.x was not found. " +
         "Install Python, or rerun with -BootstrapPython C:\path\to\python.exe."
     )
 }

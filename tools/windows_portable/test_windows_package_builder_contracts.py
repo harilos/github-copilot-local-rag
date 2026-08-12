@@ -136,7 +136,7 @@ def _request(
         no_database=no_database,
         version="1.2.3",
         profile=profile,
-        python_version="3.13.5",
+        python_version="3.13.15",
     )
 
 

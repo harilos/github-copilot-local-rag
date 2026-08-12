@@ -8,10 +8,23 @@ RAG_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = RAG_ROOT.parents[1]
 
 
-def _tokenizer_versions(path: Path) -> dict[str, str]:
+def _tokenizer_versions(
+    path: Path,
+    visited: set[Path] | None = None,
+) -> dict[str, str]:
+    visited = visited or set()
+    path = path.resolve()
+    if path in visited:
+        return {}
+    visited.add(path)
     versions: dict[str, str] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip().strip('",')
+        if line.startswith("-r "):
+            versions.update(
+                _tokenizer_versions(path.parent / line[3:].strip(), visited)
+            )
+            continue
         if "==" not in line:
             continue
         name, version = line.split("==", 1)
@@ -23,7 +36,7 @@ def _tokenizer_versions(path: Path) -> dict[str, str]:
 class WindowsTokenizerDependencyContracts(unittest.TestCase):
     def test_database_generator_matches_windows_search_runtime(self) -> None:
         canonical = _tokenizer_versions(
-            RAG_ROOT / "query" / "requirements-search.txt"
+            RAG_ROOT / "query" / "requirements-windows-search.lock"
         )
         self.assertEqual(
             {"sudachipy": "0.6.10", "sudachidict-core": "20250515"},

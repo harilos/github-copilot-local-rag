@@ -111,6 +111,19 @@ def main() -> int:
     )
     add_network_arguments(parser)
     args = parser.parse_args()
+    if not (
+        sys.implementation.name == "cpython"
+        and (3, 13) <= sys.version_info[:2] < (3, 14)
+    ):
+        _emit(
+            _error_payload(
+                failed_check="python_runtime",
+                error_kind="unsupported_python",
+                message="Local RAG requires CPython >=3.13,<3.14.",
+            ),
+            args.format,
+        )
+        return 1
     if args.prepare_model and args.no_prepare_model:
         parser.error("--prepare-model and --no-prepare-model cannot be used together")
     if args.verify_only and (args.force_model or args.prepare_model):
@@ -210,10 +223,10 @@ def main() -> int:
                     env=network_child_environment,
                     phase="venv",
                 )
-            _run_child(
-                [str(python), "-m", "pip", "install", "--upgrade", "pip"],
-                env=network_child_environment,
-                phase="pip_upgrade",
+            dependency_requirements = here / (
+                "requirements-windows-admin.lock"
+                if sys.platform.startswith("win")
+                else "requirements.txt"
             )
             _run_child(
                 [
@@ -222,7 +235,7 @@ def main() -> int:
                     "pip",
                     "install",
                     "-r",
-                    str(here / "requirements.txt"),
+                    str(dependency_requirements),
                 ],
                 env=network_child_environment,
                 phase="dependencies",
