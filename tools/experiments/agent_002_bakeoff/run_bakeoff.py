@@ -910,6 +910,72 @@ def _run_candidate(
     return value
 
 
+def _run_one_case(
+    *,
+    output_root: Path,
+    stage: str,
+    candidate: str,
+    agent: str,
+    case: dict[str, Any],
+    fixture: dict[str, str],
+    copilot_path: Path,
+    model: str,
+    max_ai_credits: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Run exactly one case, stopping before any later case can launch."""
+    candidate_directory = output_root / stage / candidate
+    candidate_directory.mkdir(parents=True, exist_ok=True)
+    case_directory = candidate_directory / str(case["id"])
+    case_directory.mkdir(exist_ok=False)
+    trace_path = case_directory / "tool-trace.jsonl"
+    session_id = str(uuid.uuid4())
+    turn_meta: list[dict[str, Any]] = []
+    for turn_index, prompt in enumerate(case["turns"], start=1):
+        turn_meta.append(
+            _run_turn(
+                output_root=output_root,
+                stage=stage,
+                candidate=candidate,
+                agent=agent,
+                case=case,
+                turn_number=turn_index,
+                prompt=str(prompt),
+                session_id=session_id,
+                turn_directory=case_directory / f"turn-{turn_index}",
+                fixture=fixture,
+                copilot_path=copilot_path,
+                model=model,
+                max_ai_credits=max_ai_credits,
+                timeout_seconds=timeout_seconds,
+                trace_path=trace_path,
+            )
+        )
+        if turn_index == 1 and len(case["turns"]) == 2:
+            interim = _assess_case(
+                case,
+                case_directory,
+                turn_meta,
+                fixture,
+                interim=True,
+            )
+            _write_json(case_directory / "interim-assessment.json", interim)
+            if not interim["strict_machine_pass"]:
+                interim["case"] = case
+                _write_json(case_directory / "assessment.json", interim)
+                return interim
+    assessment = _assess_case(
+        case,
+        case_directory,
+        turn_meta,
+        fixture,
+        interim=False,
+    )
+    assessment["case"] = case
+    _write_json(case_directory / "assessment.json", assessment)
+    return assessment
+
+
 def _rank_candidates(results: list[dict[str, Any]]) -> list[str]:
     eligible = [item for item in results if item.get("eligible")]
     ranked = sorted(
@@ -1133,10 +1199,609 @@ def _finalize_review(args: argparse.Namespace) -> int:
         return 0 if reviewed_ranking else 2
 
 
-def _run_stage_locked(args: argparse.Namespace, output_root: Path) -> int:
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_immutable_json(path: Path, value: Any) -> None:
+    if path.exists():
+        if _read_json(path) != value:
+            raise RuntimeError(f"immutable JSON differs: {path}")
+        return
+    _write_json(path, value)
+
+
+def _stepwise_manifest(
+    *,
+    args: argparse.Namespace,
+    output_root: Path,
+    selected: list[str],
+    cases: list[dict[str, Any]],
+    fixture: dict[str, str],
+    copilot_path: Path,
+) -> dict[str, Any]:
+    prior_review_sha256 = None
+    if args.stage != "stage1":
+        prior = "stage1" if args.stage == "stage2" else "stage2"
+        prior_path = output_root / prior / "reviewed-stage-summary.json"
+        if not prior_path.is_file():
+            raise RuntimeError(f"missing reviewed prior stage: {prior_path}")
+        prior_review_sha256 = _sha256(prior_path)
+    return {
+        "schema_version": "lrr-agent-002-stepwise-stage-manifest-v1",
+        "stage": args.stage,
+        "selected_candidates": selected,
+        "case_ids": [str(item["id"]) for item in cases],
+        "cases_sha256": _sha256(CASES_PATH),
+        "runner_sha256": _sha256(Path(__file__).resolve()),
+        "collector_sha256": _sha256(COLLECTOR_PATH),
+        "fixture_manifest_sha256": _sha256(output_root / "fixture-manifest.json"),
+        "prior_review_sha256": prior_review_sha256,
+        "output_root": str(output_root),
+        "copilot_path": str(copilot_path),
+        "model": args.model,
+        "max_ai_credits": args.max_ai_credits,
+        "fixture": fixture,
+    }
+
+
+def _initial_stepwise_progress(
+    stage: str,
+    selected: list[str],
+    cases: list[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    states: dict[str, Any] = {}
+    for index, candidate in enumerate(selected):
+        states[candidate] = {
+            "status": "ACTIVE" if index == 0 else "PENDING",
+            "next_case_index": 0,
+            "case_results": [],
+            "reviews": {},
+            "exclusion_reason": None,
+        }
+    return {
+        "schema_version": "lrr-agent-002-stepwise-progress-v1",
+        "stage": stage,
+        "manifest_sha256": _json_sha256(manifest),
+        "selected_candidates": selected,
+        "case_ids": [str(item["id"]) for item in cases],
+        "candidate_cursor": 0,
+        "candidate_states": states,
+        "awaiting_review": None,
+        "status": "ACTIVE",
+    }
+
+
+def _validate_stepwise_progress(
+    progress: dict[str, Any],
+    manifest: dict[str, Any],
+) -> None:
+    selected = list(manifest["selected_candidates"])
+    case_ids = list(manifest["case_ids"])
+    if (
+        progress.get("schema_version")
+        != "lrr-agent-002-stepwise-progress-v1"
+        or progress.get("stage") != manifest["stage"]
+        or progress.get("manifest_sha256") != _json_sha256(manifest)
+        or progress.get("selected_candidates") != selected
+        or progress.get("case_ids") != case_ids
+        or set(progress.get("candidate_states") or {}) != set(selected)
+    ):
+        raise RuntimeError("invalid or drifted stepwise progress")
+    cursor = progress.get("candidate_cursor")
+    if not isinstance(cursor, int) or not 0 <= cursor <= len(selected):
+        raise RuntimeError("invalid candidate cursor")
+    output_root = Path(str(manifest["output_root"]))
+    awaiting = progress.get("awaiting_review")
+    if awaiting is not None and not isinstance(awaiting, dict):
+        raise RuntimeError("invalid pending review state")
+    active = []
+    for candidate_index, candidate in enumerate(selected):
+        state = progress["candidate_states"][candidate]
+        status = state.get("status")
+        if status not in {
+            "PENDING",
+            "ACTIVE",
+            "ELIGIBLE",
+            "EXCLUDED",
+        }:
+            raise RuntimeError(f"invalid candidate state: {candidate}")
+        next_case = state.get("next_case_index")
+        if not isinstance(next_case, int) or not 0 <= next_case <= len(case_ids):
+            raise RuntimeError(f"invalid case cursor: {candidate}")
+        results = state.get("case_results")
+        reviews = state.get("reviews")
+        if not isinstance(results, list) or not isinstance(reviews, dict):
+            raise RuntimeError(f"invalid candidate evidence state: {candidate}")
+        observed_ids = [str(item.get("case_id") or "") for item in results]
+        if observed_ids != case_ids[: len(observed_ids)] or len(set(observed_ids)) != len(observed_ids):
+            raise RuntimeError(f"case result order drift: {candidate}")
+        assessments: dict[str, dict[str, Any]] = {}
+        for item in results:
+            assessment = (
+                output_root
+                / str(manifest["stage"])
+                / candidate
+                / str(item["case_id"])
+                / "assessment.json"
+            )
+            if not assessment.is_file() or _sha256(assessment) != item.get("assessment_sha256"):
+                raise RuntimeError(f"assessment drift: {candidate}/{item.get('case_id')}")
+            assessments[str(item["case_id"])] = _read_json(assessment)
+        if not set(reviews).issubset(set(observed_ids)):
+            raise RuntimeError(f"review without assessment: {candidate}")
+        for case_id, review_state in reviews.items():
+            if not isinstance(review_state, dict):
+                raise RuntimeError(f"invalid accepted review: {candidate}/{case_id}")
+            review_status = str(review_state.get("status") or "")
+            if review_status not in {"PASS", "FAIL"}:
+                raise RuntimeError(f"invalid accepted review status: {candidate}/{case_id}")
+            if not assessments[case_id].get("strict_machine_pass"):
+                raise RuntimeError(f"review attached to machine failure: {candidate}/{case_id}")
+            case_directory = output_root / str(manifest["stage"]) / candidate / case_id
+            human_path = case_directory / "human-review.json"
+            reviewed_path = case_directory / "reviewed-assessment.json"
+            if (
+                not human_path.is_file()
+                or _sha256(human_path) != review_state.get("human_review_sha256")
+                or not reviewed_path.is_file()
+            ):
+                raise RuntimeError(f"accepted human review drift: {candidate}/{case_id}")
+            human = _read_json(human_path)
+            reviewed = _read_json(reviewed_path)
+            binding_keys = (
+                "stage",
+                "candidate",
+                "case_id",
+                "assessment_sha256",
+                "ledger_count",
+                "ledger_sha256",
+            )
+            if (
+                human.get("schema_version")
+                != "lrr-agent-002-case-human-review-v1"
+                or reviewed.get("schema_version")
+                != "lrr-agent-002-reviewed-case-v1"
+                or any(human.get(key) != reviewed.get(key) for key in binding_keys)
+                or human.get("stage") != manifest["stage"]
+                or human.get("candidate") != candidate
+                or human.get("case_id") != case_id
+                or human.get("assessment_sha256")
+                != next(
+                    item["assessment_sha256"]
+                    for item in results
+                    if item["case_id"] == case_id
+                )
+                or human.get("status") != review_status
+                or reviewed.get("status") != review_status
+                or str(human.get("note") or "") != str(review_state.get("note") or "")
+                or str(reviewed.get("note") or "") != str(review_state.get("note") or "")
+                or reviewed.get("human_review_sha256")
+                != review_state.get("human_review_sha256")
+            ):
+                raise RuntimeError(f"accepted review binding drift: {candidate}/{case_id}")
+        prefix_ids = case_ids[:next_case]
+        if any(reviews.get(case_id, {}).get("status") != "PASS" for case_id in prefix_ids):
+            raise RuntimeError(f"case cursor lacks PASS review prefix: {candidate}")
+        pending_for_candidate = (
+            isinstance(awaiting, dict) and awaiting.get("candidate") == candidate
+        )
+        expected_review_keys = set(prefix_ids)
+        if status == "PENDING":
+            if (
+                candidate_index <= cursor
+                or next_case != 0
+                or results
+                or reviews
+                or pending_for_candidate
+            ):
+                raise RuntimeError(f"invalid pending candidate state: {candidate}")
+        elif status == "ACTIVE":
+            active.append(candidate)
+            if candidate_index != cursor:
+                raise RuntimeError("active candidate does not match cursor")
+            if pending_for_candidate:
+                if (
+                    next_case >= len(case_ids)
+                    or len(results) != next_case + 1
+                    or observed_ids[-1] != case_ids[next_case]
+                    or not assessments[observed_ids[-1]].get("strict_machine_pass")
+                    or set(reviews) != expected_review_keys
+                ):
+                    raise RuntimeError(f"invalid awaiting-review transition: {candidate}")
+            elif len(results) != next_case or set(reviews) != expected_review_keys:
+                raise RuntimeError(f"active case cursor bypass: {candidate}")
+        elif status == "ELIGIBLE":
+            if (
+                candidate_index >= cursor
+                or next_case != len(case_ids)
+                or len(results) != len(case_ids)
+                or set(reviews) != set(case_ids)
+                or any(reviews[case_id].get("status") != "PASS" for case_id in case_ids)
+                or pending_for_candidate
+                or state.get("exclusion_reason") is not None
+            ):
+                raise RuntimeError(f"invalid eligible candidate state: {candidate}")
+        else:
+            if candidate_index >= cursor or pending_for_candidate or len(results) != next_case + 1:
+                raise RuntimeError(f"invalid excluded candidate state: {candidate}")
+            final_case = observed_ids[-1]
+            reason = state.get("exclusion_reason")
+            if reason == "strict_machine_failure":
+                if (
+                    assessments[final_case].get("strict_machine_pass")
+                    or set(reviews) != expected_review_keys
+                ):
+                    raise RuntimeError(f"invalid machine exclusion: {candidate}")
+            elif reason == "human_evidence_review_failed":
+                if (
+                    not assessments[final_case].get("strict_machine_pass")
+                    or set(reviews) != expected_review_keys | {final_case}
+                    or reviews[final_case].get("status") != "FAIL"
+                ):
+                    raise RuntimeError(f"invalid human exclusion: {candidate}")
+            else:
+                raise RuntimeError(f"invalid exclusion reason: {candidate}")
+    if cursor < len(selected):
+        if active != [selected[cursor]]:
+            raise RuntimeError("active candidate does not match cursor")
+    elif active:
+        raise RuntimeError("completed progress still has an active candidate")
+    if isinstance(awaiting, dict):
+        if cursor >= len(selected):
+            raise RuntimeError("terminal progress cannot await review")
+        candidate = selected[cursor]
+        state = progress["candidate_states"][candidate]
+        case_id = case_ids[int(state["next_case_index"])]
+        assessment_path = output_root / str(manifest["stage"]) / candidate / case_id / "assessment.json"
+        binding = _review_binding(
+            stage=str(manifest["stage"]),
+            candidate=candidate,
+            case_id=case_id,
+            assessment_path=assessment_path,
+            output_root=output_root,
+        )
+        case_directory = assessment_path.parent
+        expected_pending = {
+            **binding,
+            "checkpoint_path": str(case_directory / "review-checkpoint.json"),
+            "template_path": str(case_directory / "human-review-template.json"),
+            "review_path": str(case_directory / "human-review.json"),
+        }
+        checkpoint = {
+            "schema_version": "lrr-agent-002-case-review-checkpoint-v1",
+            **binding,
+        }
+        template = {
+            "schema_version": "lrr-agent-002-case-human-review-v1",
+            **binding,
+            "status": "PENDING",
+            "note": "",
+        }
+        if awaiting != expected_pending:
+            raise RuntimeError("pending review progress binding drift")
+        if (
+            not Path(expected_pending["checkpoint_path"]).is_file()
+            or _read_json(Path(expected_pending["checkpoint_path"])) != checkpoint
+            or not Path(expected_pending["template_path"]).is_file()
+            or _read_json(Path(expected_pending["template_path"])) != template
+        ):
+            raise RuntimeError("pending review checkpoint drift")
+    elif any(
+        state.get("status") == "ACTIVE"
+        and len(state.get("case_results") or [])
+        != int(state.get("next_case_index") or 0)
+        for state in progress["candidate_states"].values()
+    ):
+        raise RuntimeError("unrepresented pending review")
+
+
+def _activate_next_candidate(progress: dict[str, Any]) -> None:
+    selected = list(progress["selected_candidates"])
+    progress["candidate_cursor"] = int(progress["candidate_cursor"]) + 1
+    cursor = int(progress["candidate_cursor"])
+    if cursor < len(selected):
+        progress["candidate_states"][selected[cursor]]["status"] = "ACTIVE"
+    else:
+        progress["status"] = "READY_TO_FINALIZE"
+
+
+def _review_binding(
+    *,
+    stage: str,
+    candidate: str,
+    case_id: str,
+    assessment_path: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    ledger = _load_ledger(output_root)
+    ledger_path = _ledger_path(output_root)
+    return {
+        "stage": stage,
+        "candidate": candidate,
+        "case_id": case_id,
+        "assessment_sha256": _sha256(assessment_path),
+        "ledger_count": int(ledger["count"]),
+        "ledger_sha256": _sha256(ledger_path),
+    }
+
+
+def _create_case_review_checkpoint(
+    *,
+    output_root: Path,
+    stage: str,
+    candidate: str,
+    case_id: str,
+    assessment_path: Path,
+) -> dict[str, Any]:
+    case_directory = assessment_path.parent
+    binding = _review_binding(
+        stage=stage,
+        candidate=candidate,
+        case_id=case_id,
+        assessment_path=assessment_path,
+        output_root=output_root,
+    )
+    checkpoint = {
+        "schema_version": "lrr-agent-002-case-review-checkpoint-v1",
+        **binding,
+    }
+    template = {
+        "schema_version": "lrr-agent-002-case-human-review-v1",
+        **binding,
+        "status": "PENDING",
+        "note": "",
+    }
+    checkpoint_path = case_directory / "review-checkpoint.json"
+    template_path = case_directory / "human-review-template.json"
+    _write_immutable_json(checkpoint_path, checkpoint)
+    _write_immutable_json(template_path, template)
+    return {
+        **binding,
+        "checkpoint_path": str(checkpoint_path),
+        "template_path": str(template_path),
+        "review_path": str(case_directory / "human-review.json"),
+    }
+
+
+def _apply_pending_case_review(
+    *,
+    output_root: Path,
+    progress_path: Path,
+    progress: dict[str, Any],
+) -> str:
+    pending = progress.get("awaiting_review")
+    if not isinstance(pending, dict):
+        return "NONE"
+    review_path = Path(str(pending["review_path"]))
+    if not review_path.is_file():
+        print(
+            json.dumps(
+                {
+                    "status": "AWAITING_HUMAN_REVIEW",
+                    "template": pending["template_path"],
+                    "review": str(review_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return "WAITING"
+    review = _read_json(review_path)
+    expected_binding = {
+        key: pending[key]
+        for key in (
+            "stage",
+            "candidate",
+            "case_id",
+            "assessment_sha256",
+            "ledger_count",
+            "ledger_sha256",
+        )
+    }
+    if review.get("schema_version") != "lrr-agent-002-case-human-review-v1":
+        raise RuntimeError("invalid case human review schema")
+    if any(review.get(key) != value for key, value in expected_binding.items()):
+        raise RuntimeError("case human review binding mismatch")
+    status = str(review.get("status") or "")
+    if status == "PENDING":
+        print(json.dumps({"status": "AWAITING_HUMAN_REVIEW"}, indent=2))
+        return "WAITING"
+    if status not in {"PASS", "FAIL"}:
+        raise RuntimeError("case human review status must be PASS or FAIL")
+    assessment_path = (
+        output_root
+        / str(pending["stage"])
+        / str(pending["candidate"])
+        / str(pending["case_id"])
+        / "assessment.json"
+    )
+    if (
+        _sha256(assessment_path) != pending["assessment_sha256"]
+        or _load_ledger(output_root)["count"] != pending["ledger_count"]
+        or _sha256(_ledger_path(output_root)) != pending["ledger_sha256"]
+    ):
+        raise RuntimeError("assessment or prompt ledger changed while review was pending")
+    reviewed = {
+        "schema_version": "lrr-agent-002-reviewed-case-v1",
+        **expected_binding,
+        "status": status,
+        "note": str(review.get("note") or ""),
+        "human_review_sha256": _sha256(review_path),
+    }
+    _write_immutable_json(assessment_path.parent / "reviewed-assessment.json", reviewed)
+    candidate = str(pending["candidate"])
+    case_id = str(pending["case_id"])
+    state = progress["candidate_states"][candidate]
+    state["reviews"][case_id] = {
+        "status": status,
+        "note": reviewed["note"],
+        "human_review_sha256": reviewed["human_review_sha256"],
+    }
+    progress["awaiting_review"] = None
+    if status == "FAIL":
+        state["status"] = "EXCLUDED"
+        state["exclusion_reason"] = "human_evidence_review_failed"
+        _activate_next_candidate(progress)
+    else:
+        state["next_case_index"] = int(state["next_case_index"]) + 1
+        if state["next_case_index"] == len(progress["case_ids"]):
+            state["status"] = "ELIGIBLE"
+            _activate_next_candidate(progress)
+    _write_json(progress_path, progress)
+    print(
+        json.dumps(
+            {
+                "status": "HUMAN_REVIEW_APPLIED",
+                "candidate": candidate,
+                "case_id": case_id,
+                "decision": status,
+                "next_prompt_launched": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return "APPLIED"
+
+
+def _stepwise_candidate_results(
+    *,
+    output_root: Path,
+    stage: str,
+    candidates: dict[str, str],
+    cases: list[dict[str, Any]],
+    progress: dict[str, Any],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for candidate in progress["selected_candidates"]:
+        state = progress["candidate_states"][candidate]
+        case_results: list[dict[str, Any]] = []
+        for record in state["case_results"]:
+            assessment_path = (
+                output_root
+                / stage
+                / candidate
+                / str(record["case_id"])
+                / "assessment.json"
+            )
+            if _sha256(assessment_path) != record["assessment_sha256"]:
+                raise RuntimeError(f"assessment drift at finalization: {assessment_path}")
+            case_results.append(_read_json(assessment_path))
+        metrics = _candidate_metrics(candidate, candidates[candidate], case_results)
+        eligible = state["status"] == "ELIGIBLE"
+        value = {
+            "schema_version": "lrr-agent-002-candidate-result-v1",
+            "stage": stage,
+            "candidate": candidate,
+            "agent": candidates[candidate],
+            "status": "ELIGIBLE" if eligible else "EXCLUDED",
+            "eligible": eligible,
+            "completed_case_count": len(case_results),
+            "planned_case_count": len(cases),
+            "metrics": metrics,
+            "case_results": case_results,
+            "human_reviews": state["reviews"],
+            "exclusion_reason": state["exclusion_reason"],
+        }
+        destination = output_root / stage / candidate / "candidate-result.json"
+        _write_immutable_json(destination, value)
+        results.append(value)
+    return results
+
+
+def _finalize_stepwise_stage(
+    *,
+    args: argparse.Namespace,
+    output_root: Path,
+    candidates: dict[str, str],
+    cases: list[dict[str, Any]],
+    progress_path: Path,
+    progress: dict[str, Any],
+) -> int:
+    results = _stepwise_candidate_results(
+        output_root=output_root,
+        stage=args.stage,
+        candidates=candidates,
+        cases=cases,
+        progress=progress,
+    )
+    _add_cumulative_ranking_metrics(output_root, args.stage, results)
+    reviewed_ranking = _rank_candidates(results)
+    machine_results: list[dict[str, Any]] = []
+    for item in results:
+        copy = dict(item)
+        copy["eligible"] = (
+            item["completed_case_count"] == item["planned_case_count"]
+            and bool(item["case_results"])
+            and all(value["strict_machine_pass"] for value in item["case_results"])
+        )
+        machine_results.append(copy)
+    machine_ranking = _rank_candidates(machine_results)
+    summary = {
+        "schema_version": "lrr-agent-002-stage-summary-v1",
+        "stage": args.stage,
+        "selected_candidates": progress["selected_candidates"],
+        "machine_ranking": machine_ranking,
+        "ranking": reviewed_ranking,
+        "human_review_status": "COMPLETE",
+        "all_candidates_excluded_by_machine": not machine_ranking,
+        "all_candidates_excluded": not reviewed_ranking,
+        "prompt_ledger_count": _load_ledger(output_root)["count"],
+        "results": results,
+    }
+    finalized = {
+        "schema_version": "lrr-agent-002-reviewed-stage-summary-v1",
+        "stage": args.stage,
+        "machine_ranking": machine_ranking,
+        "ranking": reviewed_ranking,
+        "all_candidates_excluded": not reviewed_ranking,
+        "review_details": {
+            candidate: progress["candidate_states"][candidate]["reviews"]
+            for candidate in progress["selected_candidates"]
+        },
+        "prompt_ledger_count": _load_ledger(output_root)["count"],
+    }
+    if args.stage == "stage3":
+        candidate = reviewed_ranking[0] if reviewed_ranking else None
+        prior_pass = False
+        if candidate:
+            stage1 = _read_json(output_root / "stage1" / "reviewed-stage-summary.json")
+            stage2 = _read_json(output_root / "stage2" / "reviewed-stage-summary.json")
+            prior_pass = (
+                candidate in (stage1.get("ranking") or [])
+                and candidate in (stage2.get("ranking") or [])
+            )
+        stable = bool(candidate and prior_pass and len(cases) == 3)
+        stable_value = {
+            "candidate": candidate,
+            "strict_pass_cases": 3 if stable else 0,
+            "required_cases": 3,
+            "status": "PASS" if stable else "FAIL",
+        }
+        summary["mini_stable_at_2_lite"] = stable_value
+        finalized["mini_stable_at_2_lite"] = stable_value
+        finalized["winner"] = candidate if stable else None
     stage_directory = output_root / args.stage
-    if stage_directory.exists():
-        raise RuntimeError(f"stage output already exists; no rerun allowed: {stage_directory}")
+    _write_immutable_json(stage_directory / "stage-summary.json", summary)
+    _write_immutable_json(
+        stage_directory / "reviewed-stage-summary.json",
+        finalized,
+    )
+    progress["status"] = "COMPLETE"
+    _write_json(progress_path, progress)
+    print(json.dumps(finalized, ensure_ascii=False, indent=2))
+    return 0 if reviewed_ranking else 2
+
+
+def _run_stage_locked(args: argparse.Namespace, output_root: Path) -> int:
     data = _case_data()
     candidates = _candidate_map(data)
     copilot_path = Path(args.copilot_path).resolve()
@@ -1152,54 +1817,143 @@ def _run_stage_locked(args: argparse.Namespace, output_root: Path) -> int:
         raise RuntimeError(
             f"{args.stage} has no reviewed eligible candidate; stop the bakeoff"
         )
-    stage_directory.mkdir()
     cases = _stage_cases(data, args.stage)
-    results: list[dict[str, Any]] = []
-    for candidate in selected:
-        results.append(
-            _run_candidate(
+    stage_directory = output_root / args.stage
+    manifest = _stepwise_manifest(
+        args=args,
+        output_root=output_root,
+        selected=selected,
+        cases=cases,
+        fixture=fixture,
+        copilot_path=copilot_path,
+    )
+    manifest_path = stage_directory / "stage-manifest.json"
+    progress_path = stage_directory / "progress.json"
+    if not stage_directory.exists():
+        stage_directory.mkdir()
+        _write_immutable_json(manifest_path, manifest)
+        progress = _initial_stepwise_progress(
+            args.stage,
+            selected,
+            cases,
+            manifest,
+        )
+        _write_json(progress_path, progress)
+    else:
+        if not manifest_path.is_file() or not progress_path.is_file():
+            raise RuntimeError(
+                f"stage output predates stepwise checkpoints; no rerun allowed: {stage_directory}"
+            )
+        if _read_json(manifest_path) != manifest:
+            raise RuntimeError("stepwise stage manifest drift")
+        progress = _read_json(progress_path)
+    _validate_stepwise_progress(progress, manifest)
+    if progress["status"] == "COMPLETE":
+        summary = _read_json(stage_directory / "reviewed-stage-summary.json")
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0 if summary.get("ranking") else 2
+    review_state = _apply_pending_case_review(
+        output_root=output_root,
+        progress_path=progress_path,
+        progress=progress,
+    )
+    if review_state in {"WAITING", "APPLIED"}:
+        if progress["status"] == "READY_TO_FINALIZE":
+            return _finalize_stepwise_stage(
+                args=args,
                 output_root=output_root,
-                stage=args.stage,
-                candidate=candidate,
-                agent=candidates[candidate],
+                candidates=candidates,
                 cases=cases,
-                fixture=fixture,
-                copilot_path=copilot_path,
-                model=args.model,
-                max_ai_credits=args.max_ai_credits,
-                timeout_seconds=args.timeout_seconds,
+                progress_path=progress_path,
+                progress=progress,
+            )
+        return 0
+    if progress["status"] == "READY_TO_FINALIZE":
+        return _finalize_stepwise_stage(
+            args=args,
+            output_root=output_root,
+            candidates=candidates,
+            cases=cases,
+            progress_path=progress_path,
+            progress=progress,
+        )
+    cursor = int(progress["candidate_cursor"])
+    candidate = selected[cursor]
+    state = progress["candidate_states"][candidate]
+    case_index = int(state["next_case_index"])
+    case = cases[case_index]
+    assessment = _run_one_case(
+        output_root=output_root,
+        stage=args.stage,
+        candidate=candidate,
+        agent=candidates[candidate],
+        case=case,
+        fixture=fixture,
+        copilot_path=copilot_path,
+        model=args.model,
+        max_ai_credits=args.max_ai_credits,
+        timeout_seconds=args.timeout_seconds,
+    )
+    assessment_path = (
+        stage_directory / candidate / str(case["id"]) / "assessment.json"
+    )
+    state["case_results"].append(
+        {
+            "case_id": str(case["id"]),
+            "assessment_sha256": _sha256(assessment_path),
+        }
+    )
+    if not assessment["strict_machine_pass"]:
+        state["status"] = "EXCLUDED"
+        state["exclusion_reason"] = "strict_machine_failure"
+        _activate_next_candidate(progress)
+        _write_json(progress_path, progress)
+        if progress["status"] == "READY_TO_FINALIZE":
+            return _finalize_stepwise_stage(
+                args=args,
+                output_root=output_root,
+                candidates=candidates,
+                cases=cases,
+                progress_path=progress_path,
+                progress=progress,
+            )
+        print(
+            json.dumps(
+                {
+                    "status": "CANDIDATE_EXCLUDED",
+                    "candidate": candidate,
+                    "case_id": case["id"],
+                    "failures": assessment["failures"],
+                    "next_prompt_launched": False,
+                },
+                ensure_ascii=False,
+                indent=2,
             )
         )
-    _add_cumulative_ranking_metrics(output_root, args.stage, results)
-    machine_ranking = _rank_candidates(results)
-    summary = {
-        "schema_version": "lrr-agent-002-stage-summary-v1",
-        "stage": args.stage,
-        "selected_candidates": selected,
-        "machine_ranking": machine_ranking,
-        "human_review_status": "PENDING" if machine_ranking else "NOT_REQUIRED",
-        "all_candidates_excluded_by_machine": not machine_ranking,
-        "prompt_ledger_count": _load_ledger(output_root)["count"],
-        "results": results,
-    }
-    if args.stage == "stage3":
-        summary["mini_stable_at_2_lite"] = {
-            "candidate": machine_ranking[0] if machine_ranking else None,
-            "strict_pass_cases": (
-                len(results[0]["case_results"])
-                if machine_ranking and results and results[0].get("eligible")
-                else 0
-            ),
-            "required_cases": 3,
-            "status": "PENDING_HUMAN_REVIEW" if machine_ranking else "FAIL",
-        }
-    _write_json(stage_directory / "stage-summary.json", summary)
-    _write_json(
-        stage_directory / "human-review-template.json",
-        _human_review_template(args.stage, results),
+        return 0
+    progress["awaiting_review"] = _create_case_review_checkpoint(
+        output_root=output_root,
+        stage=args.stage,
+        candidate=candidate,
+        case_id=str(case["id"]),
+        assessment_path=assessment_path,
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0 if machine_ranking else 2
+    _write_json(progress_path, progress)
+    print(
+        json.dumps(
+            {
+                "status": "AWAITING_HUMAN_REVIEW",
+                "candidate": candidate,
+                "case_id": case["id"],
+                "template": progress["awaiting_review"]["template_path"],
+                "review": progress["awaiting_review"]["review_path"],
+                "next_prompt_launched": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
 
 
 def _run_stage(args: argparse.Namespace) -> int:

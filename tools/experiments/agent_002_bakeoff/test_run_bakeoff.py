@@ -895,5 +895,172 @@ class FailClosedScorerTests(unittest.TestCase):
             )
 
 
+class StepwiseHumanCheckpointTests(unittest.TestCase):
+    def _exercise(
+        self,
+        root: Path,
+        *,
+        decision: str,
+        tamper_first: bool = False,
+        bypass_progress_first: bool = False,
+    ) -> tuple[mock.Mock, dict[str, Any]]:
+        copilot = root / "copilot.exe"
+        copilot.write_bytes(b"fixture")
+        installed_venv = root / "venv"
+        installed_venv.mkdir()
+        fixture_workspace = root / "fixture-workspace"
+        fixture_workspace.mkdir()
+        fixture = {
+            "workspace": str(fixture_workspace),
+            "profile": str(root / "profile"),
+            "summary_root": str(root / "summaries"),
+            "copilot_home": str(root / "copilot-home"),
+            "installed_venv": str(installed_venv),
+        }
+        cases = [
+            {
+                "id": "case-1",
+                "scenario": "grounded",
+                "question": "Q1",
+                "turns": ["Q1"],
+                "expected_db": "alpha-rag",
+                "expected_tool_sequence": ["search", "read_summary"],
+                "assistant_all": [],
+                "assistant_any_groups": [],
+            },
+            {
+                "id": "case-2",
+                "scenario": "grounded",
+                "question": "Q2",
+                "turns": ["Q2"],
+                "expected_db": "alpha-rag",
+                "expected_tool_sequence": ["search", "read_summary"],
+                "assistant_all": [],
+                "assistant_any_groups": [],
+            },
+        ]
+        args = Namespace(
+            stage="stage1",
+            candidates=None,
+            copilot_path=str(copilot),
+            installed_venv=str(installed_venv),
+            model=bakeoff.MODEL_ID,
+            max_ai_credits=30,
+            timeout_seconds=30,
+        )
+        manifest = {
+            "schema_version": "test-stepwise-manifest",
+            "stage": "stage1",
+            "selected_candidates": ["A"],
+            "case_ids": ["case-1", "case-2"],
+            "output_root": str(root),
+            "fixture": fixture,
+        }
+
+        def run_case(**kwargs: Any) -> dict[str, Any]:
+            case = kwargs["case"]
+            case_directory = (
+                root / "stage1" / "A" / str(case["id"])
+            )
+            case_directory.mkdir(parents=True, exist_ok=False)
+            assessment = {
+                "schema_version": "lrr-agent-002-case-assessment-v1",
+                "case_id": case["id"],
+                "interim": False,
+                "status": "PASS",
+                "strict_machine_pass": True,
+                "failures": [],
+                "observed": {
+                    "tool_sequence": ["search", "read_summary"],
+                    "unexpected_tools": [],
+                    "process_trace_sequence": ["search"],
+                    "requested_models": ["gpt-5-mini"],
+                    "selected_models": ["gpt-5-mini"],
+                    "assistant_by_turn": ["supported"],
+                    "elapsed_seconds": [0.01],
+                },
+                "human_evidence_review": "PENDING",
+                "case": case,
+            }
+            bakeoff._write_json(case_directory / "assessment.json", assessment)
+            ledger = bakeoff._load_ledger(root)
+            ledger["count"] = int(ledger["count"]) + 1
+            ledger["entries"].append(
+                {"prompt_number": ledger["count"], "status": "completed"}
+            )
+            bakeoff._write_json(bakeoff._ledger_path(root), ledger)
+            return assessment
+
+        run_one = mock.Mock(side_effect=run_case)
+        patches = (
+            mock.patch.object(bakeoff, "_prepare_fixture", return_value=fixture),
+            mock.patch.object(bakeoff, "_candidate_map", return_value={"A": "agent-a"}),
+            mock.patch.object(bakeoff, "_select_candidates", return_value=["A"]),
+            mock.patch.object(bakeoff, "_stage_cases", return_value=cases),
+            mock.patch.object(bakeoff, "_stepwise_manifest", return_value=manifest),
+            mock.patch.object(bakeoff, "_run_one_case", run_one),
+            mock.patch.object(bakeoff, "_finalize_stepwise_stage", return_value=0),
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            self.assertEqual(0, bakeoff._run_stage_locked(args, root))
+            self.assertEqual(1, run_one.call_count)
+            progress_path = root / "stage1" / "progress.json"
+            if bypass_progress_first:
+                original_progress = bakeoff._read_json(progress_path)
+                bypass = json.loads(json.dumps(original_progress))
+                bypass["awaiting_review"] = None
+                bypass["candidate_states"]["A"]["next_case_index"] = 1
+                bakeoff._write_json(progress_path, bypass)
+                with self.assertRaisesRegex(RuntimeError, "PASS review prefix"):
+                    bakeoff._run_stage_locked(args, root)
+                self.assertEqual(1, run_one.call_count)
+                bakeoff._write_json(progress_path, original_progress)
+            self.assertEqual(0, bakeoff._run_stage_locked(args, root))
+            self.assertEqual(1, run_one.call_count, "pending review launched a prompt")
+            review_path = root / "stage1" / "A" / "case-1" / "human-review.json"
+            review = bakeoff._read_json(
+                root / "stage1" / "A" / "case-1" / "human-review-template.json"
+            )
+            if tamper_first:
+                tampered = dict(review)
+                tampered["case_id"] = "case-2"
+                bakeoff._write_json(review_path, tampered)
+                with self.assertRaisesRegex(RuntimeError, "binding mismatch"):
+                    bakeoff._run_stage_locked(args, root)
+                self.assertEqual(1, run_one.call_count)
+            review["status"] = decision
+            review["note"] = "manual evidence decision"
+            bakeoff._write_json(review_path, review)
+            self.assertEqual(0, bakeoff._run_stage_locked(args, root))
+            self.assertEqual(1, run_one.call_count, "decision application launched a prompt")
+            progress = bakeoff._read_json(root / "stage1" / "progress.json")
+            if decision == "PASS":
+                self.assertEqual(0, bakeoff._run_stage_locked(args, root))
+                self.assertEqual(2, run_one.call_count)
+            else:
+                self.assertEqual("EXCLUDED", progress["candidate_states"]["A"]["status"])
+                self.assertEqual(1, run_one.call_count, "FAIL launched a later case")
+            self.assertEqual(run_one.call_count, bakeoff._load_ledger(root)["count"])
+        return run_one, progress
+
+    def test_pass_review_resumes_only_on_a_later_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_one, _ = self._exercise(Path(temporary), decision="PASS")
+            self.assertEqual(2, run_one.call_count)
+
+    def test_fail_review_excludes_before_next_prompt_and_replay_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_one, progress = self._exercise(
+                Path(temporary),
+                decision="FAIL",
+                tamper_first=True,
+                bypass_progress_first=True,
+            )
+            self.assertEqual(1, run_one.call_count)
+            self.assertEqual("READY_TO_FINALIZE", progress["status"])
+
+
 if __name__ == "__main__":
     unittest.main()
