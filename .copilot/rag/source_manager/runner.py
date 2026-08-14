@@ -5,9 +5,9 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
-import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -509,13 +509,19 @@ def update_source(
                 "no-change skip requires a matching completed Source run",
                 stage=f"fetch.{source.payload['source_type']}",
             )
+        with _database_writer_session(
+            Path(db_root), stage="reflect.no_change"
+        ):
+            artifacts_match = _search_artifacts_match_completed_source(
+                Path(db_root),
+                source.payload,
+                state_stored.payload,
+            )
+    else:
+        artifacts_match = False
     if (
         outcome.get("no_change") is True
-        and _search_artifacts_match_completed_source(
-            Path(db_root),
-            source.payload,
-            state_stored.payload,
-        )
+        and artifacts_match
     ):
         for field in ("fetched_count", "indexed_confirmed_count"):
             runtime_state[field] = int(state_stored.payload.get(field) or 0)
@@ -1271,6 +1277,7 @@ def _execute_add(
     command_runner: CommandRunner | None,
     progress_callback: ProgressCallback | None,
     persistent_root_identity: Path | None = None,
+    initial_database_reflection: bool = False,
 ) -> dict[str, Any]:
     key = str(source["local_source_key"])
     privacy_safe_root = (
@@ -1299,6 +1306,8 @@ def _execute_add(
                 str(Path(persistent_root_identity).resolve(strict=True)),
             ]
         )
+    if initial_database_reflection:
+        arguments.append("--initial-database-reflection")
     started = time.monotonic()
     effective_progress_callback = progress_callback
     if privacy_safe_root and progress_callback is not None:
@@ -1312,6 +1321,8 @@ def _execute_add(
             else run_streaming_process(
                 arguments,
                 progress_callback=effective_progress_callback,
+                cwd=str(rag_root),
+                env=_database_writer_child_environment(db_root),
             )
         )
     except Exception as exc:
@@ -1339,6 +1350,41 @@ def _execute_add(
         raise error from None
     elapsed = time.monotonic() - started
     returncode = int(getattr(completed, "returncode", 1))
+    if returncode == 75 and _database_busy_payload(completed) is not None:
+        error = SourceManagerError("ADD failed: DB_BUSY", stage="reflect.add")
+        error.code = "DB_BUSY"
+        error.retryable = True
+        error.diagnostic = {
+            "stage": "reflect.add",
+            "code": "DB_BUSY",
+            "retryable": True,
+            "returncode": 75,
+        }
+        safe_arguments = list(arguments)
+        if privacy_safe_root:
+            safe_arguments[0:2] = [
+                "<PYTHON_EXECUTABLE>",
+                "<ADD_ENTRY_POINT>",
+            ]
+            try:
+                root_index = safe_arguments.index("--root") + 1
+                safe_arguments[root_index] = "<EXTERNAL_SOURCE_ROOT>"
+            except (ValueError, IndexError):
+                pass
+            error.suppress_traceback = True
+        error.process_diagnostic = process_diagnostic(
+            arguments=safe_arguments,
+            cwd="<RAG_RUNTIME>" if privacy_safe_root else rag_root,
+            returncode=returncode,
+            elapsed_seconds=elapsed,
+            stdout=(
+                "" if privacy_safe_root else str(getattr(completed, "stdout", "") or "")
+            ),
+            stderr=(
+                "" if privacy_safe_root else str(getattr(completed, "stderr", "") or "")
+            ),
+        )
+        raise error
     if returncode != 0:
         raw_stderr = (
             ""
@@ -1753,9 +1799,12 @@ def _update_redmine_source(
         )
         if cutoff is not None:
             initial[REDMINE_CUTOFF_STATE_KEY] = cutoff
-        initial["initial_database_reflection"] = (
-            _is_initial_database_reflection(store, source)
-        )
+        with _database_writer_session(
+            store.db_root, stage="reflect.preflight"
+        ):
+            initial["initial_database_reflection"] = (
+                _is_initial_database_reflection(store, source)
+            )
         current_state = store.save_state(
             source.payload["local_source_key"],
             initial,
@@ -2075,7 +2124,10 @@ def _update_redmine_source(
     if bool(
         state_holder[0].payload.get("initial_database_reflection")
     ):
-        _write_initial_snapshot_marker(store.db_root)
+        with _database_writer_session(
+            store.db_root, stage="reflect.snapshot"
+        ):
+            _write_initial_snapshot_marker(store.db_root)
     sync_result = _synchronize_metadata(
         store,
         source_holder[0],
@@ -2171,9 +2223,12 @@ def _update_gitlab_issues_source(
         )
         if cutoff is not None:
             initial[GITLAB_ISSUES_CUTOFF_STATE_KEY] = cutoff
-        initial["initial_database_reflection"] = (
-            _is_initial_database_reflection(store, source)
-        )
+        with _database_writer_session(
+            store.db_root, stage="reflect.preflight"
+        ):
+            initial["initial_database_reflection"] = (
+                _is_initial_database_reflection(store, source)
+            )
         current_state = store.save_state(
             source.payload["local_source_key"],
             initial,
@@ -2511,7 +2566,10 @@ def _update_gitlab_issues_source(
     if bool(
         state_holder[0].payload.get("initial_database_reflection")
     ):
-        _write_initial_snapshot_marker(store.db_root)
+        with _database_writer_session(
+            store.db_root, stage="reflect.snapshot"
+        ):
+            _write_initial_snapshot_marker(store.db_root)
     sync_result = _synchronize_metadata(
         store,
         source_holder[0],
@@ -2609,8 +2667,13 @@ def _gitlab_issues_reflect_batch(
             rag_root=rag_root,
             command_runner=command_runner,
             progress_callback=progress_callback,
+            initial_database_reflection=bool(
+                state.payload.get("initial_database_reflection")
+            ),
         )
     except Exception as exc:
+        if getattr(exc, "code", None) == "DB_BUSY":
+            raise
         interrupted = copy.deepcopy(state.payload)
         error_detail = exception_summary(exc)
         interrupted.update(
@@ -2731,8 +2794,13 @@ def _redmine_reflect_batch(
             rag_root=rag_root,
             command_runner=command_runner,
             progress_callback=progress_callback,
+            initial_database_reflection=bool(
+                state.payload.get("initial_database_reflection")
+            ),
         )
     except Exception as exc:
+        if getattr(exc, "code", None) == "DB_BUSY":
+            raise
         interrupted = copy.deepcopy(state.payload)
         error_detail = exception_summary(exc)
         interrupted.update(
@@ -2855,6 +2923,46 @@ def _resume_add_only(
     return result
 
 
+def _database_writer_child_environment(db_root: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    for key in (
+        "RAG_DB_NAME",
+        "RAG_OUTPUT_ROOT",
+        "LOCALRAG_OUTPUT_ROOT",
+        "CHROMA_DIR_V2",
+        "CHROMA_COLLECTION",
+    ):
+        environment.pop(key, None)
+    environment["RAG_DBS_ROOT"] = str(
+        Path(db_root).resolve(strict=False).parent
+    )
+    environment.update(
+        {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    return environment
+
+
+def _database_busy_payload(completed: Any) -> dict[str, Any] | None:
+    for name in ("stderr", "stdout"):
+        raw = str(getattr(completed, name, "") or "")
+        for line in reversed(raw.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("code") == "DB_BUSY"
+                and payload.get("retryable") is True
+            ):
+                return payload
+    return None
+
+
 def _reflect_and_sync(
     store: SourceStore,
     source: StoredJson,
@@ -2903,8 +3011,11 @@ def _reflect_and_sync(
             command_runner=command_runner,
             progress_callback=progress_callback,
             persistent_root_identity=persistent_root_identity,
+            initial_database_reflection=initial_database_reflection,
         )
     except (Exception, KeyboardInterrupt) as exc:
+        if getattr(exc, "code", None) == "DB_BUSY":
+            raise
         interrupted = copy.deepcopy(state.payload)
         error_detail = exception_summary(exc)
         interrupted.update(
@@ -2954,6 +3065,11 @@ def _reflect_and_sync(
 
     add_summary = dict(add_result["summary"])
     partial = str(add_result.get("status") or "") == "partial"
+    if initial_database_reflection and not partial:
+        with _database_writer_session(
+            store.db_root, stage="reflect.snapshot"
+        ):
+            _write_initial_snapshot_marker(store.db_root)
     confirmed = confirm_add_success(
         store.db_root,
         source.payload["local_source_key"],
@@ -2975,8 +3091,6 @@ def _reflect_and_sync(
             "checkpoint_saved": True,
         },
     )
-    if initial_database_reflection and not partial:
-        _write_initial_snapshot_marker(store.db_root)
     confirmed_source = store.read_source(source.payload["local_source_key"])
     sync_result = _synchronize_metadata(
         store,
@@ -3083,14 +3197,17 @@ def _record_initial_snapshot_candidate(
     recorded = state.payload.get("initial_database_reflection")
     if isinstance(recorded, bool):
         return state, recorded
-    candidate = _is_initial_database_reflection(store, source)
+    with _database_writer_session(
+        store.db_root, stage="reflect.preflight"
+    ):
+        candidate = _is_initial_database_reflection(store, source)
     value = copy.deepcopy(state.payload)
     value["initial_database_reflection"] = candidate
-    updated = store.save_state(
-        source.payload["local_source_key"],
+    updated = StoredJson(
         value,
-        expected_revision=state.revision,
-        expected_etag=state.etag,
+        state.revision,
+        state.etag,
+        state.path,
     )
     return updated, candidate
 
@@ -3143,37 +3260,21 @@ def _is_initial_database_reflection(
 
 def _write_initial_snapshot_marker(db_root: Path) -> None:
     path = db_root / "rag-wrapper.json"
-    if path.exists() or path.is_symlink():
+    if path.exists():
         return
+    from software_rag_tool.atomic_io import atomic_write_json
+
     current = datetime.now(timezone.utc).replace(microsecond=0)
-    payload = {
-        "schema_version": "local-rag.wrapper.v1",
-        "content_snapshot_at": current.isoformat().replace("+00:00", "Z"),
-        "reason": "initial_database_reflection",
-    }
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    atomic_write_json(
+        path,
+        {
+            "schema_version": "local-rag.wrapper.v1",
+            "content_snapshot_at": current.isoformat().replace("+00:00", "Z"),
+            "reason": "initial_database_reflection",
+        },
+        indent=None,
+        sort_keys=False,
     )
-    try:
-        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-            json.dump(
-                payload,
-                handle,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            handle.write("\n")
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except OSError:
-                pass
-        os.replace(temporary, path)
-    finally:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
 
 
 def _attach_registration_failure(
@@ -3260,6 +3361,7 @@ def _synchronize_metadata(
     rag_root: str | Path | None,
     metadata_publisher: MetadataPublisher | None,
 ) -> dict[str, Any]:
+    product_publisher = metadata_publisher is None
     publisher = metadata_publisher or publish_source_metadata
     if rag_root is None:
         return {
@@ -3267,11 +3369,21 @@ def _synchronize_metadata(
             "metadata_sync_pending": True,
         }
     try:
-        publisher(
-            store.db_root,
-            copy.deepcopy(source.payload),
-            Path(rag_root),
-        )
+        if product_publisher:
+            with _database_writer_session(
+                store.db_root, stage="metadata.sync"
+            ):
+                publisher(
+                    store.db_root,
+                    copy.deepcopy(source.payload),
+                    Path(rag_root),
+                )
+        else:
+            publisher(
+                store.db_root,
+                copy.deepcopy(source.payload),
+                Path(rag_root),
+            )
         synced = store.mark_metadata_synced(
             source.payload["local_source_key"],
             expected_revision=source.revision,
@@ -3287,6 +3399,8 @@ def _synchronize_metadata(
             "metadata_sync_pending": False,
         }
     except Exception as exc:
+        if getattr(exc, "code", None) == "DB_BUSY":
+            raise
         error_detail = exception_summary(exc)
         store.append_event(
             source.payload["local_source_key"],
@@ -3298,3 +3412,28 @@ def _synchronize_metadata(
             "metadata_sync_pending": True,
             "metadata_error": error_detail,
         }
+
+
+@contextmanager
+def _database_writer_session(db_root: Path, *, stage: str):
+    tool_root = Path(__file__).resolve().parents[1] / "gen_db" / "software_rag_tool"
+    if str(tool_root) not in sys.path:
+        sys.path.insert(0, str(tool_root))
+    from software_rag_tool.writer_runtime import database_writer_session
+
+    root = Path(db_root)
+    try:
+        with database_writer_session(root.parent, root.name):
+            yield
+    except Exception as exc:
+        if getattr(exc, "code", None) != "DB_BUSY":
+            raise
+        error = SourceManagerError("database writer is busy", stage=stage)
+        error.code = "DB_BUSY"
+        error.retryable = True
+        error.diagnostic = {
+            "stage": stage,
+            "code": "DB_BUSY",
+            "retryable": True,
+        }
+        raise error from None

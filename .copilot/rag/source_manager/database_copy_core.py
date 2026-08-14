@@ -21,6 +21,7 @@ from .database_copy_storage import (
 )
 
 _DB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
+_ATOMIC_TEMP = re.compile(r"^\..+\.\d+\..+\.tmp$", re.IGNORECASE)
 _MAX_JSON_BYTES = 1024 * 1024
 
 
@@ -133,7 +134,7 @@ def live_database_ignore(source_root: Path):
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         current = Path(directory).resolve()
-        excluded: set[str] = set()
+        excluded = {name for name in names if _ATOMIC_TEMP.fullmatch(name)}
         if current == source:
             excluded.update(
                 name

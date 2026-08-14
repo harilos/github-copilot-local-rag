@@ -19,7 +19,7 @@ from setup_contract import completion_contract_valid, completion_marker_for
 from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         epilog=MANAGER_HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -86,7 +86,19 @@ def main() -> None:
 
     python = _runtime_python_or_exit()
     env = os.environ.copy()
-    env.setdefault("RAG_DBS_ROOT", str(RAG_ROOT / "dbs"))
+    configured_root = env.get("RAG_DBS_ROOT", "").strip()
+    selected_root = Path(configured_root) if configured_root else RAG_ROOT / "dbs"
+    if not selected_root.is_absolute():
+        selected_root = RAG_ROOT / selected_root
+    for key in (
+        "RAG_DB_NAME",
+        "RAG_OUTPUT_ROOT",
+        "LOCALRAG_OUTPUT_ROOT",
+        "CHROMA_DIR_V2",
+        "CHROMA_COLLECTION",
+    ):
+        env.pop(key, None)
+    env["RAG_DBS_ROOT"] = str(selected_root.resolve(strict=False))
     add_data = RAG_ROOT / "gen_db" / "add_data.py"
     cmd = [
         python,
@@ -115,7 +127,13 @@ def main() -> None:
         cmd.append("--resume")
     if args.retry_errors:
         cmd.append("--retry-errors")
-    subprocess.check_call(cmd, env=env)
+    completed = subprocess.run(
+        cmd,
+        check=False,
+        cwd=str(RAG_ROOT),
+        env=env,
+    )
+    return int(completed.returncode)
 
 
 def _runtime_python_or_exit() -> str:
@@ -140,4 +158,4 @@ def _runtime_python_or_exit() -> str:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

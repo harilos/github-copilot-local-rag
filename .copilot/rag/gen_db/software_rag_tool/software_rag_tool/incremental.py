@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 from .jsonl import write_jsonl
 from .manifest import validate_existing_index_tokenizer, write_manifest
@@ -849,9 +850,8 @@ def _effective_batch_size_files(
 
 def _save_state(state: dict[str, Any]) -> None:
     path = _state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, state)
 
 
 def _state_path() -> Path:
@@ -870,8 +870,7 @@ def _write_errors_report(state: dict[str, Any]) -> None:
         if item.get("status") == "error"
     ]
     path = logs_dir() / "prepare_errors.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(errors, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, errors, sort_keys=False)
 
 
 def _record_jsonl_path(source_id: str, rel: str) -> Path:

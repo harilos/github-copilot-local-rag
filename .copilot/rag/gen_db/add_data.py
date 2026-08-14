@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,18 @@ sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
+from software_rag_tool.atomic_io import atomic_write_json
 from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
-from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
+from software_rag_tool.dbs import require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool import incremental as incremental_module
 from software_rag_tool.paths import dbs_dir
+from software_rag_tool.writer_runtime import (
+    DB_BUSY_EXIT_CODE,
+    DatabaseBusyError,
+    busy_error_payload,
+    database_writer_session,
+)
 
 
 _PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
@@ -323,7 +331,7 @@ def _non_negative_int(value: Any) -> int:
     return max(0, number)
 
 
-def main() -> None:
+def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
@@ -404,54 +412,73 @@ def main() -> None:
         "--persistent-root-identity",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--initial-database-reflection",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.resume and (args.reset_db or args.reset_clean):
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
 
-    db_name = require_db_name(args.db)
-    db_root = ensure_db_layout(dbs_dir(), db_name)
-    os.environ["RAG_DB_NAME"] = db_name
-    os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
-    os.environ.setdefault(
-        "CHROMA_COLLECTION",
-        collection_name_for_db(db_name),
-    )
-    _install_exact_file_index_progress()
-    protocol_writer = _ManagerProtocolWriter()
-    output_context = (
-        contextlib.redirect_stdout(protocol_writer)
-        if args.manager_protocol_v1
-        else contextlib.nullcontext()
-    )
-    watcher = _AddProgressWatcher(
-        db_root / "logs" / "progress.json",
-        enabled=args.manager_protocol_v1,
-        estimated_total=_preflight_estimated_documents(
-            db_root,
-            args.source_id,
-        ),
-    )
-    watcher.start()
     try:
-        with output_context:
-            summary = incremental_module.add_or_update_root(
-                root=Path(args.root),
-                source_id=args.source_id,
-                scan_subdir=args.scan_subdir,
-                include_root_name_in_path=True,
-                batch_size_files=args.batch_size_files,
-                reset_db=args.reset_db,
-                reset_clean=args.reset_clean,
-                retry_errors=args.retry_errors,
-                operation=args.operation,
-                chunk_max_chars=args.chunk_max_chars,
-                chunk_overlap=args.chunk_overlap,
-                resume=args.resume,
-                privacy_safe_root=args.privacy_safe_root,
-                persistent_root_identity=args.persistent_root_identity,
+        db_name = require_db_name(args.db)
+        with database_writer_session(dbs_dir(), db_name) as target:
+            _install_exact_file_index_progress()
+            protocol_writer = _ManagerProtocolWriter()
+            output_context = (
+                contextlib.redirect_stdout(protocol_writer)
+                if args.manager_protocol_v1
+                else contextlib.nullcontext()
             )
-    finally:
-        watcher.stop()
+            watcher = _AddProgressWatcher(
+                target.db_root / "logs" / "progress.json",
+                enabled=args.manager_protocol_v1,
+                estimated_total=_preflight_estimated_documents(
+                    target.db_root,
+                    args.source_id,
+                ),
+            )
+            watcher.start()
+            try:
+                with output_context:
+                    summary = incremental_module.add_or_update_root(
+                        root=Path(args.root),
+                        source_id=args.source_id,
+                        scan_subdir=args.scan_subdir,
+                        include_root_name_in_path=True,
+                        batch_size_files=args.batch_size_files,
+                        reset_db=args.reset_db,
+                        reset_clean=args.reset_clean,
+                        retry_errors=args.retry_errors,
+                        operation=args.operation,
+                        chunk_max_chars=args.chunk_max_chars,
+                        chunk_overlap=args.chunk_overlap,
+                        resume=args.resume,
+                        privacy_safe_root=args.privacy_safe_root,
+                        persistent_root_identity=args.persistent_root_identity,
+                    )
+                    if (
+                        args.initial_database_reflection
+                        and summary.get("result_status") != "partial"
+                    ):
+                        _write_initial_snapshot_marker(target.db_root)
+            finally:
+                watcher.stop()
+    except DatabaseBusyError as exc:
+        print(
+            json.dumps(
+                busy_error_payload(
+                    exc,
+                    operation=args.operation,
+                    db_name=str(args.db),
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return DB_BUSY_EXIT_CODE
     if args.manager_protocol_v1:
         protocol_writer.flush()
         print(
@@ -460,7 +487,25 @@ def main() -> None:
         )
     else:
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _write_initial_snapshot_marker(db_root: Path) -> None:
+    path = db_root / "rag-wrapper.json"
+    if path.exists():
+        return
+    current = datetime.now(timezone.utc).replace(microsecond=0)
+    atomic_write_json(
+        path,
+        {
+            "schema_version": "local-rag.wrapper.v1",
+            "content_snapshot_at": current.isoformat().replace("+00:00", "Z"),
+            "reason": "initial_database_reflection",
+        },
+        indent=None,
+        sort_keys=False,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

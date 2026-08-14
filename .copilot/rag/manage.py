@@ -88,6 +88,40 @@ REPAIR_COMPONENTS = {
     "2": "vector",
     "3": "all",
 }
+
+
+DATABASE_WRITER_SCRIPTS = frozenset(
+    {
+        "gen_db/add_data.py",
+        "gen_db/build_db.py",
+        "gen_db/delete_source.py",
+        "gen_db/rebuild_component.py",
+    }
+)
+
+
+def _database_child_environment(
+    dbs_root: Path, *, writer: bool = True
+) -> dict[str, str]:
+    environment = dict(os.environ)
+    if writer:
+        for key in (
+            "RAG_DB_NAME",
+            "RAG_OUTPUT_ROOT",
+            "LOCALRAG_OUTPUT_ROOT",
+            "CHROMA_DIR_V2",
+            "CHROMA_COLLECTION",
+        ):
+            environment.pop(key, None)
+    environment.update(
+        {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "RAG_DBS_ROOT": str(Path(dbs_root).resolve(strict=True)),
+        }
+    )
+    return environment
 ALLOWED_SCRIPTS = frozenset(
     {
         "list_dbs.py",
@@ -3138,31 +3172,6 @@ class LocalRagManager:
             provider=source_type,
         )
         if source_id:
-            try:
-                from source_manager.metadata import remove_source_metadata
-
-                remove_source_metadata(
-                    self._validated_database_root(db_name),
-                    source_id,
-                    self.rag_root,
-                )
-                metadata_removed = True
-            except Exception as exc:
-                self._print_internal_diagnostic(
-                    exc,
-                    operation="Source削除",
-                    stage="source_delete.metadata",
-                    db_name=db_name,
-                    source_name=display_name,
-                    source_key=local_key,
-                    provider=source_type,
-                    can_resume=True,
-                )
-                self._print_info(
-                    "検索済み文書と取得設定は削除していません。"
-                    "設定の問題を修正後、Source削除を再実行してください。"
-                )
-                return False
             argv = [
                 str(self._runtime_python()),
                 str(self.rag_root / "gen_db" / "delete_source.py"),
@@ -3171,6 +3180,7 @@ class LocalRagManager:
                 "--source-id",
                 source_id,
                 "--manager-protocol-v1",
+                "--remove-source-metadata",
             ]
             started = time.monotonic()
             try:
@@ -3181,13 +3191,7 @@ class LocalRagManager:
                         timeout=None,
                         heartbeat_interval=5.0,
                         cwd=str(self.rag_root),
-                        env={
-                            **os.environ,
-                            "PYTHONIOENCODING": "utf-8",
-                            "PYTHONUTF8": "1",
-                            "PYTHONDONTWRITEBYTECODE": "1",
-                            "RAG_DBS_ROOT": str(self.dbs_root),
-                        },
+                        env=_database_child_environment(self.dbs_root),
                     )
                 else:
                     # Test/custom runner compatibility; production always uses
@@ -3197,13 +3201,7 @@ class LocalRagManager:
                         shell=False,
                         check=False,
                         cwd=str(self.rag_root),
-                        env={
-                            **os.environ,
-                            "PYTHONIOENCODING": "utf-8",
-                            "PYTHONUTF8": "1",
-                            "PYTHONDONTWRITEBYTECODE": "1",
-                            "RAG_DBS_ROOT": str(self.dbs_root),
-                        },
+                        env=_database_child_environment(self.dbs_root),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -3285,6 +3283,7 @@ class LocalRagManager:
                 )
                 return False
             indexed_deleted = True
+            metadata_removed = bool(payload.get("metadata_removed"))
         if local_key:
             try:
                 from source_manager.store import SourceStore
@@ -5801,13 +5800,10 @@ class LocalRagManager:
             "shell": False,
             "check": False,
             "cwd": str(self.rag_root),
-            "env": {
-                **os.environ,
-                "PYTHONIOENCODING": "utf-8",
-                "PYTHONUTF8": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "RAG_DBS_ROOT": str(self.dbs_root),
-            },
+            "env": _database_child_environment(
+                self.dbs_root,
+                writer=normalized in DATABASE_WRITER_SCRIPTS,
+            ),
         }
         if capture_output:
             kwargs.update(

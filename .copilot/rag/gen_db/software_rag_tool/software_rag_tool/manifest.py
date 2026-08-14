@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from .embeddings import embedding_fingerprint
 from .paths import default_collection_name, index_dir, output_root
 from .tokenize import (
@@ -53,15 +54,10 @@ def write_manifest(
     chunker_config: dict[str, Any] | None = None,
 ) -> Path:
     path = manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            build_manifest(record_count, chunker_config=chunker_config),
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        path,
+        build_manifest(record_count, chunker_config=chunker_config),
+        sort_keys=False,
     )
     return path
 

@@ -70,6 +70,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
         command_runner: Any,
         progress_callback: Any,
         persistent_root_identity: Path | None = None,
+        initial_database_reflection: bool = False,
     ) -> dict[str, Any]:
         if _source_selection(source) != FILE_SELECTION_DOCUMENTS:
             return original_execute_add(
@@ -81,6 +82,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
                 command_runner=command_runner,
                 progress_callback=progress_callback,
                 persistent_root_identity=persistent_root_identity,
+                initial_database_reflection=initial_database_reflection,
             )
 
         def document_runner(arguments: list[str]) -> Any:
@@ -102,6 +104,8 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
             return runner.run_streaming_process(
                 command,
                 progress_callback=progress_callback,
+                cwd=str(rag_root),
+                env=runner._database_writer_child_environment(db_root),
             )
 
         return original_execute_add(
@@ -113,6 +117,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
             command_runner=document_runner,
             progress_callback=progress_callback,
             persistent_root_identity=persistent_root_identity,
+            initial_database_reflection=initial_database_reflection,
         )
 
     @functools.wraps(original_update_configuration)

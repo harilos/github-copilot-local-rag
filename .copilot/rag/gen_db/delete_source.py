@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import stat
 import sys
 import traceback
 from pathlib import Path
@@ -13,13 +11,16 @@ TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
-from software_rag_tool.dbs import (  # noqa: E402
-    collection_name_for_db,
-    require_db_name,
-)
+from software_rag_tool.dbs import require_db_name  # noqa: E402
 from software_rag_tool.env import load_env  # noqa: E402
 from software_rag_tool.paths import dbs_dir  # noqa: E402
 from software_rag_tool.source_delete import delete_source_data  # noqa: E402
+from software_rag_tool.writer_runtime import (  # noqa: E402
+    DB_BUSY_EXIT_CODE,
+    DatabaseBusyError,
+    busy_error_payload,
+    database_writer_session,
+)
 
 PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
 RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
@@ -38,20 +39,31 @@ def main() -> int:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--remove-source-metadata",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     try:
         db_name = require_db_name(args.db)
-        db_root = _validated_database_root(db_name)
-        os.environ["RAG_DB_NAME"] = db_name
-        os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
-        os.environ["CHROMA_DIR_V2"] = str(db_root / "index" / "chroma")
-        os.environ["CHROMA_COLLECTION"] = collection_name_for_db(db_name)
-        result = delete_source_data(
-            args.source_id,
-            progress_callback=(
-                _write_progress if args.manager_protocol_v1 else None
-            ),
-        )
+        with database_writer_session(dbs_dir(), db_name) as target:
+            if args.remove_source_metadata:
+                from source_manager.metadata import remove_source_metadata
+
+                remove_source_metadata(
+                    target.db_root,
+                    args.source_id,
+                    RAG_ROOT,
+                )
+            result = delete_source_data(
+                args.source_id,
+                progress_callback=(
+                    _write_progress if args.manager_protocol_v1 else None
+                ),
+            )
+            if args.remove_source_metadata:
+                result["metadata_removed"] = True
         encoded = json.dumps(
             result,
             ensure_ascii=False,
@@ -60,6 +72,20 @@ def main() -> int:
         )
         print((RESULT_FRAME if args.manager_protocol_v1 else "") + encoded)
         return 0
+    except DatabaseBusyError as exc:
+        print(
+            json.dumps(
+                busy_error_payload(
+                    exc,
+                    operation="delete_source",
+                    db_name=str(args.db),
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return DB_BUSY_EXIT_CODE
     except Exception as exc:
         print(
             json.dumps(
@@ -76,33 +102,6 @@ def main() -> int:
         )
         traceback.print_exc(file=sys.stderr)
         return 1
-
-
-def _validated_database_root(db_name: str) -> Path:
-    root = dbs_dir()
-    root_metadata = os.lstat(root)
-    if _is_link_or_reparse(root_metadata, root) or not stat.S_ISDIR(
-        root_metadata.st_mode
-    ):
-        raise ValueError("database root is missing or unsafe")
-    db_root = root / db_name
-    metadata = os.lstat(db_root)
-    if _is_link_or_reparse(metadata, db_root) or not stat.S_ISDIR(
-        metadata.st_mode
-    ):
-        raise ValueError("database directory is missing or unsafe")
-    if db_root.resolve(strict=True).parent != root.resolve(strict=True):
-        raise ValueError("database directory escaped dbs root")
-    return db_root
-
-
-def _is_link_or_reparse(metadata: os.stat_result, path: Path) -> bool:
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    return (
-        stat.S_ISLNK(metadata.st_mode)
-        or bool(getattr(metadata, "st_file_attributes", 0) & reparse)
-        or (hasattr(path, "is_junction") and path.is_junction())
-    )
 
 
 def _write_progress(event: dict[str, object]) -> None:

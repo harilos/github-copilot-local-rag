@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -14,16 +13,22 @@ sys.path.insert(0, str(TOOL_ROOT))
 from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.catalog import counts as catalog_counts
 from software_rag_tool.catalog import rebuild_from_clean
-from software_rag_tool.dbs import collection_name_for_db, ensure_db_layout, require_db_name
+from software_rag_tool.dbs import require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
 from software_rag_tool.jsonl import read_jsonl
 from software_rag_tool.manifest import write_manifest
 from software_rag_tool.paths import clean_dir, dbs_dir, logs_dir
 from software_rag_tool.store import collection_count, load_records, reset_collection, upsert_records
+from software_rag_tool.writer_runtime import (
+    DB_BUSY_EXIT_CODE,
+    DatabaseBusyError,
+    busy_error_payload,
+    database_writer_session,
+)
 
 
-def main() -> None:
+def main() -> int:
     load_env()
     parser = argparse.ArgumentParser(
         epilog=MANAGER_HELP_EPILOG,
@@ -34,16 +39,28 @@ def main() -> None:
     parser.add_argument("--batch-size-files", type=int, default=20)
     args = parser.parse_args()
 
-    db_name = require_db_name(args.db)
-    _rebuild(args, db_name)
+    try:
+        db_name = require_db_name(args.db)
+        with database_writer_session(dbs_dir(), db_name):
+            _rebuild(args, db_name)
+    except DatabaseBusyError as exc:
+        print(
+            json.dumps(
+                busy_error_payload(
+                    exc,
+                    operation=f"rebuild.{args.component}",
+                    db_name=str(args.db),
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return DB_BUSY_EXIT_CODE
+    return 0
 
 
 def _rebuild(args: argparse.Namespace, db_name: str) -> None:
-    db_root = ensure_db_layout(dbs_dir(), db_name)
-    os.environ["RAG_DB_NAME"] = db_name
-    os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
-    os.environ.setdefault("CHROMA_COLLECTION", collection_name_for_db(db_name))
-
     if args.component in {"lexical", "catalog"}:
         count = rebuild_from_clean(reset=True)
         print(json.dumps({"db": db_name, "component": args.component, "catalog": catalog_counts(), "rebuilt_records": count}, ensure_ascii=False, indent=2))
@@ -125,4 +142,4 @@ def _load_json(path: Path) -> dict:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

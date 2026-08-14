@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -145,34 +146,44 @@ def _install_normal_source_preflight(runner: Any) -> None:
         metadata_publisher: Any,
         progress_callback: Any,
     ) -> dict[str, Any]:
-        state, reflection_root = _prepare_file_source_preview(
-            store,
-            source,
-            state,
-            Path(add_root),
-        )
+        reflection_root = Path(add_root)
         try:
-            if not source.payload.get("source_id"):
-                state, confirmed, documents = _confirm_and_store(
+            session = (
+                runner._database_writer_session(
+                    store.db_root, stage="reflect.preflight"
+                )
+                if hasattr(runner, "_database_writer_session")
+                and hasattr(store, "db_root")
+                else nullcontext()
+            )
+            with session:
+                state, reflection_root = _prepare_file_source_preview(
                     store,
                     source,
                     state,
-                    progress_callback,
+                    Path(add_root),
                 )
-                if not confirmed:
-                    result = runner._source_dto(store, source)
-                    minimum, maximum = estimate_minutes_range(documents)
-                    result.update(
-                        {
-                            "status": "confirmation_declined",
-                            "message": "概算確認で追加を開始しませんでした。",
-                            "estimated_documents": documents,
-                            "estimated_minutes_min": minimum,
-                            "estimated_minutes_max": maximum,
-                            "state_revision": state.revision,
-                        }
+                if not source.payload.get("source_id"):
+                    state, confirmed, documents = _confirm_and_store(
+                        store,
+                        source,
+                        state,
+                        progress_callback,
                     )
-                    return result
+                    if not confirmed:
+                        result = runner._source_dto(store, source)
+                        minimum, maximum = estimate_minutes_range(documents)
+                        result.update(
+                            {
+                                "status": "confirmation_declined",
+                                "message": "概算確認で追加を開始しませんでした。",
+                                "estimated_documents": documents,
+                                "estimated_minutes_min": minimum,
+                                "estimated_minutes_max": maximum,
+                                "state_revision": state.revision,
+                            }
+                        )
+                        return result
             return original(
                 store,
                 source,

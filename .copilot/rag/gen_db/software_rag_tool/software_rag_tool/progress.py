@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_json
 from .paths import logs_dir
 
 
@@ -32,8 +33,7 @@ def write_progress(**updates: Any) -> dict[str, Any]:
     data.update({key: value for key, value in updates.items() if value is not None})
     data["updated_at"] = utc_now()
     path = progress_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
     return data
 
 

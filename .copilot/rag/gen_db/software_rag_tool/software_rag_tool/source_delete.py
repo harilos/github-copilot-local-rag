@@ -20,6 +20,7 @@ from .paths import (
     output_root,
 )
 from .store import delete_ids, source_records
+from .writer_runtime import active_database_write_target
 
 
 ProgressCallback = Callable[[Mapping[str, Any]], None]
@@ -503,8 +504,14 @@ def _with_target_vector_environment(
 ) -> Any:
     keys = ("CHROMA_DIR_V2", "CHROMA_COLLECTION")
     previous = {key: os.environ.get(key) for key in keys}
+    active_target = active_database_write_target()
+    target_collection = (
+        active_target.collection
+        if active_target is not None
+        else collection_name_for_db(db_name())
+    )
     os.environ["CHROMA_DIR_V2"] = str(index_dir() / "chroma")
-    os.environ["CHROMA_COLLECTION"] = collection_name_for_db(db_name())
+    os.environ["CHROMA_COLLECTION"] = target_collection
     try:
         return callback(*args, **kwargs)
     finally:
