@@ -18,6 +18,9 @@ from .extractors import SUPPORTED_EXTENSIONS, extract_sections
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 
 
+FILE_HASH_BUFFER_SIZE = 1024 * 1024
+
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
@@ -27,7 +30,11 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def file_content_hash(path: Path) -> str:
-    return sha256_bytes(path.read_bytes())
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(FILE_HASH_BUFFER_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def chunker_config(
