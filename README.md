@@ -50,6 +50,29 @@ Copilotが内部で一覧を確認するため問題ありません。
 使うことを明示してください。単に専門用語を質問しただけでは、Copilotは勝手に
 RAG検索を始めません。
 
+### 目的で選ぶ2つのAgent
+
+製品側の定義は`.copilot/agents`にあります。Windows installerは、GitHub
+CopilotのAgent選択欄から人間が明示的に選べる2つのAgentを
+`%USERPROFILE%\.copilot\agents`へ配置します。どちらもLocal RAGの管理、
+DB変更、Source更新、file編集は行いません。
+
+| Agent | 向いている質問 | 調べる範囲 |
+|---|---|---|
+| 社内文書検索 | 社内資料だけを根拠に、短く答えてほしい | 指定したLocal RAGを1回だけ検索する。Workspaceと公開Webは読まない |
+| 社内文書徹底調査 | 社内資料と現行実装、必要なら公開情報も照合したい | Local RAGを最初に1回だけ検索し、その成功後にWorkspaceと公開Webを読み取り専用で調べる |
+
+`社内文書検索`は軽量な固定modelを使います。`社内文書徹底調査`はCopilotで現在
+選ばれているmodel（Autoを含む）を引き継ぎ、社内資料、Workspace、公開Webの
+出典を混同せずに示します。社内固有情報を公開Webの検索語へ送りません。
+
+この2つのAgentは配布・更新contractの自動testで検証しています。実際のGitHub
+Copilot UIを起動するtestは製品testの範囲外です。
+
+```text
+COPILOT_REAL_TEST: NOT_RUN_BY_DESIGN
+```
+
 | やりたいこと | Copilotへの依頼例 |
 |---|---|
 | 用語や識別子を調べる | `project-ragで、A2Lとは何か根拠付きで教えて` |
@@ -220,7 +243,7 @@ Source詳細の`更新・再開する`から続けられます。
 |---|---|
 | GitHub | repository全体を取得し、remoteの既定branchを使う |
 | SVN | 再帰／直下のみと、fileの最終更新日で検索への新規取り込み対象を絞れる |
-| Redmine | projectのIssueを1件ずつ取得し、5件ごとに検索へ反映する |
+| Redmine | projectのIssue詳細を1件ずつ取得し、今回処理する安定集合が揃った後に検索へ1回反映する |
 | SharePoint | OneDriveで同期済みのfolderを使う。追加・更新はWindowsのみ |
 | Teams | SharePoint同期root内のTeams共有folderを使う。追加・更新はWindowsのみ |
 | GitLab Issue | projectのIssue本文・Discussionを取得し、5件ごとに検索へ反映する |
@@ -230,6 +253,17 @@ GitHub、SVN、SharePoint、Teams、Otherでは、`対応する全ファイル`�
 `文書のみ取得`を選べます。文書のみ取得にはOffice、PDF、テキスト、
 Markdown（`.md`）、Astah（`.asta`）、PlantUML（`.pu`、`.puml`）が含まれます。
 `.plantuml`も文書のみ取得の対象です。
+
+GitHub、SVN、Otherでは、Source rootからの相対pathまたはglobを除外条件として
+設定できます。例は`build`、`**/*.tmp`、`docs/*/draft.md`です。取得後、初回の
+検索反映前に、除外後の追加対象と除外対象をそれぞれfile件数／bytesで表示し、
+開始確認を行います。絶対path、drive／UNC path、`..`によるroot外参照は指定
+できません。Redmine、GitLab Issue、SharePoint、Teamsにはこの除外設定は
+適用されません。
+
+既に検索へ反映済みのGitHub／SVN／Otherで除外条件を追加した場合は、次回の
+検索反映で該当する旧文書もそのSourceの検索索引から削除されます。除外後の
+対象が0件でも、この旧文書の照合と削除を行います。
 
 SharePointとTeamsの同期root、Redmine API key、GitLab access tokenは
 `5. この端末の設定・動作確認` → `3. Source接続設定`へ登録します。秘密値や
@@ -242,6 +276,12 @@ RAG内の既存文書を削除せず、そのまま保持します。次回以�
 アカウントから見えるIssueだけを新規作成または上書きします。初回取込後は
 GitLab本体URLとproject URLを変更できません。別のprojectへ切り替える場合は、
 新しいSourceとして追加します。
+
+Redmineは取得中のIssue番号と詳細取得件数を進捗へ表示します。再開用の内部
+checkpointは5 Issueごとと末尾に保存しますが、その単位では検索DBへ反映
+しません。今回の更新で処理する安定したIssue集合がすべて揃ってから、外側の
+ADDを1回だけ実行します。中断時は最後の保存済みcheckpointから詳細取得を
+再開し、最大5件を再取得することがあります。
 
 ### Sourceを更新する・中断した処理を再開する
 
