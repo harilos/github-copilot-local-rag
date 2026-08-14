@@ -18,6 +18,7 @@ from pathlib import Path
 SOURCE_MANAGER_ROOT = (
     Path(__file__).resolve().parents[2] / ".copilot" / "rag" / "source_manager"
 )
+ZIP_COPY_BUFFER_SIZE = 1024 * 1024
 
 
 def _load_source_manager_module(name: str):
@@ -382,7 +383,14 @@ def _write_deterministic_zip(package_root: Path, destination: Path) -> None:
                 info = zipfile.ZipInfo(relative.as_posix(), (2026, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o100644 << 16
-                archive.writestr(info, path.read_bytes())
+                with path.open("rb") as source:
+                    info.file_size = os.fstat(source.fileno()).st_size
+                    with archive.open(info, "w") as target:
+                        shutil.copyfileobj(
+                            source,
+                            target,
+                            length=ZIP_COPY_BUFFER_SIZE,
+                        )
         with zipfile.ZipFile(temporary) as archive:
             if archive.testzip() is not None:
                 raise ValueError("generated ZIP failed CRC verification")
