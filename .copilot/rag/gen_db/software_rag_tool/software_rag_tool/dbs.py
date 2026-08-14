@@ -72,16 +72,22 @@ def is_natural_rag_request(text: str) -> bool:
 
 
 def resolve_db_name(text: str, explicit_db: str | None, dbs_root: Path, auto: bool) -> DbResolution:
-    candidates = list_db_names(dbs_root)
     if explicit_db:
-        return DbResolution(require_db_name(explicit_db), True, "explicit --db", candidates)
+        return DbResolution(require_db_name(explicit_db), True, "explicit --db", [])
 
     embedded = extract_db_name(text)
     if embedded:
-        return DbResolution(embedded, True, "db name in request", candidates)
+        return DbResolution(require_db_name(embedded), True, "db name in request", [])
+
+    candidates = list_db_names(dbs_root)
 
     if not auto or not is_natural_rag_request(text):
-        return DbResolution(None, False, "no explicit db name or natural-language RAG trigger", candidates)
+        return DbResolution(
+            None,
+            False,
+            "no explicit db name or natural-language RAG trigger",
+            candidates,
+        )
 
     if len(candidates) == 1:
         return DbResolution(candidates[0], True, "natural-language trigger with a single available db", candidates)
