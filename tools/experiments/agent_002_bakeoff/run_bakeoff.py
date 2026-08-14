@@ -145,6 +145,31 @@ def _default_installed_venv() -> Path:
     return Path.home() / ".copilot" / "rag" / "query" / ".venv"
 
 
+def _authenticated_copilot_home() -> Path:
+    configured = os.environ.get("COPILOT_HOME")
+    home = Path(configured) if configured else Path.home() / ".copilot"
+    home = home.resolve()
+    config_path = home / "config.json"
+    if not config_path.is_file():
+        raise RuntimeError(f"Copilot login config not found: {config_path}")
+    raw = "\n".join(
+        line
+        for line in config_path.read_text(encoding="utf-8-sig").splitlines()
+        if not line.lstrip().startswith("//")
+    )
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid Copilot login config: {config_path}") from exc
+    if not isinstance(config, dict) or not (
+        config.get("lastLoggedInUser") or config.get("loggedInUsers")
+    ):
+        raise RuntimeError(
+            "Copilot CLI is not logged in; run the native copilot.exe login command"
+        )
+    return home
+
+
 def _case_data() -> dict[str, Any]:
     data = _read_json(CASES_PATH)
     if data.get("schema_version") != "lrr-agent-002-cases-v1":
@@ -277,7 +302,7 @@ def _prepare_fixture(
     for scenario, content in SUMMARY_CONTENT.items():
         _write_exact(summary_root / f"{scenario}.md", content)
     _make_junction(rag_root / "query" / ".venv", installed_venv.resolve())
-    (output_root / "copilot-home").mkdir(parents=True, exist_ok=True)
+    authenticated_copilot_home = _authenticated_copilot_home()
     manifest = {
         "schema_version": "lrr-agent-002-fixture-v1",
         "base_sha": BASE_SHA,
@@ -295,7 +320,7 @@ def _prepare_fixture(
         "workspace": str(workspace.resolve()),
         "profile": str(profile.resolve()),
         "summary_root": str(summary_root.resolve()),
-        "copilot_home": str((output_root / "copilot-home").resolve()),
+        "copilot_home": str(authenticated_copilot_home),
         "installed_venv": str(installed_venv.resolve()),
     }
 

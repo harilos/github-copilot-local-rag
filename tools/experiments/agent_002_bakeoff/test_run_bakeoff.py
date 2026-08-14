@@ -179,6 +179,25 @@ def _passing_assessment(
 
 
 class PromptBudgetAndSessionTests(unittest.TestCase):
+    def test_authenticated_copilot_home_is_required_before_prompt_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / ".copilot"
+            home.mkdir()
+            config = home / "config.json"
+            config.write_text(
+                "// managed\n{\"lastLoggedInUser\": null, \"loggedInUsers\": []}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"COPILOT_HOME": str(home)}):
+                with self.assertRaisesRegex(RuntimeError, "not logged in"):
+                    bakeoff._authenticated_copilot_home()
+                config.write_text(
+                    "// managed\n{\"lastLoggedInUser\": {\"login\": \"fixture\"}, "
+                    "\"loggedInUsers\": [{\"login\": \"fixture\"}]}\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(home.resolve(), bakeoff._authenticated_copilot_home())
+
     def test_case_matrix_has_stage_caps_and_global_24_prompt_cap(self) -> None:
         data = bakeoff._case_data()
         candidates = bakeoff._candidate_map(data)
