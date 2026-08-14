@@ -64,6 +64,26 @@ Windows Git Bash:
   "$HOME/.copilot/rag/manage.py"
 ```
 
+### Copilotで使う2つのAgent
+
+製品側の定義は`.copilot/agents`にあります。Windows installerは、GitHub
+CopilotのAgent選択欄から人間が選べる次の2つを
+`%USERPROFILE%\.copilot\agents`へ配置します。
+
+| Agent | 用途 | 情報源 |
+|---|---|---|
+| 社内文書検索 | 社内資料だけから短い回答を得る | Local RAGを1回検索。Workspace／公開Webは読まない |
+| 社内文書徹底調査 | 社内資料、現行実装、必要な公開情報を照合する | Local RAGを最初に1回検索後、Workspace／公開Webを読み取り専用で調査 |
+
+両方ともDB変更、Source更新、file編集、Manager起動を行いません。`社内文書検索`は
+軽量な固定model、`社内文書徹底調査`は現在のmodel選択（Autoを含む）を使います。
+後者も社内固有情報を公開Webへ送らず、情報源を分けて回答します。自動testは
+Agent定義と配布・更新contractを検証し、実際のGitHub Copilot UIは起動しません。
+
+```text
+COPILOT_REAL_TEST: NOT_RUN_BY_DESIGN
+```
+
 共通入力:
 
 - `【必須】`: 空欄では進みません。
@@ -235,9 +255,15 @@ checkout/updateはDB内の専用領域で行い、credentialはURLへ埋め込�
 ### Redmine
 
 projectのIssueを直列に取得し、各Issueを`issues/<issue-id>.md`へ保存します。
-取得対象と各Issueの完了位置をcheckpointへ保存し、5件保存するごとに検索へ
-反映します。中断時にやり直すのは最後に反映確認できていない最大5件です。
-一時的なHTTP失敗だけを上限付きでretryし、`Retry-After`があれば従います。
+画面には現在のIssue番号とIssue詳細の完了件数を表示します。再開用の内部
+checkpointは5 Issueごとと末尾に保存しますが、5件単位のADDは行いません。
+今回処理する安定したIssue集合をすべてMarkdownへ保存できた後、外側のADDを
+1回だけ実行して検索へ反映します。
+
+中断時は最後の保存済みcheckpointから再開するため、最大5件のIssue詳細を
+再取得することがあります。全Issue保存後のADDだけが失敗した場合は、安定した
+取得結果を使ってADDを再試行します。一時的なHTTP失敗だけを上限付きでretryし、
+`Retry-After`があれば従います。
 
 ### GitLab Issue
 
@@ -291,6 +317,41 @@ Teams Sourceもabsolute pathをDBへ保存しません。検索結果のWebリ�
 
 人間が選択したlocal file/folderを一度だけcopyして索引化します。継続同期を
 意味しません。
+
+### GitHub・SVN・Otherの除外と取込前preview
+
+この3種類だけ、Source rootを基準にした相対pathまたはglobを除外条件へ指定
+できます。Source追加時は`除外パス／glob（カンマ区切り）`へ入力します。取得
+設定の変更画面でも同じ条件を編集できます。
+
+```text
+build, **/*.tmp, docs/*/draft.md
+```
+
+- `build`: root直下の`build`とその配下を除外します。
+- `**/*.tmp`: 階層を問わず`.tmp` fileを除外します。
+- `docs/*/draft.md`: `docs`直下の1階層にある`draft.md`を除外します。
+
+separatorは`/`を使うroot相対表記です。入力した`\`は`/`へ正規化します。
+絶対path、Windows drive／UNC path、`..`によるroot外参照は保存できません。
+空欄は除外なしで、暗黙の既定除外はありません。Redmine、GitLab Issue、
+SharePoint、Teamsにはこの設定を使いません。
+
+Provider取得後、初回のADD前にfile本文を読むことなくfile metadataから次を表示し、
+続行を確認します。
+
+```text
+除外後の追加対象: <件数>件 / <容量> bytes
+除外: <件数>件 / <容量> bytes
+```
+
+開始しない場合もSource設定と再開情報は残り、`更新・再開する`から再度previewを
+作り直せます。取得済みfileが変わった再開でも件数とbytesを取り直します。
+
+既に索引済みのSourceへ除外条件を追加した場合は、次回ADDで除外対象の旧文書を
+vector、catalog、clean、取込stateから照合・削除します。除外後の追加対象が0件
+でも削除照合を省略しません。取得元のwork自体をこの除外操作で削除することは
+ありません。
 
 ### 取り込むfile種類
 
