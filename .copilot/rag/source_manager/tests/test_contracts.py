@@ -1685,7 +1685,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             self.assertIn('"journals"', text)
             self.assertIn('"attachments"', text)
 
-    def test_redmine_reflects_fifty_and_resumes_only_unconfirmed_batch(
+    def test_redmine_reflects_once_and_resumes_exact_tail_without_http(
         self,
     ) -> None:
         issue_ids = list(range(1, 54))
@@ -1778,16 +1778,16 @@ class ProviderAndRunnerContracts(unittest.TestCase):
             registered["local_source_key"]
         ).payload
         self.assertEqual("reflect", interrupted["phase"])
-        self.assertEqual(50, interrupted["fetched_count"])
+        self.assertEqual(53, interrupted["fetched_count"])
         self.assertEqual(0, interrupted["indexed_confirmed_count"])
-        self.assertEqual(50, interrupted["pending_count"])
+        self.assertEqual(53, interrupted["pending_count"])
         self.assertEqual(issue_ids, interrupted["redmine_issue_ids"])
         self.assertEqual(
             "2025-02-08",
             interrupted["redmine_updated_on_cutoff"],
         )
         self.assertIn("fixture failure", interrupted["last_error"])
-        self.assertEqual(list(range(1, 51)), detail_calls)
+        self.assertEqual(list(range(1, 54)), detail_calls)
         self.assertEqual(11, list_calls)
 
         fail_first_add = False
@@ -1809,7 +1809,7 @@ class ProviderAndRunnerContracts(unittest.TestCase):
         self.assertEqual(53, result["indexed_confirmed_count"])
         self.assertEqual(list(range(1, 54)), detail_calls)
         self.assertEqual(11, list_calls)
-        self.assertEqual(3, add_calls)
+        self.assertEqual(2, add_calls)
         final = SourceStore(self.db_root).read_state(
             registered["local_source_key"]
         ).payload
