@@ -680,6 +680,30 @@ class ManagerContractTests(unittest.TestCase):
         self.assertIn("--scan-subdir", argv)
         self.assertNotIn("untrusted command", argv)
 
+    def test_writer_invoke_sanitizes_routing_without_changing_read_only_children(
+        self,
+    ) -> None:
+        poison = {
+            "RAG_DB_NAME": "wrong-rag",
+            "RAG_OUTPUT_ROOT": "wrong-output",
+            "LOCALRAG_OUTPUT_ROOT": "wrong-local",
+            "CHROMA_DIR_V2": "wrong-chroma",
+            "CHROMA_COLLECTION": "wrong-collection",
+        }
+        manager = self.manager()
+        with mock.patch.dict(os.environ, poison, clear=False):
+            manager._invoke(
+                "gen_db/rebuild_component.py",
+                ["--db", "example-rag", "--component", "all"],
+            )
+            manager._invoke("gen_db/status.py", ["--db", "example-rag"])
+        writer_env = self.runner.calls[0][1]["env"]
+        reader_env = self.runner.calls[1][1]["env"]
+        self.assertEqual(str(self.dbs_root), writer_env["RAG_DBS_ROOT"])
+        for key in poison:
+            self.assertNotIn(key, writer_env)
+            self.assertEqual(poison[key], reader_env[key])
+
     def test_resume_confirmation_shows_saved_scope_before_execution(
         self,
     ) -> None:
@@ -897,20 +921,17 @@ class ManagerContractTests(unittest.TestCase):
                     "source_id": "source-a",
                     "documents_deleted": 2,
                     "chunks_deleted": 5,
+                    "metadata_removed": True,
                 }
             ),
         )
         manager = self.manager(["Synthetic Source", "y"])
-        with mock.patch(
-            "source_manager.metadata.remove_source_metadata",
-            return_value=True,
-        ) as remove_metadata:
-            self.assertTrue(
-                manager._delete_source_interactive(
-                    "example-rag",
-                    source,
-                )
+        self.assertTrue(
+            manager._delete_source_interactive(
+                "example-rag",
+                source,
             )
+        )
         argv = self.runner.calls[-1][0]
         self.assertEqual("delete_source.py", Path(argv[1]).name)
         self.assertEqual(
@@ -918,16 +939,16 @@ class ManagerContractTests(unittest.TestCase):
             self.runner.calls[-1][1]["env"]["PYTHONDONTWRITEBYTECODE"],
         )
         self.assertEqual(
-            argv[-5:],
+            argv[-6:],
             [
                 "--db",
                 "example-rag",
                 "--source-id",
                 "source-a",
                 "--manager-protocol-v1",
+                "--remove-source-metadata",
             ],
         )
-        remove_metadata.assert_called_once()
         rendered = "\n".join(self.output)
         self.assertIn("ほかのSourceとその文書", rendered)
         self.assertIn(
@@ -953,22 +974,18 @@ class ManagerContractTests(unittest.TestCase):
             stderr="Traceback: synthetic delete failure",
         )
         manager = self.manager(["Synthetic Source", "y"])
-        with mock.patch(
-            "source_manager.metadata.remove_source_metadata",
-        ) as remove_metadata:
-            self.assertFalse(
-                manager._delete_source_interactive(
-                    "example-rag",
-                    source,
-                )
+        self.assertFalse(
+            manager._delete_source_interactive(
+                "example-rag",
+                source,
             )
-        remove_metadata.assert_called_once()
+        )
         rendered = "\n".join(self.output)
         self.assertIn(
             "取得設定と作業ファイルは削除していません",
             rendered,
         )
-        self.assertIn("検索結果リンク設定は削除済み", rendered)
+        self.assertNotIn("検索結果リンク設定は削除済み", rendered)
         self.assertIn("synthetic delete failure", rendered)
 
     def test_source_delete_metadata_failure_does_not_delete_index(self) -> None:
@@ -980,23 +997,25 @@ class ManagerContractTests(unittest.TestCase):
             "document_count": 2,
             "chunk_count": 5,
         }
+        self.runner.respond(
+            "delete_source.py",
+            returncode=1,
+            stderr="synthetic metadata failure",
+        )
         manager = self.manager(["Synthetic Source", "y"])
-        with mock.patch(
-            "source_manager.metadata.remove_source_metadata",
-            side_effect=RuntimeError("synthetic metadata failure"),
-        ):
-            self.assertFalse(
-                manager._delete_source_interactive(
-                    "example-rag",
-                    source,
-                )
+        self.assertFalse(
+            manager._delete_source_interactive(
+                "example-rag",
+                source,
             )
-        self.assertEqual(self.runner.calls, [])
+        )
+        self.assertEqual(1, len(self.runner.calls))
         rendered = "\n".join(self.output)
         self.assertIn(
-            "検索済み文書と取得設定は削除していません",
+            "取得設定と作業ファイルは削除していません",
             rendered,
         )
+        self.assertNotIn("検索結果リンク設定は削除済み", rendered)
         self.assertIn("synthetic metadata failure", rendered)
 
     def test_manager_tty_progress_clears_tail_and_finishes_line(self) -> None:

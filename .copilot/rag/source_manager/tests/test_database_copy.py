@@ -145,6 +145,38 @@ class DatabaseCopyTests(unittest.TestCase):
         self.assertTrue(state["ingestion"]["root"].startswith(str(destination)))
         self.assertTrue((self.source / "db.json").is_file())
 
+    def test_copy_excludes_orphan_atomic_checkpoint_temporaries(self) -> None:
+        orphan_names = (
+            "logs/.index_state.json.123.deadbeef.tmp",
+            "logs/.progress.json.123.deadbeef.tmp",
+            "index/.manifest.json.123.deadbeef.tmp",
+        )
+        for relative in orphan_names:
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("partial", encoding="utf-8")
+        legitimate_temp = self.source / "data" / "raw" / "draft.tmp"
+        legitimate_temp.parent.mkdir(parents=True, exist_ok=True)
+        legitimate_temp.write_text("source material", encoding="utf-8")
+        destination = self.root / "portable-rag"
+        copy_database(
+            self.source,
+            destination,
+            destination_name="portable-rag",
+            title="Portable",
+            query_hint="Portable documents",
+            rag_root=self.root,
+        )
+        for relative in orphan_names:
+            self.assertTrue((self.source / relative).is_file())
+            self.assertFalse((destination / relative).exists())
+        self.assertEqual(
+            "source material",
+            (destination / "data" / "raw" / "draft.tmp").read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_failed_copy_does_not_publish_destination(self) -> None:
         destination = self.root / "failed-rag"
         with mock.patch(

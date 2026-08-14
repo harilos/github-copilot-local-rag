@@ -381,6 +381,47 @@ class AddIntegrationTests(unittest.TestCase):
                     progress_callback=None,
                 )
 
+    def test_add_boundary_preserves_retryable_db_busy_even_when_privacy_safe(
+        self,
+    ) -> None:
+        completed = SimpleNamespace(
+            returncode=75,
+            stdout="",
+            stderr=json.dumps(
+                {"status": "error", "code": "DB_BUSY", "retryable": True}
+            ),
+        )
+        for privacy_safe in (False, True):
+            with self.subTest(privacy_safe=privacy_safe), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with self.assertRaisesRegex(ValueError, "DB_BUSY") as raised:
+                    _execute_add(
+                        db_root=root / "fixture-rag",
+                        source={
+                            "local_source_key": "src_key",
+                            "source_type": "sharepoint" if privacy_safe else "local",
+                        },
+                        work=root / "private-work",
+                        python_executable=Path(sys.executable),
+                        rag_root=root / "rag",
+                        command_runner=lambda _arguments: completed,
+                        progress_callback=None,
+                    )
+                error = raised.exception
+                self.assertEqual("DB_BUSY", getattr(error, "code", None))
+                self.assertIs(True, getattr(error, "retryable", None))
+                self.assertEqual(
+                    {
+                        "stage": "reflect.add",
+                        "code": "DB_BUSY",
+                        "retryable": True,
+                        "returncode": 75,
+                    },
+                    error.diagnostic,
+                )
+                if privacy_safe:
+                    self.assertNotIn(str(root), json.dumps(error.process_diagnostic))
+
     def test_streaming_add_forces_utf8_under_cp932_ambient_environment(
         self,
     ) -> None:
@@ -404,7 +445,14 @@ class AddIntegrationTests(unittest.TestCase):
                 "'display_name':'日本語ソース',"
                 "'pythonioencoding':os.environ.get('PYTHONIOENCODING'),"
                 "'pythonutf8':os.environ.get('PYTHONUTF8'),"
-                "'sentinel':os.environ.get('LOCAL_RAG_SENTINEL')},"
+                "'sentinel':os.environ.get('LOCAL_RAG_SENTINEL'),"
+                "'cwd':os.getcwd(),"
+                "'rag_dbs_root':os.environ.get('RAG_DBS_ROOT'),"
+                "'rag_db_name':os.environ.get('RAG_DB_NAME'),"
+                "'rag_output_root':os.environ.get('RAG_OUTPUT_ROOT'),"
+                "'localrag_output_root':os.environ.get('LOCALRAG_OUTPUT_ROOT'),"
+                "'chroma_dir':os.environ.get('CHROMA_DIR_V2'),"
+                "'chroma_collection':os.environ.get('CHROMA_COLLECTION')},"
                 "ensure_ascii=False))\n",
                 encoding="utf-8",
             )
@@ -417,6 +465,12 @@ class AddIntegrationTests(unittest.TestCase):
                     "PYTHONIOENCODING": "cp932",
                     "PYTHONUTF8": "0",
                     "LOCAL_RAG_SENTINEL": "kept",
+                    "RAG_DBS_ROOT": "wrong-dbs-root",
+                    "RAG_DB_NAME": "wrong-rag",
+                    "RAG_OUTPUT_ROOT": "wrong-output",
+                    "LOCALRAG_OUTPUT_ROOT": "wrong-local-output",
+                    "CHROMA_DIR_V2": "wrong-chroma",
+                    "CHROMA_COLLECTION": "wrong-collection",
                 },
             ):
                 result = _execute_add(
@@ -438,6 +492,16 @@ class AddIntegrationTests(unittest.TestCase):
         self.assertEqual("utf-8", summary["pythonioencoding"])
         self.assertEqual("1", summary["pythonutf8"])
         self.assertEqual("kept", summary["sentinel"])
+        self.assertEqual(str(rag_root), summary["cwd"])
+        self.assertEqual(str(root), summary["rag_dbs_root"])
+        for field in (
+            "rag_db_name",
+            "rag_output_root",
+            "localrag_output_root",
+            "chroma_dir",
+            "chroma_collection",
+        ):
+            self.assertIsNone(summary[field])
         self.assertEqual(
             "ソース資料.md",
             observed[0]["payload"]["current_item"],

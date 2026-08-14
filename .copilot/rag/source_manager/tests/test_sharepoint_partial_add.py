@@ -399,7 +399,10 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
         observed: list[dict] = []
 
-        def run(arguments, *, progress_callback):
+        def run(arguments, *, progress_callback, cwd, env):
+            self.assertEqual("rag", cwd)
+            self.assertEqual(Path.cwd().resolve(), Path(env["RAG_DBS_ROOT"]))
+            self.assertNotIn("RAG_OUTPUT_ROOT", env)
             progress_callback(
                 {
                     "event": "subprocess.log",

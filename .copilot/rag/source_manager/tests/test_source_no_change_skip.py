@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
+from source_manager import runner as runner_module
 from source_manager.checkpoints import complete_run, new_run_state
+from source_manager.errors import SourceManagerError
 from source_manager.runner import (
     _previous_success_matches_plan,
     register_source,
@@ -18,6 +21,71 @@ from source_manager.store import MISSING_ETAG, SourceStore
 
 
 class SourceNoChangeSkipTests(unittest.TestCase):
+    def test_busy_no_change_check_does_not_read_or_change_search_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            db_root = Path(temporary) / "example-rag"
+            db_root.mkdir()
+            registered = register_source(
+                db_root,
+                source_type="github",
+                display_name="fixture",
+                fetch={"repository_url": "https://example.invalid/repository.git"},
+                source_id="src_fixture-0123456789ab",
+            )
+            key = registered["local_source_key"]
+            store = SourceStore(db_root)
+            source = store.read_source(key)
+            state = new_run_state(store.plan(source.payload))
+            state.update({"fetched_count": 1, "indexed_confirmed_count": 1})
+            store.save_state(
+                key,
+                complete_run(state),
+                expected_revision=0,
+                expected_etag=MISSING_ETAG,
+            )
+            self._create_search_artifacts(
+                db_root,
+                source_id="src_fixture-0123456789ab",
+                document_count=1,
+            )
+            artifacts = (
+                db_root / "db.json",
+                db_root / "catalog.sqlite",
+                db_root / "index/manifest.json",
+                db_root / "index/chroma/chroma.sqlite3",
+            )
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in artifacts
+            }
+            with mock.patch.object(
+                runner_module,
+                "_search_artifacts_match_completed_source",
+                wraps=runner_module._search_artifacts_match_completed_source,
+            ) as matcher, runner_module._database_writer_session(
+                db_root, stage="test.holder"
+            ):
+                with self.assertRaises(SourceManagerError) as raised:
+                    update_source(
+                        db_root,
+                        key,
+                        executor=lambda *_args: {
+                            "status": "ok",
+                            "documents": 1,
+                            "revision": "unchanged",
+                            "no_change": True,
+                        },
+                    )
+                self.assertEqual("DB_BUSY", getattr(raised.exception, "code", None))
+                matcher.assert_not_called()
+                self.assertEqual(
+                    before,
+                    {
+                        path: (path.read_bytes(), path.stat().st_mtime_ns)
+                        for path in artifacts
+                    },
+                )
+
     def test_completed_matching_source_skips_reflection_and_preserves_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             db_root = Path(temporary) / "example-rag"
