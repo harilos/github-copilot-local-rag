@@ -19,6 +19,11 @@ from windows_package_builder import BuildRequest, build_package
 
 
 HERE = Path(__file__).resolve().parent
+REPOSITORY_ROOT = HERE.parents[1]
+AGENT_NAMES = (
+    "internal-doc-deep-research.agent.md",
+    "internal-doc-search.agent.md",
+)
 
 
 def _decoded_banner(launcher: str) -> str:
@@ -72,6 +77,7 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (payload / "rag" / "query" / "portable_runtime.py").write_text(
         "raise SystemExit\n", encoding="utf-8"
     )
+    shutil.copytree(REPOSITORY_ROOT / ".copilot" / "agents", payload / "agents")
 
     _write_pe(runtime / "Scripts" / "python.exe")
     _write_pe(runtime / "python313.dll")
@@ -152,6 +158,13 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 names = set(archive.namelist())
                 prefix = "local-rag-windows-x64-1.2.3/"
                 self.assertIn(prefix + "install.cmd", names)
+                for agent_name in AGENT_NAMES:
+                    member = prefix + ".copilot/agents/" + agent_name
+                    self.assertIn(member, names)
+                    self.assertEqual(
+                        (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
+                        archive.read(member),
+                    )
                 launcher = archive.read(prefix + "install.cmd").decode("utf-8")
                 self.assertIn(
                     '"%~dp0internal\\install.ps1" '
@@ -597,6 +610,10 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
+        shutil.copytree(
+            REPOSITORY_ROOT / ".copilot" / "agents",
+            package / ".copilot" / "agents",
+        )
         model = (
             package
             / ".copilot"
@@ -670,9 +687,26 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 b"new-db",
                 (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
             )
+            agents = profile / ".copilot" / "agents"
+            for agent_name in AGENT_NAMES:
+                self.assertEqual(
+                    (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
+                    (agents / agent_name).read_bytes(),
+                )
 
             (target / "dbs" / "selected-rag" / "catalog.sqlite").write_bytes(
                 b"old-db"
+            )
+            user_agent = agents / "internal-doc-search.agent.md"
+            user_agent.write_bytes(b"user-owned-agent\r\n")
+            package_deep_agent = (
+                package
+                / ".copilot"
+                / "agents"
+                / "internal-doc-deep-research.agent.md"
+            )
+            package_deep_agent.write_bytes(
+                package_deep_agent.read_bytes() + b"\n# product revision 2\n"
             )
             unrelated = target / "dbs" / "unrelated-rag"
             unrelated.mkdir()
@@ -695,6 +729,54 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "keep\n",
                 (unrelated / "keep.txt").read_text(encoding="utf-8"),
             )
+            self.assertEqual(b"user-owned-agent\r\n", user_agent.read_bytes())
+            self.assertEqual(
+                package_deep_agent.read_bytes(),
+                (agents / "internal-doc-deep-research.agent.md").read_bytes(),
+            )
+
+    def test_agent_creation_rolls_back_with_failed_product_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            installer = package / "internal" / "install.ps1"
+            installer_text = installer.read_text(encoding="utf-8")
+            rollback_point = (
+                '\n    foreach ($Relative in @(\n'
+                '        "rag\\query\\.packaged-runtime.json",'
+            )
+            self.assertIn(rollback_point, installer_text)
+            installer.write_text(
+                installer_text.replace(
+                    rollback_point,
+                    '\n    throw "synthetic post-copy failure"\n'
+                    + rollback_point,
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            installed_agents = profile / ".copilot" / "agents"
+            installed_agents.mkdir(parents=True)
+            product_search = (
+                REPOSITORY_ROOT
+                / ".copilot"
+                / "agents"
+                / "internal-doc-search.agent.md"
+            )
+            installed_search = installed_agents / product_search.name
+            installed_search.write_bytes(product_search.read_bytes())
+            unrelated = installed_agents / "user.agent.md"
+            unrelated.write_bytes(b"user-owned-agent")
+
+            completed = self._run(package, profile)
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(product_search.read_bytes(), installed_search.read_bytes())
+            self.assertFalse(
+                (installed_agents / "internal-doc-deep-research.agent.md").exists()
+            )
+            self.assertEqual(b"user-owned-agent", unrelated.read_bytes())
 
     def test_vscode_failure_keeps_published_runtime_and_databases_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

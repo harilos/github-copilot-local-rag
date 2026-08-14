@@ -329,6 +329,51 @@ function Test-ProtectedRelativePath {
     ) -icontains $Value
 }
 
+function Test-LocalRagAgentRelativePath {
+    param([string]$Relative)
+    $Value = $Relative.Replace("/", "\")
+    return @(
+        "agents\internal-doc-deep-research.agent.md",
+        "agents\internal-doc-search.agent.md"
+    ) -icontains $Value
+}
+
+function Get-NormalizedUtf8Sha256 {
+    param([string]$Path)
+    try {
+        $StrictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $Text = [System.IO.File]::ReadAllText($Path, $StrictUtf8)
+    } catch {
+        return ""
+    }
+    $Normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Normalized)
+    $Hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join @(
+            $Hasher.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") }
+        )
+    } finally {
+        $Hasher.Dispose()
+    }
+}
+
+function Test-KnownProductAgentRevision {
+    param([string]$Relative, [string]$Destination)
+    $Value = $Relative.Replace("/", "\").ToLowerInvariant()
+    $Known = switch ($Value) {
+        "agents\internal-doc-deep-research.agent.md" {
+            @("5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39")
+        }
+        "agents\internal-doc-search.agent.md" {
+            @("93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8")
+        }
+        default { @() }
+    }
+    if ($Known.Count -eq 0) { return $false }
+    return $Known -contains (Get-NormalizedUtf8Sha256 -Path $Destination)
+}
+
 function Backup-ProductFile {
     param([string]$Relative, [string]$Destination)
     if ($ProductBackedUp -icontains $Relative) { return }
@@ -492,6 +537,16 @@ try {
                     Split-Path -Parent $Destination
                 ) | Out-Null
                 if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+                    if (
+                        (Test-LocalRagAgentRelativePath -Relative $Relative) -and
+                        -not (Test-KnownProductAgentRevision `
+                            -Relative $Relative `
+                            -Destination $Destination)
+                    ) {
+                        # User-level Agent names can already belong to the user.
+                        # Only exact, unedited product revisions are updateable.
+                        return
+                    }
                     Backup-ProductFile -Relative $Relative -Destination $Destination
                 } else {
                     $script:ProductCreatedFiles += $Destination
