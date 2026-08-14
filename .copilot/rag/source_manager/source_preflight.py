@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import copy
 import functools
+from pathlib import Path
 from typing import Any, Mapping
+
+from .errors import SourceManagerError
+from .source_exclusion import (
+    FILE_BASED_SOURCE_TYPES,
+    SourcePreview,
+    discard_prepared_work,
+    exclusion_signature,
+    normalize_exclusion_paths,
+    parse_exclusion_input,
+    preview_and_prepare_work,
+)
 
 
 _RUNTIME_PATCH_MARKER = "_local_rag_source_preflight_runtime_installed"
@@ -10,6 +22,8 @@ _MANAGER_PATCH_MARKER = "_local_rag_source_preflight_manager_installed"
 _REDMINE_REQUIRED_ATTR = "_local_rag_preflight_required"
 _RESULT_ATTR = "_local_rag_preflight_result"
 _CONFIRM_METHOD = "confirm_source_estimate"
+_PREVIEW_METHOD = "confirm_source_preview"
+_PREVIEW_ATTR = "_local_rag_source_preview"
 
 
 class SourceEstimateDeclined(RuntimeError):
@@ -54,6 +68,12 @@ def _install_manager_confirmation(manager_class: type[Any]) -> None:
         return
     original = manager_class._progress_callback
 
+    for method_name in (
+        "_prompt_new_svn_source",
+        "_prompt_new_other_source",
+    ):
+        _install_exclusion_prompt(manager_class, method_name)
+
     @functools.wraps(original)
     def progress_callback(
         self: Any,
@@ -78,7 +98,31 @@ def _install_manager_confirmation(manager_class: type[Any]) -> None:
                 )
             )
 
+        def confirm_source_preview(preview: Mapping[str, Any]) -> bool:
+            included = max(0, int(preview.get("included_count") or 0))
+            included_bytes = max(0, int(preview.get("included_bytes") or 0))
+            excluded = max(0, int(preview.get("excluded_count") or 0))
+            excluded_bytes = max(0, int(preview.get("excluded_bytes") or 0))
+            minimum, maximum = estimate_minutes_range(included)
+            self.output("")
+            self._print_info(
+                f"除外後の追加対象: {included:,}件 / {included_bytes:,} bytes"
+            )
+            self.output(
+                f"除外: {excluded:,}件 / {excluded_bytes:,} bytes"
+            )
+            self.output(
+                f"目安時間: 約{minimum:,}～{maximum:,}分"
+                "（1文書あたり1～5分の幅で算出）"
+            )
+            return bool(
+                self._confirm(
+                    f"除外後の{included:,}件を追加します。よろしいですか？"
+                )
+            )
+
         setattr(renderer, _CONFIRM_METHOD, confirm_source_estimate)
+        setattr(renderer, _PREVIEW_METHOD, confirm_source_preview)
         return renderer
 
     manager_class._progress_callback = progress_callback
@@ -101,38 +145,52 @@ def _install_normal_source_preflight(runner: Any) -> None:
         metadata_publisher: Any,
         progress_callback: Any,
     ) -> dict[str, Any]:
-        if not source.payload.get("source_id"):
-            state, confirmed, documents = _confirm_and_store(
-                store,
-                source,
-                state,
-                progress_callback,
-            )
-            if not confirmed:
-                result = runner._source_dto(store, source)
-                minimum, maximum = estimate_minutes_range(documents)
-                result.update(
-                    {
-                        "status": "confirmation_declined",
-                        "message": "概算確認で追加を開始しませんでした。",
-                        "estimated_documents": documents,
-                        "estimated_minutes_min": minimum,
-                        "estimated_minutes_max": maximum,
-                        "state_revision": state.revision,
-                    }
-                )
-                return result
-        return original(
+        state, reflection_root = _prepare_file_source_preview(
             store,
             source,
             state,
-            add_root=add_root,
-            python_executable=python_executable,
-            rag_root=rag_root,
-            command_runner=command_runner,
-            metadata_publisher=metadata_publisher,
-            progress_callback=progress_callback,
+            Path(add_root),
         )
+        try:
+            if not source.payload.get("source_id"):
+                state, confirmed, documents = _confirm_and_store(
+                    store,
+                    source,
+                    state,
+                    progress_callback,
+                )
+                if not confirmed:
+                    result = runner._source_dto(store, source)
+                    minimum, maximum = estimate_minutes_range(documents)
+                    result.update(
+                        {
+                            "status": "confirmation_declined",
+                            "message": "概算確認で追加を開始しませんでした。",
+                            "estimated_documents": documents,
+                            "estimated_minutes_min": minimum,
+                            "estimated_minutes_max": maximum,
+                            "state_revision": state.revision,
+                        }
+                    )
+                    return result
+            return original(
+                store,
+                source,
+                state,
+                add_root=reflection_root,
+                python_executable=python_executable,
+                rag_root=rag_root,
+                command_runner=command_runner,
+                metadata_publisher=metadata_publisher,
+                progress_callback=progress_callback,
+                persistent_root_identity=(
+                    Path(add_root)
+                    if reflection_root != Path(add_root)
+                    else None
+                ),
+            )
+        finally:
+            discard_prepared_work(reflection_root, Path(add_root))
 
     runner._reflect_and_sync = reflect_and_sync
 
@@ -143,11 +201,28 @@ def _confirm_and_store(
     state: Any,
     progress_callback: Any,
 ) -> tuple[Any, bool, int]:
-    documents = max(0, int(state.payload.get("fetched_count") or 0))
+    preview = _preview_from_state(state.payload)
+    documents = (
+        preview.included_count
+        if preview is not None
+        else max(0, int(state.payload.get("fetched_count") or 0))
+    )
     if bool(state.payload.get("preflight_confirmed")):
         return state, True, documents
 
-    confirmed = _request_confirmation(progress_callback, documents)
+    previous_preview = _set_optional_attribute(
+        progress_callback,
+        _PREVIEW_ATTR,
+        preview,
+    )
+    try:
+        confirmed = _request_confirmation(progress_callback, documents)
+    finally:
+        _restore_optional_attribute(
+            progress_callback,
+            _PREVIEW_ATTR,
+            previous_preview,
+        )
     value = copy.deepcopy(state.payload)
     value.update(
         {
@@ -174,6 +249,13 @@ def _confirm_and_store(
         expected_etag=state.etag,
     )
     minimum, maximum = estimate_minutes_range(documents)
+    event_details: dict[str, Any] = {
+        "estimated_documents": documents,
+        "estimated_minutes_min": minimum,
+        "estimated_minutes_max": maximum,
+    }
+    if preview is not None:
+        event_details.update(preview.to_dict())
     store.append_event(
         source.payload["local_source_key"],
         (
@@ -181,11 +263,7 @@ def _confirm_and_store(
             if confirmed
             else "source.preflight.declined"
         ),
-        {
-            "estimated_documents": documents,
-            "estimated_minutes_min": minimum,
-            "estimated_minutes_max": maximum,
-        },
+        event_details,
     )
     return saved, bool(confirmed), documents
 
@@ -585,11 +663,154 @@ def _persist_redmine_confirmation(
         return
 
 
-def _request_confirmation(progress_callback: Any, documents: int) -> bool:
+def _request_confirmation(
+    progress_callback: Any,
+    documents: int,
+    *,
+    preview: SourcePreview | None = None,
+) -> bool:
+    if preview is None:
+        candidate = getattr(progress_callback, _PREVIEW_ATTR, None)
+        if isinstance(candidate, SourcePreview):
+            preview = candidate
+    if preview is not None:
+        preview_callback = getattr(progress_callback, _PREVIEW_METHOD, None)
+        if callable(preview_callback):
+            return bool(preview_callback(preview.to_dict()))
     callback = getattr(progress_callback, _CONFIRM_METHOD, None)
     if not callable(callback):
         return True
     return bool(callback(max(0, int(documents))))
+
+
+def _prepare_file_source_preview(
+    store: Any,
+    source: Any,
+    state: Any,
+    add_root: Path,
+) -> tuple[Any, Path]:
+    source_type = str(source.payload.get("source_type") or "").strip().lower()
+    if source_type not in FILE_BASED_SOURCE_TYPES:
+        return state, add_root
+    fetch = source.payload.get("fetch")
+    settings = dict(fetch) if isinstance(fetch, Mapping) else {}
+    paths = normalize_exclusion_paths(settings.get("exclude_paths"))
+    signature = exclusion_signature(paths)
+    filtered_root = (
+        add_root.parent.parent / "filtered" / add_root.name
+    )
+    prepared = preview_and_prepare_work(
+        add_root,
+        paths,
+        filtered_root=filtered_root,
+    )
+    preview = prepared.preview
+    value = copy.deepcopy(state.payload)
+    effective_fetched_count = (
+        preview.included_count
+        if paths or preview.acquired_count > 0
+        else max(0, int(value.get("fetched_count") or 0))
+    )
+    confirmed_count = min(
+        effective_fetched_count,
+        max(0, int(value.get("indexed_confirmed_count") or 0)),
+    )
+    value.update(
+        {
+            "fetched_count": effective_fetched_count,
+            "indexed_confirmed_count": confirmed_count,
+            "pending_count": max(
+                0,
+                effective_fetched_count
+                - confirmed_count,
+            ),
+            "preflight_acquired_count": preview.acquired_count,
+            "preflight_acquired_bytes": preview.acquired_bytes,
+            "preflight_included_count": preview.included_count,
+            "preflight_included_bytes": preview.included_bytes,
+            "preflight_excluded_count": preview.excluded_count,
+            "preflight_excluded_bytes": preview.excluded_bytes,
+            "preflight_exclusion_hash": signature,
+            "preflight_filter_applied": True,
+        }
+    )
+    try:
+        saved = store.save_state(
+            source.payload["local_source_key"],
+            value,
+            expected_revision=state.revision,
+            expected_etag=state.etag,
+        )
+        store.append_event(
+            source.payload["local_source_key"],
+            "source.preflight.preview_prepared",
+            preview.to_dict(),
+        )
+        return saved, prepared.add_root
+    except BaseException:
+        discard_prepared_work(prepared.add_root, add_root)
+        raise
+
+
+def _preview_from_state(value: Mapping[str, Any]) -> SourcePreview | None:
+    fields = (
+        "preflight_included_count",
+        "preflight_included_bytes",
+        "preflight_excluded_count",
+        "preflight_excluded_bytes",
+    )
+    if any(field not in value for field in fields):
+        return None
+    return SourcePreview(
+        included_count=max(0, int(value[fields[0]] or 0)),
+        included_bytes=max(0, int(value[fields[1]] or 0)),
+        excluded_count=max(0, int(value[fields[2]] or 0)),
+        excluded_bytes=max(0, int(value[fields[3]] or 0)),
+    )
+
+
+def _install_exclusion_prompt(manager_class: type[Any], method_name: str) -> None:
+    original = getattr(manager_class, method_name, None)
+    if not callable(original):
+        return
+
+    @functools.wraps(original)
+    def prompt(self: Any) -> dict[str, Any] | None:
+        proposal = original(self)
+        if proposal is None:
+            return None
+        raw = self._prompt_preserving_value(
+            "除外パス／glob（カンマ区切り）",
+            "",
+            required=False,
+            description=(
+                "Source rootからの相対POSIX path/globです。"
+                "空欄は除外なしです。例: build, **/*.tmp"
+            ),
+            empty_help="除外なし",
+        )
+        if raw is None:
+            return None
+        try:
+            exclude_paths = parse_exclusion_input(raw)
+        except SourceManagerError as exc:
+            self._print_error(str(exc))
+            return None
+        updated = copy.deepcopy(proposal)
+        fetch = dict(updated.get("fetch") or {})
+        fetch["exclude_paths"] = exclude_paths
+        updated["fetch"] = fetch
+        summary = list(updated.get("summary") or ())
+        summary.append(
+            (
+                "除外パス",
+                ", ".join(exclude_paths) if exclude_paths else "なし",
+            )
+        )
+        updated["summary"] = tuple(summary)
+        return updated
+
+    setattr(manager_class, method_name, prompt)
 
 
 def _record_callback_result(

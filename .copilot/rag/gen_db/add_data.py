@@ -400,6 +400,10 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--persistent-root-identity",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     if args.resume and (args.reset_db or args.reset_clean):
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
@@ -444,6 +448,7 @@ def main() -> None:
                 chunk_overlap=args.chunk_overlap,
                 resume=args.resume,
                 privacy_safe_root=args.privacy_safe_root,
+                persistent_root_identity=args.persistent_root_identity,
             )
     finally:
         watcher.stop()

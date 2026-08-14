@@ -21,6 +21,7 @@ from .security import (
     validate_svn_fetch_url,
     validate_web_url,
 )
+from .source_exclusion import normalize_exclusion_paths
 
 
 SUPPORTED_PROVIDERS = frozenset(
@@ -115,10 +116,14 @@ def validate_provider_config(
             supplied,
             environment_key="root_env",
         )
-    _only_keys(supplied, {"one_shot"})
+    _only_keys(supplied, {"one_shot", "exclude_paths"})
     if "one_shot" in supplied and supplied["one_shot"] is not True:
         raise SourceManagerError("Other one_shot must be true")
-    return {}
+    return {
+        "exclude_paths": normalize_exclusion_paths(
+            supplied.get("exclude_paths")
+        )
+    }
 
 
 def build_fetch_plan(
@@ -311,7 +316,12 @@ def _validate_github_issues(settings: dict[str, Any]) -> dict[str, Any]:
 def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:
     _only_keys(
         settings,
-        {"repository_url", "recursive", "updated_within_days"},
+        {
+            "repository_url",
+            "recursive",
+            "updated_within_days",
+            "exclude_paths",
+        },
     )
     repository = validate_svn_fetch_url(
         settings.get("repository_url"),
@@ -336,6 +346,9 @@ def _validate_svn(settings: dict[str, Any]) -> dict[str, Any]:
             )
         days = int(days)
     output["updated_within_days"] = days
+    output["exclude_paths"] = normalize_exclusion_paths(
+        settings.get("exclude_paths")
+    )
     return output
 
 
