@@ -46,6 +46,7 @@ def add_or_update_root(
     resume: bool = False,
     document_token_budget: DocumentTokenBudget | None = None,
     privacy_safe_root: bool = False,
+    persistent_root_identity: str | None = None,
 ) -> dict[str, Any]:
     if chunk_max_chars <= 0:
         raise ValueError("chunk_max_chars must be positive")
@@ -89,6 +90,8 @@ def add_or_update_root(
         source_id=source_id,
         privacy_safe_root=privacy_safe_root,
     )
+    if persistent_root_identity is not None:
+        persistent_scope_fields["resolved_root"] = str(persistent_root_identity)
     if privacy_safe_root:
         _migrate_private_scope_paths(
             state,

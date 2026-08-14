@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -238,6 +239,89 @@ class IngestionScopePathTests(unittest.TestCase):
         delete_ids.assert_called_once_with(["FY27"])
         self.assertIn(f"project:{path26}", state["files"])
         self.assertNotIn(f"project:{path27}", state["files"])
+
+    def test_filtered_empty_add_reconciles_original_root_from_all_stores(
+        self,
+    ) -> None:
+        acquired = self.workspace / "ingest" / "source-key"
+        dropped = acquired / "drop"
+        dropped.mkdir(parents=True)
+        old_file = dropped / "old.md"
+        old_file.write_text("old searchable content", encoding="utf-8")
+        filtered = self.workspace / "filtered" / acquired.name
+        filtered.mkdir(parents=True)
+        output_root = self.workspace / "db"
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"RAG_OUTPUT_ROOT": str(output_root)},
+                clear=False,
+            ),
+            mock.patch.object(incremental, "require_index_tokenizer"),
+            mock.patch.object(
+                incremental,
+                "validate_existing_index_tokenizer",
+            ),
+            mock.patch.object(
+                incremental,
+                "delete_ids",
+                side_effect=lambda values: len(values),
+            ) as delete_ids,
+            mock.patch.object(
+                incremental,
+                "delete_catalog_chunks",
+            ) as delete_catalog_chunks,
+            mock.patch.object(
+                incremental,
+                "upsert_records",
+                side_effect=lambda values, **_kwargs: len(values),
+            ),
+            mock.patch.object(incremental, "upsert_catalog_records"),
+            mock.patch.object(incremental, "collection_count", return_value=0),
+            mock.patch.object(incremental, "write_manifest"),
+            mock.patch.object(
+                incremental,
+                "update_profile_from_clean",
+                return_value=False,
+            ),
+            mock.patch.object(incremental, "write_progress"),
+            mock.patch.object(incremental, "emit_event"),
+        ):
+            first = incremental.add_or_update_root(
+                root=acquired,
+                source_id="fixture",
+                document_token_budget=_TEST_TOKEN_BUDGET,
+            )
+            self.assertEqual(1, first["indexed_files"])
+            state_path = output_root / "logs" / "index_state.json"
+            indexed_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(1, len(indexed_state["files"]))
+            state_key, old_entry = next(iter(indexed_state["files"].items()))
+            old_ids = list(old_entry["record_ids"])
+            self.assertTrue(old_ids)
+            clean_record = incremental._record_jsonl_path(
+                "fixture",
+                old_entry["stored_path"],
+            )
+            self.assertTrue(clean_record.is_file())
+
+            delete_ids.reset_mock()
+            delete_catalog_chunks.reset_mock()
+            second = incremental.add_or_update_root(
+                root=filtered,
+                source_id="fixture",
+                document_token_budget=_TEST_TOKEN_BUDGET,
+                persistent_root_identity=str(acquired.resolve(strict=True)),
+            )
+
+        self.assertEqual(1, second["deleted_files"])
+        self.assertGreater(second["deleted_records"], 0)
+        delete_ids.assert_called_once_with(old_ids)
+        delete_catalog_chunks.assert_called_once_with(old_ids)
+        reconciled_state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertNotIn(state_key, reconciled_state["files"])
+        self.assertFalse(clean_record.exists())
 
     def test_status_commands_preserve_scope_and_compatibility_flag(self) -> None:
         resume = STATUS._resume_command(

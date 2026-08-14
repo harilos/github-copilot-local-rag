@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import types
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from source_manager.source_preflight import (
     _confirm_and_store,
     _install_gitlab_issues_preflight,
     _install_manager_confirmation,
+    _install_normal_source_preflight,
     _install_redmine_preflight,
     estimate_minutes_range,
 )
+from source_manager.source_exclusion import SourcePreview
 
 
 @dataclass
@@ -177,6 +181,400 @@ class SourcePreflightTests(unittest.TestCase):
             ["約7件追加します。よろしいですか？"],
             manager.prompts,
         )
+
+    def test_manager_preview_shows_included_and_excluded_stats_semantically(self) -> None:
+        class Renderer:
+            pass
+
+        class Manager:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+                self.prompts: list[str] = []
+
+            def _progress_callback(self, operation: str, *, provider=None):
+                return Renderer()
+
+            def output(self, value: str) -> None:
+                self.lines.append(value)
+
+            def _print_info(self, value: str) -> None:
+                self.lines.append(value)
+
+            def _confirm(self, value: str) -> bool:
+                self.prompts.append(value)
+                return True
+
+        _install_manager_confirmation(Manager)
+        manager = Manager()
+        renderer = manager._progress_callback("Source追加", provider="svn")
+
+        self.assertTrue(
+            renderer.confirm_source_preview(
+                SourcePreview(3, 1024, 2, 512).to_dict()
+            )
+        )
+        rendered = "\n".join(manager.lines)
+        self.assertIn("追加対象", rendered)
+        self.assertIn("3件", rendered)
+        self.assertIn("1,024", rendered)
+        self.assertIn("除外", rendered)
+        self.assertIn("2件", rendered)
+        self.assertIn("512", rendered)
+        self.assertEqual(1, len(manager.prompts))
+
+    def test_file_source_add_uses_filtered_view_and_keeps_acquired_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            acquired = work_root / "ingest" / "source-key"
+            (acquired / "build").mkdir(parents=True)
+            (acquired / "keep.md").write_text("keep", encoding="utf-8")
+            (acquired / "build" / "skip.md").write_text(
+                "skip", encoding="utf-8"
+            )
+            source = types.SimpleNamespace(
+                payload={
+                    "local_source_key": "src_example-0123456789ab",
+                    "source_id": "src_example-0123456789ab",
+                    "source_type": "github",
+                    "fetch": {"exclude_paths": ["build"]},
+                }
+            )
+            state = _Stored(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "local_source_key": "src_example-0123456789ab",
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 2,
+                    "indexed_confirmed_count": 2,
+                    "pending_count": 2,
+                }
+            )
+            store = _Store(state)
+            observed: list[tuple[str, list[str]]] = []
+            runner = types.SimpleNamespace()
+
+            def reflect(_store, _source, current_state, *, add_root, **_kwargs):
+                observed.append(
+                    (
+                        Path(add_root).name,
+                        sorted(
+                            path.relative_to(add_root).as_posix()
+                            for path in Path(add_root).rglob("*")
+                            if path.is_file()
+                        ),
+                    )
+                )
+                return {"status": "updated", "state": current_state.payload}
+
+            runner._reflect_and_sync = reflect
+            _install_normal_source_preflight(runner)
+
+            result = runner._reflect_and_sync(
+                store,
+                source,
+                state,
+                add_root=acquired,
+                python_executable=Path("python"),
+                rag_root=Path("rag"),
+                command_runner=None,
+                metadata_publisher=None,
+                progress_callback=None,
+            )
+
+            self.assertEqual("updated", result["status"])
+            self.assertEqual([("source-key", ["keep.md"])], observed)
+            self.assertTrue((acquired / "build" / "skip.md").is_file())
+            self.assertFalse((work_root / "filtered" / "source-key").exists())
+            assert store.current is not None
+            self.assertEqual(1, store.current.payload["fetched_count"])
+            self.assertEqual(
+                1, store.current.payload["indexed_confirmed_count"]
+            )
+            self.assertEqual(1, store.current.payload["preflight_excluded_count"])
+
+    def test_preview_is_recomputed_when_empty_unset_work_grows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            acquired = work_root / "ingest" / "source-key"
+            acquired.mkdir(parents=True)
+            source = types.SimpleNamespace(
+                payload={
+                    "local_source_key": "src_example-0123456789ab",
+                    "source_id": "src_example-0123456789ab",
+                    "source_type": "other",
+                    "fetch": {},
+                }
+            )
+            state = _Stored(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "local_source_key": "src_example-0123456789ab",
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 0,
+                    "indexed_confirmed_count": 0,
+                    "pending_count": 0,
+                }
+            )
+            store = _Store(state)
+            observed: list[tuple[int, list[str]]] = []
+            runner = types.SimpleNamespace()
+
+            def reflect(_store, _source, current_state, *, add_root, **_kwargs):
+                observed.append(
+                    (
+                        current_state.payload["preflight_included_count"],
+                        sorted(
+                            path.relative_to(add_root).as_posix()
+                            for path in Path(add_root).rglob("*")
+                            if path.is_file()
+                        ),
+                    )
+                )
+                return {"status": "updated"}
+
+            runner._reflect_and_sync = reflect
+            _install_normal_source_preflight(runner)
+            arguments = {
+                "add_root": acquired,
+                "python_executable": Path("python"),
+                "rag_root": Path("rag"),
+                "command_runner": None,
+                "metadata_publisher": None,
+                "progress_callback": None,
+            }
+
+            runner._reflect_and_sync(store, source, state, **arguments)
+            (acquired / "later.md").write_text("later", encoding="utf-8")
+            assert store.current is not None
+            runner._reflect_and_sync(store, source, store.current, **arguments)
+
+            self.assertEqual([(0, []), (1, ["later.md"])], observed)
+            assert store.current is not None
+            self.assertEqual(1, store.current.payload["fetched_count"])
+
+    def test_filtered_preview_is_rebuilt_when_acquired_work_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            acquired = work_root / "ingest" / "source-key"
+            (acquired / "build").mkdir(parents=True)
+            (acquired / "keep.md").write_text("keep", encoding="utf-8")
+            skipped = acquired / "build" / "skip.md"
+            skipped.write_text("skip", encoding="utf-8")
+            source = types.SimpleNamespace(
+                payload={
+                    "local_source_key": "src_example-0123456789ab",
+                    "source_id": "src_example-0123456789ab",
+                    "source_type": "github",
+                    "fetch": {"exclude_paths": ["build"]},
+                }
+            )
+            state = _Stored(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "local_source_key": "src_example-0123456789ab",
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 2,
+                    "indexed_confirmed_count": 0,
+                    "pending_count": 2,
+                }
+            )
+            store = _Store(state)
+            observed: list[tuple[int, int, list[str]]] = []
+            runner = types.SimpleNamespace()
+
+            def reflect(_store, _source, current_state, *, add_root, **_kwargs):
+                observed.append(
+                    (
+                        current_state.payload["preflight_included_count"],
+                        current_state.payload["preflight_excluded_count"],
+                        sorted(
+                            path.relative_to(add_root).as_posix()
+                            for path in Path(add_root).rglob("*")
+                            if path.is_file()
+                        ),
+                    )
+                )
+                return {"status": "updated"}
+
+            runner._reflect_and_sync = reflect
+            _install_normal_source_preflight(runner)
+            arguments = {
+                "add_root": acquired,
+                "python_executable": Path("python"),
+                "rag_root": Path("rag"),
+                "command_runner": None,
+                "metadata_publisher": None,
+                "progress_callback": None,
+            }
+
+            runner._reflect_and_sync(store, source, state, **arguments)
+            skipped.unlink()
+            (acquired / "later.md").write_text("later", encoding="utf-8")
+            assert store.current is not None
+            runner._reflect_and_sync(store, source, store.current, **arguments)
+
+            self.assertEqual(
+                [
+                    (1, 1, ["keep.md"]),
+                    (2, 0, ["keep.md", "later.md"]),
+                ],
+                observed,
+            )
+
+    def test_filtered_view_is_discarded_on_decline_and_retry_converges(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            acquired = work_root / "ingest" / "source-key"
+            (acquired / "build").mkdir(parents=True)
+            (acquired / "keep.md").write_text("keep", encoding="utf-8")
+            (acquired / "build" / "skip.md").write_text(
+                "skip", encoding="utf-8"
+            )
+            source = types.SimpleNamespace(
+                payload={
+                    "local_source_key": "src_example-0123456789ab",
+                    "source_id": None,
+                    "source_type": "github",
+                    "fetch": {"exclude_paths": ["build"]},
+                }
+            )
+            state = _Stored(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "local_source_key": "src_example-0123456789ab",
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 2,
+                    "pending_count": 2,
+                }
+            )
+            store = _Store(state)
+            observed: list[list[str]] = []
+            runner = types.SimpleNamespace()
+
+            def reflect(_store, _source, _state, *, add_root, **_kwargs):
+                observed.append(
+                    sorted(
+                        path.relative_to(add_root).as_posix()
+                        for path in Path(add_root).rglob("*")
+                        if path.is_file()
+                    )
+                )
+                return {"status": "updated"}
+
+            runner._reflect_and_sync = reflect
+            runner._source_dto = lambda _store, _source: {}
+            _install_normal_source_preflight(runner)
+
+            declined = runner._reflect_and_sync(
+                store,
+                source,
+                state,
+                add_root=acquired,
+                python_executable=Path("python"),
+                rag_root=Path("rag"),
+                command_runner=None,
+                metadata_publisher=None,
+                progress_callback=_Callback(False),
+            )
+
+            filtered = work_root / "filtered" / "source-key"
+            self.assertEqual("confirmation_declined", declined["status"])
+            self.assertFalse(filtered.exists())
+            self.assertEqual([], observed)
+            assert store.current is not None
+
+            retried = runner._reflect_and_sync(
+                store,
+                source,
+                store.current,
+                add_root=acquired,
+                python_executable=Path("python"),
+                rag_root=Path("rag"),
+                command_runner=None,
+                metadata_publisher=None,
+                progress_callback=_Callback(True),
+            )
+
+            self.assertEqual("updated", retried["status"])
+            self.assertEqual([["keep.md"]], observed)
+            self.assertFalse(filtered.exists())
+
+    def test_filtered_view_is_discarded_on_add_abort_and_retry_converges(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work_root = Path(temporary) / "work"
+            acquired = work_root / "ingest" / "source-key"
+            (acquired / "build").mkdir(parents=True)
+            (acquired / "keep.md").write_text("keep", encoding="utf-8")
+            (acquired / "build" / "skip.md").write_text(
+                "skip", encoding="utf-8"
+            )
+            source = types.SimpleNamespace(
+                payload={
+                    "local_source_key": "src_example-0123456789ab",
+                    "source_id": "src_example-0123456789ab",
+                    "source_type": "github",
+                    "fetch": {"exclude_paths": ["build"]},
+                }
+            )
+            state = _Stored(
+                {
+                    "schema_version": "local-rag-source-state-v1",
+                    "local_source_key": "src_example-0123456789ab",
+                    "status": "fetched",
+                    "phase": "reflect",
+                    "fetched_count": 2,
+                    "pending_count": 2,
+                }
+            )
+            store = _Store(state)
+            observed: list[list[str]] = []
+            abort = [True, False]
+            runner = types.SimpleNamespace()
+
+            def reflect(_store, _source, _state, *, add_root, **_kwargs):
+                observed.append(
+                    sorted(
+                        path.relative_to(add_root).as_posix()
+                        for path in Path(add_root).rglob("*")
+                        if path.is_file()
+                    )
+                )
+                if abort.pop(0):
+                    raise KeyboardInterrupt("simulated ADD abort")
+                return {"status": "updated"}
+
+            runner._reflect_and_sync = reflect
+            _install_normal_source_preflight(runner)
+            arguments = {
+                "add_root": acquired,
+                "python_executable": Path("python"),
+                "rag_root": Path("rag"),
+                "command_runner": None,
+                "metadata_publisher": None,
+                "progress_callback": None,
+            }
+
+            with self.assertRaises(KeyboardInterrupt):
+                runner._reflect_and_sync(store, source, state, **arguments)
+
+            filtered = work_root / "filtered" / "source-key"
+            self.assertFalse(filtered.exists())
+            assert store.current is not None
+
+            result = runner._reflect_and_sync(
+                store,
+                source,
+                store.current,
+                **arguments,
+            )
+
+            self.assertEqual("updated", result["status"])
+            self.assertEqual([["keep.md"], ["keep.md"]], observed)
+            self.assertFalse(filtered.exists())
 
     def test_redmine_decline_happens_after_inventory_but_before_detail_fetch(self) -> None:
         detail_started: list[bool] = []

@@ -23,6 +23,7 @@ if str(_MODULE_ROOT) not in sys.path:
 from help_links import MANAGER_HELP_EPILOG, MANAGER_HELP_URL
 from source_manager.errors import SourceManagerError, sanitize_diagnostic
 from source_manager.security import validate_svn_fetch_url, validate_web_url
+from source_manager.source_exclusion import parse_exclusion_input
 from source_manager.manage_custom import load_manage_custom
 from source_manager.progress import ProgressRenderer
 from source_manager.subprocess_stream import (
@@ -3456,6 +3457,7 @@ class LocalRagManager:
             "recursive": "配下フォルダ",
             "updated_within_days": "取得期間（日）",
             "one_shot": "取り込み方式",
+            "exclude_paths": "除外パス／glob",
         }
         shown = False
         for key, label in public_labels.items():
@@ -3466,6 +3468,8 @@ class LocalRagManager:
                 value = "含める" if bool(value) else "この階層だけ"
             elif key == "one_shot":
                 value = "今回だけ取り込む"
+            elif key == "exclude_paths":
+                value = ", ".join(str(item) for item in value) or "なし"
             elif value is None:
                 value = "制限なし"
             self.output(f"{label}: {value}")
@@ -3557,6 +3561,34 @@ class LocalRagManager:
                         "再帰"
                         if updated["recursive"]
                         else "この階層のファイルだけ",
+                    )
+                )
+                raw_exclusions = self._prompt_preserving_value(
+                    "除外パス／glob（カンマ区切り）",
+                    ", ".join(
+                        str(value)
+                        for value in fetch.get("exclude_paths") or []
+                    ),
+                    required=False,
+                    description=(
+                        "SVN rootからの相対POSIX path/globです。"
+                        "空欄は除外なしです。例: build, **/*.tmp"
+                    ),
+                    empty_help="除外なし",
+                )
+                if raw_exclusions is None:
+                    return
+                try:
+                    updated["exclude_paths"] = parse_exclusion_input(
+                        raw_exclusions
+                    )
+                except SourceManagerError as exc:
+                    self._print_error(str(exc))
+                    return
+                summary.append(
+                    (
+                        "除外パス",
+                        ", ".join(updated["exclude_paths"]) or "なし",
                     )
                 )
                 current_days = fetch.get("updated_within_days")

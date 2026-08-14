@@ -346,7 +346,13 @@ def update_source(
     if (
         state_stored.payload
         and state_stored.payload.get("phase") == "reflect"
-        and int(state_stored.payload.get("pending_count") or 0) > 0
+        and (
+            int(state_stored.payload.get("pending_count") or 0) > 0
+            or _file_preview_add_resume_required(
+                source.payload,
+                state_stored.payload,
+            )
+        )
         and source.payload.get("source_type") != "sharepoint"
         and not force_full_materialization
     ):
@@ -626,6 +632,23 @@ def update_source(
             progress_callback=progress_callback,
         )
     return result
+
+
+def _file_preview_add_resume_required(
+    source: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    """Resume a filtered ADD even when exclusion reduced pending to zero."""
+
+    return (
+        str(source.get("source_type") or "").strip().lower()
+        in {"github", "svn", "other"}
+        and state.get("status") == "interrupted"
+        and state.get("phase") == "reflect"
+        and state.get("preflight_filter_applied") is True
+        and "preflight_included_count" in state
+        and "preflight_excluded_count" in state
+    )
 
 
 def _search_artifacts_match_completed_source(
@@ -1247,6 +1270,7 @@ def _execute_add(
     rag_root: Path,
     command_runner: CommandRunner | None,
     progress_callback: ProgressCallback | None,
+    persistent_root_identity: Path | None = None,
 ) -> dict[str, Any]:
     key = str(source["local_source_key"])
     privacy_safe_root = (
@@ -1268,6 +1292,13 @@ def _execute_add(
     ]
     if privacy_safe_root:
         arguments.append("--privacy-safe-root")
+    if persistent_root_identity is not None:
+        arguments.extend(
+            [
+                "--persistent-root-identity",
+                str(Path(persistent_root_identity).resolve(strict=True)),
+            ]
+        )
     started = time.monotonic()
     effective_progress_callback = progress_callback
     if privacy_safe_root and progress_callback is not None:
@@ -2835,6 +2866,7 @@ def _reflect_and_sync(
     command_runner: CommandRunner | None,
     metadata_publisher: MetadataPublisher | None,
     progress_callback: ProgressCallback | None,
+    persistent_root_identity: Path | None = None,
 ) -> dict[str, Any]:
     work = Path(add_root)
     if str(source.payload.get("source_type") or "") == "sharepoint":
@@ -2870,8 +2902,9 @@ def _reflect_and_sync(
             rag_root=rag_root,
             command_runner=command_runner,
             progress_callback=progress_callback,
+            persistent_root_identity=persistent_root_identity,
         )
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         interrupted = copy.deepcopy(state.payload)
         error_detail = exception_summary(exc)
         interrupted.update(

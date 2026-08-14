@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .errors import SourceManagerError
+from .source_exclusion import normalize_exclusion_paths, parse_exclusion_input
 
 
 _PROVIDER_MARKER = "_local_rag_generic_git_provider_installed"
@@ -59,7 +60,12 @@ def _install_provider_contract(providers: Any, runner: Any, store_module: Any) -
         providers.validate_persistable(supplied, field="provider_settings")
         providers._only_keys(
             supplied,
-            {"repository_url", "include_paths", "updated_within_days"},
+            {
+                "repository_url",
+                "include_paths",
+                "updated_within_days",
+                "exclude_paths",
+            },
         )
         days = supplied.get("updated_within_days")
         if days is not None:
@@ -81,6 +87,9 @@ def _install_provider_contract(providers: Any, runner: Any, store_module: Any) -
                 providers=providers,
             ),
             "updated_within_days": days,
+            "exclude_paths": normalize_exclusion_paths(
+                supplied.get("exclude_paths")
+            ),
         }
 
     providers.validate_provider_config = validate_provider_config
@@ -780,6 +789,7 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         normalized = dict(fetch) if isinstance(fetch, dict) else {}
         normalized.setdefault("include_paths", [])
         normalized.setdefault("updated_within_days", None)
+        normalized.setdefault("exclude_paths", [])
         display = copy.deepcopy(source)
         display["fetch"] = normalized
         original_show(self, display)
@@ -851,12 +861,30 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         days = _prompt_edit_days(self, fetch.get("updated_within_days"))
         if days is _CANCELLED:
             return
+        raw_exclusions = self._prompt_preserving_value(
+            "除外パス／glob（カンマ区切り）",
+            ", ".join(str(value) for value in fetch.get("exclude_paths") or []),
+            required=False,
+            description=(
+                "リポジトリrootからの相対POSIX path/globです。"
+                "空欄は除外なしです。例: build, **/*.tmp"
+            ),
+            empty_help="除外なし",
+        )
+        if raw_exclusions is None:
+            return
+        try:
+            exclude_paths = parse_exclusion_input(raw_exclusions)
+        except SourceManagerError as exc:
+            self._print_error(str(exc))
+            return
         updated = dict(fetch)
         updated.update(
             {
                 "repository_url": repository_url,
                 "include_paths": include_paths,
                 "updated_within_days": days,
+                "exclude_paths": exclude_paths,
             }
         )
         self.output("\n変更後の取得設定")
@@ -872,6 +900,10 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         self.output(
             "取得期間: "
             + ("制限なし" if days is None else f"過去{days}日")
+        )
+        self.output(
+            "除外パス: "
+            + (", ".join(exclude_paths) if exclude_paths else "なし")
         )
         if not self._confirm("この内容で取得設定を保存しますか？"):
             self._print_info("取得設定は変更されていません。")
@@ -915,7 +947,7 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
 
 def prompt_new_git_source(self: Any) -> dict[str, Any] | None:
     self.output(
-        "\n[1/4] Gitリポジトリの取得URL【必須】\n"
+        "\n[1/5] Gitリポジトリの取得URL【必須】\n"
         "GitHub、GitLab、GitHub Enterpriseなどのclone URLを指定します。"
     )
     url = self._prompt_preserving_value(
@@ -958,9 +990,27 @@ def prompt_new_git_source(self: Any) -> dict[str, Any] | None:
     days = _prompt_new_days(self)
     if days is _CANCELLED:
         return None
+    self.output("\n[4/5] 除外パス／glob【任意】")
+    raw_exclusions = self._prompt_preserving_value(
+        "除外パス／glob（カンマ区切り）",
+        "",
+        required=False,
+        description=(
+            "リポジトリrootからの相対POSIX path/globです。"
+            "空欄は除外なしです。例: build, **/*.tmp"
+        ),
+        empty_help="除外なし",
+    )
+    if raw_exclusions is None:
+        return None
+    try:
+        exclude_paths = parse_exclusion_input(raw_exclusions)
+    except SourceManagerError as exc:
+        self._print_error(str(exc))
+        return None
     proposed = _repository_name_from_url(url)
     self.output(
-        "\n[4/4] Sourceの名前【必須】\n"
+        "\n[5/5] Sourceの名前【必須】\n"
         f"リポジトリ名から「{proposed}」を提案しました。"
     )
     name = self._prompt_preserving_value(
@@ -979,6 +1029,7 @@ def prompt_new_git_source(self: Any) -> dict[str, Any] | None:
             "repository_url": url,
             "include_paths": include_paths,
             "updated_within_days": days,
+            "exclude_paths": exclude_paths,
         },
         "summary": (
             (
@@ -995,6 +1046,10 @@ def prompt_new_git_source(self: Any) -> dict[str, Any] | None:
                 else f"各ファイルの最終コミットが過去{days}日以内",
             ),
             ("作業場所", "DB内でLocal RAGが管理"),
+            (
+                "除外パス",
+                ", ".join(exclude_paths) if exclude_paths else "なし",
+            ),
         ),
     }
 

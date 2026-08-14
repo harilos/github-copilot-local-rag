@@ -69,6 +69,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
         rag_root: Path,
         command_runner: Any,
         progress_callback: Any,
+        persistent_root_identity: Path | None = None,
     ) -> dict[str, Any]:
         if _source_selection(source) != FILE_SELECTION_DOCUMENTS:
             return original_execute_add(
@@ -79,6 +80,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
                 rag_root=rag_root,
                 command_runner=command_runner,
                 progress_callback=progress_callback,
+                persistent_root_identity=persistent_root_identity,
             )
 
         def document_runner(arguments: list[str]) -> Any:
@@ -110,6 +112,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
             rag_root=rag_root,
             command_runner=document_runner,
             progress_callback=progress_callback,
+            persistent_root_identity=persistent_root_identity,
         )
 
     @functools.wraps(original_update_configuration)
