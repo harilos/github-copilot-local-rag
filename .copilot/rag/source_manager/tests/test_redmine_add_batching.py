@@ -10,14 +10,13 @@ from source_manager import build_fetch_plan, execute_fetch_plan
 
 
 class RedmineAddBatchingTests(unittest.TestCase):
-    def test_add_callbacks_use_fifty_with_one_final_remainder(self) -> None:
+    def test_add_callback_runs_once_after_the_exact_tail(self) -> None:
         cases = {
             0: [],
-            1: [1],
-            49: [49],
+            5: [5],
             50: [50],
-            53: [50, 3],
-            100: [50, 50],
+            51: [51],
+            400: [400],
         }
         for issue_count, expected_batches in cases.items():
             with self.subTest(issue_count=issue_count):

@@ -46,7 +46,6 @@ from .networking import (
     reject_http_redirects,
     source_command_timeout_seconds,
 )
-from .redmine_contract import REDMINE_ADD_BATCH_SIZE
 from .redmine import parse_redmine_project_url, redmine_updated_on_cutoff
 from .security import validate_environment_name
 
@@ -1016,7 +1015,6 @@ def _redmine(
 
     if resume_count < 0 or resume_count > len(ordered_issue_ids):
         raise SourceManagerError("Redmine resume checkpoint is invalid")
-    last_reflected_count = int(resume_count)
     for position, issue_id in enumerate(ordered_issue_ids, start=1):
         if position <= resume_count:
             continue
@@ -1082,23 +1080,15 @@ def _redmine(
         written += 1
         if item_callback is not None:
             item_callback(position, issue_id)
-        if (
-            batch_callback is not None
-            and position - last_reflected_count >= REDMINE_ADD_BATCH_SIZE
-            and position < len(ordered_issue_ids)
-        ):
-            batch_callback(position, issue_id)
-            last_reflected_count = position
     # Previously fetched Issue files are intentionally retained when a later
     # run uses a shorter updated-on window. The stable tree is additive/update
     # only; Source Manager never interprets an unseen Issue as deleted.
     if (
         batch_callback is not None
-        and len(ordered_issue_ids) > last_reflected_count
+        and written > 0
     ):
         last_issue_id = ordered_issue_ids[-1]
         batch_callback(len(ordered_issue_ids), last_issue_id)
-        last_reflected_count = len(ordered_issue_ids)
     return {
         "status": "ok",
         "documents": len(ordered_issue_ids),
