@@ -306,7 +306,13 @@ class PromptBudgetAndSessionTests(unittest.TestCase):
             }
             session_id = "11111111-1111-4111-8111-111111111111"
             run_mock = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
-            with mock.patch.object(bakeoff.subprocess, "run", run_mock):
+            real_profile = str(output_root / "authenticated-user-profile")
+            with (
+                mock.patch.dict(
+                    os.environ, {"USERPROFILE": real_profile}, clear=False
+                ),
+                mock.patch.object(bakeoff.subprocess, "run", run_mock),
+            ):
                 for turn, prompt in ((1, "original question"), (2, "beta-rag")):
                     bakeoff._run_turn(
                         output_root=output_root,
@@ -339,6 +345,14 @@ class PromptBudgetAndSessionTests(unittest.TestCase):
             for arguments in (first, second):
                 self.assertEqual(1, arguments.count("--available-tools=execute"))
                 self.assertEqual(bakeoff.MODEL_ID, arguments[arguments.index("--model") + 1])
+            for call in run_mock.call_args_list:
+                environment = call.kwargs["env"]
+                self.assertEqual(real_profile, environment["USERPROFILE"])
+                self.assertEqual(
+                    str(Path(fixture["profile"]) / ".copilot"),
+                    environment["LRR_AGENT_HOME"],
+                )
+                self.assertEqual(fixture["copilot_home"], environment["COPILOT_HOME"])
 
     def test_timeout_is_counted_once_and_never_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -475,6 +489,153 @@ class PromptBudgetAndSessionTests(unittest.TestCase):
 
 
 class FakeRagContractTests(unittest.TestCase):
+    def test_db_selection_fixture_is_exactly_two_simple_databases(self) -> None:
+        data = bakeoff._case_data()
+        case = next(
+            item for item in data["stage1"] if item["scenario"] == "db_select"
+        )
+        self.assertEqual(2, len(case["turns"]))
+        self.assertEqual("beta-rag", case["turns"][1])
+        self.assertNotIn("alpha-rag", case["turns"][0])
+        self.assertNotIn("beta-rag", case["turns"][0])
+        self.assertEqual(["list_dbs"], case["interim_tool_sequence"])
+        self.assertEqual(
+            ["list_dbs", "search", "read_summary"],
+            case["expected_tool_sequence"],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace_path = root / "trace.jsonl"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "LRR_AGENT_TRACE_PATH": str(trace_path),
+                        "LRR_AGENT_SCENARIO": "db_select",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(sys, "argv", ["list_dbs.py", "--format", "json"]),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = fake_list_dbs.main()
+            self.assertEqual(0, exit_code, stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                ["alpha-rag", "beta-rag"],
+                [item["name"] for item in payload["databases"]],
+            )
+
+    def test_db_selection_interim_requires_an_actual_selection_request(self) -> None:
+        data = bakeoff._case_data()
+        case = next(
+            item for item in data["stage1"] if item["scenario"] == "db_select"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case_directory = root / "case"
+            case_directory.mkdir()
+            summary_root = root / "summaries"
+            summary_root.mkdir()
+            fixture = {
+                "workspace": str(root / "workspace"),
+                "profile": str(root / "profile"),
+                "copilot_home": str(root / "copilot-home"),
+                "summary_root": str(summary_root),
+            }
+            stdout_path = case_directory / "copilot.jsonl"
+            otel_path = case_directory / "otel.jsonl"
+            _write_jsonl(
+                stdout_path,
+                [
+                    _tool_event(
+                        "powershell",
+                        {"command": bakeoff._powershell_list_command()},
+                        call_id="list-1",
+                    ),
+                    _assistant_event("alpha-rag beta-rag"),
+                ],
+            )
+            _write_jsonl(
+                otel_path,
+                [_otel_models(bakeoff.MODEL_ID, bakeoff.MODEL_ID)],
+            )
+            _write_jsonl(
+                case_directory / "tool-trace.jsonl",
+                [
+                    {
+                        "schema_version": "lrr-agent-002-tool-trace-v1",
+                        "event": "list_dbs",
+                        "scenario": "db_select",
+                        "python": str(
+                            Path(fixture["profile"])
+                            / ".copilot"
+                            / "rag"
+                            / "query"
+                            / ".venv"
+                            / "Scripts"
+                            / "python.exe"
+                        ),
+                        "script": str(
+                            Path(fixture["profile"])
+                            / ".copilot"
+                            / "rag"
+                            / "list_dbs.py"
+                        ),
+                        "argv": ["--format", "json"],
+                    }
+                ],
+            )
+            assessment = bakeoff._assess_case(
+                case,
+                case_directory,
+                [
+                    {
+                        "turn": 1,
+                        "exit_code": 0,
+                        "elapsed_seconds": 0.01,
+                        "stdout": str(stdout_path),
+                        "otel": str(otel_path),
+                    }
+                ],
+                fixture,
+                interim=True,
+            )
+            self.assertIn("interim_assistant_ask_missing", assessment["failures"])
+            _write_jsonl(
+                stdout_path,
+                [
+                    _tool_event(
+                        "powershell",
+                        {"command": bakeoff._powershell_list_command()},
+                        call_id="list-1",
+                    ),
+                    _assistant_event(
+                        "alpha-rag と beta-rag のどちらを選択しますか？"
+                    ),
+                ],
+            )
+            assessment = bakeoff._assess_case(
+                case,
+                case_directory,
+                [
+                    {
+                        "turn": 1,
+                        "exit_code": 0,
+                        "elapsed_seconds": 0.01,
+                        "stdout": str(stdout_path),
+                        "otel": str(otel_path),
+                    }
+                ],
+                fixture,
+                interim=True,
+            )
+            self.assertEqual([], assessment["failures"])
+
     def test_unicode_question_round_trips_as_one_exact_process_argv_element(self) -> None:
         data = bakeoff._case_data()
         case = data["stage2"][0]

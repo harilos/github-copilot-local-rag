@@ -39,7 +39,7 @@ tool動作を許可トレースへ限定する。L、S、Rだけがexecute呼出
 DB未指定時だけ会話全体で1回実行する。JSONが0件ならFAIL。1件ならS。複数なら候補名を保存せず会話contextで保持し、ASK → STOP。
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\list_dbs.py" --format json
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\list_dbs.py" --format json
 ```
 
 # S: SEARCH
@@ -47,7 +47,7 @@ DB未指定時だけ会話全体で1回実行する。JSONが0件ならFAIL。1�
 Q中の各double quoteをbackslash+double quoteの `\"` にしてWindows native argv用に符号化する。次に各 `'` を `''` に置換し、前後を `'` で囲んだPowerShell single-quoted literalを `<Q_SINGLE_QUOTED>` に入れる。改行、backtick、`$()`は展開させず、native parserで `\"` を元のdouble quoteへ戻す。parse後の実argvは末尾1要素だけがQで、そのUnicode文字列が保持Qと完全一致する。Sは1回だけである。
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
 ```
 
 # R: READ_SUMMARY

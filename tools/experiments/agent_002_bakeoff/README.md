@@ -16,9 +16,10 @@ outside the Git worktree. Each invocation launches at most one case (one or two
 user turns), then stops before any later case so the natural-language evidence
 can be reviewed immediately:
 
-The fixture keeps its RAG `USERPROFILE` isolated, while `COPILOT_HOME` points to
-the caller's authenticated CLI home. The runner validates a recorded CLI login
-before creating any prompt-ledger entry.
+The fixture exposes its isolated RAG root through `LRR_AGENT_HOME`, while the
+real `USERPROFILE` and `COPILOT_HOME` remain available to the Windows credential
+store and the caller's authenticated CLI home. The runner validates a recorded
+CLI login before creating any prompt-ledger entry.
 
 ```powershell
 python -B tools/experiments/agent_002_bakeoff/run_bakeoff.py `

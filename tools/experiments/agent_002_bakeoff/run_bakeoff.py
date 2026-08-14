@@ -493,8 +493,8 @@ def _run_turn(
     environment = os.environ.copy()
     environment.update(
         {
-            "USERPROFILE": fixture["profile"],
             "COPILOT_HOME": fixture["copilot_home"],
+            "LRR_AGENT_HOME": str(Path(fixture["profile"]) / ".copilot"),
             "COPILOT_AUTO_UPDATE": "false",
             "COPILOT_OTEL_ENABLED": "true",
             "COPILOT_OTEL_EXPORTER_TYPE": "file",
@@ -556,8 +556,8 @@ def _powershell_search_command(case: dict[str, Any]) -> str:
     question = str(case["question"])
     encoded_question = question.replace('"', '\\"').replace("'", "''")
     return (
-        '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-        '-B "$env:USERPROFILE\\.copilot\\rag\\search.py" '
+        '& "$env:LRR_AGENT_HOME\\rag\\query\\.venv\\Scripts\\python.exe" '
+        '-B "$env:LRR_AGENT_HOME\\rag\\search.py" '
         f"--db '{case['expected_db']}' --include-db-hint --compact-json "
         "--result-delivery file --format json "
         f"'{encoded_question}'"
@@ -566,8 +566,8 @@ def _powershell_search_command(case: dict[str, Any]) -> str:
 
 def _powershell_list_command() -> str:
     return (
-        '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-        '-B "$env:USERPROFILE\\.copilot\\rag\\list_dbs.py" --format json'
+        '& "$env:LRR_AGENT_HOME\\rag\\query\\.venv\\Scripts\\python.exe" '
+        '-B "$env:LRR_AGENT_HOME\\rag\\list_dbs.py" --format json'
     )
 
 
@@ -766,6 +766,9 @@ def _assess_case(
         for required in case.get("interim_assistant_all") or []:
             if str(required) not in assistant:
                 failures.append(f"interim_assistant_missing:{required}")
+        for group in case.get("interim_assistant_any_groups") or []:
+            if not any(str(value) in assistant for value in group):
+                failures.append("interim_assistant_ask_missing")
     else:
         for required in case.get("assistant_all") or []:
             if str(required) not in assistant:

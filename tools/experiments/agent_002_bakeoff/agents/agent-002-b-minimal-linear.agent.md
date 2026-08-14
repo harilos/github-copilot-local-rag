@@ -27,13 +27,13 @@ disable-model-invocation: true
 2. 有効な末尾 `-rag` のDB名がなければLIST_DBSを1回だけ実行する。0件は失敗してSTOP。1件は採用。複数は候補を示して選択を依頼し、SEARCHせずSTOP。次ターンが候補内のDB名だけなら再LISTせず、lock済みQを使う。候補外なら再選択を依頼してSTOP。
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\list_dbs.py" --format json
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\list_dbs.py" --format json
 ```
 
 3. Q中の各double quoteをbackslash+double quoteの `\"` にしてWindows native argv用に符号化する。次に各 `'` を `''` に置換し、前後を `'` で囲んだPowerShell single-quoted literalを `<Q_SINGLE_QUOTED>` に入れる。改行、backtick、`$()`は展開させず、native parserで `\"` を元のdouble quoteへ戻す。実argvの末尾1要素を保持Qと完全一致させ、SEARCHを1回だけ実行する。
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
 ```
 
 4. SEARCH失敗またはpointer JSONに有効な `summary_file` がなければ、補完せずSTOPする。有効ならその絶対path中の各 `'` を `''` に置換したsingle-quoted literalを `<SUMMARY_FILE_SINGLE_QUOTED>` に入れ、READ_SUMMARYを1回だけ実行する。

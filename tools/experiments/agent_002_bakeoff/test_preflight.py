@@ -35,12 +35,12 @@ CANDIDATES = {
 }
 
 LIST_COMMAND = (
-    '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-    '-B "$env:USERPROFILE\\.copilot\\rag\\list_dbs.py" --format json'
+    '& "$env:LRR_AGENT_HOME\\rag\\query\\.venv\\Scripts\\python.exe" '
+    '-B "$env:LRR_AGENT_HOME\\rag\\list_dbs.py" --format json'
 )
 SEARCH_COMMAND = (
-    '& "$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe" '
-    '-B "$env:USERPROFILE\\.copilot\\rag\\search.py" --db \'<DB_NAME>\' '
+    '& "$env:LRR_AGENT_HOME\\rag\\query\\.venv\\Scripts\\python.exe" '
+    '-B "$env:LRR_AGENT_HOME\\rag\\search.py" --db \'<DB_NAME>\' '
     "--include-db-hint --compact-json --result-delivery file --format json "
     "'<Q_SINGLE_QUOTED>'"
 )

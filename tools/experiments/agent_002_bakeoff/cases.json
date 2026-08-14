@@ -61,6 +61,14 @@
         "alpha-rag",
         "beta-rag"
       ],
+      "interim_assistant_any_groups": [
+        [
+          "選ん",
+          "選択",
+          "どちら",
+          "指定"
+        ]
+      ],
       "assistant_all": [
         "LEDGER-WINDOW-02:00-02:15",
         "E1"
