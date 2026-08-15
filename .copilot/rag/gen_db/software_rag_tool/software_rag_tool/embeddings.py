@@ -116,19 +116,21 @@ class OnnxRuntimeEmbedder:
         print("ONNX embedding model loaded", file=sys.stderr)
 
     def encode(self, texts: list[str], mode: Mode) -> list[list[float]]:
+        if not texts:
+            return []
         prefix = self.document_prefix if mode == "document" else self.query_prefix
         encoded_texts = [prefix + text for text in texts]
         if mode == "document":
-            _validate_document_inputs(
-                self._tokenizer,
-                encoded_texts,
-                max_tokens=self.max_length,
-            )
             batch = self._tokenizer(
                 encoded_texts,
                 padding=True,
                 truncation=False,
                 return_tensors="np",
+            )
+            _validate_document_batch(
+                self._tokenizer,
+                batch,
+                max_tokens=self.max_length,
             )
         else:
             batch = self._tokenizer(
@@ -349,6 +351,41 @@ def _validate_document_inputs(
         for index, text in enumerate(texts)
     ]
     oversized = [item for item in oversized if item[1] > max_tokens]
+    if oversized:
+        details = ", ".join(
+            f"index={index} tokens={count}"
+            for index, count in oversized[:5]
+        )
+        raise DocumentEmbeddingTokenLimitError(
+            "document embedding input exceeds the hard token limit; "
+            "silent truncation is disabled: "
+            f"limit={max_tokens} {details}"
+        )
+
+
+def _validate_document_batch(
+    tokenizer: Any,
+    batch: dict[str, Any],
+    *,
+    max_tokens: int,
+) -> None:
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is not None:
+        counts = attention_mask.sum(axis=1).tolist()
+    else:
+        input_ids = batch.get("input_ids")
+        if input_ids is None:
+            raise RuntimeError("embedding tokenizer returned no input_ids")
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            counts = [int(input_ids.shape[1])] * int(input_ids.shape[0])
+        else:
+            counts = (input_ids != pad_token_id).sum(axis=1).tolist()
+    oversized = [
+        (index, int(count))
+        for index, count in enumerate(counts)
+        if int(count) > max_tokens
+    ]
     if oversized:
         details = ", ".join(
             f"index={index} tokens={count}"

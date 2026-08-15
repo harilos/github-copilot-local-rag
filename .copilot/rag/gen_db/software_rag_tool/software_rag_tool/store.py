@@ -24,6 +24,8 @@ from .manifest import (
 from .paths import chroma_dir, clean_dir, default_collection_name
 from .tokenize import require_index_tokenizer
 
+_CHROMA_WRITE_BATCH_SIZE = 128
+
 
 def collection_name() -> str:
     return default_collection_name()
@@ -117,24 +119,78 @@ def upsert_records(records: list[dict[str, Any]], progress_callback: Callable[[i
     # _get_existing_collection() so deletion preflight never creates a store.
     collection = _get_or_create_collection()
     embedder = get_embedder()
-    batch_size = int(os.getenv("EMBED_BATCH_SIZE", "8"))
-    if batch_size <= 0:
+    inference_batch_size = int(os.getenv("EMBED_BATCH_SIZE", "8"))
+    if inference_batch_size <= 0:
         raise ValueError("EMBED_BATCH_SIZE must be positive")
+    write_batch_size = _CHROMA_WRITE_BATCH_SIZE
+    expected_dimension = int(embedding_fingerprint()["embedding_dimension"])
 
     total = 0
-    for start in range(0, len(records), batch_size):
-        batch = records[start : start + batch_size]
+    write_number = 0
+    buffered_ids: list[str] = []
+    buffered_docs: list[str] = []
+    buffered_metas: list[dict[str, str | int | float | bool]] = []
+    buffered_embeddings: list[list[float]] = []
+
+    def flush() -> None:
+        nonlocal total, write_number
+        if not buffered_ids:
+            return
+        collection.upsert(
+            ids=buffered_ids,
+            documents=buffered_docs,
+            embeddings=buffered_embeddings,
+            metadatas=buffered_metas,
+        )
+        total += len(buffered_ids)
+        write_number += 1
+        if progress_callback:
+            progress_callback(total, len(records))
+        print(f"Upserted batch {write_number}: +{len(buffered_ids)} (total={total})")
+        buffered_ids.clear()
+        buffered_docs.clear()
+        buffered_metas.clear()
+        buffered_embeddings.clear()
+
+    for start in range(0, len(records), inference_batch_size):
+        batch = records[start : start + inference_batch_size]
         ids = [str(r["id"]) for r in batch]
         docs = [str(r.get("text") or "") for r in batch]
         embedding_docs = [str(r.get("embedding_text") or r.get("text") or "") for r in batch]
         metas = [_flat_metadata(dict(r.get("metadata") or {})) for r in batch]
         embeddings = embedder.encode(embedding_docs, mode="document")
-        collection.upsert(ids=ids, documents=docs, embeddings=embeddings, metadatas=metas)
-        total += len(batch)
-        if progress_callback:
-            progress_callback(total, len(records))
-        print(f"Upserted batch {(start // batch_size) + 1}: +{len(batch)} (total={total})")
+        _validate_embedding_batch(embeddings, len(batch), expected_dimension)
+        offset = 0
+        while offset < len(batch):
+            take = min(write_batch_size - len(buffered_ids), len(batch) - offset)
+            end = offset + take
+            buffered_ids.extend(ids[offset:end])
+            buffered_docs.extend(docs[offset:end])
+            buffered_metas.extend(metas[offset:end])
+            buffered_embeddings.extend(embeddings[offset:end])
+            offset = end
+            if len(buffered_ids) == write_batch_size:
+                flush()
+    flush()
     return total
+
+
+def _validate_embedding_batch(
+    embeddings: list[list[float]],
+    expected_count: int,
+    expected_dimension: int,
+) -> None:
+    if len(embeddings) != expected_count:
+        raise RuntimeError(
+            "embedding result count mismatch: "
+            f"expected={expected_count} actual={len(embeddings)}"
+        )
+    for index, vector in enumerate(embeddings):
+        if len(vector) != expected_dimension:
+            raise RuntimeError(
+                "embedding result dimension mismatch: "
+                f"index={index} expected={expected_dimension} actual={len(vector)}"
+            )
 
 
 def delete_ids(
