@@ -314,7 +314,9 @@ class SharePointReadErrorHotfixTests(unittest.TestCase):
                         progress_callback(index, len(records))
                 return len(records)
 
-            def upsert_catalog(records):
+            def upsert_catalog(records, *, delete_ids=None):
+                for chunk_id in delete_ids or ():
+                    catalog.pop(str(chunk_id), None)
                 for record in records:
                     catalog[str(record["id"])] = dict(record)
 
