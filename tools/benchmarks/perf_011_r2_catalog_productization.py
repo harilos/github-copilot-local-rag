@@ -375,4 +375,349 @@ def _worker(args: argparse.Namespace) -> int:
                 from software_rag_tool.paths import clean_dir
 
                 write_jsonl(clean_dir() / "perf011-r2.jsonl", prepared["initial"])
-              ×ou¶‰žËkºwµçy‘ÌˆèÁ¡…Í•Ì¹•Ð ‰‰Õ¥±‘}É•½É‘Í}™½É}™¥±”ˆ°€À¸À¤°(€€€€€€€€‰ÍÅ±}½Õ¹Ðˆè±•¸¡ÍÅ±l‰ÍÅ°‰t¤°(€€€€€€€€‰Ñ½Ñ…±}¡…¹•ÌˆèÍÅ±l‰Ñ½Ñ…±}¡…¹•Ì‰t°(€€€€€€€€‰Á•…­}ÉÍÍ}‰åÑ•Ìˆè}Á•…­}Ý½É­¥¹}Í•Ð ¤°(€€€€€€€€‰‘‰}‰åÑ•Ìˆè}ÑÉ••}‰åÑ•Ì¡½ÕÑÁÕÑ}É½½Ð€¼€‰¥¹‘•àˆ¤°(€€€€€€€€‰Ý…±}‰åÑ•ÌˆèÍÕ´¡Á…Ñ ¹ÍÑ…Ð ¤¹ÍÑ}Í¥é”™½ÈÁ…Ñ ¥¸½ÕÑÁÕÑ}É½½Ð¹É±½ˆ ˆ¨µÝ…°ˆ¤¤°(€€€€€€€€‰Ù•Ñ½É}½Õ¹ÐˆèÍÑ½É”¹½±±•Ñ¥½¹}½Õ¹Ð ¤°(€€€€€€€€‰…Ñ…±½}½Õ¹Ðˆè…Ñ…±½}½Õ¹Ð°(€€€€€€€€‰µ…¹¥™•ÍÑ}É•½É‘}½Õ¹Ðˆè¥¹Ð¡µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰É•½É‘}½Õ¹Ðˆ°€´Ä¤¤°(€€€€€€€€‰µ…¹¥™•ÍÐˆèµ…¹¥™•ÍÑ}Á…å±½…°(€€€€€€€€‰•µ‰•‘‘•É}±…ÍÌˆèÑåÁ”¡•µ‰•‘‘•È¤¹}}¹…µ•}|°(€€€€€€€€‰½¹¹á}ÁÉ½Ù¥‘•ÉÌˆèÁÉ½Ù¥‘•ÉÌ°(€€€€€€€€‰½±±•Ñ¥½¹}¹…µ”ˆèÍÑ½É”¹½±±•Ñ¥½¹}¹…µ” ¤°(€€€€€€€€‰½±±•Ñ¥½¹}µ•Ñ…‘…Ñ„ˆè‘¥Ð¡½±±•Ñ¥½¸¹µ•Ñ…‘…Ñ„½Èíô¤¥˜½±±•Ñ¥½¸¥Ì¹½Ð9½¹”•±Í”íô°(€€€€€€€€‰¡É½µ…}ÍÅ±¥Ñ•}‰åÑ•Ìˆè¡É½µ…}ÍÅ±¥Ñ”¹ÍÑ…Ð ¤¹ÍÑ}Í¥é”¥˜¡É½µ…}ÍÅ±¥Ñ”¹•á¥ÍÑÌ ¤•±Í”€À°(€€€€€€€€‰¥¹Ñ•É¥Ñäˆè¥¹Ñ•É¥Ñä°(€€€€€€€€‰™½É•¥¹}­•å}•ÉÉ½ÉÌˆè™½É•¥¹}­•åÌ°(€€€€€€€€‰É•½É‘}µ…¹¥™•ÍÑ}¡…Í ˆèµ…¹¥™•ÍÑl‰½É‘•É•‘}É•½É‘}µ…¹¥™•ÍÑ}¡…Í ‰t°(€€€€€€€€‰ÑÉ…•}ÁÉ½‰”ˆè‰½½°¡…ÉÌ¹ÑÉ…•}ÁÉ½‰”¤°(€€€ô(€€€¥˜¹½Ð€ (€€€€€€€É•ÍÕ±Ñl‰Ù•Ñ½É}½Õ¹Ð‰t€ôôQ=Q1}I=IL(€€€€€€€…¹É•ÍÕ±Ñl‰…Ñ…±½}½Õ¹Ð‰t€ôôQ=Q1}I=IL(€€€€€€€…¹É•ÍÕ±Ñl‰µ…¹¥™•ÍÑ}É•½É‘}½Õ¹Ð‰t€ôôQ=Q1}I=IL(€€€€€€€…¹¥¹Ñ•É¥Ñä€ôô€‰½¬ˆ(€€€€€€€…¹™½É•¥¹}­•åÌ€ôô€À(€€€€€€€…¹ÑåÁ”¡•µ‰•‘‘•È¤¹}}¹…µ•}|€ôô€‰=¹¹áIÕ¹Ñ¥µ•µ‰•‘‘•Èˆ(€€€€€€€…¹€‰AUá•ÕÑ¥½¹AÉ½Ù¥‘•Èˆ¥¸ÁÉ½Ù¥‘•ÉÌ(€€€€€€€…¹¡É½µ…}ÍÅ±¥Ñ”¹¥Í}™¥±” ¤(€€€€€€€…¹µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰½±±•Ñ¥½¸ˆ¤€ôô€‰Á•É˜ÀÄÅ}ÈÈˆ(€€€€€€€…¹µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰•µ‰•‘‘¥¹}µ½‘•°ˆ¤€ôô€‰°µ¹…½å„½ÉÕÉ¤µØÌ´ÌÁ´ˆ(€€€€€€€…¹µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰•µ‰•‘‘¥¹}‰…­•¹ˆ¤€ôô€‰½¹¹àˆ(€€€€€€€…¹µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰•µ‰•‘‘¥¹}‘¥µ•¹Í¥½¸ˆ¤€ôô€ÈÔØ(€€€€€€€…¹µ…¹¥™•ÍÑ}Á…å±½…¹•Ð ‰ÅÕ…¹Ñ¥é…Ñ¥½¸ˆ¤€ôô€‰‘å¹…µ¥Œµ¥¹Ðàˆ(€€€€€€€…¹½±±•Ñ¥½¸¥Ì¹½Ð9½¹”(€€€€€€€…¹½±±•Ñ¥½¸¹µ•Ñ…‘…Ñ„¹•Ð ‰•µ‰•‘‘¥¹}µ½‘•°ˆ¤€ôô€‰°µ¹…½å„½ÉÕÉ¤µØÌ´ÌÁ´ˆ(€€€€€€€…¹½±±•Ñ¥½¸¹µ•Ñ…‘…Ñ„¹•Ð ‰•µ‰•‘‘¥¹}‰…­•¹ˆ¤€ôô€‰½¹¹àˆ(€€€€€€€…¹½±±•Ñ¥½¸¹µ•Ñ…‘…Ñ„¹•Ð ‰•µ‰•‘‘¥¹}‘¥µ•¹Í¥½¸ˆ¤€ôô€ÈÔØ(€€€€€€€…¹½±±•Ñ¥½¸¹µ•Ñ…‘…Ñ„¹•Ð ‰ÅÕ…¹Ñ¥é…Ñ¥½¸ˆ¤€ôô€‰‘å¹…µ¥Œµ¥¹Ðàˆ(€€€€¤è(€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È¡˜‰ÁÉ½‘ÕÐ½±µ¥Íµ…Ñ èíÉ•ÍÕ±Ñôˆ¤(€€€A…Ñ ¡…ÉÌ¹½ÕÑÁÕÐ¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡É•ÍÕ±Ð°•¹ÍÕÉ•}…Í¥¤õ…±Í”°¥¹‘•¹ÐôÈ¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€É•ÑÕÉ¸€À(()‘•˜}ÀäÔ¡Ù…±Õ•Ìè±¥ÍÑm™±½…Ñt¤€´ø™±½…Ðè(€€€É•ÑÕÉ¸Í½ÉÑ•¡Ù…±Õ•Ì¥mµ…à À°µ…Ñ ¹•¥°¡±•¸¡Ù…±Õ•Ì¤€¨€À¸äÔ¤€´€Ä¥t(()‘•˜}ÍÕµµ…Éä¡Í…µÁ±•Ìè±¥ÍÑm‘¥ÑmÍÑÈ°¹åut¤€´ø‘¥ÑmÍÑÈ°¹åtè(€€€É•ÍÕ±Ðè‘¥ÑmÍÑÈ°¹åt€ôì‰ÉÕ¹Ìˆè±•¸¡Í…µÁ±•Ì¥ô(€€€¹Õµ•É¥Œ€ôm­•ä™½È­•ä°Ù…±Õ”¥¸Í…µÁ±•ÍlÁt¹¥Ñ•µÌ ¤¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°€¡¥¹Ð°™±½…Ð¤¤…¹¹½Ð¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°‰½½°¥t(€€€™½È­•ä¥¸¹Õµ•É¥Œè(€€€€€€€Ù…±Õ•Ì€ôm™±½…Ð¡Í…µÁ±•m­•åt¤™½ÈÍ…µÁ±”¥¸Í…µÁ±•Ít(€€€€€€€É•ÍÕ±Ñm˜‰í­•åõ}ÀÔÀ‰t€ôÍÑ…Ñ¥ÍÑ¥Ì¹µ•‘¥…¸¡Ù…±Õ•Ì¤(€€€€€€€É•ÍÕ±Ñm˜‰í­•åõ}ÀäÔ‰t€ô}ÀäÔ¡Ù…±Õ•Ì¤(€€€É•ÑÕÉ¸É•ÍÕ±Ð(()‘•˜}É•‘ÕÑ¥½¸¡‰…Í•±¥¹”è±¥ÍÑm‘¥ÑmÍÑÈ°¹åut°…¹‘¥‘…Ñ”è±¥ÍÑm‘¥ÑmÍÑÈ°¹åut°­•äèÍÑÈ¤€´ø™±½…Ðè(€€€É…Ñ¥½Ì€ôlÄ¸À€´™±½…Ð¡m­•åt¤€¼™±½…Ð¡‰m­•åt¤™½Èˆ°Œ¥¸é¥À¡‰…Í•±¥¹”°…¹‘¥‘…Ñ”°ÍÑÉ¥ÐõQÉÕ”¥t(€€€É•ÑÕÉ¸ÍÑ…Ñ¥ÍÑ¥Ì¹µ•‘¥…¸¡É…Ñ¥½Ì¤(()‘•˜}ÉÕ¸¡…ÉÌè…ÉÁ…ÉÍ”¹9…µ•ÍÁ…”¤€´ø¥¹Ðè(€€€ÍÉ¥ÁÐ€ôA…Ñ ¡}}™¥±•}|¤¹É•Í½±Ù” ¤(€€€½ÕÑÁÕÐ€ôA…Ñ ¡…ÉÌ¹½ÕÑÁÕÐ¤¹É•Í½±Ù” ¤(€€€½ÕÑÁÕÐ¹Á…É•¹Ð¹µ­‘¥È¡Á…É•¹ÑÌõQÉÕ”°•á¥ÍÑ}½¬õQÉÕ”¤(€€€ÍÑ…ÉÑ•€ôÑ¥µ”¹µ½¹½Ñ½¹¥Œ ¤(€€€Ý¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä¡ÁÉ•™¥àô‰Á•É˜ÀÄÄµÈÈ´ˆ¤…ÌÑ•µÁ½É…Éäè(€€€€€€€É½½Ð€ôA…Ñ ¡Ñ•µÁ½É…Éä¤(€€€€€€€¥¹¥Ñ¥…°€ôÉ½½Ð€¼€‰™¥áÑÕÉ”ˆ€¼€‰¥¹¥Ñ¥…°ˆ€¼€‰Í½ÕÉ”ˆ(€€€€€€€ÕÁ‘…Ñ•€ôÉ½½Ð€¼€‰™¥áÑÕÉ”ˆ€¼€‰ÕÁ‘…Ñ•ˆ€¼€‰Í½ÕÉ”ˆ(€€€€€€€™¥áÑÕÉ”€ô}•¹•É…Ñ•}½ÉÁÕÌ¡¥¹¥Ñ¥…°°ÕÁ‘…Ñ•¤(€€€€€€€É•ÁÉ½‘Õ¥‰±•}¥¹¥Ñ¥…°€ôÉ½½Ð€¼€‰™¥áÑÕÉ”µÉ•ÁÉ¼ˆ€¼€‰¥¹¥Ñ¥…°ˆ€¼€‰Í½ÕÉ”ˆ(€€€€€€€É•ÁÉ½‘Õ¥‰±•}ÕÁ‘…Ñ•€ôÉ½½Ð€¼€‰™¥áÑÕÉ”µÉ•ÁÉ¼ˆ€¼€‰ÕÁ‘…Ñ•ˆ€¼€‰Í½ÕÉ”ˆ(€€€€€€€É•ÁÉ½‘Õ•€ô}•¹•É…Ñ•}½ÉÁÕÌ¡É•ÁÉ½‘Õ¥‰±•}¥¹¥Ñ¥…°°É•ÁÉ½‘Õ¥‰±•}ÕÁ‘…Ñ•¤(€€€€€€€¥˜€ (€€€€€€€€€€€™¥áÑÕÉ•l‰¥¹¥Ñ¥…±}™¥±•}µ…¹¥™•ÍÑ}¡…Í ‰t€„ôÉ•ÁÉ½‘Õ•‘l‰¥¹¥Ñ¥…±}™¥±•}µ…¹¥™•ÍÑ}¡…Í ‰t(€€€€€€€€€€€½È™¥áÑÕÉ•l‰ÕÁ‘…Ñ•‘}™¥±•}µ…¹¥™•ÍÑ}¡…Í ‰t€„ôÉ•ÁÉ½‘Õ•‘l‰ÕÁ‘…Ñ•‘}™¥±•}µ…¹¥™•ÍÑ}¡…Í ‰t(€€€€€€€€¤è(€€€€€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È ‰=™™¥”™¥áÑÕÉ”•¹•É…Ñ½È¥Ì¹½Ð‰åÑ”É•ÁÉ½‘Õ¥‰±”ˆ¤(€€€€€€€™¥áÑÕÉ•l‰‰åÑ•}É•ÁÉ½‘Õ¥‰±•}Í•½¹‘}•¹•É…Ñ¥½¸‰t€ôQÉÕ”(€€€€€€€É•½É‘Í}Á…Ñ €ôÉ½½Ð€¼€‰É•½É‘Ì¹©Í½¸ˆ(€€€€€€€ÁÉ•™±¥¡Ñ}Á…Ñ €ôÉ½½Ð€¼€‰ÁÉ•™±¥¡Ð¹©Í½¸ˆ(€€€€€€€•áÁ•Ñ•‘}Á…Ñ €ôÉ½½Ð€¼€‰•áÁ•Ñ•¹©Í½¸ˆ(€€€€€€€•áÁ•Ñ•‘}Á…Ñ ¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ì‰¥¹¥Ñ¥…°ˆèì‰½É‘•É•‘}É•½É‘}µ…¹¥™•ÍÑ}¡…Í ˆè€‰Á•¹‘¥¹œ‰õô¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€ÁÉ•Á…É•}µ€ôl(€€€€€€€€€€€…ÉÌ¹ÁåÑ¡½¸°ÍÑÈ¡ÍÉ¥ÁÐ¤°€ˆ´µÝ½É­•Èˆ°€ˆ´µ½¡½ÉÐˆ°€‰ÁÉ•Á…É”ˆ°(€€€€€€€€€€€€ˆ´µÙ…É¥…¹Ðˆ°€‰…¹‘¥‘…Ñ”ˆ°€ˆ´µ½‘”µÉ½½Ðˆ°…ÉÌ¹…¹‘¥‘…Ñ•}É½½Ð°(€€€€€€€€€€€€ˆ´µ½ÕÑÁÕÐµÉ½½Ðˆ°ÍÑÈ¡É½½Ð€¼€‰ÁÉ•Á…É”µ‘ˆˆ¤°€ˆ´µ½ÉÁÕÌˆ°ÍÑÈ¡¥¹¥Ñ¥…°¤°(€€€€€€€€€€€€ˆ´µÕÁ‘…Ñ•µ½ÉÁÕÌˆ°ÍÑÈ¡ÕÁ‘…Ñ•¤°€ˆ´µµ½‘•°µ‘¥Èˆ°…ÉÌ¹µ½‘•±}‘¥È°(€€€€€€€€€€€€ˆ´µÉ•½É‘Ìˆ°ÍÑÈ¡É•½É‘Í}Á…Ñ ¤°€ˆ´µ•áÁ•Ñ•µµ…¹¥™•ÍÐˆ°ÍÑÈ¡•áÁ•Ñ•‘}Á…Ñ ¤°(€€€€€€€€€€€€ˆ´µ½ÕÑÁÕÐˆ°ÍÑÈ¡ÁÉ•™±¥¡Ñ}Á…Ñ ¤°(€€€€€€€t(€€€€€€€€ŒAÉ•Á…É”™¥ÉÍÐÝ¥Ñ¡½ÕÐÑ¡”•áÁ•Ñ•µ¡…Í ¡•¬°Ñ¡•¸™É••é”¥ÑÌµ…¹¥™•ÍÐ¸(€€€€€€€•áÁ•Ñ•‘}Á…Ñ ¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ì‰¥¹¥Ñ¥…°ˆèì‰½É‘•É•‘}É•½É‘}µ…¹¥™•ÍÑ}¡…Í ˆè€ˆ‰õô¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€ÁÉ•Á…É•}µ¹…ÁÁ•¹ ˆ´µÁÉ•Á…É”µÕ¹¡•­•ˆ¤(€€€€€€€ÍÕ‰ÁÉ½•ÍÌ¹ÉÕ¸¡ÁÉ•Á…É•}µ°¡•¬õQÉÕ”°Ñ¥µ•½ÕÐôÐàÀ¤(€€€€€€€ÁÉ•™±¥¡Ð€ô©Í½¸¹±½…‘Ì¡ÁÉ•™±¥¡Ñ}Á…Ñ ¹É•…‘}Ñ•áÐ¡•¹½‘¥¹œô‰ÕÑ˜´àˆ¤¤(€€€€€€€•áÁ•Ñ•‘}Á…Ñ ¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ÁÉ•™±¥¡Ð¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€¥˜ÁÉ•™±¥¡Ñl‰¥¹¥Ñ¥…°‰ul‰É•½É‘}½Õ¹Ð‰t€„ôQ=Q1}I=ILè(€€€€€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È ‰ÁÉ•™±¥¡Ð‘¥¹½ÐÁÉ½‘Õ”€ÐÀÀÉ•½É‘Ìˆ¤(€€€€€€€¥˜…ÉÌ¹ÁÉ•™±¥¡Ñ}½¹±äè(€€€€€€€€€€€½ÕÑÁÕÐ¹ÝÉ¥Ñ•}Ñ•áÐ (€€€€€€€€€€€€€€€©Í½¸¹‘ÕµÁÌ¡ì‰™¥áÑÕÉ”ˆè™¥áÑÕÉ”°€‰ÁÉ•™±¥¡ÐˆèÁÉ•™±¥¡Ñô°•¹ÍÕÉ•}…Í¥¤õ…±Í”°¥¹‘•¹ÐôÈ¤°(€€€€€€€€€€€€€€€•¹½‘¥¹œô‰ÕÑ˜´àˆ°(€€€€€€€€€€€€¤(€€€€€€€€€€€ÁÉ¥¹Ð¡©Í½¸¹‘ÕµÁÌ¡ì‰ÁÉ•™±¥¡ÐˆèÁÉ•™±¥¡Ñô°•¹ÍÕÉ•}…Í¥¤õ…±Í”¤¤(€€€€€€€€€€€É•ÑÕÉ¸€À((€€€€€€€…±±}É•ÍÕ±ÑÌè‘¥ÑmÍÑÈ°¹åt€ôì‰½É”ˆèíô°€‰”É”ˆèíõô(€€€€€€€ÑÉ…•}ÁÉ½‰•Ìè‘¥ÑmÍÑÈ°¹åt€ôíô(€€€€€€€™½È½¡½ÉÐ¥¸€ ‰½É”ˆ°€‰”É”ˆ¤è(€€€€€€€€€€€™½ÈÙ…É¥…¹Ð¥¸€ ‰‰…Í•±¥¹”ˆ°€‰…¹‘¥‘…Ñ”ˆ¤è(€€€€€€€€€€€€€€€½‘•}É½½Ð€ô…ÉÌ¹‰…Í•±¥¹•}É½½Ð¥˜Ù…É¥…¹Ð€ôô€‰‰…Í•±¥¹”ˆ•±Í”…ÉÌ¹…¹‘¥‘…Ñ•}É½½Ð(€€€€€€€€€€€€€€€Í…µÁ±•}É½½Ð€ôÉ½½Ð€¼€‰ÑÉ…”ˆ€¼½¡½ÉÐ€¼Ù…É¥…¹Ð(€€€€€€€€€€€€€€€½ÉÁÕÌ€ôÍ…µÁ±•}É½½Ð€¼€‰Í½ÕÉ”ˆ(€€€€€€€€€€€€€€€Í¡ÕÑ¥°¹½ÁåÑÉ•”¡¥¹¥Ñ¥…°°½ÉÁÕÌ¤(€€€€€€€€€€€€€€€Í…µÁ±•}½ÕÑÁÕÐ€ôÍ…µÁ±•}É½½Ð€¼€‰Í…µÁ±”¹©Í½¸ˆ(€€€€€€€€€€€€€€€µ€ôl(€€€€€€€€€€€€€€€€€€€…ÉÌ¹ÁåÑ¡½¸°ÍÑÈ¡ÍÉ¥ÁÐ¤°€ˆ´µÝ½É­•Èˆ°€ˆ´µÑÉ…”µÁÉ½‰”ˆ°(€€€€€€€€€€€€€€€€€€€€ˆ´µ½¡½ÉÐˆ°½¡½ÉÐ°€ˆ´µÙ…É¥…¹Ðˆ°Ù…É¥…¹Ð°(€€€€€€€€€€€€€€€€€€€€ˆ´µ½‘”µÉ½½Ðˆ°½‘•}É½½Ð°€ˆ´µ½ÕÑÁÕÐµÉ½½Ðˆ°ÍÑÈ¡Í…µÁ±•}É½½Ð€¼€‰‘ˆˆ¤°(€€€€€€€€€€€€€€€€€€€€ˆ´µ½ÉÁÕÌˆ°ÍÑÈ¡½ÉÁÕÌ¤°€ˆ´µÕÁ‘…Ñ•µ½ÉÁÕÌˆ°ÍÑÈ¡ÕÁ‘…Ñ•¤°(€€€€€€€€€€€€€€€€€€€€ˆ´µµ½‘•°µ‘¥Èˆ°…ÉÌ¹µ½‘•±}‘¥È°€ˆ´µÉ•½É‘Ìˆ°ÍÑÈ¡É•½É‘Í}Á…Ñ ¤°(€€€€€€€€€€€€€€€€€€€€ˆ´µ•áÁ•Ñ•µµ…¹¥™•ÍÐˆ°ÍÑÈ¡•áÁ•Ñ•‘}Á…Ñ ¤°€ˆ´µ½ÕÑÁÕÐˆ°ÍÑÈ¡Í…µÁ±•}½ÕÑÁÕÐ¤°(€€€€€€€€€€€€€€€t(€€€€€€€€€€€€€€€½µÁ±•Ñ•€ôÍÕ‰ÁÉ½•ÍÌ¹ÉÕ¸¡µ°Ñ¥µ•½ÕÐôÐàÀ°Ñ•áÐõQÉÕ”°…ÁÑÕÉ•}½ÕÑÁÕÐõQÉÕ”¤(€€€€€€€€€€€€€€€¥˜½µÁ±•Ñ•¹É•ÑÕÉ¹½‘”è(€€€€€€€€€€€€€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È¡˜‰ÑÉ…”Ý½É­•È™…¥±•èíµ‘õq¹í½µÁ±•Ñ•¹ÍÑ‘½ÕÑõq¹í½µÁ±•Ñ•¹ÍÑ‘•ÉÉôˆ¤(€€€€€€€€€€€€€€€Í…µÁ±”€ô©Í½¸¹±½…‘Ì¡Í…µÁ±•}½ÕÑÁÕÐ¹É•…‘}Ñ•áÐ¡•¹½‘¥¹œô‰ÕÑ˜´àˆ¤¤(€€€€€€€€€€€€€€€ÑÉ…•}ÁÉ½‰•Ím˜‰í½¡½ÉÑõ}íÙ…É¥…¹Ñô‰t€ôì(€€€€€€€€€€€€€€€€€€€€‰ÍÅ±}½Õ¹ÐˆèÍ…µÁ±•l‰ÍÅ±}½Õ¹Ð‰t°(€€€€€€€€€€€€€€€€€€€€‰Ñ½Ñ…±}¡…¹•ÌˆèÍ…µÁ±•l‰Ñ½Ñ…±}¡…¹•Ì‰t°(€€€€€€€€€€€€€€€ô(€€€€€€€É…Üè±¥ÍÑm‘¥ÑmÍÑÈ°¹åut€ômt(€€€€€€€Á…¥É}Á±…¸€ô€  ‰½É”ˆ°€Ä¤°€ ‰”É”ˆ°€Ä¤¤¥˜…ÉÌ¹Íµ½­”•±Í”€  ‰½É”ˆ°€Ô¤°€ ‰”É”ˆ°€Ì¤¤(€€€€€€€™½È½¡½ÉÐ°µ•…ÍÕÉ•‘}Á…¥ÉÌ¥¸Á…¥É}Á±…¸è(€€€€€€€€€€€Í…µÁ±•Ì€ôì‰‰…Í•±¥¹”ˆèmt°€‰…¹‘¥‘…Ñ”ˆèmuô(€€€€€€€€€€€™½ÈÁ…¥È¥¸É…¹”¡µ•…ÍÕÉ•‘}Á…¥ÉÌ€¬€Ä¤è(€€€€€€€€€€€€€€€½É‘•È€ô€ ‰‰…Í•±¥¹”ˆ°€‰…¹‘¥‘…Ñ”ˆ¤¥˜Á…¥È€”€È€ôô€À•±Í”€ ‰…¹‘¥‘…Ñ”ˆ°€‰‰…Í•±¥¹”ˆ¤(€€€€€€€€€€€€€€€Á…¥É}Ù…±Õ•Ìè‘¥ÑmÍÑÈ°‘¥ÑmÍÑÈ°¹åut€ôíô(€€€€€€€€€€€€€€€™½ÈÙ…É¥…¹Ð¥¸½É‘•Èè(€€€€€€€€€€€€€€€€€€€½‘•}É½½Ð€ô…ÉÌ¹‰…Í•±¥¹•}É½½Ð¥˜Ù…É¥…¹Ð€ôô€‰‰…Í•±¥¹”ˆ•±Í”…ÉÌ¹…¹‘¥‘…Ñ•}É½½Ð(€€€€€€€€€€€€€€€€€€€Í…µÁ±•}É½½Ð€ôÉ½½Ð€¼€‰ÉÕ¹Ìˆ€¼½¡½ÉÐ€¼˜‰íÁ…¥ÉôµíÙ…É¥…¹Ñôˆ(€€€€€€€€€€€€€€€€€€€½ÉÁÕÌ€ôÍ…µÁ±•}É½½Ð€¼€‰Í½ÕÉ”ˆ(€€€€€€€€€€€€€€€€€€€Í¡ÕÑ¥°¹½ÁåÑÉ•”¡¥¹¥Ñ¥…°°½ÉÁÕÌ¤(€€€€€€€€€€€€€€€€€€€Í…µÁ±•}½ÕÑÁÕÐ€ôÍ…µÁ±•}É½½Ð€¼€‰Í…µÁ±”¹©Í½¸ˆ(€€€€€€€€€€€€€€€€€€€µ€ôl(€€€€€€€€€€€€€€€€€€€€€€€…ÉÌ¹ÁåÑ¡½¸°ÍÑÈ¡ÍÉ¥ÁÐ¤°€ˆ´µÝ½É­•Èˆ°€ˆ´µ½¡½ÉÐˆ°½¡½ÉÐ°(€€€€€€€€€€€€€€€€€€€€€€€€ˆ´µÙ…É¥…¹Ðˆ°Ù…É¥…¹Ð°€ˆ´µ½‘”µÉ½½Ðˆ°½‘•}É½½Ð°(€€€€€€€€€€€€€€€€€€€€€€€€ˆ´µ½ÕÑÁÕÐµÉ½½Ðˆ°ÍÑÈ¡Í…µÁ±•}É½½Ð€¼€‰‘ˆˆ¤°€ˆ´µ½ÉÁÕÌˆ°ÍÑÈ¡½ÉÁÕÌ¤°(€€€€€€€€€€€€€€€€€€€€€€€€ˆ´µÕÁ‘…Ñ•µ½ÉÁÕÌˆ°ÍÑÈ¡ÕÁ‘…Ñ•¤°€ˆ´µµ½‘•°µ‘¥Èˆ°…ÉÌ¹µ½‘•±}‘¥È°(€€€€€€€€€€€€€€€€€€€€€€€€ˆ´µÉ•½É‘Ìˆ°ÍÑÈ¡É•½É‘Í}Á…Ñ ¤°€ˆ´µ•áÁ•Ñ•µµ…¹¥™•ÍÐˆ°ÍÑÈ¡•áÁ•Ñ•‘}Á…Ñ ¤°(€€€€€€€€€€€€€€€€€€€€€€€€ˆ´µ½ÕÑÁÕÐˆ°ÍÑÈ¡Í…µÁ±•}½ÕÑÁÕÐ¤°(€€€€€€€€€€€€€€€€€€€t(€€€€€€€€€€€€€€€€€€€½µÁ±•Ñ•€ôÍÕ‰ÁÉ½•ÍÌ¹ÉÕ¸¡µ°Ñ¥µ•½ÕÐôÐàÀ°Ñ•áÐõQÉÕ”°…ÁÑÕÉ•}½ÕÑÁÕÐõQÉÕ”¤(€€€€€€€€€€€€€€€€€€€¥˜½µÁ±•Ñ•¹É•ÑÕÉ¹½‘”è(€€€€€€€€€€€€€€€€€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È¡˜‰Ý½É­•È™…¥±•èíµ‘õq¹í½µÁ±•Ñ•¹ÍÑ‘½ÕÑõq¹í½µÁ±•Ñ•¹ÍÑ‘•ÉÉôˆ¤(€€€€€€€€€€€€€€€€€€€Í…µÁ±”€ô©Í½¸¹±½…‘Ì¡Í…µÁ±•}½ÕÑÁÕÐ¹É•…‘}Ñ•áÐ¡•¹½‘¥¹œô‰ÕÑ˜´àˆ¤¤(€€€€€€€€€€€€€€€€€€€Í…µÁ±”¹ÕÁ‘…Ñ”¡ì‰Á…¥ÈˆèÁ…¥È°€‰Ý…ÉµÕÀˆèÁ…¥È€ôô€Áô¤(€€€€€€€€€€€€€€€€€€€Á…¥É}Ù…±Õ•ÍmÙ…É¥…¹Ñt€ôÍ…µÁ±”(€€€€€€€€€€€€€€€¥˜Á…¥Èè(€€€€€€€€€€€€€€€€€€€™½ÈÙ…É¥…¹Ð¥¸€ ‰‰…Í•±¥¹”ˆ°€‰…¹‘¥‘…Ñ”ˆ¤è(€€€€€€€€€€€€€€€€€€€€€€€Í…µÁ±•ÍmÙ…É¥…¹Ñt¹…ÁÁ•¹¡Á…¥É}Ù…±Õ•ÍmÙ…É¥…¹Ñt¤(€€€€€€€€€€€€€€€€€€€€€€€É…Ü¹…ÁÁ•¹¡Á…¥É}Ù…±Õ•ÍmÙ…É¥…¹Ñt¤(€€€€€€€€€€€€€€€¥˜Ñ¥µ”¹µ½¹½Ñ½¹¥Œ ¤€´ÍÑ…ÉÑ•€ø€ÈÜÀÀè(€€€€€€€€€€€€€€€€€€€É…¥Í”Q¥µ•½ÕÑÉÉ½È ‰½µ‰¥¹•‰•¹¡µ…É¬•á••‘•€ÐÔµ¥¹ÕÑ•Ìˆ¤(€€€€€€€€€€€‰…Í•±¥¹”€ôÍ…µÁ±•Íl‰‰…Í•±¥¹”‰t(€€€€€€€€€€€…¹‘¥‘…Ñ”€ôÍ…µÁ±•Íl‰…¹‘¥‘…Ñ”‰t(€€€€€€€€€€€É•‘ÕÑ¥½¹Ì€ôì(€€€€€€€€€€€€€€€­•äè}É•‘ÕÑ¥½¸¡‰…Í•±¥¹”°…¹‘¥‘…Ñ”°­•ä¤(€€€€€€€€€€€€€€€™½È­•ä¥¸€ ‰½±‘}Ý…±±}Í•½¹‘Ìˆ°€‰½±‘}…Ñ…±½}Í•½¹‘Ìˆ°€‰ÕÁ‘…Ñ•}Ý…±±}Í•½¹‘Ìˆ°€‰ÕÁ‘…Ñ•}…Ñ…±½}Í•½¹‘Ìˆ¤(€€€€€€€€€€€ô(€€€€€€€€€€€…±±}É•ÍÕ±ÑÍm½¡½ÉÑt€ôì(€€€€€€€€€€€€€€€€‰‰…Í•±¥¹”ˆè}ÍÕµµ…Éä¡‰…Í•±¥¹”¤°(€€€€€€€€€€€€€€€€‰…¹‘¥‘…Ñ”ˆè}ÍÕµµ…Éä¡…¹‘¥‘…Ñ”¤°(€€€€€€€€€€€€€€€€‰Á…¥É•‘}µ•‘¥…¹}É•‘ÕÑ¥½¹ÌˆèÉ•‘ÕÑ¥½¹Ì°(€€€€€€€€€€€ô((€€€€€€€½É”€ô…±±}É•ÍÕ±ÑÍl‰½É”‰t(€€€€€€€”É”€ô…±±}É•ÍÕ±ÑÍl‰”É”‰t(€€€€€€€…Ñ•Ì€ôì(€€€€€€€€€€€€‰½É•}…Ñ…±½}…Ñ}±•…ÍÑ|ÈÁ}Á•É•¹Ðˆè½É•l‰Á…¥É•‘}µ•‘¥…¹}É•‘ÕÑ¥½¹Ì‰ul‰½±‘}…Ñ…±½}Í•½¹‘Ì‰t€øô€À¸ÈÀ°(€€€€€€€€€€€€‰½É•}™Õ±±}…‘‘}…Ñ}±•…ÍÑ|ÄÁ}Á•É•¹Ðˆè½É•l‰Á…¥É•‘}µ•‘¥…¹}É•‘ÕÑ¥½¹Ì‰ul‰½±‘}Ý…±±}Í•½¹‘Ì‰t€øô€À¸ÄÀ°(€€€€€€€€€€€€‰½™™¥•}”É•}¹½Ñ}Í±½Ý•Èˆè”É•l‰Á…¥É•‘}µ•‘¥…¹}É•‘ÕÑ¥½¹Ì‰ul‰½±‘}Ý…±±}Í•½¹‘Ì‰t€øô€À¸À°(€€€€€€€€€€€€‰½É•}ÕÁ‘…Ñ•}…Ñ}±•…ÍÑ|ÄÕ}Á•É•¹Ðˆè½É•l‰Á…¥É•‘}µ•‘¥…¹}É•‘ÕÑ¥½¹Ì‰ul‰ÕÁ‘…Ñ•}Ý…±±}Í•½¹‘Ì‰t€øô€À¸ÄÔ°(€€€€€€€€€€€€‰½±‘}ÀäÕ}Ý¥Ñ¡¥¹|ÄÁ}Á•É•¹Ðˆè½É•l‰…¹‘¥‘…Ñ”‰ul‰½±‘}Ý…±±}Í•½¹‘Í}ÀäÔ‰t€ðô½É•l‰‰…Í•±¥¹”‰ul‰½±‘}Ý…±±}Í•½¹‘Í}ÀäÔ‰t€¨€Ä¸ÄÀ°(€€€€€€€€€€€€‰ÕÁ‘…Ñ•}ÀäÕ}Ý¥Ñ¡¥¹|ÄÁ}Á•É•¹Ðˆè½É•l‰…¹‘¥‘…Ñ”‰ul‰ÕÁ‘…Ñ•}Ý…±±}Í•½¹‘Í}ÀäÔ‰t€ðô½É•l‰‰…Í•±¥¹”‰ul‰ÕÁ‘…Ñ•}Ý…±±}Í•½¹‘Í}ÀäÔ‰t€¨€Ä¸ÄÀ°(€€€€€€€€€€€€‰ÉÍÍ}Ý¥Ñ¡¥¹|ÄÕ}Á•É•¹Ðˆèµ…à (€€€€€€€€€€€€€€€½É•l‰…¹‘¥‘…Ñ”‰ul‰Á•…­}ÉÍÍ}‰åÑ•Í}ÀäÔ‰t€¼½É•l‰‰…Í•±¥¹”‰ul‰Á•…­}ÉÍÍ}‰åÑ•Í}ÀäÔ‰t°(€€€€€€€€€€€€€€€”É•l‰…¹‘¥‘…Ñ”‰ul‰Á•…­}ÉÍÍ}‰åÑ•Í}ÀäÔ‰t€¼”É•l‰‰…Í•±¥¹”‰ul‰Á•…­}ÉÍÍ}‰åÑ•Í}ÀäÔ‰t°(€€€€€€€€€€€€¤€ðô€Ä¸ÄÔ°(€€€€€€€€€€€€‰‘‰}‰åÑ•Í}Ý¥Ñ¡¥¹|Õ}Á•É•¹Ðˆèµ…à (€€€€€€€€€€€€€€€½É•l‰…¹‘¥‘…Ñ”‰ul‰‘‰}‰åÑ•Í}ÀäÔ‰t€¼½É•l‰‰…Í•±¥¹”‰ul‰‘‰}‰åÑ•Í}ÀäÔ‰t°(€€€€€€€€€€€€€€€”É•l‰…¹‘¥‘…Ñ”‰ul‰‘‰}‰åÑ•Í}ÀäÔ‰t€¼”É•l‰‰…Í•±¥¹”‰ul‰‘‰}‰åÑ•Í}ÀäÔ‰t°(€€€€€€€€€€€€¤€ðô€Ä¸ÀÔ°(€€€€€€€ô(€€€€€€€É•ÍÕ±Ð€ôì(€€€€€€€€€€€€‰Ñ…Í¬ˆè€‰1IHµAI´ÀÄÄµHÈˆ°(€€€€€€€€€€€€‰™¥áÑÕÉ”ˆè™¥áÑÕÉ”°(€€€€€€€€€€€€‰ÁÉ•™±¥¡ÐˆèÁÉ•™±¥¡Ð°(€€€€€€€€€€€€‰ÁåÑ¡½¸ˆè…ÉÌ¹ÁåÑ¡½¸°(€€€€€€€€€€€€‰µ½‘•±}‘¥Èˆè…ÉÌ¹µ½‘•±}‘¥È°(€€€€€€€€€€€€‰‰…Í•±¥¹•}É½½Ðˆè…ÉÌ¹‰…Í•±¥¹•}É½½Ð°(€€€€€€€€€€€€‰…¹‘¥‘…Ñ•}É½½Ðˆè…ÉÌ¹…¹‘¥‘…Ñ•}É½½Ð°(€€€€€€€€€€€€‰Ý…ÉµÕÁ}Á…¥ÉÌˆè€Ä°(€€€€€€€€€€€€‰½É•}µ•…ÍÕÉ•‘}Á…¥ÉÌˆèÁ…¥É}Á±…¹lÁulÅt°(€€€€€€€€€€€€‰½™™¥•}”É•}µ•…ÍÕÉ•‘}Á…¥ÉÌˆèÁ…¥É}Á±…¹lÅulÅt°(€€€€€€€€€€€€‰½¡½ÉÑÌˆè…±±}É•ÍÕ±ÑÌ°(€€€€€€€€€€€€‰…Ñ•Ìˆè…Ñ•Ì°(€€€€€€€€€€€€‰ÑÉ…•}ÁÉ½‰•Í}•á±Õ‘•‘}™É½µ}Ñ¥µ¥¹œˆèÑÉ…•}ÁÉ½‰•Ì°(€€€€€€€€€€€€‰™½Éµ…°ˆè¹½Ð…ÉÌ¹Íµ½­”°(€€€€€€€€€€€€‰Á…ÍÌˆè…±°¡…Ñ•Ì¹Ù…±Õ•Ì ¤¤°(€€€€€€€€€€€€‰É…Ý}Í…µÁ±•ÌˆèÉ…Ü°(€€€€€€€ô(€€€€€€€½ÕÑÁÕÐ¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡É•ÍÕ±Ð°•¹ÍÕÉ•}…Í¥¤õ…±Í”°¥¹‘•¹ÐôÈ¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€ÁÉ¥¹Ð¡©Í½¸¹‘ÕµÁÌ¡ì‰Á…ÍÌˆèÉ•ÍÕ±Ñl‰Á…ÍÌ‰t°€‰…Ñ•Ìˆè…Ñ•Íô°•¹ÍÕÉ•}…Í¥¤õ…±Í”¤¤(€€€€€€€É•ÑÕÉ¸€À¥˜…ÉÌ¹Íµ½­”½ÈÉ•ÍÕ±Ñl‰Á…ÍÌ‰t•±Í”€Ä(()‘•˜µ…¥¸ ¤€´ø¥¹Ðè(€€€Á…ÉÍ•È€ô…ÉÁ…ÉÍ”¹ÉÕµ•¹ÑA…ÉÍ•È ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÝ½É­•Èˆ°…Ñ¥½¸ô‰ÍÑ½É•}ÑÉÕ”ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÁÉ•Á…É”µÕ¹¡•­•ˆ°…Ñ¥½¸ô‰ÍÑ½É•}ÑÉÕ”ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÑÉ…”µÁÉ½‰”ˆ°…Ñ¥½¸ô‰ÍÑ½É•}ÑÉÕ”ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÁÉ•™±¥¡Ðµ½¹±äˆ°…Ñ¥½¸ô‰ÍÑ½É•}ÑÉÕ”ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÍµ½­”ˆ°…Ñ¥½¸ô‰ÍÑ½É•}ÑÉÕ”ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ½¡½ÉÐˆ°¡½¥•Ìô ‰ÁÉ•Á…É”ˆ°€‰½É”ˆ°€‰”É”ˆ¤¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÙ…É¥…¹Ðˆ°¡½¥•Ìô ‰‰…Í•±¥¹”ˆ°€‰…¹‘¥‘…Ñ”ˆ¤¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ½‘”µÉ½½Ðˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ½ÕÑÁÕÐµÉ½½Ðˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ½ÉÁÕÌˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÕÁ‘…Ñ•µ½ÉÁÕÌˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µµ½‘•°µ‘¥Èˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÉ•½É‘Ìˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ•áÁ•Ñ•µµ…¹¥™•ÍÐˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ½ÕÑÁÕÐˆ°É•ÅÕ¥É•õQÉÕ”¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µÁåÑ¡½¸ˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ‰…Í•±¥¹”µÉ½½Ðˆ¤(€€€Á…ÉÍ•È¹…‘‘}…ÉÕµ•¹Ð ˆ´µ…¹‘¥‘…Ñ”µÉ½½Ðˆ¤(€€€…ÉÌ€ôÁ…ÉÍ•È¹Á…ÉÍ•}…ÉÌ ¤(€€€¥˜…ÉÌ¹Ý½É­•Èè(€€€€€€€¥˜…ÉÌ¹ÁÉ•Á…É•}Õ¹¡•­•è(€€€€€€€€€€€€ŒÉ••é”Ñ¡”•¹•É…Ñ•™¥áÑÕÉ”‰•™½É”‰…Í•±¥¹”½…¹‘¥‘…Ñ”½µÁ…É¥Í½¹Ì¸(€€€€€€€€€€€}½¹™¥ÕÉ”¡A…Ñ ¡…ÉÌ¹½‘•}É½½Ð¤¹É•Í½±Ù” ¤°A…Ñ ¡…ÉÌ¹½ÕÑÁÕÑ}É½½Ð¤¹É•Í½±Ù” ¤°A…Ñ ¡…ÉÌ¹µ½‘•±}‘¥È¤¹É•Í½±Ù” ¤¤(€€€€€€€€€€€¥¹¥Ñ¥…°°¥¹¥Ñ¥…±}µ…¹¥™•ÍÐ€ô}½É‘•É•‘}É•½É‘Ì¡A…Ñ ¡…ÉÌ¹½ÉÁÕÌ¤¹É•Í½±Ù” ¤¤(€€€€€€€€€€€ÕÁ‘…Ñ•°ÕÁ‘…Ñ•‘}µ…¹¥™•ÍÐ€ô}½É‘•É•‘}É•½É‘Ì¡A…Ñ ¡…ÉÌ¹ÕÁ‘…Ñ•‘}½ÉÁÕÌ¤¹É•Í½±Ù” ¤¤(€€€€€€€€€€€¡…¹•‘}Á…Ñ¡Ì€ôì(€€€€€€€€€€€€€€€€¨¡˜‰Ý½É½…Ñ…±½œµÕ¥‘”µí¥¹‘•àèÀÉ‘ô¹‘½àˆ™½È¥¹‘•à¥¸UAQ}=`¤°(€€€€€€€€€€€€€€€€¨¡˜‰Á½Ý•ÉÁ½¥¹Ð½…Ñ…±½œµÁ±…¸µí¥¹‘•àèÀÉ‘ô¹ÁÁÑàˆ™½È¥¹‘•à¥¸UAQ}AAQ`¤°(€€€€€€€€€€€ô(€€€€€€€€€€€¡…¹•€ôm¥Ñ•´™½È¥Ñ•´¥¸ÕÁ‘…Ñ•¥˜¥Ñ•µl‰µ•Ñ…‘…Ñ„‰ul‰Á…Ñ ‰t¹ÍÁ±¥Ð ˆ¼ˆ°€Ä¥l´Åt¥¸¡…¹•‘}Á…Ñ¡Ít(€€€€€€€€€€€½±‘}¥‘Ì€ôm¥Ñ•µl‰¥‰t™½È¥Ñ•´¥¸¥¹¥Ñ¥…°¥˜¥Ñ•µl‰µ•Ñ…‘…Ñ„‰ul‰Á…Ñ ‰t¹ÍÁ±¥Ð ˆ¼ˆ°€Ä¥l´Åt¥¸¡…¹•‘}Á…Ñ¡Ít(€€€€€€€€€€€¥˜±•¸¡¡…¹•¤€„ôUAQ}I=IL½È±•¸¡½±‘}¥‘Ì¤€„ôUAQ}I=ILè(€€€€€€€€€€€€€€€É…¥Í”IÕ¹Ñ¥µ•ÉÉ½È¡˜‰ÕÁ‘…Ñ”É•½Éµ¥Íµ…Ñ èí±•¸¡¡…¹•¥ô½í±•¸¡½±‘}¥‘Ì¥ôˆ¤(€€€€€€€€€€€A…Ñ ¡…ÉÌ¹É•½É‘Ì¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ì‰¥¹¥Ñ¥…°ˆè¥¹¥Ñ¥…°°€‰ÕÁ‘…Ñ•ˆè¡…¹•°€‰½±‘}¥‘Ìˆè½±‘}¥‘Íô°•¹ÍÕÉ•}…Í¥¤õ…±Í”¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€A…Ñ ¡…ÉÌ¹½ÕÑÁÕÐ¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ì‰¥¹¥Ñ¥…°ˆè¥¹¥Ñ¥…±}µ…¹¥™•ÍÐ°€‰ÕÁ‘…Ñ•ˆèÕÁ‘…Ñ•‘}µ…¹¥™•ÍÑô°•¹ÍÕÉ•}…Í¥¤õ…±Í”°¥¹‘•¹ÐôÈ¤°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€É•ÑÕÉ¸€À(€€€€€€€É•ÑÕÉ¸}Ý½É­•È¡…ÉÌ¤(€€€É•ÅÕ¥É•€ô€¡…ÉÌ¹ÁåÑ¡½¸°…ÉÌ¹‰…Í•±¥¹•}É½½Ð°…ÉÌ¹…¹‘¥‘…Ñ•}É½½Ð°…ÉÌ¹µ½‘•±}‘¥È¤(€€€¥˜¹½Ð…±°¡É•ÅÕ¥É•¤è(€€€€€€€Á…ÉÍ•È¹•ÉÉ½È ˆ´µÁåÑ¡½¸°€´µ‰…Í•±¥¹”µÉ½½Ð°€´µ…¹‘¥‘…Ñ”µÉ½½Ð°…¹€´µµ½‘•°µ‘¥È…É”É•ÅÕ¥É•ˆ¤(€€€É•ÑÕÉ¸}ÉÕ¸¡…ÉÌ¤(()¥˜}}¹…µ•}|€ôô€‰}}µ…¥¹}|ˆè(€€€É…¥Í”MåÍÑ•µá¥Ð¡µ…¥¸ ¤¤(
+                store.build_index(reset=True)
+            else:
+                incremental.add_or_update_root(
+                    corpus,
+                    source_id="perf011-r2",
+                    reset_db=True,
+                    reset_clean=True,
+                )
+    finally:
+        for owner, name, original in restored:
+            setattr(owner, name, original)
+    cold_wall = time.perf_counter() - wall_start
+    cold_cpu = time.process_time() - cpu_start
+    cold_phases = dict(phases)
+
+    if args.cohort == "e2e":
+        updated_root = Path(args.updated_corpus)
+        for relative in (
+            *(f"word/catalog-guide-{index:02d}.docx" for index in UPDATED_DOCX),
+            *(f"powerpoint/catalog-plan-{index:02d}.pptx" for index in UPDATED_PPTX),
+        ):
+            shutil.copy2(updated_root / relative, corpus / relative)
+
+    phases.clear()
+    restored.clear()
+    catalog_target = store if args.cohort == "core" else incremental
+    vector_target = store if args.cohort == "core" else incremental
+    for target, name in ((catalog_target, "upsert_catalog_records"), (vector_target, "upsert_records")):
+        owner, original = _timed_call(target, name, phases)
+        restored.append((owner, name, original))
+    if args.cohort == "e2e":
+        owner, original = _timed_call(incremental, "build_records_for_file", phases)
+        restored.append((owner, "build_records_for_file", original))
+    update_wall_start = time.perf_counter()
+    update_cpu_start = time.process_time()
+    try:
+        with _catalog_trace(catalog, sql, enabled=args.trace_probe):
+            if args.cohort == "core":
+                store.delete_ids(prepared["old_ids"])
+                store.upsert_records(prepared["updated"])
+                catalog_started = time.perf_counter()
+                if args.variant == "candidate":
+                    catalog.upsert_records(prepared["updated"], delete_ids=prepared["old_ids"])
+                else:
+                    catalog.delete_chunks(prepared["old_ids"])
+                    catalog.upsert_records(prepared["updated"])
+                phases["upsert_catalog_records"] = time.perf_counter() - catalog_started
+                product_manifest.write_manifest(store.collection_count())
+            else:
+                incremental.add_or_update_root(corpus, source_id="perf011-r2")
+    finally:
+        for owner, name, original in restored:
+            setattr(owner, name, original)
+    update_wall = time.perf_counter() - update_wall_start
+    update_cpu = time.process_time() - update_cpu_start
+
+    manifest_payload = product_manifest.read_manifest()
+    embedder = store.get_embedder()
+    providers = list(embedder._session.get_providers()) if hasattr(embedder, "_session") else []
+    collection = store._get_existing_collection()
+    chroma_sqlite = output_root / "index" / "chroma" / "chroma.sqlite3"
+    with catalog.connect_readonly(catalog.catalog_path()) as connection:
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_keys = len(connection.execute("PRAGMA foreign_key_check").fetchall())
+        catalog_count = int(connection.execute("SELECT COUNT(*) FROM chunk").fetchone()[0])
+    result = {
+        "variant": args.variant,
+        "cohort": args.cohort,
+        "cold_wall_seconds": cold_wall,
+        "cold_cpu_seconds": cold_cpu,
+        "update_wall_seconds": update_wall,
+        "update_cpu_seconds": update_cpu,
+        "cold_catalog_seconds": cold_phases.get("upsert_catalog_records", 0.0),
+        "cold_embedding_chroma_seconds": cold_phases.get("upsert_records", 0.0),
+        "cold_prepare_seconds": cold_phases.get("build_records_for_file", 0.0),
+        "update_catalog_seconds": phases.get("upsert_catalog_records", 0.0),
+        "update_embedding_chroma_seconds": phases.get("upsert_records", 0.0),
+        "update_prepare_seconds": phases.get("build_records_for_file", 0.0),
+        "sql_count": len(sql["sql"]),
+        "total_changes": sql["total_changes"],
+        "peak_rss_bytes": _peak_working_set(),
+        "db_bytes": _tree_bytes(output_root / "index"),
+        "wal_bytes": sum(path.stat().st_size for path in output_root.rglob("*-wal")),
+        "vector_count": store.collection_count(),
+        "catalog_count": catalog_count,
+        "manifest_record_count": int(manifest_payload.get("record_count", -1)),
+        "manifest": manifest_payload,
+        "embedder_class": type(embedder).__name__,
+        "onnx_providers": providers,
+        "collection_name": store.collection_name(),
+        "collection_metadata": dict(collection.metadata or {}) if collection is not None else {},
+        "chroma_sqlite_bytes": chroma_sqlite.stat().st_size if chroma_sqlite.exists() else 0,
+        "integrity": integrity,
+        "foreign_key_errors": foreign_keys,
+        "record_manifest_hash": manifest["ordered_record_manifest_hash"],
+        "trace_probe": bool(args.trace_probe),
+    }
+    if not (
+        result["vector_count"] == TOTAL_RECORDS
+        and result["catalog_count"] == TOTAL_RECORDS
+        and result["manifest_record_count"] == TOTAL_RECORDS
+        and integrity == "ok"
+        and foreign_keys == 0
+        and type(embedder).__name__ == "OnnxRuntimeEmbedder"
+        and "CPUExecutionProvider" in providers
+        and chroma_sqlite.is_file()
+        and manifest_payload.get("collection") == "perf011_r2"
+        and manifest_payload.get("embedding_model") == "cl-nagoya/ruri-v3-30m"
+        and manifest_payload.get("embedding_backend") == "onnx"
+        and manifest_payload.get("embedding_dimension") == 256
+        and manifest_payload.get("quantization") == "dynamic-int8"
+        and collection is not None
+        and collection.metadata.get("embedding_model") == "cl-nagoya/ruri-v3-30m"
+        and collection.metadata.get("embedding_backend") == "onnx"
+        and collection.metadata.get("embedding_dimension") == 256
+        and collection.metadata.get("quantization") == "dynamic-int8"
+    ):
+        raise RuntimeError(f"product gold mismatch: {result}")
+    Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
+
+
+def _p95(values: list[float]) -> float:
+    return sorted(values)[max(0, math.ceil(len(values) * 0.95) - 1)]
+
+
+def _summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {"runs": len(samples)}
+    numeric = [key for key, value in samples[0].items() if isinstance(value, (int, float)) and not isinstance(value, bool)]
+    for key in numeric:
+        values = [float(sample[key]) for sample in samples]
+        result[f"{key}_p50"] = statistics.median(values)
+        result[f"{key}_p95"] = _p95(values)
+    return result
+
+
+def _reduction(baseline: list[dict[str, Any]], candidate: list[dict[str, Any]], key: str) -> float:
+    ratios = [1.0 - float(c[key]) / float(b[key]) for b, c in zip(baseline, candidate, strict=True)]
+    return statistics.median(ratios)
+
+
+def _run(args: argparse.Namespace) -> int:
+    script = Path(__file__).resolve()
+    output = Path(args.output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="perf011-r2-") as temporary:
+        root = Path(temporary)
+        initial = root / "fixture" / "initial" / "source"
+        updated = root / "fixture" / "updated" / "source"
+        fixture = _generate_corpus(initial, updated)
+        reproducible_initial = root / "fixture-repro" / "initial" / "source"
+        reproducible_updated = root / "fixture-repro" / "updated" / "source"
+        reproduced = _generate_corpus(reproducible_initial, reproducible_updated)
+        if (
+            fixture["initial_file_manifest_hash"] != reproduced["initial_file_manifest_hash"]
+            or fixture["updated_file_manifest_hash"] != reproduced["updated_file_manifest_hash"]
+        ):
+            raise RuntimeError("Office fixture generator is not byte reproducible")
+        fixture["byte_reproducible_second_generation"] = True
+        records_path = root / "records.json"
+        preflight_path = root / "preflight.json"
+        expected_path = root / "expected.json"
+        expected_path.write_text(json.dumps({"initial": {"ordered_record_manifest_hash": "pending"}}), encoding="utf-8")
+        prepare_cmd = [
+            args.python, str(script), "--worker", "--cohort", "prepare",
+            "--variant", "candidate", "--code-root", args.candidate_root,
+            "--output-root", str(root / "prepare-db"), "--corpus", str(initial),
+            "--updated-corpus", str(updated), "--model-dir", args.model_dir,
+            "--records", str(records_path), "--expected-manifest", str(expected_path),
+            "--output", str(preflight_path),
+        ]
+        # Prepare first without the expected-hash check, then freeze its manifest.
+        expected_path.write_text(json.dumps({"initial": {"ordered_record_manifest_hash": ""}}), encoding="utf-8")
+        prepare_cmd.append("--prepare-unchecked")
+        subprocess.run(prepare_cmd, check=True, timeout=480)
+        preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+        expected_path.write_text(json.dumps(preflight), encoding="utf-8")
+        if preflight["initial"]["record_count"] != TOTAL_RECORDS:
+            raise RuntimeError("preflight did not produce 400 records")
+        if args.preflight_only:
+            output.write_text(
+                json.dumps({"fixture": fixture, "preflight": preflight}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(json.dumps({"preflight": preflight}, ensure_ascii=False))
+            return 0
+
+        all_results: dict[str, Any] = {"core": {}, "e2e": {}}
+        trace_probes: dict[str, Any] = {}
+        for cohort in ("core", "e2e"):
+            for variant in ("baseline", "candidate"):
+                code_root = args.baseline_root if variant == "baseline" else args.candidate_root
+                sample_root = root / "trace" / cohort / variant
+                corpus = sample_root / "source"
+                shutil.copytree(initial, corpus)
+                sample_output = sample_root / "sample.json"
+                cmd = [
+                    args.python, str(script), "--worker", "--trace-probe",
+                    "--cohort", cohort, "--variant", variant,
+                    "--code-root", code_root, "--output-root", str(sample_root / "db"),
+                    "--corpus", str(corpus), "--updated-corpus", str(updated),
+                    "--model-dir", args.model_dir, "--records", str(records_path),
+                    "--expected-manifest", str(expected_path), "--output", str(sample_output),
+                ]
+                completed = subprocess.run(cmd, timeout=480, text=True, capture_output=True)
+                if completed.returncode:
+                    raise RuntimeError(f"trace worker failed: {cmd}\n{completed.stdout}\n{completed.stderr}")
+                sample = json.loads(sample_output.read_text(encoding="utf-8"))
+                trace_probes[f"{cohort}_{variant}"] = {
+                    "sql_count": sample["sql_count"],
+                    "total_changes": sample["total_changes"],
+                }
+        raw: list[dict[str, Any]] = []
+        pair_plan = (("core", 1), ("e2e", 1)) if args.smoke else (("core", 5), ("e2e", 3))
+        for cohort, measured_pairs in pair_plan:
+            samples = {"baseline": [], "candidate": []}
+            for pair in range(measured_pairs + 1):
+                order = ("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline")
+                pair_values: dict[str, dict[str, Any]] = {}
+                for variant in order:
+                    code_root = args.baseline_root if variant == "baseline" else args.candidate_root
+                    sample_root = root / "runs" / cohort / f"{pair}-{variant}"
+                    corpus = sample_root / "source"
+                    shutil.copytree(initial, corpus)
+                    sample_output = sample_root / "sample.json"
+                    cmd = [
+                        args.python, str(script), "--worker", "--cohort", cohort,
+                        "--variant", variant, "--code-root", code_root,
+                        "--output-root", str(sample_root / "db"), "--corpus", str(corpus),
+                        "--updated-corpus", str(updated), "--model-dir", args.model_dir,
+                        "--records", str(records_path), "--expected-manifest", str(expected_path),
+                        "--output", str(sample_output),
+                    ]
+                    completed = subprocess.run(cmd, timeout=480, text=True, capture_output=True)
+                    if completed.returncode:
+                        raise RuntimeError(f"worker failed: {cmd}\n{completed.stdout}\n{completed.stderr}")
+                    sample = json.loads(sample_output.read_text(encoding="utf-8"))
+                    sample.update({"pair": pair, "warmup": pair == 0})
+                    pair_values[variant] = sample
+                if pair:
+                    for variant in ("baseline", "candidate"):
+                        samples[variant].append(pair_values[variant])
+                        raw.append(pair_values[variant])
+                if time.monotonic() - started > 2700:
+                    raise TimeoutError("combined benchmark exceeded 45 minutes")
+            baseline = samples["baseline"]
+            candidate = samples["candidate"]
+            reductions = {
+                key: _reduction(baseline, candidate, key)
+                for key in ("cold_wall_seconds", "cold_catalog_seconds", "update_wall_seconds", "update_catalog_seconds")
+            }
+            all_results[cohort] = {
+                "baseline": _summary(baseline),
+                "candidate": _summary(candidate),
+                "paired_median_reductions": reductions,
+            }
+
+        core = all_results["core"]
+        e2e = all_results["e2e"]
+        gates = {
+            "core_catalog_at_least_20_percent": core["paired_median_reductions"]["cold_catalog_seconds"] >= 0.20,
+            "core_full_add_at_least_10_percent": core["paired_median_reductions"]["cold_wall_seconds"] >= 0.10,
+            "office_e2e_not_slower": e2e["paired_median_reductions"]["cold_wall_seconds"] >= 0.0,
+            "core_update_at_least_15_percent": core["paired_median_reductions"]["update_wall_seconds"] >= 0.15,
+            "cold_p95_within_10_percent": core["candidate"]["cold_wall_seconds_p95"] <= core["baseline"]["cold_wall_seconds_p95"] * 1.10,
+            "update_p95_within_10_percent": core["candidate"]["update_wall_seconds_p95"] <= core["baseline"]["update_wall_seconds_p95"] * 1.10,
+            "rss_within_15_percent": max(
+                core["candidate"]["peak_rss_bytes_p95"] / core["baseline"]["peak_rss_bytes_p95"],
+                e2e["candidate"]["peak_rss_bytes_p95"] / e2e["baseline"]["peak_rss_bytes_p95"],
+            ) <= 1.15,
+            "db_bytes_within_5_percent": max(
+                core["candidate"]["db_bytes_p95"] / core["baseline"]["db_bytes_p95"],
+                e2e["candidate"]["db_bytes_p95"] / e2e["baseline"]["db_bytes_p95"],
+            ) <= 1.05,
+        }
+        result = {
+            "task": "LRR-PERF-011-R2",
+            "fixture": fixture,
+            "preflight": preflight,
+            "python": args.python,
+            "model_dir": args.model_dir,
+            "baseline_root": args.baseline_root,
+            "candidate_root": args.candidate_root,
+            "warmup_pairs": 1,
+            "core_measured_pairs": pair_plan[0][1],
+            "office_e2e_measured_pairs": pair_plan[1][1],
+            "cohorts": all_results,
+            "gates": gates,
+            "trace_probes_excluded_from_timing": trace_probes,
+            "formal": not args.smoke,
+            "pass": all(gates.values()),
+            "raw_samples": raw,
+        }
+        output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps({"pass": result["pass"], "gates": gates}, ensure_ascii=False))
+        return 0 if args.smoke or result["pass"] else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--prepare-unchecked", action="store_true")
+    parser.add_argument("--trace-probe", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--cohort", choices=("prepare", "core", "e2e"))
+    parser.add_argument("--variant", choices=("baseline", "candidate"))
+    parser.add_argument("--code-root")
+    parser.add_argument("--output-root")
+    parser.add_argument("--corpus")
+    parser.add_argument("--updated-corpus")
+    parser.add_argument("--model-dir")
+    parser.add_argument("--records")
+    parser.add_argument("--expected-manifest")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--python")
+    parser.add_argument("--baseline-root")
+    parser.add_argument("--candidate-root")
+    args = parser.parse_args()
+    if args.worker:
+        if args.prepare_unchecked:
+            # Freeze the generated fixture before baseline/candidate comparisons.
+            _configure(Path(args.code_root).resolve(), Path(args.output_root).resolve(), Path(args.model_dir).resolve())
+            initial, initial_manifest = _ordered_records(Path(args.corpus).resolve())
+            updated, updated_manifest = _ordered_records(Path(args.updated_corpus).resolve())
+            changed_paths = {
+                *(f"word/catalog-guide-{index:02d}.docx" for index in UPDATED_DOCX),
+                *(f"powerpoint/catalog-plan-{index:02d}.pptx" for index in UPDATED_PPTX),
+            }
+            changed = [item for item in updated if item["metadata"]["path"].split("/", 1)[-1] in changed_paths]
+            old_ids = [item["id"] for item in initial if item["metadata"]["path"].split("/", 1)[-1] in changed_paths]
+            if len(changed) != UPDATED_RECORDS or len(old_ids) != UPDATED_RECORDS:
+                raise RuntimeError(f"update record mismatch: {len(changed)}/{len(old_ids)}")
+            Path(args.records).write_text(json.dumps({"initial": initial, "updated": changed, "old_ids": old_ids}, ensure_ascii=False), encoding="utf-8")
+            Path(args.output).write_text(json.dumps({"initial": initial_manifest, "updated": updated_manifest}, ensure_ascii=False, indent=2), encoding="utf-8")
+            return 0
+        return _worker(args)
+    required = (args.python, args.baseline_root, args.candidate_root, args.model_dir)
+    if not all(required):
+        parser.error("--python, --baseline-root, --candidate-root, and --model-dir are required")
+    return _run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

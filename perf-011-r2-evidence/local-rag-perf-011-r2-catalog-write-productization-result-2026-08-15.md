@@ -2,11 +2,11 @@
 
 ## 判定
 
-`NO_GO`
+`GO（2026-08-15補正gate）`
 
-catalog区間はpaired medianで21.68%短縮し、20% gateを通過した。しかし、400 records core full ADDは1.63%短縮で10% gate未達、10%更新は2.21%短縮で15% gate未達だった。指示どおり追加最適化・別fixture・再測定は行わず、candidateをmainへ統合しない。
+元指示のgateでは、catalog区間がpaired medianで21.68%短縮して20% gateを通過した一方、400 records core full ADDは1.63%短縮で10% gate未達、10%更新は2.21%短縮で15% gate未達だったため`NO_GO`だった。この元判定と正式測定値は変更せず保存する。
 
-Office E2Eは0.36%短縮で非退行、p95／RSS／DB容量も非退行gate内だった。正しさgateと独立reviewはPASSしているため、NO_GO理由は性能採用gateだけである。
+ユーザー補正により、catalog 20%以上短縮を効果の主gateとし、core full ADD／Office E2E／10%更新は短縮必須ではなく非退行gateとする。既存値はそれぞれ1.63%／0.36%／2.21%短縮で、すべて非退行である。正しさ、独立review P0/P1、p95、RSS、DB容量のgateも全PASSしているため、追加測定なしで補正gateの`GO`と再判定する。
 
 ## Gitと実施範囲
 
@@ -16,8 +16,8 @@ Office E2Eは0.36%短縮で非退行、p95／RSS／DB容量も非退行gate内�
 - product commit: `31f7447feebb4720c99f640fcb5287f2fbafc01f`
 - tested SHA: `184a643a325499d3a701187874ebeb7076cd2117`
 - reviewed SHA: `184a643a325499d3a701187874ebeb7076cd2117`
-- merged SHA: `NONE (NO_GO)`
-- main push: `NOT_RUN (NO_GO)`
+- merged SHA: `PENDING (Drive結果票の新規保存確認後にmain統合)`
+- main push: `PENDING (Drive結果票の新規保存確認後)`
 - Release／tag／配布物公開: `NOT_RUN`
 - 実DB／旧20k DB／秘密文書: `NOT_USED`
 
@@ -52,7 +52,7 @@ Office E2Eは0.36%短縮で非退行、p95／RSS／DB容量も非退行gate内�
 
 warm-up pairはcore 1回、Office E2E 1回。採用sampleはcore 5 pair、Office E2E 3 pair。全体423.1秒で完走し、45分上限内だった。
 
-| cohort／指標 | baseline p50 | candidate p50 | paired median短縮 | gate |
+| cohort／指標 | baseline p50 | candidate p50 | paired median短縮 | 元指示gate |
 |---|---:|---:|---:|---|
 | core catalog | 0.4681 s | 0.3684 s | 21.68% | PASS (>=20%) |
 | core full ADD | 8.0277 s | 7.9601 s | 1.63% | FAIL (<10%) |
@@ -88,7 +88,7 @@ Office E2E paired raw wall値:
 
 非計測SQL probeではcore baseline 30,540 statements／14,147 total changes、candidate 22,033／7,061だった。計測値へtrace callback overheadは混入していない。
 
-Gate一覧:
+元指示gate一覧（測定時の判定を保存）:
 
 - catalog paired median >=20%: `PASS`
 - core full ADD paired median >=10%: `FAIL`
@@ -97,6 +97,19 @@ Gate一覧:
 - full／update p95 <= baseline +10%: `PASS`
 - peak RSS <= baseline +15%: `PASS`
 - DB bytes <= baseline +5%: `PASS`
+
+2026-08-15補正gate一覧（追加測定なし）:
+
+- 効果主gate — catalog paired median >=20%: `PASS (21.68%)`
+- 防波堤 — core full ADD非退行: `PASS (1.63%短縮)`
+- 防波堤 — Office E2E非退行: `PASS (0.36%短縮)`
+- 防波堤 — 10% update非退行: `PASS (2.21%短縮)`
+- 正しさ／logical gold／検索契約: `PASS`
+- 独立review P0/P1 0: `PASS`
+- full／update p95 <= baseline +10%: `PASS`
+- peak RSS <= baseline +15%: `PASS`
+- DB bytes <= baseline +5%: `PASS`
+- 補正総合判定: `GO`
 
 ## 正しさと回帰試験
 
@@ -120,4 +133,4 @@ Gate一覧:
 - preflight: `perf-011-r2-evidence/preflight-fixed.json`
 - smokeは`formal:false`であり、正式判定へ流用していない。
 
-本candidateはcatalog書込量を減らす正しさを保つが、実ONNX／Chromaを含む400 records full ADDと10%更新の利用者向け短縮が採用閾値に届かない。branch証跡は通常pushするが、mainへは反映しない。LRR-PERF-011-R2は`NO_GO`で正式終端し、後続LRR-PERF-012-R2はINTEGRITY-002受入済みmainから開始できる。
+本candidateはcatalog書込量を21.68%削減し、実ONNX／Chromaを含むcore full ADD、Office E2E、10%更新も悪化させていない。元指示gateでの`NO_GO`を履歴として残しつつ、ユーザー補正gateでは`GO`とする。結果票のDrive新規保存を確認後、branchと証拠を保持したままmainへ通常統合し、後続LRR-PERF-012-R2はその更新後mainから開始する。

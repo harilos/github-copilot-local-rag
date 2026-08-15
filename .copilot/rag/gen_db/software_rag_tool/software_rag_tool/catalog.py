@@ -451,4 +451,1223 @@ def delete_source_documents(source_id: str) -> dict[str, int]:
         conn.execute(
             """
             DELETE FROM chunk
-            WHERE chunk_pk IN (SELECT chu÷¯t¶‰žËkºwµç]!8€Á…Ñ œQ!8€À]!8€‰…Í•¹…µ”œQ!8€Ä]!8€ÍÑ•´œQ!8€È1M€Ì9¤L™¥•±‘}É…¹¬°4(€€€€€€€€€€´À¸ÄLÍ½É”4(€€€€€€€I=4‘½Õµ•¹Ñ}±½½­ÕÀ‘°4(€€€€€€€)=%8‘½Õµ•¹Ð=8¹‘½}Á¬€ô‘°¹‘½}Á¬4(€€€€€€€)=%8¡Õ¹¬Œ=8Œ¹¡Õ¹­}Á¬€ô€ 4(€€€€€€€€€M1PŒÈ¹¡Õ¹­}Á¬4(€€€€€€€€€I=4¡Õ¹¬ŒÈ4(€€€€€€€€€]!IŒÈ¹‘½}Á¬€ô¹‘½}Á¬4(€€€€€€€€€€€9ŒÈ¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€=IH	dŒÈ¹¡Õ¹­}¥¹‘•àM°ŒÈ¹¡Õ¹­}Á¬M4(€€€€€€€€€1%5%P€Ä4(€€€€€€€€¤4(€€€€€€€]!I‘°¹¹½Éµ…±¥é•‘}Ù…±Õ”%8€¡íÁ±…•¡½±‘•ÉÍô¤4(€€€€€€€€€9¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€íÍ½ÕÉ•}ÍÅ±ô4(€€€€€€€I=U@	dŒ¹¡Õ¹­}Á¬4(€€€€€€€=IH	dµ…Ñ¡}½Õ¹ÐM°™¥•±‘}É…¹¬M4(€€€€€€€1%5%P€ü4(€€€€ˆˆˆ4(€€€Á…É…µÌè±¥ÍÑm¹åt€ôl©Ù…±Õ•Ì°€©Í½ÕÉ•}Á…É…µÌ°Ñ½Á}­t4(€€€É•ÑÕÉ¸±¥ÍÐ¡½¹¸¹•á•ÕÑ”¡ÍÅ°°Á…É…µÌ¤¤4(4(4)‘•˜}¥‘•¹Ñ¥™¥•É}Í•…É ¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°Ù…±Õ•Ìè±¥ÍÑmÍÑÉt°€¨°Ñ½Á}¬è¥¹Ð°Í½ÕÉ”èÍÑÈ¤€´ø±¥ÍÑmÍÅ±¥Ñ”Ì¹I½Ýtè4(€€€¥˜¹½ÐÙ…±Õ•Ìè4(€€€€€€€É•ÑÕÉ¸mt4(€€€Í½ÕÉ•}ÍÅ°°Í½ÕÉ•}Á…É…µÌ€ô}Í½ÕÉ•}™¥±Ñ•È ‰ˆ°Í½ÕÉ”¤4(€€€Á±…•¡½±‘•ÉÌ€ô€ˆ°ˆ¹©½¥¸ ˆüˆ™½È|¥¸Ù…±Õ•Ì¤4(€€€ÍÅ°€ô˜ˆˆˆ4(€€€€€€€M1Pí}IMU1Q}=1U59Mô°4(€€€€€€€€€MU4¡À¹½Õ¹Ð¤Lµ…Ñ¡}½Õ¹Ð°4(€€€€€€€€€5%8¡À¹™¥•±¤L™¥•±‘}É…¹¬°4(€€€€€€€€€I=UA}=9P¡%MQ%9PÐ¹…¹½¹¥…±}Ù…±Õ”¤Lµ…Ñ¡•‘}Ñ•ÉµÌ°4(€€€€€€€€€€µMP¡MU4¡À¹½Õ¹Ð¤LI0¤LÍ½É”4(€€€€€€€I=4¥‘•¹Ñ¥™¥•É}Ñ•É´Ð4(€€€€€€€)=%8¥‘•¹Ñ¥™¥•É}Á½ÍÑ¥¹œÀ=8À¹Ñ•Éµ}¥€ôÐ¹Ñ•Éµ}¥4(€€€€€€€)=%8¡Õ¹¬Œ=8Œ¹¡Õ¹­}Á¬€ôÀ¹¡Õ¹­}Á¬4(€€€€€€€)=%8‘½Õµ•¹Ð=8¹‘½}Á¬€ôŒ¹‘½}Á¬4(€€€€€€€]!IÐ¹…¹½¹¥…±}Ù…±Õ”%8€¡íÁ±…•¡½±‘•ÉÍô¤4(€€€€€€€€€9Œ¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€9¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€íÍ½ÕÉ•}ÍÅ±ô4(€€€€€€€I=U@	dŒ¹¡Õ¹­}Á¬4(€€€€€€€=IH	dµ…Ñ¡}½Õ¹ÐM°™¥•±‘}É…¹¬M4(€€€€€€€1%5%P€ü4(€€€€ˆˆˆ4(€€€Á…É…µÌè±¥ÍÑm¹åt€ôl©Ù…±Õ•Ì°€©Í½ÕÉ•}Á…É…µÌ°Ñ½Á}­t4(€€€É•ÑÕÉ¸±¥ÍÐ¡½¹¸¹•á•ÕÑ”¡ÍÅ°°Á…É…µÌ¤¤4(4(4)‘•˜}±½½­ÕÁ}Ù…±Õ•Í}™½É}…¹¡½ÉÌ¡…¹¡½ÉÌè±¥ÍÑmÍÑÉt¤€´ø±¥ÍÑmÍÑÉtè4(€€€Ù…±Õ•Ìè±¥ÍÑmÍÑÉt€ômt4(€€€™½È…¹¡½È¥¸…¹¡½ÉÌè4(€€€€€€€Ù…±Õ•Ì¹•áÑ•¹¡¥‘•¹Ñ¥™¥•É}µ…Ñ¡}­•åÌ¡…¹¡½È¤¤4(€€€É•ÑÕÉ¸}Õ¹¥ÅÕ”¡Ù…±Õ”™½ÈÙ…±Õ”¥¸Ù…±Õ•Ì¥˜Ù…±Õ”¤4(4(4)‘•˜}Í•Ñ}•á…Ñ}‘•‰Õœ¡¥Ñ•´è‘¥ÑmÍÑÈ°¹åt°É½ÜèÍÅ±¥Ñ”Ì¹I½Ü°€¨°µ…Ñ¡}­¥¹èÍÑÈ¤€´ø9½¹”è4(€€€µ…Ñ¡•‘}Ñ•ÉµÌ€ô€ˆˆ4(€€€¥˜€‰µ…Ñ¡•‘}Ñ•ÉµÌˆ¥¸É½Ü¹­•åÌ ¤è4(€€€€€€€µ…Ñ¡•‘}Ñ•ÉµÌ€ôÍÑÈ¡É½Ýl‰µ…Ñ¡•‘}Ñ•ÉµÌ‰t½È€ˆˆ¤4(€€€‘•‰Õœ€ô‘¥Ð¡¥Ñ•´¹•Ð ‰‘•‰Õœˆ¤½Èíô¤4(€€€‘•‰Õl‰•á…Ñ}µ…Ñ ‰t€ôì4(€€€€€€€€‰µ…Ñ¡}­¥¹ˆèµ…Ñ¡}­¥¹°4(€€€€€€€€‰µ…Ñ¡•‘}Ñ•ÉµÌˆèmÙ…±Õ”™½ÈÙ…±Õ”¥¸µ…Ñ¡•‘}Ñ•ÉµÌ¹ÍÁ±¥Ð ˆ°ˆ¤¥˜Ù…±Õ•t°4(€€€ô4(€€€¥Ñ•µl‰‘•‰Õœ‰t€ô‘•‰Õœ4(4(4)‘•˜}ÅÕ•Éå}Ù…É¥…¹ÑÌ¡ÅÕ•ÍÑ¥½¸èÍÑÈ°Ñ½­•¹Ìè±¥ÍÑmÍÑÉt¤€´ø±¥ÍÑmÍÑÉtè4(€€€ÅÕ•É¥•Ìè±¥ÍÑmÍÑÉt€ômt4(€€€…¹‘}Ñ½­•¹Ì€ômÑ½­•¸™½ÈÑ½­•¸¥¸Ñ½­•¹Ì¥˜±•¸¡Ñ½­•¸¤€øô€Íulèát4(€€€…¹‘}ÅÕ•Éä€ô™ÑÍ}ÅÕ•Éå}™É½µ}Ñ½­•¹Ì¡…¹‘}Ñ½­•¹Ì°½Á•É…Ñ½Èô‰9ˆ°µ…á}Ñ•ÉµÌôà¤4(€€€¥˜…¹‘}ÅÕ•Éäè4(€€€€€€€ÅÕ•É¥•Ì¹…ÁÁ•¹¡…¹‘}ÅÕ•Éä¤4(€€€½É}ÅÕ•Éä€ô™ÑÍ}ÅÕ•Éå}™É½µ}Ñ½­•¹Ì¡Ñ½­•¹Ì°½Á•É…Ñ½Èô‰=Hˆ°µ…á}Ñ•ÉµÌôÈÐ¤4(€€€¥˜½É}ÅÕ•Éäè4(€€€€€€€ÅÕ•É¥•Ì¹…ÁÁ•¹¡½É}ÅÕ•Éä¤4(€€€ÅÕ•É¥•Ì¹•áÑ•¹¡Á¡É…Í•}ÅÕ•É¥•Ì¡ÅÕ•ÍÑ¥½¸¤¤4(€€€É•ÑÕÉ¸}Õ¹¥ÅÕ”¡ÅÕ•É¥•Ì¤4(4(4)‘•˜}¥¹™½Éµ…Ñ¥Ù•}…¹¡½É}Ñ½­•¹Ì 4(€€€½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°4(€€€ÅÕ•ÍÑ¥½¸èÍÑÈ°4(€€€€¨°4(€€€±¥µ¥Ðè¥¹Ð°4(¤€´ø±¥ÍÑmÑÕÁ±•mÍÑÈ°¥¹Ð°™±½…Ñutè4(€€€Ñ½­•¹Ì€ô}Õ¹¥ÅÕ”¡…¹½¹¥…±¥é”¡Ñ½­•¸¤™½ÈÑ½­•¸¥¸Ñ½­•¹Í}™½É}™ÑÌ¡ÅÕ•ÍÑ¥½¸°µ…á}Ñ½­•¹ÌôÌÈ¤¤4(€€€Ñ½­•¹Ì€ôl4(€€€€€€€Ñ½­•¸4(€€€€€€€™½ÈÑ½­•¸¥¸Ñ½­•¹Ì4(€€€€€€€¥˜±•¸¡Ñ½­•¸¤€øô€È4(€€€€€€€…¹¹½ÐÑ½­•¸¹¥Í‘¥¥Ð ¤4(€€€€€€€…¹…¹ä¡¡…É…Ñ•È¹¥Í…±¹Õ´ ¤™½È¡…É…Ñ•È¥¸Ñ½­•¸¤4(€€€t4(€€€¥˜¹½ÐÑ½­•¹Ì½È±¥µ¥Ð€ðô€Àè4(€€€€€€€É•ÑÕÉ¸mt4(€€€ÅÕ•Éå}½¹±ä€ô‰½½°¡½¹¸¹•á•ÕÑ” ‰AI5ÅÕ•Éå}½¹±äˆ¤¹™•Ñ¡½¹” ¥lÁt¤4(€€€¥˜ÅÕ•Éå}½¹±äè4(€€€€€€€€ŒQ¡”…Ñ…±½œ™¥±”É•µ…¥¹ÌÁÉ½Ñ•Ñ•‰äµ½‘”õÉ¼¸Q•µÁ½É…É¥±ä…±±½Ü„4(€€€€€€€€Œ½¹¹•Ñ¥½¸µ±½…°Q5@™ÑÌÕÙ½…ˆÙ¥•ÜÕÍ•½¹±ä™½È…±Õ±…Ñ¥½¸¸4(€€€€€€€½¹¸¹•á•ÕÑ” ‰AI5ÅÕ•Éå}½¹±äõ=ˆ¤4(€€€ÑÉäè4(€€€€€€€½¹¸¹•á•ÕÑ” 4(€€€€€€€€€€€€‰IQY%IQU0Q	1%9=Pa%MQLÑ•µÀ¹™ÑÍ}Ý½É‘}Ù½…ˆ€ˆ4(€€€€€€€€€€€€‰UM%9™ÑÌÕÙ½…ˆ¡µ…¥¸°™ÑÍ}Ý½É°€É½Üœ¤ˆ4(€€€€€€€€¤4(€€€™¥¹…±±äè4(€€€€€€€¥˜ÅÕ•Éå}½¹±äè4(€€€€€€€€€€€½¹¸¹•á•ÕÑ” ‰AI5ÅÕ•Éå}½¹±äõ=8ˆ¤4(€€€Á±…•¡½±‘•ÉÌ€ô€ˆ°ˆ¹©½¥¸ ˆüˆ™½È|¥¸Ñ½­•¹Ì¤4(€€€É½ÝÌ€ô½¹¸¹•á•ÕÑ” 4(€€€€€€€˜‰M1PÑ•É´°‘½ŒI=4Ñ•µÀ¹™ÑÍ}Ý½É‘}Ù½…ˆ]!IÑ•É´%8€¡íÁ±…•¡½±‘•ÉÍô¤ˆ°4(€€€€€€€Ñ½­•¹Ì°4(€€€€¤4(€€€‘½Õµ•¹Ñ}½Õ¹Ñ}É½Ü€ô½¹¸¹•á•ÕÑ” 4(€€€€€€€€ˆˆˆ4(€€€€€€€M1P=U9P¡%MQ%9P¹‘½}Á¬¤L½Õ¹Ð4(€€€€€€€I=4‘½Õµ•¹Ð4(€€€€€€€)=%8¡Õ¹¬Œ=8Œ¹‘½}Á¬€ô¹‘½}Á¬4(€€€€€€€]!I¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€9Œ¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€ˆˆˆ4(€€€€¤¹™•Ñ¡½¹” ¤4(€€€‘½Õµ•¹Ñ}½Õ¹Ð€ô¥¹Ð¡‘½Õµ•¹Ñ}½Õ¹Ñ}É½Ýl‰½Õ¹Ð‰t¥˜‘½Õµ•¹Ñ}½Õ¹Ñ}É½Ü•±Í”€À¤4(€€€¥˜‘½Õµ•¹Ñ}½Õ¹Ð€ðô€Àè4(€€€€€€€É•ÑÕÉ¸mt4(€€€Ñ½­•¹}½É‘•È€ôíÑ½­•¸è¥¹‘•à™½È¥¹‘•à°Ñ½­•¸¥¸•¹Õµ•É…Ñ”¡Ñ½­•¹Ì¥ô4(€€€É…¹­•è±¥ÍÑmÑÕÁ±•mÍÑÈ°¥¹Ð°™±½…Ñut€ômt4(€€€™½ÈÉ½Ü¥¸É½ÝÌè4(€€€€€€€Ñ½­•¸€ôÍÑÈ¡É½Ýl‰Ñ•É´‰t¤4(€€€€€€€ÅÕ•Éå}Ñ•áÐ€ô™ÑÍ}ÅÕ•Éå}™É½µ}Ñ½­•¹Ì¡mÑ½­•¹t°½Á•É…Ñ½Èô‰=Hˆ°µ…á}Ñ•ÉµÌôÄ¤4(€€€€€€€¥˜¹½ÐÅÕ•Éå}Ñ•áÐè4(€€€€€€€€€€€½¹Ñ¥¹Õ”4(€€€€€€€‘½Õµ•¹Ñ}‘™}É½Ü€ô½¹¸¹•á•ÕÑ” 4(€€€€€€€€€€€€ˆˆˆ4(€€€€€€€€€€€M1P=U9P¡%MQ%9PŒ¹‘½}Á¬¤L½Õ¹Ð4(€€€€€€€€€€€I=4™ÑÍ}Ý½É4(€€€€€€€€€€€)=%8¡Õ¹¬Œ=8Œ¹¡Õ¹­}Á¬€ô™ÑÍ}Ý½É¹É½Ý¥4(€€€€€€€€€€€)=%8‘½Õµ•¹Ð=8¹‘½}Á¬€ôŒ¹‘½}Á¬4(€€€€€€€€€€€]!I™ÑÍ}Ý½É5Q €ü4(€€€€€€€€€€€€€9Œ¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€€€€€9¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€€€€ˆˆˆ°4(€€€€€€€€€€€€¡ÅÕ•Éå}Ñ•áÐ°¤°4(€€€€€€€€¤¹™•Ñ¡½¹” ¤4(€€€€€€€‘½Õµ•¹Ñ}‘˜€ô¥¹Ð¡‘½Õµ•¹Ñ}‘™}É½Ýl‰½Õ¹Ð‰t¥˜‘½Õµ•¹Ñ}‘™}É½Ü•±Í”€À¤4(€€€€€€€É…É•}‘½Õµ•¹Ñ}±¥µ¥Ð€ôµ…à È°¥¹Ð¡‘½Õµ•¹Ñ}½Õ¹Ð€¨€À¸ÀÔ¤¤4(€€€€€€€¥˜‘½Õµ•¹Ñ}‘˜€ðô€À½È‘½Õµ•¹Ñ}‘˜€øÉ…É•}‘½Õµ•¹Ñ}±¥µ¥Ðè4(€€€€€€€€€€€½¹Ñ¥¹Õ”4(€€€€€€€¥‘˜€ôµ…Ñ ¹±½œ ¡‘½Õµ•¹Ñ}½Õ¹Ð€¬€Ä¤€¼€¡‘½Õµ•¹Ñ}‘˜€¬€Ä¤¤4(€€€€€€€±•¹Ñ¡}‰½¹ÕÌ€ô€Ä¸À€¬µ¥¸¡±•¸¡Ñ½­•¸¤°€ÄÈ¤€¼€ÄÈ¸À4(€€€€€€€É…¹­•¹…ÁÁ•¹ ¡Ñ½­•¸°‘½Õµ•¹Ñ}‘˜°¥‘˜€¨±•¹Ñ¡}‰½¹ÕÌ¤¤4(€€€É…¹­•¹Í½ÉÐ 4(€€€€€€€­•äõ±…µ‰‘„¥Ñ•´è€ 4(€€€€€€€€€€€€µ¥Ñ•µlÉt°4(€€€€€€€€€€€¥Ñ•µlÅt°4(€€€€€€€€€€€Ñ½­•¹}½É‘•È¹•Ð¡¥Ñ•µlÁt°±•¸¡Ñ½­•¹Ì¤¤°4(€€€€€€€€¤4(€€€€¤4(€€€É•ÑÕÉ¸É…¹­•‘lé±¥µ¥Ñt4(4(4)‘•˜}Ñ½­•¹}Á½Í¥Ñ¥½¸¡Ñ•áÐèÍÑÈ°Ñ½­•¸èÍÑÈ¤€´ø¥¹Ðè4(€€€Á½Í¥Ñ¥½¸€ô…¹½¹¥…±¥é”¡Ñ•áÐ¤¹™¥¹¡…¹½¹¥…±¥é”¡Ñ½­•¸¤¤4(€€€É•ÑÕÉ¸Á½Í¥Ñ¥½¸¥˜Á½Í¥Ñ¥½¸€øô€À•±Í”€Å|ÀÀÁ|ÀÀÁ|ÀÀÀ4(4(4)‘•˜}ÉÕ¹}™ÑÌ¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°Ñ…‰±”èÍÑÈ°ÅÕ•Éå}Ñ•áÐèÍÑÈ°Ñ½Á}¬è¥¹Ð°Í½ÕÉ”èÍÑÈ¤€´ø±¥ÍÑmÍÅ±¥Ñ”Ì¹I½Ýtè4(€€€¥˜Ñ…‰±”€„ô€‰™ÑÍ}Ý½Éˆè4(€€€€€€€É…¥Í”Y…±Õ•ÉÉ½È¡Ñ…‰±”¤4(€€€Í½ÕÉ•}ÍÅ°°Í½ÕÉ•}Á…É…µÌ€ô}Í½ÕÉ•}™¥±Ñ•È ‰ˆ°Í½ÕÉ”¤4(€€€Í½É•}•áÁÈ€ô€‰‰´ÈÔ¡™ÑÍ}Ý½É°€È¸À°€Ä¸À¤ˆ4(€€€ÍÅ°€ô˜ˆˆˆ4(€€€€€€€M1Pí}IMU1Q}=1U59Mô°íÍ½É•}•áÁÉôLÍ½É”4(€€€€€€€I=4™ÑÍ}Ý½É4(€€€€€€€)=%8¡Õ¹¬Œ=8Œ¹¡Õ¹­}Á¬€ô™ÑÍ}Ý½É¹É½Ý¥4(€€€€€€€)=%8‘½Õµ•¹Ð=8¹‘½}Á¬€ôŒ¹‘½}Á¬4(€€€€€€€]!I™ÑÍ}Ý½É5Q €ü4(€€€€€€€€€9Œ¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€9¹Ù¥Í¥‰±•}Õ¹Ñ¥°%L9U104(€€€€€€€€€íÍ½ÕÉ•}ÍÅ±ô4(€€€€€€€=IH	dÍ½É”M4(€€€€€€€1%5%P€ü4(€€€€ˆˆˆ4(€€€Á…É…µÌè±¥ÍÑm¹åt€ômÅÕ•Éå}Ñ•áÐ°€©Í½ÕÉ•}Á…É…µÌ°Ñ½Á}­t4(€€€ÑÉäè4(€€€€€€€É•ÑÕÉ¸±¥ÍÐ¡½¹¸¹•á•ÕÑ”¡ÍÅ°°Á…É…µÌ¤¤4(€€€•á•ÁÐÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½È…Ì•áŒè4(€€€€€€€¥˜}¥Í}Í…™•}™ÑÍ}ÅÕ•Éå}Íå¹Ñ…á}•ÉÉ½È¡•áŒ¤è4(€€€€€€€€€€€É•ÑÕÉ¸mt4(€€€€€€€É…¥Í”4(4(4)‘•˜}¥Í}Í…™•}™ÑÍ}ÅÕ•Éå}Íå¹Ñ…á}•ÉÉ½È¡•áŒèÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½È¤€´ø‰½½°è4(€€€€ˆˆ‰I•½¹¥é”½¹±äQLÔÁ…ÉÍ•È•ÉÉ½ÉÌ…ÐÑ¡”5Q •á•ÕÑ¥½¸‰½Õ¹‘…Éä¸ˆˆˆ4(€€€¥˜•Ñ…ÑÑÈ¡•áŒ°€‰ÍÅ±¥Ñ•}•ÉÉ½É½‘”ˆ°9½¹”¤€„ôÍÅ±¥Ñ”Ì¹ME1%Q}II=Hè4(€€€€€€€É•ÑÕÉ¸…±Í”4(€€€¥˜•Ñ…ÑÑÈ¡•áŒ°€‰ÍÅ±¥Ñ•}•ÉÉ½É¹…µ”ˆ°9½¹”¤€„ô€‰ME1%Q}II=Hˆè4(€€€€€€€É•ÑÕÉ¸…±Í”4(€€€‘•Ñ…¥°€ôÍÑÈ¡•áŒ¤4(€€€É•ÑÕÉ¸‘•Ñ…¥°€ôô€‰Õ¹Ñ•Éµ¥¹…Ñ•ÍÑÉ¥¹œˆ½È‘•Ñ…¥°¹ÍÑ…ÉÑÍÝ¥Ñ  4(€€€€€€€€‰™ÑÌÔèÍå¹Ñ…à•ÉÉ½È¹•…È€ˆ4(€€€€¤4(4(4)‘•˜}É½Ý}Ñ½}É•ÍÕ±Ð¡É½ÜèÍÅ±¥Ñ”Ì¹I½Ü°€¨°Í¥¹…°èÍÑÈ°Í½É”è™±½…Ð¤€´ø‘¥ÑmÍÑÈ°¹åtè4(€€€‘½Õµ•¹Ñ}µ•Ñ„€ô}±½…‘}©Í½¹}½‰©•Ð¡É½Ýl‰‘½Õµ•¹Ñ}µ•Ñ…‘…Ñ…}©Í½¸‰t¤4(€€€¡Õ¹­}µ•Ñ„€ô}±½…‘}©Í½¹}½‰©•Ð¡É½Ýl‰¡Õ¹­}µ•Ñ…‘…Ñ…}©Í½¸‰t¤4(€€€µ•Ñ„€ôì4(€€€€€€€€¨©‘½Õµ•¹Ñ}µ•Ñ„°4(€€€€€€€€¨©¡Õ¹­}µ•Ñ„°4(€€€€€€€€‰Í½ÕÉ”ˆèÍÑÈ¡É½Ýl‰Í½ÕÉ”‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰Í½ÕÉ”ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Í½ÕÉ•}¥ˆèÍÑÈ¡É½Ýl‰Í½ÕÉ•}¥‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰Í½ÕÉ•}¥ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Í½ÕÉ•}ÑåÁ”ˆèÍÑÈ¡É½Ýl‰Í½ÕÉ•}ÑåÁ”‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰Í½ÕÉ•}ÑåÁ”ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Á…Ñ ˆèÍÑÈ¡É½Ýl‰Á…Ñ ‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰Á…Ñ ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰ÕÉ¤ˆèÍÑÈ¡É½Ýl‰ÕÉ¤‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰ÕÉ¤ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Ñ¥Ñ±”ˆèÍÑÈ¡É½Ýl‰Ñ¥Ñ±”‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰Ñ¥Ñ±”ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰±…¹Õ…”ˆèÍÑÈ¡É½Ýl‰¡Õ¹­}±…¹Õ…”‰t½ÈÉ½Ýl‰‘½Õµ•¹Ñ}±…¹Õ…”‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰±…¹Õ…”ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Í•Ñ¥½¹}Á…Ñ ˆèÍÑÈ¡É½Ýl‰Í•Ñ¥½¹}Á…Ñ ‰t½È¡Õ¹­}µ•Ñ„¹•Ð ‰Í•Ñ¥½¹}Á…Ñ ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰¡Õ¹­}¥¹‘•àˆèÉ½Ýl‰¡Õ¹­}¥¹‘•à‰t°4(€€€€€€€€‰‘½}¥ˆèÍÑÈ¡É½Ýl‰‘½}¥‰t½È¡Õ¹­}µ•Ñ„¹•Ð ‰‘½}¥ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰¡Õ¹­}¡…Í ˆèÍÑÈ¡É½Ýl‰¡Õ¹­}¡…Í ‰t½È¡Õ¹­}µ•Ñ„¹•Ð ‰¡Õ¹­}¡…Í ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰Ñ•áÑ}¡…Í ˆèÍÑÈ¡É½Ýl‰Ñ•áÑ}¡…Í ‰t½È¡Õ¹­}µ•Ñ„¹•Ð ‰Ñ•áÑ}¡…Í ˆ¤½È€ˆˆ¤°4(€€€€€€€€‰½¹Ñ•¹Ñ}¡…Í ˆèÍÑÈ¡É½Ýl‰‘½Õµ•¹Ñ}½¹Ñ•¹Ñ}¡…Í ‰t½ÈÉ½Ýl‰¡Õ¹­}½¹Ñ•¹Ñ}¡…Í ‰t½È‘½Õµ•¹Ñ}µ•Ñ„¹•Ð ‰½¹Ñ•¹Ñ}¡…Í ˆ¤½È€ˆˆ¤°4(€€€ô4(€€€É•ÑÕÉ¸ì4(€€€€€€€€‰É…¹¬ˆè€À°4(€€€€€€€€‰¥ˆèÍÑÈ¡É½Ýl‰¡Õ¹­}Õ¥‰t¤°4(€€€€€€€€‰‘¥ÍÑ…¹”ˆè9½¹”°4(€€€€€€€€‰Í½É”ˆèÍ½É”°4(€€€€€€€€‰Ñ•áÐˆèÍÑÈ¡É½Ýl‰Ñ•áÐ‰t½È€ˆˆ¤°4(€€€€€€€€‰µ•Ñ…‘…Ñ„ˆèµ•Ñ„°4(€€€€€€€€‰Í¥¹…±ÌˆèmÍ¥¹…±t°4(€€€ô4(4(4)‘•˜}É…¹­•¡É½ÝÌè±¥ÍÑm‘¥ÑmÍÑÈ°¹åut¤€´ø±¥ÍÑm‘¥ÑmÍÑÈ°¹åutè4(€€€™½ÈÉ…¹¬°É½Ü¥¸•¹Õµ•É…Ñ”¡É½ÝÌ°ÍÑ…ÉÐôÄ¤è4(€€€€€€€É½Ýl‰É…¹¬‰t€ôÉ…¹¬4(€€€É•ÑÕÉ¸É½ÝÌ4(4(4)‘•˜}Í½ÕÉ•}™¥±Ñ•È¡…±¥…ÌèÍÑÈ°Í½ÕÉ”èÍÑÈ¤€´øÑÕÁ±•mÍÑÈ°±¥ÍÑm¹åutè4(€€€¥˜Í½ÕÉ”€ôô€‰…¹äˆè4(€€€€€€€É•ÑÕÉ¸€ˆˆ°mt4(€€€É•ÑÕÉ¸˜‰9í…±¥…Íô¹Í½ÕÉ”€ô€üˆ°mÍ½ÕÉ•t4(4(4)‘•˜}‘½Õµ•¹Ñ}µ•Ñ…‘…Ñ„¡µ•Ñ„è‘¥ÑmÍÑÈ°¹åt¤€´ø‘¥ÑmÍÑÈ°¹åtè4(€€€­•åÌ€ôl‰Í½ÕÉ”ˆ°€‰Í½ÕÉ•}¥ˆ°€‰Í½ÕÉ•}ÑåÁ”ˆ°€‰Á…Ñ ˆ°€‰ÕÉ¤ˆ°€‰Ñ¥Ñ±”ˆ°€‰±…¹Õ…”ˆ°€‰É½½Ðˆ°€‰½¹Ñ•¹Ñ}¡…Í ‰t4(€€€É•ÑÕÉ¸í­•äèµ•Ñ„¹•Ð¡­•ä¤™½È­•ä¥¸­•åÌ¥˜}¡…Í}µ•Ñ…‘…Ñ…}Ù…±Õ”¡µ•Ñ„¹•Ð¡­•ä¤¥ô4(4(4)‘•˜}¡Õ¹­}µ•Ñ…‘…Ñ„¡µ•Ñ„è‘¥ÑmÍÑÈ°¹åt¤€´ø‘¥ÑmÍÑÈ°¹åtè4(€€€‘½Õµ•¹Ñ}­•åÌ€ôì‰Í½ÕÉ”ˆ°€‰Í½ÕÉ•}¥ˆ°€‰Í½ÕÉ•}ÑåÁ”ˆ°€‰Á…Ñ ˆ°€‰ÕÉ¤ˆ°€‰Ñ¥Ñ±”ˆ°€‰±…¹Õ…”ˆ°€‰É½½Ðˆ°€‰½¹Ñ•¹Ñ}¡…Í ‰ô4(€€€­•åÌ€ôl4(€€€€€€€€‰¡Õ¹­}Ñ¥Ñ±”ˆ°4(€€€€€€€€‰Í•Ñ¥½¹}Á…Ñ ˆ°4(€€€€€€€€‰¡Õ¹­}¥¹‘•àˆ°4(€€€€€€€€‰¡Õ¹­}¡…Í ˆ°4(€€€€€€€€‰Ñ•áÑ}¡…Í ˆ°4(€€€€€€€€‰¡Õ¹­•É}Ù•ÉÍ¥½¸ˆ°4(€€€€€€€€‰Á…”ˆ°4(€€€€€€€€‰Í±¥‘”ˆ°4(€€€€€€€€‰±¥¹•Ìˆ°4(€€€t4(€€€½ÕÑÁÕÐ€ôí­•äèµ•Ñ„¹•Ð¡­•ä¤™½È­•ä¥¸­•åÌ¥˜}¡…Í}µ•Ñ…‘…Ñ…}Ù…±Õ”¡µ•Ñ„¹•Ð¡­•ä¤¥ô4(€€€™½È­•ä°Ù…±Õ”¥¸µ•Ñ„¹¥Ñ•µÌ ¤è4(€€€€€€€¥˜­•ä¥¸‘½Õµ•¹Ñ}­•åÌ½È­•ä¥¸½ÕÑÁÕÐ½È¹½Ð}¡…Í}µ•Ñ…‘…Ñ…}Ù…±Õ”¡Ù…±Õ”¤è4(€€€€€€€€€€€½¹Ñ¥¹Õ”4(€€€€€€€½ÕÑÁÕÑm­•åt€ôÙ…±Õ”4(€€€É•ÑÕÉ¸½ÕÑÁÕÐ4(4(4)‘•˜}±½…Ñ¥½¹}µ•Ñ…‘…Ñ„¡µ•Ñ„è‘¥ÑmÍÑÈ°¹åt¤€´ø‘¥ÑmÍÑÈ°¹åtè4(€€€­•åÌ€ôl‰Í•Ñ¥½¹}Á…Ñ ˆ°€‰¡Õ¹­}Ñ¥Ñ±”ˆ°€‰¡Õ¹­}¥¹‘•àˆ°€‰Á…”ˆ°€‰Í±¥‘”ˆ°€‰±¥¹•Ì‰t4(€€€É•ÑÕÉ¸í­•äèµ•Ñ„¹•Ð¡­•ä¤™½È­•ä¥¸­•åÌ¥˜}¡…Í}µ•Ñ…‘…Ñ…}Ù…±Õ”¡µ•Ñ„¹•Ð¡­•ä¤¥ô4(4(4)‘•˜}¡…Í}µ•Ñ…‘…Ñ…}Ù…±Õ”¡Ù…±Õ”è¹ä¤€´ø‰½½°è4(€€€É•ÑÕÉ¸Ù…±Õ”¥Ì¹½Ð9½¹”…¹Ù…±Õ”€„ô€ˆˆ4(4(4)‘•˜}¥‘•¹Ñ¥™¥•É}­¥¹¡¥‘•¹Ñ¥™¥•ÈèÍÑÈ¤€´øÍÑÈè4(€€€Ù…±Õ”€ô¥‘•¹Ñ¥™¥•È¹ÍÑÉ¥À ¤4(€€€…¹½¹¥…°€ô…¹½¹¥…±¥é”¡Ù…±Õ”¤4(€€€¥˜¹½ÐÙ…±Õ”½È…¹½¹¥…°¥¸}=55=9}]-}I=9e5Lè4(€€€€€€€É•ÑÕÉ¸€ˆˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰¡ÑÑÁÌüè¼½myqÌ¤ùquõt¬ˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰ÕÉ°ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡Èˆ½mµi„µèÀ´å|¸¼èµuìÈ±ôˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰Á…Ñ ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰mµi„µèÀ´å|¸è¼µt­p¸ üéµ‘ñÑáÑñ±½ñÁ‘™ñ‘½àýñÁÁÑàýñá±Íáñ©Í½¹ñå„ýµ±ñÑ½µ±ñ¥¹¥ñÁåñ©Íñ©ÍáñÑÍñÑÍáñ©…Ù…ñ½ñÉÍñÍñÍÅ°¤ˆ°Ù…±Õ”°É”¹$¤è4(€€€€€€€É•ÑÕÉ¸€‰™¥±”ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰lÀ´å„µ™µuìáôµlÀ´å„µ™µuìÑôµlÀ´å„µ™µuìÑôµlÀ´å„µ™µuìÑôµlÀ´å„µ™µuìÄÉôˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰ÕÕ¥ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰lÀ´å„µ™µuìÄÈ±ôˆ°Ù…±Õ”¤…¹É”¹Í•…É ¡È‰m„µ™µtˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰¡•àˆ4(€€€¥˜É”¹Í•…É ¡È‰mµi„µétˆ°Ù…±Õ”¤…¹É”¹Í•…É ¡È‰qˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰…±Á¡…}¹Õµ•É¥Œˆ4(€€€¥˜É”¹Í•…É ¡È‰m|ètˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰Íåµ‰½°ˆ4(€€€¥˜É”¹Í•…É ¡È‰mµi„µé}umµi„µèÀ´å}t¨ üél¸è¼µumµi„µèÀ´å}t¬¤¬ˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰ÅÕ…±¥™¥•ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰mµiumµhÀ´åt¬ üé}mµhÀ´åt¬¤¬ˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰½¹ÍÑ…¹Ðˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰mµitým„µét¬ üémµiumµi„µèÀ´åt¬¥ìÄ±ôˆ°Ù…±Õ”¤è4(€€€€€€€É•ÑÕÉ¸€‰…µ•°ˆ4(€€€¥˜É”¹™Õ±±µ…Ñ ¡È‰mµiuìÈ±õÌüˆ°Ù…±Õ”¤…¹€È€ðô±•¸¡Ù…±Õ”¤€ðô€ÄÈè4(€€€€€€€É•ÑÕÉ¸€‰Ý•…­}…É½¹å´ˆ4(€€€É•ÑÕÉ¸€ˆˆ4(4(4)‘•˜}Í•Ñ}µ•Ñ„¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°­•äèÍÑÈ°Ù…±Õ”èÍÑÈ¤€´ø9½¹”è4(€€€½¹¸¹•á•ÕÑ” 4(€€€€€€€€‰%9MIP%9Q<‘…Ñ…‰…Í•}µ•Ñ„¡­•ä°Ù…±Õ”¤Y1UL ü°€ü¤=8=91%P¡­•ä¤<UAQMPÙ…±Õ”õ•á±Õ‘•¹Ù…±Õ”ˆ°4(€€€€€€€€¡­•ä°Ù…±Õ”¤°4(€€€€¤4(4(4)‘•˜}•Ñ}µ•Ñ„¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°­•äèÍÑÈ¤€´øÍÑÈè4(€€€ÑÉäè4(€€€€€€€É½Ü€ô½¹¸¹•á•ÕÑ” ‰M1PÙ…±Õ”I=4‘…Ñ…‰…Í•}µ•Ñ„]!I­•ä€ô€üˆ°€¡­•ä°¤¤¹™•Ñ¡½¹” ¤4(€€€•á•ÁÐÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½Èè4(€€€€€€€É•ÑÕÉ¸€ˆˆ4(€€€É•ÑÕÉ¸ÍÑÈ¡É½Ýl‰Ù…±Õ”‰t¤¥˜É½Ü•±Í”€ˆˆ4(4(4)‘•˜}½Õ¹Ð¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°Ñ…‰±”èÍÑÈ¤€´ø¥¹Ðè4(€€€ÑÉäè4(€€€€€€€É•ÑÕÉ¸¥¹Ð¡½¹¸¹•á•ÕÑ”¡˜‰M1P=U9P ¨¤I=4íÑ…‰±•ôˆ¤¹™•Ñ¡½¹” ¥lÁt¤4(€€€•á•ÁÐÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½Èè4(€€€€€€€É•ÑÕÉ¸€À4(4(4)‘•˜}‘É½Á}…Ñ…±½}½‰©•ÑÌ¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸¤€´ø9½¹”è4(€€€½¹¸¹•á•ÕÑ•ÍÉ¥ÁÐ 4(€€€€€€€€ˆˆˆ4(€€€€€€€I=@Q	1%a%MQL¥‘•¹Ñ¥™¥•É}ÍÕÁÁÉ•ÍÍ•ì4(€€€€€€€I=@Q	1%a%MQL¥‘•¹Ñ¥™¥•É}Á½ÍÑ¥¹œì4(€€€€€€€I=@Q	1%a%MQL¥‘•¹Ñ¥™¥•É}…±¥…Ìì4(€€€€€€€I=@Q	1%a%MQL¥‘•¹Ñ¥™¥•É}Ñ•É´ì4(€€€€€€€I=@Q	1%a%MQL¥‘•¹Ñ¥™¥•É}½ÕÉÉ•¹”ì4(€€€€€€€I=@Q	1%a%MQL‘½Õµ•¹Ñ}±½½­ÕÀì4(€€€€€€€I=@Q	1%a%MQL™ÑÍ}Ý½Éì4(€€€€€€€I=@Q	1%a%MQL™¥±•}™ÑÌì4(€€€€€€€I=@Q	1%a%MQL¡Õ¹¬ì4(€€€€€€€I=@Q	1%a%MQL‘½Õµ•¹Ðì4(€€€€€€€I=@Q	1%a%MQL‘…Ñ…‰…Í•}µ•Ñ„ì4(€€€€€€€€ˆˆˆ4(€€€€¤4(4(4)‘•˜}¥Í}ÍÕÁÁÉ•ÍÍ•‘}¥‘•¹Ñ¥™¥•È¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°…¹½¹¥…°èÍÑÈ¤€´ø‰½½°è4(€€€ÑÉäè4(€€€€€€€É½Ü€ô½¹¸¹•á•ÕÑ” ‰M1P€ÄI=4¥‘•¹Ñ¥™¥•É}ÍÕÁÁÉ•ÍÍ•]!I…¹½¹¥…±}Ù…±Õ”€ô€üˆ°€¡…¹½¹¥…°°¤¤¹™•Ñ¡½¹” ¤4(€€€•á•ÁÐÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½Èè4(€€€€€€€É•ÑÕÉ¸…±Í”4(€€€É•ÑÕÉ¸‰½½°¡É½Ü¤4(4(4)‘•˜}Ñ…‰±•}•á¥ÍÑÌ¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°Ñ…‰±”èÍÑÈ¤€´ø‰½½°è4(€€€É½Ü€ô½¹¸¹•á•ÕÑ” ‰M1P€ÄI=4ÍÅ±¥Ñ•}µ…ÍÑ•È]!IÑåÁ”€ô€Ñ…‰±”œ9¹…µ”€ô€üˆ°€¡Ñ…‰±”°¤¤¹™•Ñ¡½¹” ¤4(€€€É•ÑÕÉ¸‰½½°¡É½Ü¤4(4(4)‘•˜}½±Õµ¹}•á¥ÍÑÌ¡½¹¸èÍÅ±¥Ñ”Ì¹½¹¹•Ñ¥½¸°Ñ…‰±”èÍÑÈ°½±Õµ¸èÍÑÈ¤€´ø‰½½°è4(€€€ÑÉäè4(€€€€€€€É•ÑÕÉ¸…¹ä¡É½Ýl‰¹…µ”‰t€ôô½±Õµ¸™½ÈÉ½Ü¥¸½¹¸¹•á•ÕÑ”¡˜‰AI5Ñ…‰±•}¥¹™¼¡íÑ…‰±•ô¤ˆ¤¤4(€€€•á•ÁÐÍÅ±¥Ñ”Ì¹=Á•É…Ñ¥½¹…±ÉÉ½Èè4(€€€€€€€É•ÑÕÉ¸…±Í”4(4(4)‘•˜}±½…‘}©Í½¹}½‰©•Ð¡Ù…±Õ”è¹ä¤€´ø‘¥ÑmÍÑÈ°¹åtè4(€€€ÑÉäè4(€€€€€€€Á…ÉÍ•€ô©Í½¸¹±½…‘Ì¡ÍÑÈ¡Ù…±Õ”½È€‰íôˆ¤¤4(€€€•á•ÁÐ©Í½¸¹)M=9•½‘•ÉÉ½Èè4(€€€€€€€É•ÑÕÉ¸íô4(€€€É•ÑÕÉ¸Á…ÉÍ•¥˜¥Í¥¹ÍÑ…¹”¡Á…ÉÍ•°‘¥Ð¤•±Í”íô4(4(4)‘•˜}¥¹Ñ}½É}¹½¹”¡Ù…±Õ”è¹ä¤€´ø¥¹Ðð9½¹”è4(€€€ÑÉäè4(€€€€€€€É•ÑÕÉ¸¥¹Ð¡Ù…±Õ”¤4(€€€•á•ÁÐ€¡QåÁ•ÉÉ½È°Y…±Õ•ÉÉ½È¤è4(€€€€€€€É•ÑÕÉ¸9½¹”4(4(4)‘•˜}Õ¹¥ÅÕ”¡Ù…±Õ•Ìè%Ñ•É…‰±•mÍÑÉt¤€´ø±¥ÍÑmÍÑÉtè4(€€€Í••¸èÍ•ÑmÍÑÉt€ôÍ•Ð ¤4(€€€½ÕÑÁÕÐè±¥ÍÑmÍÑÉt€ômt4(€€€™½ÈÙ…±Õ”¥¸Ù…±Õ•Ìè4(€€€€€€€Ù…±Õ”€ôÍÑÈ¡Ù…±Õ”¤¹ÍÑÉ¥À ¤4(€€€€€€€¥˜¹½ÐÙ…±Õ”è4(€€€€€€€€€€€½¹Ñ¥¹Õ”4(€€€€€€€­•ä€ô…¹½¹¥…±¥é”¡Ù…±Õ”¤4(€€€€€€€¥˜­•ä¥¸Í••¸è4(€€€€€€€€€€€½¹Ñ¥¹Õ”4(€€€€€€€Í••¸¹…‘¡­•ä¤4(€€€€€€€½ÕÑÁÕÐ¹…ÁÁ•¹¡Ù…±Õ”¤4(€€€É•ÑÕÉ¸½ÕÑÁÕÐ4
+            WHERE chunk_pk IN (SELECT chunk_pk FROM source_delete_chunks)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM document_lookup
+            WHERE doc_pk IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM file_fts
+            WHERE rowid IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM document
+            WHERE doc_pk IN (SELECT doc_pk FROM source_delete_documents)
+            """
+        )
+        _refresh_identifier_stats_for_source_delete(conn)
+        _delete_orphan_identifier_terms(conn)
+        _set_meta(conn, "updated_at", datetime.now(timezone.utc).isoformat())
+        return {
+            "documents": document_count,
+            "chunks": chunk_count,
+        }
+
+
+def chunk_count(path: Path | None = None) -> int:
+    """Return only the manifest count needed after a Source deletion."""
+    path = path or catalog_path()
+    if not path.is_file():
+        return 0
+    with connect_readonly(path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM chunk").fetchone()[0])
+
+
+def rebuild_from_clean(reset: bool = True) -> int:
+    records: list[dict[str, Any]] = []
+    directory = clean_dir()
+    if directory.exists():
+        for path in sorted(directory.rglob("*.jsonl")):
+            records.extend(read_jsonl(path))
+    if not records:
+        raise RuntimeError(f"No clean jsonl records found under {directory}")
+    if reset:
+        reset_catalog()
+    return upsert_records(records)
+
+
+def counts(path: Path | None = None) -> dict[str, Any]:
+    path = path or catalog_path()
+    if not path.exists():
+        return {"exists": False, "path": str(path), "chunks": 0, "fts_rows": 0, "identifiers": 0}
+    with connect(path) as conn:
+        return {
+            "exists": True,
+            "path": str(path),
+            "documents": _count(conn, "document"),
+            "chunks": _count(conn, "chunk"),
+            "fts_rows": _count(conn, "fts_word"),
+            "file_fts_rows": _count(conn, "file_fts"),
+            "document_lookup_rows": _count(conn, "document_lookup"),
+            "identifier_terms": _count(conn, "identifier_term"),
+            "identifier_aliases": _count(conn, "identifier_alias"),
+            "identifier_postings": _count(conn, "identifier_posting"),
+            "identifiers": _count(conn, "identifier_posting"),
+            "schema_version": _get_meta(conn, "schema_version"),
+            "tokenizer": _get_meta(conn, "tokenizer"),
+            "active_generation": _get_meta(conn, "active_generation"),
+        }
+
+
+def bm25_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    path = path or catalog_path()
+    if not path.exists():
+        return []
+    tokens = tokens_for_fts(question, max_tokens=32)
+    queries = _query_variants(question, tokens)
+    if not queries:
+        return []
+    rows: dict[str, dict[str, Any]] = {}
+    try:
+        with _reader(conn, path) as reader:
+            for query_text in queries:
+                for row in _run_fts(
+                    reader,
+                    "fts_word",
+                    query_text,
+                    top_k * 2,
+                    source,
+                ):
+                    item = _row_to_result(
+                        row,
+                        signal="lexical",
+                        score=row["score"],
+                    )
+                    current = rows.get(item["id"])
+                    if current is None or float(item.get("score") or 0) < float(
+                        current.get("score") or 0
+                    ):
+                        rows[item["id"]] = item
+    except sqlite3.Error as exc:
+        raise LexicalSearchError() from exc
+    ranked = sorted(rows.values(), key=lambda item: float(item.get("score") or 0))
+    return _ranked(ranked[:top_k])
+
+
+def anchor_lexical_search(
+    question: str,
+    *,
+    top_k: int = 1,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Return a few low-document-frequency lexical candidates for one Hybrid call."""
+    path = path or catalog_path()
+    if not path.exists() or top_k <= 0:
+        return []
+    try:
+        with _reader(conn, path) as reader:
+            anchors = _informative_anchor_tokens(reader, question, limit=1)
+            if not anchors:
+                return []
+            token, document_df, information_score = anchors[0]
+            query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
+            if not query_text:
+                return []
+            candidates = _run_fts(reader, "fts_word", query_text, max(8, top_k * 4), source)
+            rows: list[dict[str, Any]] = []
+            for raw in candidates:
+                item = _row_to_result(raw, signal="lexical_anchor", score=raw["score"])
+                debug = dict(item.get("debug") or {})
+                debug["lexical_anchor"] = {
+                    "token": token,
+                    "document_df": document_df,
+                    "information_score": round(information_score, 6),
+                }
+                item["debug"] = debug
+                rows.append(item)
+            rows.sort(
+                key=lambda item: (
+                    _token_position(str(item.get("text") or ""), token),
+                    float(item.get("score") or 0),
+                )
+            )
+            return _ranked(rows[:top_k])
+    except sqlite3.Error as exc:
+        raise LexicalSearchError() from exc
+
+
+def metadata_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    path = path or catalog_path()
+    if not path.exists():
+        return []
+    tokens = tokens_for_fts(question, max_tokens=24)
+    query_text = fts_query_from_tokens(tokens, operator="OR", max_terms=24)
+    if not query_text:
+        return []
+    source_sql, source_params = _source_filter("d", source)
+    sql = f"""
+        SELECT {_RESULT_COLUMNS}, docs.score AS score
+        FROM (
+          SELECT d.doc_pk, bm25(file_fts, 2.8, 2.4, 2.0, 1.8) AS score
+          FROM file_fts
+          JOIN document d ON d.doc_pk = file_fts.rowid
+          WHERE file_fts MATCH ?
+            AND d.visible_until IS NULL
+            {source_sql}
+          ORDER BY score ASC
+          LIMIT ?
+        ) docs
+        JOIN document d ON d.doc_pk = docs.doc_pk
+        JOIN chunk c ON c.chunk_pk = (
+          SELECT c2.chunk_pk
+          FROM chunk c2
+          WHERE c2.doc_pk = d.doc_pk
+            AND c2.visible_until IS NULL
+          ORDER BY c2.chunk_index ASC, c2.chunk_pk ASC
+          LIMIT 1
+        )
+        ORDER BY docs.score ASC
+    """
+    params: list[Any] = [query_text, *source_params, top_k]
+    try:
+        with _reader(conn, path) as reader:
+            rows = [
+                _row_to_result(row, signal="metadata", score=row["score"])
+                for row in reader.execute(sql, params)
+            ]
+    except sqlite3.Error as exc:
+        raise MetadataSearchError() from exc
+    return _ranked(rows[:top_k])
+
+
+def exact_search(
+    question: str,
+    *,
+    top_k: int,
+    source: str = "any",
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    path = path or catalog_path()
+    if not path.exists():
+        return []
+    anchors = extract_anchors(question, limit=30)
+    filename = supported_unicode_filename_anchor(question)
+    if filename and filename not in anchors:
+        anchors.append(filename)
+    if not anchors:
+        return []
+    lookup_values = _lookup_values_for_anchors(anchors)
+    rows: dict[str, dict[str, Any]] = {}
+    try:
+        with _reader(conn, path) as reader:
+            for row in _document_lookup_search(
+                reader,
+                lookup_values,
+                top_k=top_k,
+                source=source,
+            ):
+                item = _row_to_result(row, signal="exact", score=-0.1)
+                _set_exact_debug(item, row, match_kind="document_lookup")
+                rows[item["id"]] = item
+            for row in _identifier_search(
+                reader,
+                lookup_values,
+                top_k=top_k,
+                source=source,
+            ):
+                item = _row_to_result(
+                    row,
+                    signal="exact",
+                    score=-float(row["match_count"]),
+                )
+                _set_exact_debug(item, row, match_kind="casefold_exact")
+                current = rows.get(item["id"])
+                if current is None or float(item["score"]) < float(
+                    current.get("score") or 0
+                ):
+                    rows[item["id"]] = item
+    except sqlite3.Error as exc:
+        raise ExactSearchError() from exc
+    ranked = sorted(rows.values(), key=lambda item: float(item.get("score") or 0))
+    return _ranked(ranked[:top_k])
+
+
+def get_neighbor_rows(
+    chunk_uid: str,
+    *,
+    window: int = 1,
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    path = path or catalog_path()
+    if not path.exists():
+        return []
+    with _reader(conn, path) as reader:
+        row = reader.execute("SELECT doc_pk, chunk_index FROM chunk WHERE chunk_uid = ?", (chunk_uid,)).fetchone()
+        if not row or row["chunk_index"] is None:
+            return []
+        rows = reader.execute(
+            f"""
+            SELECT {_RESULT_COLUMNS}, 0.0 AS score
+            FROM chunk c
+            JOIN document d ON d.doc_pk = c.doc_pk
+            WHERE c.doc_pk = ?
+              AND c.chunk_index BETWEEN ? AND ?
+              AND c.visible_until IS NULL
+              AND d.visible_until IS NULL
+            ORDER BY c.chunk_index ASC
+            """,
+            (row["doc_pk"], int(row["chunk_index"]) - window, int(row["chunk_index"]) + window),
+        ).fetchall()
+    return [_row_to_result(item, signal="neighbor", score=0) for item in rows]
+
+
+def fetch_rows_by_ids(
+    ids: Iterable[str],
+    *,
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, dict[str, Any]]:
+    chunk_ids = [str(value) for value in ids if value]
+    path = path or catalog_path()
+    if not chunk_ids or not path.exists():
+        return {}
+    with _reader(conn, path) as reader:
+        placeholders = ",".join("?" for _ in chunk_ids)
+        rows = reader.execute(
+            f"""
+            SELECT {_RESULT_COLUMNS}, 0.0 AS score
+            FROM chunk c
+            JOIN document d ON d.doc_pk = c.doc_pk
+            WHERE c.chunk_uid IN ({placeholders})
+              AND c.visible_until IS NULL
+              AND d.visible_until IS NULL
+            """,
+            chunk_ids,
+        ).fetchall()
+    return {str(row["chunk_uid"]): _row_to_result(row, signal="catalog", score=0) for row in rows}
+
+
+def _insert_record(conn: sqlite3.Connection, record: dict[str, Any], now: str) -> None:
+    meta = dict(record.get("metadata") or {})
+    doc_id = _record_doc_id(record, meta)
+    document_pks = {doc_id: _upsert_document(conn, record, meta, doc_id, now)}
+    _insert_record_with_document_pks(conn, record, document_pks, now)
+
+
+def _insert_record_with_document_pks(
+    conn: sqlite3.Connection,
+    record: dict[str, Any],
+    document_pks: dict[str, int],
+    now: str,
+) -> None:
+    meta = dict(record.get("metadata") or {})
+    chunk_uid = str(record["id"])
+    text = str(record.get("text") or "")
+    heading = str(meta.get("section_path") or meta.get("chunk_title") or "")
+    chunk_index = _int_or_none(meta.get("chunk_index"))
+    doc_id = _record_doc_id(record, meta)
+    doc_pk = document_pks[doc_id]
+    chunk_meta = _chunk_metadata(meta)
+    cur = conn.execute(
+        """
+        INSERT INTO chunk (
+          chunk_uid, doc_pk, doc_id, chunk_index, section_path, language,
+          chunk_hash, content_hash, text_hash, text, location_json, metadata_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            chunk_uid,
+            doc_pk,
+            doc_id,
+            chunk_index,
+            heading,
+            str(meta.get("language") or ""),
+            str(meta.get("chunk_hash") or ""),
+            str(meta.get("content_hash") or ""),
+            str(meta.get("text_hash") or ""),
+            text,
+            json.dumps(_location_metadata(meta), ensure_ascii=False, sort_keys=True),
+            json.dumps(chunk_meta, ensure_ascii=False, sort_keys=True),
+            now,
+        ),
+    )
+    chunk_pk = int(cur.lastrowid)
+    conn.execute(
+        "INSERT INTO fts_word(rowid, heading_tokens, body_tokens) VALUES (?, ?, ?)",
+        (
+            chunk_pk,
+            tokenize_for_fts(
+                heading,
+                max_tokens=100,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                text,
+                max_tokens=2000,
+                preserve_occurrences=True,
+            ),
+        ),
+    )
+    _insert_identifiers(conn, chunk_pk, FIELD_HEADING, heading, limit=80)
+    _insert_identifiers(conn, chunk_pk, FIELD_BODY, text, limit=500)
+
+
+def _upsert_document(conn: sqlite3.Connection, record: dict[str, Any], meta: dict[str, Any], doc_id: str, now: str) -> int:
+    path = str(meta.get("path") or "")
+    title = str(meta.get("title") or path)
+    doc_meta = _document_metadata(meta)
+    conn.execute(
+        """
+        INSERT INTO document (
+          doc_id, source, source_id, source_type, path, uri, title, language,
+          content_hash, metadata_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(doc_id) DO UPDATE SET
+          source=excluded.source,
+          source_id=excluded.source_id,
+          source_type=excluded.source_type,
+          path=excluded.path,
+          uri=excluded.uri,
+          title=excluded.title,
+          language=excluded.language,
+          content_hash=excluded.content_hash,
+          metadata_json=excluded.metadata_json,
+          visible_until=NULL,
+          updated_at=excluded.updated_at
+        """,
+        (
+            doc_id,
+            str(meta.get("source") or ""),
+            str(meta.get("source_id") or ""),
+            str(meta.get("source_type") or ""),
+            path,
+            str(meta.get("uri") or ""),
+            title,
+            str(meta.get("language") or ""),
+            str(meta.get("content_hash") or ""),
+            json.dumps(doc_meta, ensure_ascii=False, sort_keys=True),
+            now,
+        ),
+    )
+    row = conn.execute("SELECT doc_pk FROM document WHERE doc_id = ?", (doc_id,)).fetchone()
+    doc_pk = int(row["doc_pk"])
+    conn.execute("DELETE FROM document_lookup WHERE doc_pk = ?", (doc_pk,))
+    conn.execute("DELETE FROM file_fts WHERE rowid = ?", (doc_pk,))
+    _insert_document_lookup(conn, doc_pk, path, title)
+    conn.execute(
+        "INSERT INTO file_fts(rowid, basename_tokens, stem_tokens, path_tokens, title_tokens) VALUES (?, ?, ?, ?, ?)",
+        (
+            doc_pk,
+            tokenize_for_fts(
+                Path(path).name,
+                max_tokens=80,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                Path(path).stem,
+                max_tokens=80,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                path,
+                max_tokens=200,
+                preserve_occurrences=True,
+            ),
+            tokenize_for_fts(
+                title,
+                max_tokens=100,
+                preserve_occurrences=True,
+            ),
+        ),
+    )
+    return doc_pk
+
+
+def _record_doc_id(record: dict[str, Any], meta: dict[str, Any]) -> str:
+    explicit = record.get("doc_id") or meta.get("doc_id")
+    if explicit:
+        return str(explicit)
+    source = str(meta.get("source_id") or meta.get("source") or "local")
+    path = str(meta.get("path") or record.get("path") or "")
+    content_hash = str(meta.get("content_hash") or record.get("content_hash") or "")
+    seed = f"{source}:{path}:{content_hash or record.get('id') or ''}"
+    return hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _insert_document_lookup(conn: sqlite3.Connection, doc_pk: int, path: str, title: str) -> None:
+    values: list[tuple[str, int, str, str]] = []
+    for kind, raw in [
+        ("path", path),
+        ("basename", Path(path).name),
+        ("stem", Path(path).stem),
+        ("title", title),
+    ]:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        values.append((canonicalize(raw), doc_pk, kind, raw))
+    if values:
+        conn.executemany(
+            "INSERT OR IGNORE INTO document_lookup(normalized_value, doc_pk, kind, raw_value) VALUES (?, ?, ?, ?)",
+            values,
+        )
+
+
+def _insert_identifiers(conn: sqlite3.Connection, chunk_pk: int, field: int, text: str, *, limit: int) -> None:
+    postings: Counter[tuple[str, str, int]] = Counter()
+    aliases_by_term: dict[str, set[str]] = {}
+    kinds: dict[str, str] = {}
+    for identifier in extract_anchors(text, limit=limit):
+        kind = _identifier_kind(identifier)
+        if not kind:
+            continue
+        canonical = canonicalize(identifier)
+        if _is_suppressed_identifier(conn, canonical):
+            continue
+        postings[(canonical, kind, field)] += 1
+        aliases_by_term.setdefault(canonical, set()).update(canonicalize(alias) for alias in identifier_aliases(identifier))
+        aliases_by_term[canonical].add(canonical)
+        kinds[canonical] = kind
+
+    for canonical, aliases in aliases_by_term.items():
+        kind = kinds[canonical]
+        term_id = _ensure_identifier_term(conn, canonical, kind)
+        conn.executemany(
+            "INSERT OR IGNORE INTO identifier_alias(alias_value, term_id, match_kind) VALUES (?, ?, ?)",
+            [(alias, term_id, "alias" if alias != canonical else "canonical") for alias in aliases if alias],
+        )
+        for (term_value, _kind, posting_field), count in postings.items():
+            if term_value != canonical:
+                continue
+            conn.execute(
+                """
+                INSERT INTO identifier_posting(term_id, chunk_pk, field, count) VALUES (?, ?, ?, ?)
+                ON CONFLICT(term_id, chunk_pk, field) DO UPDATE SET count = identifier_posting.count + excluded.count
+                """,
+                (term_id, chunk_pk, posting_field, count),
+            )
+
+
+def _ensure_identifier_term(conn: sqlite3.Connection, canonical: str, kind: str) -> int:
+    if _is_suppressed_identifier(conn, canonical):
+        raise ValueError(f"suppressed identifier: {canonical}")
+    conn.execute(
+        "INSERT OR IGNORE INTO identifier_term(canonical_value, kind) VALUES (?, ?)",
+        (canonical, kind),
+    )
+    row = conn.execute("SELECT term_id FROM identifier_term WHERE canonical_value = ?", (canonical,)).fetchone()
+    return int(row["term_id"])
+
+
+def _delete_chunks(conn: sqlite3.Connection, ids: Iterable[str]) -> int:
+    chunk_ids = [str(value) for value in ids if value]
+    if not chunk_ids:
+        return 0
+    affected_doc_pks: set[int] = set()
+    for chunk_id in chunk_ids:
+        row = conn.execute("SELECT chunk_pk, doc_pk FROM chunk WHERE chunk_uid = ?", (chunk_id,)).fetchone()
+        if not row:
+            continue
+        chunk_pk = int(row["chunk_pk"])
+        affected_doc_pks.add(int(row["doc_pk"]))
+        conn.execute("DELETE FROM identifier_posting WHERE chunk_pk = ?", (chunk_pk,))
+        conn.execute("DELETE FROM fts_word WHERE rowid = ?", (chunk_pk,))
+        conn.execute("DELETE FROM chunk WHERE chunk_pk = ?", (chunk_pk,))
+    _delete_orphan_documents(conn, affected_doc_pks)
+    _delete_orphan_identifier_terms(conn)
+    return len(chunk_ids)
+
+
+def _stage_catalog_write(conn: sqlite3.Connection, chunk_ids: Iterable[str]) -> None:
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS catalog_write_chunks "
+        "(chunk_uid TEXT PRIMARY KEY) WITHOUT ROWID"
+    )
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS catalog_write_documents "
+        "(doc_pk INTEGER PRIMARY KEY)"
+    )
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS catalog_write_terms "
+        "(canonical_value TEXT PRIMARY KEY) WITHOUT ROWID"
+    )
+    conn.execute("DELETE FROM catalog_write_chunks")
+    conn.execute("DELETE FROM catalog_write_documents")
+    conn.execute("DELETE FROM catalog_write_terms")
+    conn.executemany(
+        "INSERT OR IGNORE INTO catalog_write_chunks(chunk_uid) VALUES (?)",
+        ((str(value),) for value in chunk_ids if value),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO catalog_write_documents(doc_pk)
+        SELECT DISTINCT c.doc_pk
+        FROM chunk c
+        JOIN catalog_write_chunks s ON s.chunk_uid = c.chunk_uid
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO catalog_write_terms(canonical_value)
+        SELECT DISTINCT t.canonical_value
+        FROM identifier_term t
+        JOIN identifier_posting p ON p.term_id = t.term_id
+        JOIN chunk c ON c.chunk_pk = p.chunk_pk
+        JOIN catalog_write_chunks s ON s.chunk_uid = c.chunk_uid
+        """
+    )
+
+
+def _delete_staged_chunks(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM identifier_posting
+        WHERE chunk_pk IN (
+          SELECT c.chunk_pk FROM chunk c
+          JOIN catalog_write_chunks s ON s.chunk_uid = c.chunk_uid
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM fts_word
+        WHERE rowid IN (
+          SELECT c.chunk_pk FROM chunk c
+          JOIN catalog_write_chunks s ON s.chunk_uid = c.chunk_uid
+        )
+        """
+    )
+    conn.execute(
+        "DELETE FROM chunk WHERE chunk_uid IN (SELECT chunk_uid FROM catalog_write_chunks)"
+    )
+    conn.execute(
+        """
+        DELETE FROM document_lookup
+        WHERE doc_pk IN (SELECT doc_pk FROM catalog_write_documents)
+          AND NOT EXISTS (
+            SELECT 1 FROM chunk c WHERE c.doc_pk = document_lookup.doc_pk
+          )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM file_fts
+        WHERE rowid IN (
+          SELECT d.doc_pk FROM catalog_write_documents d
+          WHERE NOT EXISTS (SELECT 1 FROM chunk c WHERE c.doc_pk = d.doc_pk)
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM document
+        WHERE doc_pk IN (SELECT doc_pk FROM catalog_write_documents)
+          AND NOT EXISTS (SELECT 1 FROM chunk c WHERE c.doc_pk = document.doc_pk)
+        """
+    )
+
+
+def _stage_inserted_identifier_terms(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO catalog_write_terms(canonical_value)
+        SELECT DISTINCT t.canonical_value
+        FROM identifier_term t
+        JOIN identifier_posting p ON p.term_id = t.term_id
+        JOIN chunk c ON c.chunk_pk = p.chunk_pk
+        JOIN catalog_write_chunks s ON s.chunk_uid = c.chunk_uid
+        """
+    )
+
+
+def _refresh_staged_identifier_stats(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE identifier_term
+        SET document_frequency = COALESCE((
+          SELECT COUNT(DISTINCT c.doc_pk)
+          FROM identifier_posting p
+          JOIN chunk c ON c.chunk_pk = p.chunk_pk
+          WHERE p.term_id = identifier_term.term_id
+        ), 0)
+        WHERE canonical_value IN (SELECT canonical_value FROM catalog_write_terms)
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE canonical_value IN (SELECT canonical_value FROM catalog_write_terms)
+          AND NOT EXISTS (
+            SELECT 1 FROM identifier_posting p
+            WHERE p.term_id = identifier_term.term_id
+          )
+        """
+    )
+    chunk_total = _count(conn, "chunk")
+    threshold = max(8, int(chunk_total * 0.02))
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO identifier_suppressed(
+          canonical_value, kind, suppressed_at
+        )
+        SELECT canonical_value, kind, ?
+        FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (now, threshold),
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (threshold,),
+    )
+
+
+def _delete_orphan_documents(conn: sqlite3.Connection, doc_pks: Iterable[int]) -> None:
+    for doc_pk in sorted(set(doc_pks)):
+        row = conn.execute("SELECT 1 FROM chunk WHERE doc_pk = ? LIMIT 1", (doc_pk,)).fetchone()
+        if row:
+            continue
+        conn.execute("DELETE FROM document_lookup WHERE doc_pk = ?", (doc_pk,))
+        conn.execute("DELETE FROM file_fts WHERE rowid = ?", (doc_pk,))
+        conn.execute("DELETE FROM document WHERE doc_pk = ?", (doc_pk,))
+
+
+def _delete_orphan_identifier_terms(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE term_id NOT IN (SELECT DISTINCT term_id FROM identifier_posting)
+        """
+    )
+
+
+def _refresh_identifier_stats(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE identifier_term
+        SET document_frequency = COALESCE((
+          SELECT COUNT(DISTINCT c.doc_pk)
+          FROM identifier_posting p
+          JOIN chunk c ON c.chunk_pk = p.chunk_pk
+          WHERE p.term_id = identifier_term.term_id
+        ), 0)
+        """
+    )
+    chunk_count = _count(conn, "chunk")
+    threshold = max(8, int(chunk_count * 0.02))
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO identifier_suppressed(canonical_value, kind, suppressed_at)
+        SELECT canonical_value, kind, ?
+        FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (now, threshold),
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (threshold,),
+    )
+    _delete_orphan_identifier_terms(conn)
+
+
+def _refresh_identifier_stats_for_source_delete(
+    conn: sqlite3.Connection,
+) -> None:
+    """Refresh changed identifier terms and reapply the global weak threshold."""
+    conn.execute(
+        """
+        UPDATE identifier_term
+        SET document_frequency = COALESCE((
+          SELECT COUNT(DISTINCT c.doc_pk)
+          FROM identifier_posting p
+          JOIN chunk c ON c.chunk_pk = p.chunk_pk
+          WHERE p.term_id = identifier_term.term_id
+        ), 0)
+        WHERE term_id IN (SELECT term_id FROM source_delete_terms)
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE term_id IN (SELECT term_id FROM source_delete_terms)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM identifier_posting p
+            WHERE p.term_id = identifier_term.term_id
+          )
+        """
+    )
+    chunk_total = _count(conn, "chunk")
+    threshold = max(8, int(chunk_total * 0.02))
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO identifier_suppressed(
+          canonical_value, kind, suppressed_at
+        )
+        SELECT canonical_value, kind, ?
+        FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (now, threshold),
+    )
+    conn.execute(
+        """
+        DELETE FROM identifier_term
+        WHERE kind = 'weak_acronym'
+          AND document_frequency > ?
+        """,
+        (threshold,),
+    )
+
+
+def _document_lookup_search(conn: sqlite3.Connection, values: list[str], *, top_k: int, source: str) -> list[sqlite3.Row]:
+    if not values:
+        return []
+    source_sql, source_params = _source_filter("d", source)
+    placeholders = ",".join("?" for _ in values)
+    sql = f"""
+        SELECT {_RESULT_COLUMNS},
+          COUNT(*) AS match_count,
+          MIN(CASE dl.kind WHEN 'path' THEN 0 WHEN 'basename' THEN 1 WHEN 'stem' THEN 2 ELSE 3 END) AS field_rank,
+          -0.1 AS score
+        FROM document_lookup dl
+        JOIN document d ON d.doc_pk = dl.doc_pk
+        JOIN chunk c ON c.chunk_pk = (
+          SELECT c2.chunk_pk
+          FROM chunk c2
+          WHERE c2.doc_pk = d.doc_pk
+            AND c2.visible_until IS NULL
+          ORDER BY c2.chunk_index ASC, c2.chunk_pk ASC
+          LIMIT 1
+        )
+        WHERE dl.normalized_value IN ({placeholders})
+          AND d.visible_until IS NULL
+          {source_sql}
+        GROUP BY c.chunk_pk
+        ORDER BY match_count DESC, field_rank ASC
+        LIMIT ?
+    """
+    params: list[Any] = [*values, *source_params, top_k]
+    return list(conn.execute(sql, params))
+
+
+def _identifier_search(conn: sqlite3.Connection, values: list[str], *, top_k: int, source: str) -> list[sqlite3.Row]:
+    if not values:
+        return []
+    source_sql, source_params = _source_filter("d", source)
+    placeholders = ",".join("?" for _ in values)
+    sql = f"""
+        SELECT {_RESULT_COLUMNS},
+          SUM(p.count) AS match_count,
+          MIN(p.field) AS field_rank,
+          GROUP_CONCAT(DISTINCT t.canonical_value) AS matched_terms,
+          -CAST(SUM(p.count) AS REAL) AS score
+        FROM identifier_term t
+        JOIN identifier_posting p ON p.term_id = t.term_id
+        JOIN chunk c ON c.chunk_pk = p.chunk_pk
+        JOIN document d ON d.doc_pk = c.doc_pk
+        WHERE t.canonical_value IN ({placeholders})
+          AND c.visible_until IS NULL
+          AND d.visible_until IS NULL
+          {source_sql}
+        GROUP BY c.chunk_pk
+        ORDER BY match_count DESC, field_rank ASC
+        LIMIT ?
+    """
+    params: list[Any] = [*values, *source_params, top_k]
+    return list(conn.execute(sql, params))
+
+
+def _lookup_values_for_anchors(anchors: list[str]) -> list[str]:
+    values: list[str] = []
+    for anchor in anchors:
+        values.extend(identifier_match_keys(anchor))
+    return _unique(value for value in values if value)
+
+
+def _set_exact_debug(item: dict[str, Any], row: sqlite3.Row, *, match_kind: str) -> None:
+    matched_terms = ""
+    if "matched_terms" in row.keys():
+        matched_terms = str(row["matched_terms"] or "")
+    debug = dict(item.get("debug") or {})
+    debug["exact_match"] = {
+        "match_kind": match_kind,
+        "matched_terms": [value for value in matched_terms.split(",") if value],
+    }
+    item["debug"] = debug
+
+
+def _query_variants(question: str, tokens: list[str]) -> list[str]:
+    queries: list[str] = []
+    and_tokens = [token for token in tokens if len(token) >= 3][:8]
+    and_query = fts_query_from_tokens(and_tokens, operator="AND", max_terms=8)
+    if and_query:
+        queries.append(and_query)
+    or_query = fts_query_from_tokens(tokens, operator="OR", max_terms=24)
+    if or_query:
+        queries.append(or_query)
+    queries.extend(phrase_queries(question))
+    return _unique(queries)
+
+
+def _informative_anchor_tokens(
+    conn: sqlite3.Connection,
+    question: str,
+    *,
+    limit: int,
+) -> list[tuple[str, int, float]]:
+    tokens = _unique(canonicalize(token) for token in tokens_for_fts(question, max_tokens=32))
+    tokens = [
+        token
+        for token in tokens
+        if len(token) >= 2
+        and not token.isdigit()
+        and any(character.isalnum() for character in token)
+    ]
+    if not tokens or limit <= 0:
+        return []
+    query_only = bool(conn.execute("PRAGMA query_only").fetchone()[0])
+    if query_only:
+        # The catalog file remains protected by mode=ro. Temporarily allow a
+        # connection-local TEMP fts5vocab view used only for DF calculation.
+        conn.execute("PRAGMA query_only=OFF")
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.fts_word_vocab "
+            "USING fts5vocab(main, fts_word, 'row')"
+        )
+    finally:
+        if query_only:
+            conn.execute("PRAGMA query_only=ON")
+    placeholders = ",".join("?" for _ in tokens)
+    rows = conn.execute(
+        f"SELECT term, doc FROM temp.fts_word_vocab WHERE term IN ({placeholders})",
+        tokens,
+    )
+    document_count_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT d.doc_pk) AS count
+        FROM document d
+        JOIN chunk c ON c.doc_pk = d.doc_pk
+        WHERE d.visible_until IS NULL
+          AND c.visible_until IS NULL
+        """
+    ).fetchone()
+    document_count = int(document_count_row["count"] if document_count_row else 0)
+    if document_count <= 0:
+        return []
+    token_order = {token: index for index, token in enumerate(tokens)}
+    ranked: list[tuple[str, int, float]] = []
+    for row in rows:
+        token = str(row["term"])
+        query_text = fts_query_from_tokens([token], operator="OR", max_terms=1)
+        if not query_text:
+            continue
+        document_df_row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT c.doc_pk) AS count
+            FROM fts_word
+            JOIN chunk c ON c.chunk_pk = fts_word.rowid
+            JOIN document d ON d.doc_pk = c.doc_pk
+            WHERE fts_word MATCH ?
+              AND c.visible_until IS NULL
+              AND d.visible_until IS NULL
+            """,
+            (query_text,),
+        ).fetchone()
+        document_df = int(document_df_row["count"] if document_df_row else 0)
+        rare_document_limit = max(2, int(document_count * 0.05))
+        if document_df <= 0 or document_df > rare_document_limit:
+            continue
+        idf = math.log((document_count + 1) / (document_df + 1))
+        length_bonus = 1.0 + min(len(token), 12) / 12.0
+        ranked.append((token, document_df, idf * length_bonus))
+    ranked.sort(
+        key=lambda item: (
+            -item[2],
+            item[1],
+            token_order.get(item[0], len(tokens)),
+        )
+    )
+    return ranked[:limit]
+
+
+def _token_position(text: str, token: str) -> int:
+    position = canonicalize(text).find(canonicalize(token))
+    return position if position >= 0 else 1_000_000_000
+
+
+def _run_fts(conn: sqlite3.Connection, table: str, query_text: str, top_k: int, source: str) -> list[sqlite3.Row]:
+    if table != "fts_word":
+        raise ValueError(table)
+    source_sql, source_params = _source_filter("d", source)
+    score_expr = "bm25(fts_word, 2.0, 1.0)"
+    sql = f"""
+        SELECT {_RESULT_COLUMNS}, {score_expr} AS score
+        FROM fts_word
+        JOIN chunk c ON c.chunk_pk = fts_word.rowid
+        JOIN document d ON d.doc_pk = c.doc_pk
+        WHERE fts_word MATCH ?
+          AND c.visible_until IS NULL
+          AND d.visible_until IS NULL
+          {source_sql}
+        ORDER BY score ASC
+        LIMIT ?
+    """
+    params: list[Any] = [query_text, *source_params, top_k]
+    try:
+        return list(conn.execute(sql, params))
+    except sqlite3.OperationalError as exc:
+        if _is_safe_fts_query_syntax_error(exc):
+            return []
+        raise
+
+
+def _is_safe_fts_query_syntax_error(exc: sqlite3.OperationalError) -> bool:
+    """Recognize only FTS5 parser errors at the MATCH execution boundary."""
+    if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_ERROR:
+        return False
+    if getattr(exc, "sqlite_errorname", None) != "SQLITE_ERROR":
+        return False
+    detail = str(exc)
+    return detail == "unterminated string" or detail.startswith(
+        "fts5: syntax error near "
+    )
+
+
+def _row_to_result(row: sqlite3.Row, *, signal: str, score: float) -> dict[str, Any]:
+    document_meta = _load_json_object(row["document_metadata_json"])
+    chunk_meta = _load_json_object(row["chunk_metadata_json"])
+    meta = {
+        **document_meta,
+        **chunk_meta,
+        "source": str(row["source"] or document_meta.get("source") or ""),
+        "source_id": str(row["source_id"] or document_meta.get("source_id") or ""),
+        "source_type": str(row["source_type"] or document_meta.get("source_type") or ""),
+        "path": str(row["path"] or document_meta.get("path") or ""),
+        "uri": str(row["uri"] or document_meta.get("uri") or ""),
+        "title": str(row["title"] or document_meta.get("title") or ""),
+        "language": str(row["chunk_language"] or row["document_language"] or document_meta.get("language") or ""),
+        "section_path": str(row["section_path"] or chunk_meta.get("section_path") or ""),
+        "chunk_index": row["chunk_index"],
+        "doc_id": str(row["doc_id"] or chunk_meta.get("doc_id") or ""),
+        "chunk_hash": str(row["chunk_hash"] or chunk_meta.get("chunk_hash") or ""),
+        "text_hash": str(row["text_hash"] or chunk_meta.get("text_hash") or ""),
+        "content_hash": str(row["document_content_hash"] or row["chunk_content_hash"] or document_meta.get("content_hash") or ""),
+    }
+    return {
+        "rank": 0,
+        "id": str(row["chunk_uid"]),
+        "distance": None,
+        "score": score,
+        "text": str(row["text"] or ""),
+        "metadata": meta,
+        "signals": [signal],
+    }
+
+
+def _ranked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+    return rows
+
+
+def _source_filter(alias: str, source: str) -> tuple[str, list[Any]]:
+    if source == "any":
+        return "", []
+    return f"AND {alias}.source = ?", [source]
+
+
+def _document_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    keys = ["source", "source_id", "source_type", "path", "uri", "title", "language", "root", "content_hash"]
+    return {key: meta.get(key) for key in keys if _has_metadata_value(meta.get(key))}
+
+
+def _chunk_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    document_keys = {"source", "source_id", "source_type", "path", "uri", "title", "language", "root", "content_hash"}
+    keys = [
+        "chunk_title",
+        "section_path",
+        "chunk_index",
+        "chunk_hash",
+        "text_hash",
+        "chunker_version",
+        "page",
+        "slide",
+        "lines",
+    ]
+    output = {key: meta.get(key) for key in keys if _has_metadata_value(meta.get(key))}
+    for key, value in meta.items():
+        if key in document_keys or key in output or not _has_metadata_value(value):
+            continue
+        output[key] = value
+    return output
+
+
+def _location_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    keys = ["section_path", "chunk_title", "chunk_index", "page", "slide", "lines"]
+    return {key: meta.get(key) for key in keys if _has_metadata_value(meta.get(key))}
+
+
+def _has_metadata_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
+def _identifier_kind(identifier: str) -> str:
+    value = identifier.strip()
+    canonical = canonicalize(value)
+    if not value or canonical in _COMMON_WEAK_ACRONYMS:
+        return ""
+    if re.fullmatch(r"https?://[^\s)>\]}]+", value):
+        return "url"
+    if re.fullmatch(r"/[A-Za-z0-9_./:-]{2,}", value):
+        return "path"
+    if re.fullmatch(r"[A-Za-z0-9_.:/-]+\.(?:md|txt|log|pdf|docx?|pptx?|xlsx|json|ya?ml|toml|ini|py|js|jsx|ts|tsx|java|go|rs|cs|sql)", value, re.I):
+        return "file"
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value):
+        return "uuid"
+    if re.fullmatch(r"[0-9a-fA-F]{12,}", value) and re.search(r"[a-fA-F]", value):
+        return "hex"
+    if re.search(r"[A-Za-z]", value) and re.search(r"\d", value):
+        return "alpha_numeric"
+    if re.search(r"[_:#@]", value):
+        return "symbol"
+    if re.search(r"[A-Za-z_][A-Za-z0-9_]*(?:[.:/-][A-Za-z0-9_]+)+", value):
+        return "qualified"
+    if re.fullmatch(r"[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+", value):
+        return "constant"
+    if re.fullmatch(r"[A-Z]?[a-z]+(?:[A-Z][A-Za-z0-9]+){1,}", value):
+        return "camel"
+    if re.fullmatch(r"[A-Z]{2,}s?", value) and 2 <= len(value) <= 12:
+        return "weak_acronym"
+    return ""
+
+
+def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO database_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def _get_meta(conn: sqlite3.Connection, key: str) -> str:
+    try:
+        row = conn.execute("SELECT value FROM database_meta WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    return str(row["value"]) if row else ""
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    except sqlite3.OperationalError:
+        return 0
+
+
+def _drop_catalog_objects(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS identifier_suppressed;
+        DROP TABLE IF EXISTS identifier_posting;
+        DROP TABLE IF EXISTS identifier_alias;
+        DROP TABLE IF EXISTS identifier_term;
+        DROP TABLE IF EXISTS identifier_occurrence;
+        DROP TABLE IF EXISTS document_lookup;
+        DROP TABLE IF EXISTS fts_word;
+        DROP TABLE IF EXISTS file_fts;
+        DROP TABLE IF EXISTS chunk;
+        DROP TABLE IF EXISTS document;
+        DROP TABLE IF EXISTS database_meta;
+        """
+    )
+
+
+def _is_suppressed_identifier(conn: sqlite3.Connection, canonical: str) -> bool:
+    try:
+        row = conn.execute("SELECT 1 FROM identifier_suppressed WHERE canonical_value = ?", (canonical,)).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return bool(row)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    return bool(row)
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+    except sqlite3.OperationalError:
+        return False
+
+
+def _load_json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _unique(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        value = str(value).strip()
+        if not value:
+            continue
+        key = canonicalize(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(value)
+    return output

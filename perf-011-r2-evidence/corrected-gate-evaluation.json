@@ -1,0 +1,32 @@
+{
+  "task": "LRR-PERF-011-R2",
+  "evaluated_at": "2026-08-15",
+  "measurement_reused_without_rerun": true,
+  "formal_measurement_sha256": "A8DFE0D2CA5A6F762BA4BC554515A0B150AD38B5D4F5DF329A53FEAC64AEC610",
+  "original_gate_result": "NO_GO",
+  "corrected_gate_result": "GO",
+  "corrected_policy": {
+    "primary_effect_gate": "catalog paired median reduction >= 20%",
+    "full_add": "non_regression",
+    "office_e2e": "non_regression",
+    "update": "non_regression",
+    "unchanged_hard_gates": [
+      "correctness",
+      "independent_review_p0_p1_zero",
+      "p95",
+      "peak_rss",
+      "database_bytes"
+    ]
+  },
+  "observed": {
+    "catalog_reduction_percent": 21.678634430013088,
+    "core_full_add_reduction_percent": 1.6286485568712927,
+    "office_e2e_reduction_percent": 0.3568705298967023,
+    "update_reduction_percent": 2.2080646921914915,
+    "correctness_pass": true,
+    "independent_review_p0_p1_zero": true,
+    "p95_pass": true,
+    "peak_rss_pass": true,
+    "database_bytes_pass": true
+  }
+}
