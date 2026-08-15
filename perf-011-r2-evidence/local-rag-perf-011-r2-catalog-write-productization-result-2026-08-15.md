@@ -16,8 +16,9 @@
 - product commit: `31f7447feebb4720c99f640fcb5287f2fbafc01f`
 - tested SHA: `184a643a325499d3a701187874ebeb7076cd2117`
 - reviewed SHA: `184a643a325499d3a701187874ebeb7076cd2117`
-- merged SHA: `PENDING (Drive結果票の新規保存確認後にmain統合)`
-- main push: `PENDING (Drive結果票の新規保存確認後)`
+- product merged SHA: `f0858512a2b1ce70298c91987425ebe33c051720`
+- main push readback: `f0858512a2b1ce70298c91987425ebe33c051720`
+- Drive result: `https://drive.google.com/file/d/1acIL4FL4rvBvyK1tJyOHihd8lGdt3aMY/view?usp=drivesdk`
 - Release／tag／配布物公開: `NOT_RUN`
 - 実DB／旧20k DB／秘密文書: `NOT_USED`
 
@@ -133,4 +134,4 @@ Office E2E paired raw wall値:
 - preflight: `perf-011-r2-evidence/preflight-fixed.json`
 - smokeは`formal:false`であり、正式判定へ流用していない。
 
-本candidateはcatalog書込量を21.68%削減し、実ONNX／Chromaを含むcore full ADD、Office E2E、10%更新も悪化させていない。元指示gateでの`NO_GO`を履歴として残しつつ、ユーザー補正gateでは`GO`とする。結果票のDrive新規保存を確認後、branchと証拠を保持したままmainへ通常統合し、後続LRR-PERF-012-R2はその更新後mainから開始する。
+本candidateはcatalog書込量を21.68%削減し、実ONNX／Chromaを含むcore full ADD、Office E2E、10%更新も悪化させていない。元指示gateでの`NO_GO`を履歴として残しつつ、ユーザー補正gateでは`GO`とする。結果票のDrive新規保存を確認後、branchと証拠を保持したままmainへ通常統合し、main／branchのreadbackが同じ`f0858512a2b1ce70298c91987425ebe33c051720`であることを確認した。後続LRR-PERF-012-R2はこの更新後mainから開始する。
