@@ -102,4 +102,11 @@
 
 ## 統合状態
 
-この結果票作成時点では候補branchに保持し、main統合前。Driveへの新規結果票保存とremote readback後、通常のnon-force fast-forwardでmainへ統合する。Release／tagは別gateであり、このタスクでは実施しない。
+- Drive result: `https://drive.google.com/file/d/1vAt3xNkH4Q13ppI-aCXQDEcxVKKzlDuM/view?usp=drivesdk`
+- remote product/evidence integration commit: `8d1f360ed10568b2693121afa54292844852dcb6`
+- remote tree: `8808e86d4441765d2032314b5967d5363e34847e`（local tested result treeと完全一致）
+- branch readback: `perf/perf-012-r2-400-record-chroma-batch` → `8d1f360ed10568b2693121afa54292844852dcb6`
+- main readback: `main` → `8d1f360ed10568b2693121afa54292844852dcb6`
+- update mode: non-force fast-forward
+
+main統合ゲートは完了。Release／tagは別gateであり、このタスクでは実施していない。PERF-011のbranch／formal証拠／Drive結果票は変更せず保持した。
