@@ -51,7 +51,7 @@ class VscodePartAContracts(unittest.TestCase):
             self.assertEqual(1, body.count("rag\\list_dbs.py"))
             self.assertIn("retry", body.lower())
             self.assertIn("Q", body)
-            self.assertIn("native parser consumes each added backslash", body)
+            self.assertIn("pass `$q` as the final native argument", body.lower())
         self.assertEqual(list(EXPECTED_NAMES), names)
 
     def test_candidates_are_outside_product_payload(self) -> None:
@@ -92,27 +92,16 @@ class VscodePartAContracts(unittest.TestCase):
         self_test()
 
     @unittest.skipUnless(sys.platform == "win32", "PowerShell argv contract is Windows-specific")
-    def test_powershell_single_quoted_query_preserves_exact_argv(self) -> None:
+    def test_powershell_single_quoted_query_variable_preserves_exact_text(self) -> None:
         query = "\u9867\u5ba2 `A-\u03a9` \u306e\u8b58\u5225\u5b50 \"Q'$()\" \u3068\n\u6539\u884c\u3092\u542b\u3080\u9805\u76ee\u300c\u96ea\u2603\u300d"
-        windows_native = query.replace('"', '\\"')
-        literal = "'" + windows_native.replace("'", "''") + "'"
+        literal = "'" + query.replace("'", "''") + "'"
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "argv.json"
-            probe = (
-                "import json, pathlib, sys; "
-                "pathlib.Path(sys.argv[1]).write_text("
-                "json.dumps(sys.argv[2], ensure_ascii=False), encoding='utf-8')"
-            )
+            output = Path(directory) / "argv.bin"
             quote = lambda value: "'" + value.replace("'", "''") + "'"
-            command = " ".join(
-                (
-                    "&",
-                    quote(sys.executable),
-                    "-c",
-                    quote(probe),
-                    quote(str(output)),
-                    literal,
-                )
+            command = (
+                f"$q = {literal}; "
+                f"[IO.File]::WriteAllBytes({quote(str(output))}, "
+                "[Text.Encoding]::UTF8.GetBytes($q))"
             )
             completed = subprocess.run(
                 ["powershell.exe", "-NoLogo", "-NoProfile", "-Command", command],
@@ -120,7 +109,7 @@ class VscodePartAContracts(unittest.TestCase):
                 capture_output=True,
             )
             self.assertEqual(0, completed.returncode, completed.stderr.decode(errors="replace"))
-            self.assertEqual(query, json.loads(output.read_text(encoding="utf-8")))
+            self.assertEqual(query.encode("utf-8"), output.read_bytes())
 
 
 if __name__ == "__main__":

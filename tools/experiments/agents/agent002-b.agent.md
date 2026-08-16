@@ -20,10 +20,11 @@ Proceed once from top to bottom and never go back.
 & "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\list_dbs.py" --format json
 ```
 
-3. Run SEARCH exactly once. Encode `"` in `Q` as `\"` for the Windows native argument, then escape each single quote as `''`, and wrap the whole value in a PowerShell single-quoted literal. The native parser consumes each added backslash so the final argv element equals the original `Q` exactly.
+3. Run SEARCH exactly once. Escape each single quote in `Q` as `''`, assign the unchanged text to PowerShell variable `$q` with a single-quoted literal, and pass `$q` as the final native argument. Do not escape double quotes or backslashes. The final argv element must equal the original `Q` exactly.
 
 ```powershell
-& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
+$q = '<Q_SINGLE_QUOTED>'
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json $q
 ```
 
 4. If SEARCH fails or the pointer lacks a valid absolute `summary_file`, report failure and stop. Otherwise read only that file exactly once.

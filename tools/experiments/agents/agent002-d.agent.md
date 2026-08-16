@@ -30,10 +30,11 @@ Capture the original question as exact Unicode `Q`; do not summarize, normalize,
 & "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\list_dbs.py" --format json
 ```
 
-`S`, exactly once after DB resolution: encode each `"` in `Q` as `\"` for the Windows native argument, then escape each single quote as `''`, and wrap the full value in a PowerShell single-quoted literal. The native parser consumes each added backslash so the final argv element equals the original `Q` exactly.
+`S`, exactly once after DB resolution: escape each single quote in `Q` as `''`, assign the unchanged text to PowerShell variable `$q` with a single-quoted literal, and pass `$q` as the final native argument. Do not escape double quotes or backslashes. The final argv element must equal the original `Q` exactly.
 
 ```powershell
-& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
+$q = '<Q_SINGLE_QUOTED>'
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json $q
 ```
 
 `R`, exactly once after a valid pointer: read only the absolute `summary_file`.

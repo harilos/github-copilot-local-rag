@@ -19,10 +19,11 @@ disable-model-invocation: true
 & "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\list_dbs.py" --format json
 ```
 
-- SEARCH exactly once. Encode each `"` in `Q` as `\"` for the Windows native argument, then escape each single quote as `''` and wrap the entire value in a PowerShell single-quoted literal. The native parser consumes each added backslash so the final argv element equals the original `Q`, including whitespace, newlines, backticks, quotes, and `$()`.
+- SEARCH exactly once. Escape each single quote in `Q` as `''`, assign the unchanged text to PowerShell variable `$q` with a single-quoted literal, and pass `$q` as the final native argument. Do not escape double quotes or backslashes. The final argv element must equal the original `Q`, including whitespace, newlines, backticks, quotes, and `$()`.
 
 ```powershell
-& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json '<Q_SINGLE_QUOTED>'
+$q = '<Q_SINGLE_QUOTED>'
+& "$env:LRR_AGENT_HOME\rag\query\.venv\Scripts\python.exe" -B "$env:LRR_AGENT_HOME\rag\search.py" --db '<DB_NAME>' --include-db-hint --compact-json --result-delivery file --format json $q
 ```
 
 - If SEARCH fails, returns invalid pointer JSON, or has no `summary_file`, report the failure and stop without retry or fallback.
