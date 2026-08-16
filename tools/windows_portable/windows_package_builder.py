@@ -408,7 +408,8 @@ def _write_json(path: Path, payload: object) -> None:
 
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    newline = "\r\n" if path.suffix.casefold() == ".cmd" else "\n"
+    path.write_text(content, encoding="utf-8", newline=newline)
 
 
 def _install_bootstrap() -> str:

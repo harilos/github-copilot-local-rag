@@ -165,7 +165,10 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                         (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
                         archive.read(member),
                     )
-                launcher = archive.read(prefix + "install.cmd").decode("utf-8")
+                launcher_bytes = archive.read(prefix + "install.cmd")
+                self.assertIn(b"\r\n", launcher_bytes)
+                self.assertNotIn(b"\n", launcher_bytes.replace(b"\r\n", b""))
+                launcher = launcher_bytes.decode("utf-8")
                 self.assertIn(
                     '"%~dp0internal\\install.ps1" '
                     "-ConfigureVSCodeAutoApprove",
