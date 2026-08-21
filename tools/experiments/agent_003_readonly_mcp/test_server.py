@@ -346,7 +346,25 @@ class WorkspaceConfigurationContractTests(unittest.TestCase):
             / "agents"
             / "agent003-readonly-local-rag.agent.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("tools: ['localRagAgent003/*']", agent)
+        frontmatter = agent.split("---", 2)[1]
+        self.assertIn("target: vscode", frontmatter)
+        self.assertIn("agents: []", frontmatter)
+        self.assertIn("model: 'GPT-5 mini (copilot)'", frontmatter)
+        self.assertIn("tools: ['localragagent003/*']", frontmatter)
+        self.assertIn(
+            "description: Local RAGを必ず検索し、"
+            "取得したローカル資料の根拠に基づいて回答します。",
+            frontmatter,
+        )
+        self.assertIn(
+            "#tool:localragagent003/local_rag_search",
+            agent,
+        )
+        self.assertIn("このAgentへの質問には、回答前に必ず", agent)
+        self.assertIn("検索前に回答しない。", agent)
+        self.assertNotIn("必要なときだけ", agent)
+        self.assertNotIn("一般知識だけで十分", agent)
+        self.assertNotIn("Local RAGが必要な質問では", agent)
         self.assertNotIn("tools: ['execute", agent)
         self.assertNotIn("tools: ['read", agent)
         self.assertNotIn("tools: ['web", agent)
