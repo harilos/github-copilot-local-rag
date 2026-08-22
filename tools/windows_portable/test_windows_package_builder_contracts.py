@@ -21,6 +21,7 @@ from windows_package_builder import BuildRequest, build_package
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[1]
 AGENT_NAMES = (
+    "agent003-readonly-local-rag.agent.md",
     "internal-doc-deep-research.agent.md",
     "internal-doc-search.agent.md",
 )
@@ -165,11 +166,14 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                         (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
                         archive.read(member),
                     )
-                launcher = archive.read(prefix + "install.cmd").decode("utf-8")
-                self.assertIn(
-                    '"%~dp0internal\\install.ps1" '
-                    "-ConfigureVSCodeAutoApprove",
-                    launcher,
+                launcher_bytes = archive.read(prefix + "install.cmd")
+                self.assertIn(b"\r\n", launcher_bytes)
+                self.assertNotIn(b"\n", launcher_bytes.replace(b"\r\n", b""))
+                self.assertNotIn(b"\r", launcher_bytes.replace(b"\r\n", b""))
+                launcher = launcher_bytes.decode("utf-8")
+                self.assertIn('"%~dp0internal\\install.ps1" ', launcher)
+                self.assertNotIn(
+                    'install.ps1" -ConfigureVSCodeAutoApprove', launcher
                 )
                 self.assertLess(
                     launcher.index("Local-RAG"),
@@ -263,22 +267,28 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer.index("$PayloadRoot ="),
                 )
                 self.assertGreater(
-                    installer.rindex("if ($ConfigureVSCodeAutoApprove)"),
+                    installer.index('$InstallStage = "mcp_config"'),
                     installer.index(
                         "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
                     ),
+                )
+                self.assertIn(
+                    'Join-Path $env:APPDATA "Code\\User\\mcp.json"',
+                    installer,
+                )
+                self.assertIn(
+                    "--vscode-mcp-config $VSCodeMcpTarget", installer
                 )
                 readme = archive.read(prefix + "README-WINDOWS.md").decode(
                     "utf-8"
                 )
                 normalized_readme = " ".join(readme.split())
-                self.assertIn("global auto-approve", readme)
+                self.assertIn("localragagent003", readme)
                 self.assertIn(
-                    "all tools and terminal commands", normalized_readme
+                    "does not change VS Code approval settings",
+                    normalized_readme,
                 )
-                self.assertIn("-SkipVSCodeAutoApprove", readme)
-                self.assertIn("leave VS Code settings unchanged", readme)
-                self.assertIn("-RetryVSCodeApprovals", readme)
+                self.assertNotIn("global auto-approve", readme)
                 self.assertIn("-NoPause", readme)
                 self.assertIn("waits exactly once", readme)
                 self.assertIn("%LOCALAPPDATA%\\LocalRAG\\logs", readme)
@@ -401,25 +411,18 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             root = Path(directory)
             package = root / "package"
             profile = root / "profile"
-            fake_windows = root / "fake-windows"
-            powershell = (
-                fake_windows
-                / "System32"
-                / "WindowsPowerShell"
-                / "v1.0"
-                / "powershell.exe"
-            )
             package.mkdir()
             profile.mkdir()
-            powershell.parent.mkdir(parents=True)
-            powershell.write_bytes(b"not a Windows executable")
+            (package / "internal").mkdir()
+            (package / "internal" / "install.ps1").write_text(
+                "exit 2\n", encoding="ascii"
+            )
             (package / "install.cmd").write_text(
                 package_builder._install_cmd(),
                 encoding="utf-8",
                 newline="\r\n",
             )
             environment = os.environ.copy()
-            environment["SystemRoot"] = str(fake_windows)
             environment["LOCALAPPDATA"] = str(profile / "AppData" / "Local")
             environment["TEMP"] = str(root / "temp")
             (root / "temp").mkdir()
@@ -591,7 +594,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         machine: int = 0x8664,
         database_content: bytes = b"new-db",
         product_content: str = "new\n",
-        executable_python: bool = False,
+        executable_python: bool = True,
     ) -> Path:
         package = root / "package"
         internal = package / "internal"
@@ -601,7 +604,8 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         python = query / ".venv" / "Scripts" / "python.exe"
         if executable_python:
             python.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(Path(sys.executable), python)
+            base_executable = Path(getattr(sys, "_base_executable", sys.executable))
+            shutil.copy2(base_executable, python)
         else:
             _write_pe(python, machine)
         if not executable_python:
@@ -610,6 +614,10 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
+        shutil.copy2(
+            REPOSITORY_ROOT / ".copilot" / "rag" / "query" / "mcp_config.py",
+            query / "mcp_config.py",
+        )
         shutil.copytree(
             REPOSITORY_ROOT / ".copilot" / "agents",
             package / ".copilot" / "agents",
@@ -778,54 +786,11 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(b"user-owned-agent", unrelated.read_bytes())
 
-    def test_vscode_failure_keeps_published_runtime_and_databases_ready(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            profile = root / "profile"
-            target = profile / ".copilot" / "rag"
-            runtime = target / "query" / ".venv"
-            _write_pe(runtime / "Scripts" / "python.exe")
-            (runtime / "old.txt").write_text("old-runtime\n", encoding="utf-8")
-            (target / "query" / "product.txt").write_text(
-                "old-product\n", encoding="utf-8"
-            )
-            model = target / "models" / "ruri-v3-30m-onnx-int8"
-            model.mkdir(parents=True)
-            (model / "model.onnx").write_bytes(b"old-model")
-            database = target / "dbs" / "selected-rag"
-            database.mkdir(parents=True)
-            (database / "catalog.sqlite").write_bytes(b"old-db")
-
-            package = self._package(root)
-            completed = self._run(
-                package,
-                profile,
-                "-ReplaceExistingDatabases",
-                "-ConfigureVSCodeAutoApprove",
-            )
-            self.assertNotEqual(0, completed.returncode)
-            self.assertFalse((runtime / "old.txt").exists())
-            self.assertTrue((runtime / "Scripts" / "python.exe").is_file())
-            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
-            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
-            self.assertEqual(
-                "new\n",
-                (target / "query" / "product.txt").read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "Local RAG インストール結果: 失敗 (FAILED)",
-                completed.stdout,
-            )
-            self.assertIn("ランタイム: READY", completed.stdout)
-            self.assertIn("データベース: READY", completed.stdout)
-            self.assertIn("VS Code 承認設定: FAILED", completed.stdout)
-            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
-
     def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
-            package = self._package(root, machine=0x014C)
+            package = self._package(root, machine=0x014C, executable_python=False)
             completed = self._run(package, profile)
             self.assertNotEqual(0, completed.returncode)
             self.assertFalse((profile / ".copilot").exists())
@@ -841,7 +806,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 completed.stdout,
             )
 
-    def test_skip_vscode_auto_approve_leaves_settings_byte_identical(self) -> None:
+    def test_legacy_approval_flags_are_noops_and_settings_stay_identical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -858,67 +823,70 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             settings.write_bytes(original)
             package = self._package(root)
             completed = self._run(
-                package, profile, "-SkipVSCodeAutoApprove"
+                package,
+                profile,
+                "-ConfigureVSCodeAutoApprove",
+                "-SkipVSCodeAutoApprove",
+                "-RetryVSCodeApprovals",
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertEqual(original, settings.read_bytes())
             self.assertEqual(
                 [], list(settings.parent.glob("*.local-rag-backup-*"))
             )
-            self.assertIn(
-                "VS Code 承認設定: SKIPPED_BY_USER", completed.stdout
+            self.assertNotIn("VS Code 承認設定", completed.stdout)
+            config = (profile / ".copilot" / "mcp-config.json").read_text(
+                encoding="utf-8-sig"
             )
-            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
+            self.assertIn('"localragagent003"', config)
 
-    def test_opt_in_configures_global_setting_and_reports_unknown_policy(self) -> None:
+    def test_fresh_install_registers_mcp_and_preserves_jsonc_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
-            settings = (
+            profile.mkdir()
+            config = profile / ".copilot" / "mcp-config.json"
+            config.parent.mkdir()
+            vscode_config = (
                 profile
                 / "AppData"
                 / "Roaming"
                 / "Code"
                 / "User"
-                / "settings.json"
+                / "mcp.json"
             )
-            settings.parent.mkdir(parents=True)
+            vscode_config.parent.mkdir(parents=True)
             original = (
-                b'{\r\n  // keep\r\n  '
-                b'"chat.tools.global.autoApprove": false,\r\n}\r\n'
+                b'\xef\xbb\xbf{\r\n  // keep\r\n  "inputs": [],\r\n'
+                b'  "servers": {"foreign": {"type": "http", '
+                b'"url": "https://example.test"}},\r\n}\r\n'
             )
-            settings.write_bytes(original)
-            package = self._package(root, executable_python=True)
-            shutil.copy2(
-                HERE.parents[1]
-                / ".copilot"
-                / "rag"
-                / "query"
-                / "vscode_settings.py",
-                package
-                / ".copilot"
-                / "rag"
-                / "query"
-                / "vscode_settings.py",
+            config.write_bytes(original)
+            vscode_config.write_bytes(
+                b'{\r\n  // keep vscode\r\n  "inputs": [],\r\n}\r\n'
             )
-            completed = self._run(
-                package, profile, "-ConfigureVSCodeAutoApprove"
-            )
+            package = self._package(root)
+            completed = self._run(package, profile)
             self.assertEqual(0, completed.returncode, completed.stderr)
-            rendered = settings.read_bytes()
+            rendered = config.read_bytes()
+            self.assertTrue(rendered.startswith(b"\xef\xbb\xbf"))
             self.assertIn(b"// keep\r\n", rendered)
-            self.assertIn(
-                b'"chat.tools.global.autoApprove": true,\r\n', rendered
-            )
-            backups = list(settings.parent.glob("*.local-rag-backup-*"))
-            self.assertEqual(1, len(backups))
-            self.assertEqual(original, backups[0].read_bytes())
-            self.assertIn(
-                "VS Code 承認設定: CONFIGURED_ON_DISK", completed.stdout
-            )
-            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
+            self.assertIn(b'"foreign"', rendered)
+            self.assertIn(b'"inputs"', rendered)
+            self.assertIn(b'"localragagent003"', rendered)
+            vscode_rendered = vscode_config.read_bytes()
+            self.assertIn(b"// keep vscode\r\n", vscode_rendered)
+            self.assertIn(b'"inputs"', vscode_rendered)
+            self.assertIn(b'"localragagent003"', vscode_rendered)
+            self.assertIn("MCP: configured_on_disk", completed.stdout)
 
-    def test_logical_vscode_opt_in_failure_is_retryable_without_rollback(self) -> None:
+            second = self._run(package, profile, "-ReplaceExistingDatabases")
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertEqual(rendered, config.read_bytes())
+            self.assertEqual(vscode_rendered, vscode_config.read_bytes())
+            self.assertIn("MCP: already_configured", second.stdout)
+
+    def test_foreign_mcp_name_collision_rolls_back_every_published_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -936,64 +904,83 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             database.mkdir(parents=True)
             (database / "catalog.sqlite").write_bytes(b"old-db")
 
-            package = self._package(root, executable_python=True)
-            vscode = package / ".copilot" / "rag" / "query" / "vscode_settings.py"
-            vscode.write_text(
-                "import json\n"
-                "print(json.dumps({'status': 'partial_failure'}))\n",
-                encoding="utf-8",
+            config = profile / ".copilot" / "mcp-config.json"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            original_config = (
+                b'{"servers":{"localragagent003":{"type":"http",'
+                b'"url":"https://foreign.example"}}}\n'
             )
+            config.write_bytes(original_config)
+            package = self._package(root)
             completed = self._run(
                 package,
                 profile,
                 "-ReplaceExistingDatabases",
-                "-ConfigureVSCodeAutoApprove",
             )
             self.assertNotEqual(0, completed.returncode)
-            self.assertFalse((runtime / "old.txt").exists())
-            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
-            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
+            self.assertTrue((runtime / "old.txt").exists())
+            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                "new\n",
+                "old-product\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
-            self.assertIn(
-                "Local RAG インストール結果: 失敗 (FAILED)",
-                completed.stdout,
-            )
-            self.assertIn("ランタイム: READY", completed.stdout)
-            self.assertIn("データベース: READY", completed.stdout)
-            self.assertIn("VS Code 承認設定: FAILED", completed.stdout)
-            self.assertIn("ポリシー有効性: UNKNOWN", completed.stdout)
+            self.assertEqual(original_config, config.read_bytes())
+            self.assertIn("Local RAG MCP configuration failed", completed.stdout)
 
-            installed_vscode = target / "query" / "vscode_settings.py"
-            installed_vscode.write_text(
-                "import json\n"
-                "print(json.dumps({'status': 'configured_on_disk'}))\n",
-                encoding="utf-8",
+    def test_vscode_mcp_collision_rolls_back_every_published_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            target = profile / ".copilot" / "rag"
+            runtime = target / "query" / ".venv"
+            _write_pe(runtime / "Scripts" / "python.exe")
+            (runtime / "old.txt").write_text("old-runtime\n", encoding="utf-8")
+            (target / "query" / "product.txt").write_text(
+                "old-product\n", encoding="utf-8"
             )
-            runtime_before = (runtime / "Scripts" / "python.exe").read_bytes()
-            model_before = (model / "model.onnx").read_bytes()
-            database_before = (database / "catalog.sqlite").read_bytes()
-            retried = self._run(
+            model = target / "models" / "ruri-v3-30m-onnx-int8"
+            model.mkdir(parents=True)
+            (model / "model.onnx").write_bytes(b"old-model")
+            database = target / "dbs" / "selected-rag"
+            database.mkdir(parents=True)
+            (database / "catalog.sqlite").write_bytes(b"old-db")
+            portable_config = profile / ".copilot" / "mcp-config.json"
+            portable_original = b'{"inputs":["portable-keep"]}\n'
+            portable_config.write_bytes(portable_original)
+            vscode_config = (
+                profile
+                / "AppData"
+                / "Roaming"
+                / "Code"
+                / "User"
+                / "mcp.json"
+            )
+            vscode_config.parent.mkdir(parents=True)
+            vscode_original = (
+                b'{"servers":{"localragagent003":{"type":"http",'
+                b'"url":"https://foreign.example"}}}\n'
+            )
+            vscode_config.write_bytes(vscode_original)
+
+            package = self._package(root)
+            completed = self._run(
                 package,
                 profile,
-                "-ConfigureVSCodeAutoApprove",
-                "-RetryVSCodeApprovals",
+                "-ReplaceExistingDatabases",
             )
-            self.assertEqual(0, retried.returncode, retried.stderr)
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertTrue((runtime / "old.txt").exists())
+            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                runtime_before, (runtime / "Scripts" / "python.exe").read_bytes()
+                "old-product\n",
+                (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
-            self.assertEqual(model_before, (model / "model.onnx").read_bytes())
-            self.assertEqual(
-                database_before, (database / "catalog.sqlite").read_bytes()
-            )
-            self.assertIn("ランタイム: READY", retried.stdout)
-            self.assertIn("データベース: READY", retried.stdout)
-            self.assertIn(
-                "VS Code 承認設定: CONFIGURED_ON_DISK", retried.stdout
-            )
+            self.assertEqual(portable_original, portable_config.read_bytes())
+            self.assertEqual(vscode_original, vscode_config.read_bytes())
+            self.assertIn("Local RAG MCP configuration failed", completed.stdout)
 
 
 if __name__ == "__main__":

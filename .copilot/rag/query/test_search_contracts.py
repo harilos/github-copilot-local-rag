@@ -1307,6 +1307,48 @@ class SyncFallbackMetadataTests(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 2.0)
 
+    def test_require_daemon_rejects_disabled_daemon_without_sync_child(self) -> None:
+        resolution = SimpleNamespace(
+            triggered=True,
+            reason="explicit",
+            db_name="alpha-rag",
+            candidates=[],
+        )
+        for disabled_args, environment in (
+            (["--no-daemon"], {}),
+            ([], {"RAG_DISABLE_DAEMON": "1"}),
+        ):
+            with self.subTest(args=disabled_args, environment=environment):
+                with (
+                    mock.patch.object(
+                        SEARCH.sys,
+                        "argv",
+                        [
+                            "search.py",
+                            "--db",
+                            "alpha-rag",
+                            "--require-daemon",
+                            *disabled_args,
+                            "question",
+                        ],
+                    ),
+                    mock.patch.object(
+                        SEARCH, "resolve_db_name", return_value=resolution
+                    ),
+                    mock.patch.object(Path, "exists", return_value=True),
+                    mock.patch.object(
+                        SEARCH, "is_fixed_windows_runtime", return_value=True
+                    ),
+                    mock.patch.object(SEARCH, "_run_sync_script") as sync_child,
+                    mock.patch.dict(SEARCH.os.environ, environment, clear=False),
+                ):
+                    if "RAG_DISABLE_DAEMON" not in environment:
+                        SEARCH.os.environ.pop("RAG_DISABLE_DAEMON", None)
+                    with self.assertRaises(SystemExit) as raised:
+                        SEARCH.main()
+            self.assertEqual(1, raised.exception.code)
+            sync_child.assert_not_called()
+
 
 class DaemonLifecycleTests(unittest.TestCase):
     def test_starting_and_busy_requests_stay_on_daemon_route(self) -> None:

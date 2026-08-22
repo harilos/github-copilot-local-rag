@@ -18,7 +18,7 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
             "Resolve-BootstrapPython",
             'Command = "py"',
             'Command = "python"',
-            "sys.version_info >= (3, 10)",
+            "(3, 13) <= sys.version_info[:2] < (3, 14)",
             'SetupArguments @("--format", "json")',
             '"rag\\list_dbs.py"',
         ):
@@ -31,24 +31,25 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
             "Existing databases were not overwritten",
             self.installer,
         )
-        self.assertNotIn("Remove-Item", self.installer)
+        self.assertNotIn('Join-Path $Target "rag\\dbs"', self.installer)
 
     def test_runtime_is_created_on_the_admin_machine_not_copied(self) -> None:
         self.assertIn('($Parts -icontains ".venv")', self.installer)
         self.assertIn('SetupArguments @("--format", "json")', self.installer)
         self.assertNotIn("Copy-Item -Recurse", self.installer)
 
-    def test_vscode_auto_approve_is_explicit_and_uses_installed_runtime(self) -> None:
+    def test_mcp_config_uses_installed_runtime_without_global_approval(self) -> None:
         for fragment in (
             "[switch]$ConfigureVSCodeAutoApprove",
-            "if ($ConfigureVSCodeAutoApprove)",
-            '"rag\\query\\vscode_settings.py"',
+            'Join-Path $Target "rag\\query\\mcp_config.py"',
             "--copilot-home $Target",
             '"configured_on_disk", "already_configured"',
-            "Restart VS Code",
+            'MCP: $MCPStatus',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.installer)
+        self.assertNotIn("if ($ConfigureVSCodeAutoApprove)", self.installer)
+        self.assertNotIn('Join-Path $Target "rag\\query\\vscode_settings.py"', self.installer)
 
     def test_result_is_unambiguous_and_identifies_the_failed_stage(self) -> None:
         for fragment in (
@@ -58,7 +59,7 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
             '$InstallStage = "validate_payload"',
             '$InstallStage = "runtime_create"',
             '$InstallStage = "list_dbs"',
-            '$InstallStage = "vscode_auto_approve"',
+            '$InstallStage = "mcp_config"',
             'Runtime: $RuntimeStatus',
         ):
             with self.subTest(fragment=fragment):

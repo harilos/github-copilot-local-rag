@@ -127,6 +127,7 @@ _PORTABLE_CONFIG_EXAMPLES = frozenset(
 _PROJECT_SKILLS = ("local-rag", "local-rag-setup")
 _PROJECT_AGENTS = (
     "internal-doc-search.agent.md",
+    "agent003-readonly-local-rag.agent.md",
     "internal-doc-deep-research.agent.md",
 )
 _DB_SEARCH_FILES = frozenset(

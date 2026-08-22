@@ -8,9 +8,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if ($SkipVSCodeAutoApprove) {
-    $ConfigureVSCodeAutoApprove = $false
-}
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $Utf8NoBom
 [Console]::OutputEncoding = $Utf8NoBom
@@ -43,8 +40,7 @@ $ModelPublished = $false
 $InstallStage = "validate_package"
 $RuntimeStatus = "NOT_READY"
 $DatabaseStatus = "NOT_CHECKED"
-$VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "SKIPPED_BY_USER" }
-$PolicyEffectiveness = "UNKNOWN"
+$MCPStatus = "NOT_CONFIGURED"
 $InstallLogPath = ""
 $InstallTranscriptStarted = $false
 
@@ -130,12 +126,7 @@ function Write-InstallSummary {
     Write-Host (($Utf8.GetString([Convert]::FromBase64String(
         "44OH44O844K/44OZ44O844K5OiA="
     ))) + $DatabaseStatus)
-    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
-        "VlMgQ29kZSDmib/oqo3oqK3lrpo6IA=="
-    ))) + $VSCodeStatus)
-    Write-Host (($Utf8.GetString([Convert]::FromBase64String(
-        "44Od44Oq44K344O85pyJ5Yq55oCnOiA="
-    ))) + $PolicyEffectiveness)
+    Write-Host ("MCP: " + $MCPStatus)
     if (-not $Succeeded -and -not [string]::IsNullOrWhiteSpace($Reason)) {
         Write-Host (($Utf8.GetString([Convert]::FromBase64String(
             "55CG55SxOiA="
@@ -333,6 +324,7 @@ function Test-LocalRagAgentRelativePath {
     param([string]$Relative)
     $Value = $Relative.Replace("/", "\")
     return @(
+        "agents\agent003-readonly-local-rag.agent.md",
         "agents\internal-doc-deep-research.agent.md",
         "agents\internal-doc-search.agent.md"
     ) -icontains $Value
@@ -363,10 +355,26 @@ function Test-KnownProductAgentRevision {
     $Value = $Relative.Replace("/", "\").ToLowerInvariant()
     $Known = switch ($Value) {
         "agents\internal-doc-deep-research.agent.md" {
-            @("5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39")
+            @(
+                "5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39",
+                "bae16f42a6fdba678d8cf3ae0ab6facecbe97b3e8f5be8589db8e4c4312fc2a9",
+                "e9cce412e5cec4a14c6d62d657fced68df01ef0c1fda1edaa2912dbf26e4e146",
+                "5baec62979950f74c66264c8fbdd5a45fde5790ec1fc5be9b925d21c43ffe175"
+            )
         }
         "agents\internal-doc-search.agent.md" {
-            @("93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8")
+            @(
+                "93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8",
+                "486dddb48dd394c131932511a97a80938bee4a8eec02b26f17fb32931ede4fca",
+                "72a299323fcd9ae112fef3dd5ddc482815bb4290a5b5e033c876890928354262",
+                "babcd820d4d2b6970dda51e419807c1d9504f58c410a2057b2eff8ca08470142"
+            )
+        }
+        "agents\agent003-readonly-local-rag.agent.md" {
+            @(
+                "e9c3591c7ae5a0b17ec9759c67f580eb080b02a8a8b834a3834d32779ea87836",
+                "98b092c5f1d0731d8b58f64440ea8d9983d475649bef7eb02fffff08b7bedceb"
+            )
         }
         default { @() }
     }
@@ -385,33 +393,6 @@ function Backup-ProductFile {
     $script:ProductBackedUp += $Relative
 }
 
-function Invoke-VSCodeApprovalConfiguration {
-    $script:InstallStage = "vscode_approvals"
-    $script:VSCodeStatus = "FAILED"
-    $VscodeText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
-        Join-Path $TargetQuery "vscode_settings.py"
-    ) --copilot-home $Target | Out-String)
-    $VscodeExitCode = $LASTEXITCODE
-    try {
-        $VscodeResult = $VscodeText | ConvertFrom-Json
-    } catch {
-        throw "VS Code approval configuration returned invalid JSON."
-    }
-    if (
-        $VscodeExitCode -ne 0 -or
-        @("configured_on_disk", "already_configured") -inotcontains (
-            [string]$VscodeResult.status
-        )
-    ) {
-        throw (
-            "VS Code global auto-approve configuration failed. " +
-            "Correct the reported settings problem and rerun " +
-            "install.cmd -RetryVSCodeApprovals."
-        )
-    }
-    $script:VSCodeStatus = "CONFIGURED_ON_DISK"
-}
-
 Assert-NoReparsePath -Path $Target
 Assert-NoReparsePath -Path $TargetDbs
 Assert-NoReparsePath -Path $TargetQuery
@@ -421,10 +402,7 @@ Assert-NoReparseTree -Path $Payload
 Assert-NoReparseTree -Path $SourceRuntime
 Assert-NoReparseTree -Path $SourceModel
 Assert-Amd64PortableRuntime -Runtime $SourceRuntime
-if (
-    -not $RetryVSCodeApprovals -and
-    (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf)
-) {
+if (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf) {
     throw "stop the owned Local RAG daemon before updating"
 }
 
@@ -443,35 +421,6 @@ if (Test-Path -LiteralPath $SourceDbs -PathType Container) {
 if (@($DatabaseNames | ForEach-Object { $_.ToLowerInvariant() } |
     Sort-Object -Unique).Count -ne $DatabaseNames.Count) {
     throw "portable package database names collide after case folding"
-}
-if ($RetryVSCodeApprovals) {
-    if (-not $ConfigureVSCodeAutoApprove -or $SkipVSCodeAutoApprove) {
-        throw "-RetryVSCodeApprovals requires VS Code approval opt-in."
-    }
-    if (
-        -not (Test-Path -LiteralPath (
-            Join-Path $TargetRuntime "Scripts\python.exe"
-        ) -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (
-            Join-Path $TargetQuery "vscode_settings.py"
-        ) -PathType Leaf)
-    ) {
-        throw "installed Local RAG runtime is unavailable for approval retry."
-    }
-    foreach ($Name in $DatabaseNames) {
-        if (-not (Test-Path -LiteralPath (
-            Join-Path $TargetDbs $Name
-        ) -PathType Container)) {
-            throw ("installed Local RAG database is unavailable: " + $Name)
-        }
-    }
-    $RuntimeStatus = "READY"
-    $DatabaseStatus = "READY"
-    Invoke-VSCodeApprovalConfiguration
-    $InstallStage = "completed"
-    Write-InstallSummary -Succeeded $true
-    Stop-InstallTranscript
-    exit 0
 }
 foreach ($Name in $DatabaseNames) {
     $Existing = Join-Path $TargetDbs $Name
@@ -561,7 +510,8 @@ try {
         "rag\query\.rag-deps-installed",
         "rag\query\portable_runtime.py",
         "rag\query\portable_db_install.py",
-        "rag\query\portable_db_smoke.py"
+        "rag\query\portable_db_smoke.py",
+        "rag\query\vscode_settings.py"
     )) {
         $Retired = Join-Path $Target $Relative
         if (Test-Path -LiteralPath $Retired -PathType Leaf) {
@@ -604,6 +554,42 @@ try {
     [System.IO.Directory]::Move($StageRuntime, $TargetRuntime)
     $RuntimePublished = $true
     $RuntimeStatus = "READY"
+
+    $InstallStage = "mcp_config"
+    $McpRelative = "mcp-config.json"
+    $McpTarget = Join-Path $Target $McpRelative
+    if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        throw "APPDATA is required to configure the normal VS Code Default Profile."
+    }
+    $VSCodeMcpTarget = [System.IO.Path]::GetFullPath((
+        Join-Path $env:APPDATA "Code\User\mcp.json"
+    ))
+    Assert-NoReparsePath -Path $McpTarget
+    Assert-NoReparsePath -Path $VSCodeMcpTarget
+    if (Test-Path -LiteralPath $McpTarget -PathType Leaf) {
+        Backup-ProductFile -Relative $McpRelative -Destination $McpTarget
+    } else {
+        $script:ProductCreatedFiles += $McpTarget
+    }
+    $McpText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
+        Join-Path $TargetQuery "mcp_config.py"
+    ) --copilot-home $Target --vscode-mcp-config $VSCodeMcpTarget `
+        --no-backup | Out-String)
+    $McpExitCode = $LASTEXITCODE
+    try {
+        $McpResult = $McpText | ConvertFrom-Json
+    } catch {
+        throw "Local RAG MCP configuration returned invalid JSON."
+    }
+    if (
+        $McpExitCode -ne 0 -or
+        @("configured_on_disk", "already_configured") -inotcontains (
+            [string]$McpResult.status
+        )
+    ) {
+        throw "Local RAG MCP configuration failed."
+    }
+    $MCPStatus = [string]$McpResult.status
 } catch {
     foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
         $Current = Join-Path $TargetDbs $Name
@@ -685,13 +671,9 @@ foreach ($Path in @(
     }
 }
 
-if ($ConfigureVSCodeAutoApprove) {
-    Invoke-VSCodeApprovalConfiguration
-}
-
 Write-Host ("Installed Local RAG Windows portable runtime to: " + $Target)
-Write-Host "Use Agent mode and enable runInTerminal in Configure Tools."
-Write-Host "Enable readFile when using file result delivery."
+Write-Host "Select one of the three LOCAL-RAG Agents in VS Code Agent mode."
+Write-Host "The installer did not change VS Code approval settings."
 $InstallStage = "completed"
 Write-InstallSummary -Succeeded $true
 Stop-InstallTranscript

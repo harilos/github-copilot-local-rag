@@ -28,12 +28,10 @@ Do not use PATH-based `python`, `py -3`, `cmd.exe /c`,
 Windows packaged setup is offline: it must not create a venv, run pip, download
 or convert a model, or fall back to system Python.
 
-After setup, tell the human to use VS Code Copilot Chat in Agent mode and open
-Configure Tools. `runInTerminal` is required. `readFile` is also required
-for file result delivery. Tool availability and approval are separate. The
-Windows installer can explicitly configure VS Code global auto-approve, which
-affects every tool and terminal command in every workspace; use
-`install.cmd -SkipVSCodeAutoApprove` to opt out.
+After setup, tell the human to select one of the three installed LOCAL-RAG
+Agents in VS Code Copilot Chat. The installer registers the fixed user-level
+`localragagent003` server. It exposes only the read-only search and evidence
+tools and does not change VS Code approval settings.
 
 ## macOS/Linux
 

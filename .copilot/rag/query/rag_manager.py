@@ -22,7 +22,6 @@ DEFAULT_MAX_QUEUED_REQUESTS = 16
 DEFAULT_MAX_PENDING_PER_CLIENT = 4
 DEFAULT_MAX_CLIENTS = 4
 DEFAULT_MAX_REQUESTS_PER_WORKER = 500
-WORKER_START_TIMEOUT_SECONDS = 5.0
 WORKER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
@@ -450,9 +449,7 @@ class PersistentWorkerManager:
         remaining = item.deadline - time.monotonic()
         if remaining <= 0:
             return self._manager_error(item, "queue_deadline_expired")
-        if not self._ensure_worker(
-            timeout_seconds=min(WORKER_START_TIMEOUT_SECONDS, remaining)
-        ):
+        if not self._ensure_worker(timeout_seconds=remaining):
             return self._manager_error(item, "worker_start_failed")
         with self._worker_lifecycle_lock:
             connection = self._connection

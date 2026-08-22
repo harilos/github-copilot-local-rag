@@ -18,13 +18,24 @@ import windows_package_builder as package_builder  # noqa: E402
 
 AGENTS = {
     "internal-doc-search.agent.md": {
-        "name": "社内文書検索",
-        "tools": ["execute"],
-        "model": "GPT-5 mini",
+        "name": "LOCAL-RAG-節約",
+        "description": "Local RAGを必ず検索し、最小限の検索と根拠確認で短く回答します。",
+        "tools": ["localragagent003/*"],
+        "model": "GPT-5 mini (copilot)",
+        "cap": "合計2回",
+    },
+    "agent003-readonly-local-rag.agent.md": {
+        "name": "LOCAL-RAG-標準",
+        "description": "Local RAGを必ず検索し、質問に合う検索量と形式で根拠付き回答します。",
+        "tools": ["localragagent003/*"],
+        "cap": "合計5回",
     },
     "internal-doc-deep-research.agent.md": {
-        "name": "社内文書徹底調査",
-        "tools": ["execute", "read", "search", "web"],
+        "name": "LOCAL-RAG-徹底検索",
+        "description": "Local RAGを必ず複数の観点から検索し、Evidenceを突き合わせて回答します。",
+        "tools": ["localragagent003/*"],
+        "model": "GPT-5.3-Codex (copilot)",
+        "cap": "合計7回",
     },
 }
 
@@ -58,7 +69,7 @@ class CustomAgentContractTests(unittest.TestCase):
             text = (AGENTS_ROOT / filename).read_text(encoding="utf-8")
             frontmatter, body = _frontmatter(text)
             self.assertEqual(expected["name"], frontmatter["name"])
-            self.assertTrue(str(frontmatter["description"]).strip())
+            self.assertEqual(expected["description"], frontmatter["description"])
             self.assertEqual(expected["tools"], frontmatter["tools"])
             self.assertEqual([], frontmatter["agents"])
             self.assertIs(True, frontmatter["user-invocable"])
@@ -72,33 +83,34 @@ class CustomAgentContractTests(unittest.TestCase):
             else:
                 self.assertNotIn("model", frontmatter)
                 self.assertIn("Auto選択を継承", body)
+            self.assertIn(expected["cap"], body)
+            self.assertIn("local_rag_search", body)
+            self.assertIn("local_rag_get_evidence", body)
+            self.assertIn("許可を求め", body)
+            self.assertIn("まだ検索していない", body)
+            self.assertIn("同じturn", body)
+            self.assertIn("選択も求めず", body)
+            self.assertNotIn("候補が一意でなければ選択を求め", body)
 
-    def test_each_agent_uses_the_fixed_windows_search_once(self) -> None:
-        required_fragments = (
-            '$env:USERPROFILE\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe',
-            " -B ",
-            '$env:USERPROFILE\\.copilot\\rag\\search.py',
-            '--db "<選択したDB>"',
-            "--include-db-hint",
-            "--compact-json",
-            "--result-delivery file",
-            "--format json",
-            '"<利用者の質問全文>"',
-        )
+    def test_agents_have_no_pointer_or_non_rag_tool_detour(self) -> None:
         for filename in AGENTS:
             text = (AGENTS_ROOT / filename).read_text(encoding="utf-8")
-            blocks = re.findall(r"```powershell\n(.*?)\n```", text, re.DOTALL)
-            commands = [block for block in blocks if "rag\\search.py" in block]
-            self.assertEqual(1, len(commands), filename)
-            command = commands[0]
-            positions = [command.index(fragment) for fragment in required_fragments]
-            self.assertEqual(positions, sorted(positions), filename)
-            self.assertEqual(1, text.count("<利用者の質問全文>"), filename)
-            self.assertEqual(1, text.count("rag\\search.py"), filename)
-            self.assertEqual(1, text.count("rag\\list_dbs.py"), filename)
-            self.assertNotIn("--result-delivery stdout", text)
-            self.assertNotIn("--no-daemon", text)
-            self.assertIn("summary_file", text)
+            self.assertNotRegex(text, r"```(?:powershell|shell|bash)")
+            self.assertNotIn("summary_file", text)
+            self.assertNotIn("result_set_id", text)
+            self.assertNotIn("Get-Content", text)
+            self.assertNotIn("runInTerminal", text)
+            self.assertNotIn("session_store_sql", text)
+
+    def test_standard_workspace_mirror_is_byte_identical(self) -> None:
+        product = AGENTS_ROOT / "agent003-readonly-local-rag.agent.md"
+        workspace = (
+            REPOSITORY_ROOT
+            / ".github"
+            / "agents"
+            / "agent003-readonly-local-rag.agent.md"
+        )
+        self.assertEqual(product.read_bytes(), workspace.read_bytes())
 
     def test_both_windows_distribution_paths_include_only_product_agents(self) -> None:
         entries = package_builder._SNAPSHOT_MODULE._product_entries(

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -247,6 +248,91 @@ def build_initial_summary(
     }
     details = [*evidence_details, *document_details]
     return summary, details[:MAX_ITEMS_PER_RESULT]
+
+
+def load_initial_summary(
+    result_set_id: str,
+    expected_db: str,
+    *,
+    spool_root: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any] | None, datetime | None]:
+    """Load one ready initial summary without exposing its spool identity.
+
+    The result-set identifier is an internal lookup capability.  Callers get
+    only an independent summary projection with that identifier removed, plus
+    the validated expiry.  Every validation failure is deliberately collapsed
+    to ``(None, None)`` so a model-facing adapter cannot use this API to probe
+    managed paths or distinguish malformed, tampered, and expired bundles.
+    """
+
+    root = _managed_root(spool_root)
+    if not _safe_spool_root(root):
+        return None, None
+    cleanup_result_spool(spool_root=root, now=now)
+    current = _utc_now(now)
+    database = str(expected_db or "")
+    if not database:
+        return None, None
+    try:
+        result_dir = _result_dir(result_set_id, root)
+        if not _safe_ready_directory(root, result_dir):
+            return None, None
+
+        meta_path = result_dir / "meta.json"
+        manifest_path = result_dir / "manifest.json"
+        summary_path = result_dir / "summary.json"
+        if not all(
+            _safe_regular_bundle_file(path, result_dir)
+            for path in (meta_path, manifest_path, summary_path)
+        ):
+            return None, None
+
+        meta = _read_ready_meta(result_dir)
+        if (
+            meta is None
+            or meta.get("schema_version") != "rag-result-meta-v1"
+        ):
+            return None, None
+        expires_at = _parse_iso(meta.get("expires_at"))
+        if expires_at <= current:
+            return None, None
+        if str(meta.get("selected_db") or "") != database:
+            return None, None
+
+        manifest = _read_json(manifest_path)
+        if (
+            manifest.get("schema_version") != MANIFEST_SCHEMA
+            or manifest.get("result_set_id") != result_set_id
+        ):
+            return None, None
+        manifest_files = manifest.get("files")
+        summary_integrity = (
+            manifest_files.get("summary.json")
+            if isinstance(manifest_files, dict)
+            else None
+        )
+        if (
+            not isinstance(summary_integrity, dict)
+            or "size" not in summary_integrity
+            or "sha256" not in summary_integrity
+            or not _manifest_file_matches(summary_path, summary_integrity)
+        ):
+            return None, None
+
+        summary = _read_json(summary_path)
+        if (
+            summary.get("schema_version") != SUMMARY_SCHEMA
+            or summary.get("result_set_id") != result_set_id
+            or str(summary.get("selected_db") or "") != database
+        ):
+            return None, None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None, None
+
+    public_summary = dict(summary)
+    public_summary.pop("result_set_id", None)
+    return public_summary, expires_at
 
 
 def load_expanded_result(
@@ -1193,6 +1279,62 @@ def _read_ready_meta(result_dir: Path) -> dict[str, Any] | None:
     ):
         return None
     return meta
+
+
+def _safe_ready_directory(root: Path, result_dir: Path) -> bool:
+    """Reject managed-root or result-directory reparse escapes."""
+
+    try:
+        if not _safe_spool_root(root) or _is_reparse_point(result_dir):
+            return False
+        result_metadata = result_dir.lstat()
+        if not stat.S_ISDIR(result_metadata.st_mode):
+            return False
+        resolved_root = root.resolve(strict=True)
+        resolved_result = result_dir.resolve(strict=True)
+    except OSError:
+        return False
+    return resolved_result.parent == resolved_root
+
+
+def _safe_spool_root(root: Path) -> bool:
+    try:
+        if _is_reparse_point(root):
+            return False
+        metadata = root.lstat()
+        return stat.S_ISDIR(metadata.st_mode)
+    except OSError:
+        return False
+
+
+def _safe_regular_bundle_file(path: Path, result_dir: Path) -> bool:
+    """Accept only a direct, non-reparse regular file in one result set."""
+
+    try:
+        if path.parent != result_dir or _is_reparse_point(path):
+            return False
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return False
+        resolved_result = result_dir.resolve(strict=True)
+        resolved_path = path.resolve(strict=True)
+    except OSError:
+        return False
+    return resolved_path.parent == resolved_result
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = int(getattr(metadata, "st_file_attributes", 0) or 0)
+    reparse_attribute = int(
+        getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    )
+    return bool(attributes & reparse_attribute)
 
 
 def _safe_manifest_item_path(path: Path, result_dir: Path) -> bool:

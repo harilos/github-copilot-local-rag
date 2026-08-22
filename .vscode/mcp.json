@@ -1,15 +1,15 @@
 {
   "servers": {
-    "localRagAgent003": {
+    "localragagent003": {
       "type": "stdio",
       "command": "${userHome}\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe",
       "args": [
         "-B",
-        "${workspaceFolder}\\tools\\experiments\\agent_003_readonly_mcp\\server.py",
+        "${userHome}\\.copilot\\rag\\query\\mcp_server.py",
         "--rag-root",
         "${userHome}\\.copilot\\rag"
       ],
-      "cwd": "${workspaceFolder}"
+      "cwd": "${userHome}\\.copilot\\rag"
     }
   }
 }

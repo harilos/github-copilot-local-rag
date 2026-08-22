@@ -852,13 +852,13 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
         vscode = (payload.get("integrations") or {}).get("vscode")
         if vscode is not None:
             print(
-                "VS Code: use Copilot Chat in Agent mode; in Configure Tools "
-                "enable runInTerminal and enable readFile for file delivery."
+                "VS Code: use one of the installed LOCAL-RAG Agents. "
+                "The read-only localragagent003 MCP server supplies inline "
+                "evidence without file or terminal tools."
             )
             print(
-                "Tool availability and approval are separate. The Windows "
-                "installer can configure global auto-approve for every tool "
-                "and terminal command; use -SkipVSCodeAutoApprove to opt out."
+                "VS Code tool approvals and unrelated user settings are not "
+                "changed by Local RAG setup."
             )
 
         return

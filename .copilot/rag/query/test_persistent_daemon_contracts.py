@@ -18,6 +18,7 @@ RAG_ROOT = QUERY_ROOT.parent
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(QUERY_ROOT))
 from rag_worker import (  # noqa: E402
+    _dense_warmup_wait_seconds,
     _execute_search_payload,
     _final_dense_loaded,
     _wrapper_handoff_environment,
@@ -267,6 +268,20 @@ class PersistentDaemonContracts(unittest.TestCase):
         # and immediately before response state is serialized.
         ready.set()
         self.assertTrue(_final_dense_loaded(False, ready))
+
+    def test_cold_dense_warmup_uses_request_deadline_not_platform_cap(self) -> None:
+        self.assertEqual(
+            86.0,
+            _dense_warmup_wait_seconds(100.0, now_monotonic=10.0),
+        )
+        self.assertEqual(
+            0.0,
+            _dense_warmup_wait_seconds(12.0, now_monotonic=10.0),
+        )
+        self.assertEqual(
+            0.0,
+            _dense_warmup_wait_seconds(None, now_monotonic=10.0),
+        )
 
     def test_warmup_event_is_published_before_ready_snapshot(self) -> None:
         source = (QUERY_ROOT / "rag_worker.py").read_text(encoding="utf-8")
@@ -546,6 +561,24 @@ for name in ('search', 'ragd'):
             manager._last_worker_start_error,
         )
         context.assert_not_called()
+
+    def test_worker_start_uses_the_request_deadline(self) -> None:
+        manager = object.__new__(PersistentWorkerManager)
+        manager._ensure_worker = mock.Mock(return_value=False)
+        manager._manager_error = mock.Mock(return_value={"status": "error"})
+        item = mock.Mock()
+        item.deadline = time.monotonic() + 30.0
+
+        result = PersistentWorkerManager._execute_item(manager, item)
+
+        self.assertEqual({"status": "error"}, result)
+        timeout = manager._ensure_worker.call_args.kwargs["timeout_seconds"]
+        self.assertGreater(timeout, 29.0)
+        self.assertLessEqual(timeout, 30.0)
+        manager._manager_error.assert_called_once_with(
+            item,
+            "worker_start_failed",
+        )
 
 
 if __name__ == "__main__":

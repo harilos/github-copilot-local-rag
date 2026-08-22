@@ -128,7 +128,11 @@ def build_package(request: BuildRequest) -> BuildResult:
                 raise ValueError(str(exc)) from exc
 
         _assert_amd64_runtime(runtime_target)
-        _write_text(package_root / "install.cmd", _install_cmd())
+        _write_text(
+            package_root / "install.cmd",
+            _install_cmd(),
+            newline="\r\n",
+        )
         _write_text(package_root / "internal" / "install.ps1", _install_bootstrap())
         _write_text(package_root / "README-WINDOWS.md", _windows_readme())
         _write_text(
@@ -406,9 +410,9 @@ def _write_json(path: Path, payload: object) -> None:
     )
 
 
-def _write_text(path: Path, content: str) -> None:
+def _write_text(path: Path, content: str, *, newline: str = "\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
+    path.write_text(content, encoding="utf-8", newline=newline)
 
 
 def _install_bootstrap() -> str:
@@ -424,16 +428,14 @@ def _install_cmd() -> str:
         "setlocal EnableExtensions DisableDelayedExpansion\n"
         + _WINDOWS_BANNER_MODULE.install_cmd_banner(newline="\n")
         + 'set "local_rag_no_pause=0"\n'
-        'set "local_rag_skip="\n'
-        'set "local_rag_retry="\n'
         'set "local_rag_replace="\n'
         'set "local_rag_argument_error="\n'
         ":local_rag_parse\n"
         'if "%~1"=="" goto local_rag_run\n'
         'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\n'
         'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\n'
-        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_mark_skip\n'
-        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_mark_retry\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_ignore\n'
+        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_ignore\n'
         'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\n'
         'set "local_rag_argument_error=-LauncherArgumentError"\n'
         "shift\n"
@@ -445,14 +447,6 @@ def _install_cmd() -> str:
         'set "local_rag_no_pause=1"\n'
         "shift\n"
         "goto local_rag_parse\n"
-        ":local_rag_mark_skip\n"
-        'set "local_rag_skip=-SkipVSCodeAutoApprove"\n'
-        "shift\n"
-        "goto local_rag_parse\n"
-        ":local_rag_mark_retry\n"
-        'set "local_rag_retry=-RetryVSCodeApprovals"\n'
-        "shift\n"
-        "goto local_rag_parse\n"
         ":local_rag_mark_replace\n"
         'set "local_rag_replace=-ReplaceExistingDatabases"\n'
         "shift\n"
@@ -461,8 +455,8 @@ def _install_cmd() -> str:
         'if not exist "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" goto local_rag_powershell_unavailable\n'
         "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" "
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        "\"%~dp0internal\\install.ps1\" -ConfigureVSCodeAutoApprove "
-        "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
+        "\"%~dp0internal\\install.ps1\" "
+        "%local_rag_replace% "
         "%local_rag_argument_error%\n"
         "set \"local_rag_rc=%ERRORLEVEL%\"\n"
         'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\n'
@@ -496,21 +490,18 @@ If Windows PowerShell cannot start, the cmd launcher itself prints Japanese
 failure guidance and writes an actual run log before returning a nonzero code.
 
 PowerShell writes exactly one log per run under
-`%LOCALAPPDATA%\LocalRAG\logs` (falling back to TEMP), prints a Japanese result
+`%LOCALAPPDATA%\\LocalRAG\\logs` (falling back to TEMP), prints a Japanese result
 summary, and shows the absolute log path. PowerShell never waits for input.
 
 The package contains only the databases selected by the builder. Existing
 unrelated databases are preserved. Replacing a same-name database requires
 `install.cmd -ReplaceExistingDatabases`.
 
-In VS Code Copilot Chat, select Agent and enable runInTerminal in Configure
-Tools. Enable readFile when using file result delivery. Tool availability and
-approval are separate. The installer enables VS Code global auto-approve by
-setting `chat.tools.global.autoApprove: true` for all tools and terminal
-commands in all workspaces by default. Run
-`install.cmd -SkipVSCodeAutoApprove` to leave VS Code settings unchanged.
-After a settings-only failure, correct the settings problem and run
-`install.cmd -RetryVSCodeApprovals` without replacing runtime or databases.
+In VS Code Copilot Chat, select one of the three installed LOCAL-RAG Agents.
+They expose only the two read-only Local RAG MCP tools. The installer registers
+the fixed user-level `localragagent003` MCP server in both the portable Copilot
+configuration and the normal VS Code Default Profile.
+The installer does not change VS Code approval settings.
 Copilot acceptance is never run by the installer or product tests.
 """
 

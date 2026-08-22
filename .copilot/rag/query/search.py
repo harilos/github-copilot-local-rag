@@ -235,7 +235,16 @@ def main() -> None:
         ),
     }
 
-    daemon_enabled = not args.no_daemon and os.getenv("RAG_DISABLE_DAEMON", "").lower() not in {"1", "true", "yes"}
+    daemon_disabled_by_environment = (
+        os.getenv("RAG_DISABLE_DAEMON", "").lower() in {"1", "true", "yes"}
+    )
+    if args.require_daemon and (args.no_daemon or daemon_disabled_by_environment):
+        print(
+            "Local RAG daemon execution is required but daemon use is disabled.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    daemon_enabled = not args.no_daemon and not daemon_disabled_by_environment
     if daemon_enabled:
         desired_transport = _desired_transport()
         configured_transport = os.getenv("RAGD_TRANSPORT", "auto").lower()

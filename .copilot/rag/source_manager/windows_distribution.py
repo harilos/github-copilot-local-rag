@@ -423,16 +423,14 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "setlocal EnableExtensions DisableDelayedExpansion\r\n"
         + windows_banner.install_cmd_banner()
         + 'set "local_rag_no_pause=0"\r\n'
-        'set "local_rag_skip="\r\n'
-        'set "local_rag_retry="\r\n'
         'set "local_rag_replace="\r\n'
         'set "local_rag_argument_error="\r\n'
         ":local_rag_parse\r\n"
         'if "%~1"=="" goto local_rag_run\r\n'
         'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\r\n'
         'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\r\n'
-        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_mark_skip\r\n'
-        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_mark_retry\r\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_ignore\r\n'
+        'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_ignore\r\n'
         'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\r\n'
         'set "local_rag_argument_error=-LauncherArgumentError"\r\n'
         "shift\r\n"
@@ -444,14 +442,6 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         'set "local_rag_no_pause=1"\r\n'
         "shift\r\n"
         "goto local_rag_parse\r\n"
-        ":local_rag_mark_skip\r\n"
-        'set "local_rag_skip=-SkipVSCodeAutoApprove"\r\n'
-        "shift\r\n"
-        "goto local_rag_parse\r\n"
-        ":local_rag_mark_retry\r\n"
-        'set "local_rag_retry=-RetryVSCodeApprovals"\r\n'
-        "shift\r\n"
-        "goto local_rag_parse\r\n"
         ":local_rag_mark_replace\r\n"
         'set "local_rag_replace=-ReplaceExistingDatabases"\r\n'
         "shift\r\n"
@@ -460,8 +450,8 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         'if not exist "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" goto local_rag_powershell_unavailable\r\n'
         '"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
-        '"%~dp0internal\\install.ps1" -ConfigureVSCodeAutoApprove '
-        "%local_rag_skip% %local_rag_retry% %local_rag_replace% "
+        '"%~dp0internal\\install.ps1" '
+        "%local_rag_replace% "
         "%local_rag_argument_error%\r\n"
         'set "local_rag_rc=%ERRORLEVEL%"\r\n'
         'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\r\n'
@@ -490,13 +480,10 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback. If Windows "
         "PowerShell cannot start, the cmd launcher itself prints Japanese "
         "failure guidance and writes the same class of run log.\n\n"
-        "VS Code `chat.tools.global.autoApprove: true` is applied by default. "
-        "It affects every "
-        "tool and terminal command in every workspace. Run "
-        "`install.cmd -SkipVSCodeAutoApprove` to leave settings unchanged. "
-        "After a settings-only failure, use `install.cmd "
-        "-RetryVSCodeApprovals` without replacing runtime or databases. "
-        "Tool availability (runInTerminal and readFile) is separate. Copilot "
+        "The package registers the fixed user-level `localragagent003` MCP "
+        "server in both the portable Copilot configuration and the normal "
+        "VS Code Default Profile. It does not change VS Code approval "
+        "settings. Copilot "
         "acceptance is not run by the installer or product tests.\n",
         encoding="utf-8",
     )

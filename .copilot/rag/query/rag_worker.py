@@ -36,6 +36,18 @@ def _final_dense_loaded(
     return bool(dense_loaded or dense_ready.is_set())
 
 
+def _dense_warmup_wait_seconds(
+    deadline_monotonic: float | None,
+    *,
+    now_monotonic: float | None = None,
+) -> float:
+    """Reserve four seconds for result serialization after cold warmup."""
+    if deadline_monotonic is None:
+        return 0.0
+    now = time.monotonic() if now_monotonic is None else now_monotonic
+    return max(0.0, deadline_monotonic - now - 4.0)
+
+
 def worker_main(
     connection: Any,
     status_connection: Any,
@@ -173,17 +185,12 @@ def worker_main(
             not dense_warmup_finished.is_set()
             and deadline_monotonic is not None
         ):
-            # Give the persistent generation one bounded chance to finish its
-            # single background model load, while preserving time for lexical
-            # retrieval, serialization, and client output.
+            # The first request owns the caller's full remaining deadline.
+            # Wait for the generation's one background model load instead of
+            # falling into lexical-only after an arbitrary platform cap.  A
+            # small reserve remains for retrieval serialization and output.
             dense_warmup_finished.wait(
-                max(
-                    0.0,
-                    min(
-                        8.0 if os.name == "nt" else 6.0,
-                        deadline_monotonic - time.monotonic() - 4.0,
-                    ),
-                )
+                _dense_warmup_wait_seconds(deadline_monotonic)
             )
         if dense_ready.is_set() and not dense_loaded:
             dense_loaded = True

@@ -11,6 +11,12 @@ $QueryRoot = Join-Path $Target "rag\query"
 $RuntimePython = Join-Path $QueryRoot ".venv\Scripts\python.exe"
 $LegacyMarker = Join-Path $QueryRoot ".venv\.rag-deps-installed"
 $LegacyBackup = $null
+$Transaction = [Guid]::NewGuid().ToString("N")
+$ProductBackupRoot = Join-Path $QueryRoot (".source-product-backup-" + $Transaction)
+$ProductBackedUp = @()
+$ProductCreatedFiles = @()
+$ProductCreatedDirectories = @()
+$MCPStatus = "NOT_CONFIGURED"
 
 function Resolve-BootstrapPython {
     param([string]$Requested)
@@ -117,11 +123,108 @@ function Remove-CompletionMarkerBackups {
     }
 }
 
+function Test-PathHasReparse {
+    param([string]$Path, [string]$Boundary)
+    $Current = [System.IO.Path]::GetFullPath($Path)
+    $Root = [System.IO.Path]::GetFullPath($Boundary).TrimEnd("\")
+    while ($Current.Length -ge $Root.Length) {
+        if (Test-Path -LiteralPath $Current) {
+            $Item = Get-Item -LiteralPath $Current -Force
+            if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $true
+            }
+        }
+        if ($Current -ieq $Root) { break }
+        $Parent = Split-Path -Parent $Current
+        if (-not $Parent -or $Parent -eq $Current) { break }
+        $Current = $Parent
+    }
+    return $false
+}
+
+function Get-NormalizedUtf8Sha256 {
+    param([string]$Path)
+    try {
+        $StrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        $Text = [IO.File]::ReadAllText($Path, $StrictUtf8)
+    } catch { return "" }
+    $Bytes = [Text.Encoding]::UTF8.GetBytes(
+        $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    )
+    $Hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($Hasher.ComputeHash($Bytes) | ForEach-Object {
+            $_.ToString("x2")
+        })
+    } finally { $Hasher.Dispose() }
+}
+
+function Test-KnownProductAgentRevision {
+    param([string]$Relative, [string]$Destination)
+    $Known = switch ($Relative.Replace("/", "\").ToLowerInvariant()) {
+        "agents\internal-doc-search.agent.md" { @(
+            "93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8",
+            "486dddb48dd394c131932511a97a80938bee4a8eec02b26f17fb32931ede4fca"
+        ) }
+        "agents\internal-doc-deep-research.agent.md" { @(
+            "5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39",
+            "bae16f42a6fdba678d8cf3ae0ab6facecbe97b3e8f5be8589db8e4c4312fc2a9"
+        ) }
+        "agents\agent003-readonly-local-rag.agent.md" { @(
+            "e9c3591c7ae5a0b17ec9759c67f580eb080b02a8a8b834a3834d32779ea87836"
+        ) }
+        default { @() }
+    }
+    return $Known -contains (Get-NormalizedUtf8Sha256 -Path $Destination)
+}
+
+function Test-ProductAgentRelativePath {
+    param([string]$Relative)
+    return @(
+        "agents\agent003-readonly-local-rag.agent.md",
+        "agents\internal-doc-deep-research.agent.md",
+        "agents\internal-doc-search.agent.md"
+    ) -icontains $Relative.Replace("/", "\")
+}
+
+function Backup-ProductFile {
+    param([string]$Relative, [string]$Destination)
+    if ($ProductBackedUp -icontains $Relative) { return }
+    $Backup = Join-Path $ProductBackupRoot $Relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Backup) |
+        Out-Null
+    Copy-Item -LiteralPath $Destination -Destination $Backup
+    $script:ProductBackedUp += $Relative
+}
+
+function Restore-ProductFiles {
+    foreach ($Path in $ProductCreatedFiles) {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Delete($Path)
+        }
+    }
+    foreach ($Relative in $ProductBackedUp) {
+        $Backup = Join-Path $ProductBackupRoot $Relative
+        $Destination = Join-Path $Target $Relative
+        if (Test-Path -LiteralPath $Backup -PathType Leaf) {
+            New-Item -ItemType Directory -Force -Path (
+                Split-Path -Parent $Destination
+            ) | Out-Null
+            Copy-Item -LiteralPath $Backup -Destination $Destination -Force
+        }
+    }
+    foreach ($Directory in ($ProductCreatedDirectories |
+        Sort-Object { $_.Length } -Descending)) {
+        if ((Test-Path -LiteralPath $Directory -PathType Container) -and
+            -not (Get-ChildItem -LiteralPath $Directory -Force)) {
+            [IO.Directory]::Delete($Directory)
+        }
+    }
+}
+
 $InstallStage = "validate_payload"
 $RuntimeStatus = "NOT_READY"
 $DatabaseListStatus = "NOT_CHECKED"
-$VSCodeStatus = if ($ConfigureVSCodeAutoApprove) { "PENDING" } else { "SKIPPED_BY_USER" }
-$PolicyEffectiveness = "UNKNOWN"
 
 try {
 if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
@@ -212,12 +315,28 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
     )
     if (-not (Test-InstallPayloadExcluded -RelativePath $Relative)) {
         $Destination = Join-Path $Target $Relative
+        if (Test-PathHasReparse -Path $Destination -Boundary $Target) {
+            throw ("installation target contains a reparse point: " + $Relative)
+        }
         if ($_.PSIsContainer) {
-            New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+            if (-not (Test-Path -LiteralPath $Destination)) {
+                New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+                $ProductCreatedDirectories += $Destination
+            }
         } else {
             $Parent = Split-Path -Parent $Destination
             if ($Parent) {
                 New-Item -ItemType Directory -Force -Path $Parent | Out-Null
+            }
+            if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+                if ((Test-ProductAgentRelativePath -Relative $Relative) -and
+                    -not (Test-KnownProductAgentRevision `
+                        -Relative $Relative -Destination $Destination)) {
+                    return
+                }
+                Backup-ProductFile -Relative $Relative -Destination $Destination
+            } else {
+                $ProductCreatedFiles += $Destination
             }
             Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
         }
@@ -236,11 +355,13 @@ $RetiredFiles = @(
     "rag\query\portable_runtime.py",
     "rag\query\portable_db_install.py",
     "rag\query\portable_db_smoke.py",
+    "rag\query\vscode_settings.py",
     "skills\local-rag-admin\SKILL.md"
 )
 foreach ($RelativePath in $RetiredFiles) {
     $RetiredPath = Join-Path $Target $RelativePath
     if (Test-Path -LiteralPath $RetiredPath -PathType Leaf) {
+        Backup-ProductFile -Relative $RelativePath -Destination $RetiredPath
         [System.IO.File]::Delete($RetiredPath)
     }
 }
@@ -293,36 +414,33 @@ if ($LASTEXITCODE -ne 0) {
 }
 $DatabaseListStatus = "READY"
 
-if ($ConfigureVSCodeAutoApprove) {
-    $InstallStage = "vscode_approvals"
-    $VSCodeStatus = "FAILED"
-    $VSCodeResult = & $RuntimePython `
-        -B `
-        (Join-Path $Target "rag\query\vscode_settings.py") `
-        --copilot-home $Target
-    $VSCodeExitCode = $LASTEXITCODE
-    try {
-        $VSCodePayload = $VSCodeResult | ConvertFrom-Json
-    } catch {
-        throw "VS Code global auto-approve returned invalid status output."
-    }
-    if (
-        $VSCodeExitCode -ne 0 -or
-        @("configured_on_disk", "already_configured") -inotcontains (
-            [string]$VSCodePayload.status
-        )
-    ) {
-        throw "VS Code global auto-approve configuration failed."
-    }
-    $VSCodeStatus = "CONFIGURED_ON_DISK"
-    Write-Host "VS Code global auto-approve: $VSCodeStatus"
-    Write-Host "Restart VS Code before testing the Local RAG command."
-} else {
-    Write-Host (
-        "VS Code approvals were not changed. " +
-        "Rerun with -ConfigureVSCodeAutoApprove to enable global auto-approve."
-    )
+$InstallStage = "mcp_config"
+$McpRelative = "mcp-config.json"
+$McpTarget = Join-Path $Target $McpRelative
+if (Test-PathHasReparse -Path $McpTarget -Boundary $Target) {
+    throw "MCP configuration target contains a reparse point."
 }
+if (Test-Path -LiteralPath $McpTarget -PathType Leaf) {
+    Backup-ProductFile -Relative $McpRelative -Destination $McpTarget
+} else {
+    $ProductCreatedFiles += $McpTarget
+}
+$McpOutput = & $RuntimePython -B (
+    Join-Path $Target "rag\query\mcp_config.py"
+) --copilot-home $Target --no-backup
+$McpExitCode = $LASTEXITCODE
+try {
+    $McpPayload = $McpOutput | ConvertFrom-Json
+} catch {
+    throw "Local RAG MCP configuration returned invalid status output."
+}
+if ($McpExitCode -ne 0 -or
+    @("configured_on_disk", "already_configured") -inotcontains (
+        [string]$McpPayload.status
+    )) {
+    throw "Local RAG MCP configuration failed."
+}
+$MCPStatus = [string]$McpPayload.status
 
 $InstallStage = "complete"
 Write-Host "Installed Copilot Local RAG files to: $Target"
@@ -333,15 +451,20 @@ Write-Host ""
 Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
 Write-Host "Runtime: $RuntimeStatus"
 Write-Host "Databases: $DatabaseListStatus"
-Write-Host "VS Code approvals: $VSCodeStatus"
-Write-Host "Policy effectiveness: $PolicyEffectiveness"
+Write-Host "MCP: $MCPStatus"
+if (Test-Path -LiteralPath $ProductBackupRoot) {
+    Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force
+}
 } catch {
+    Restore-ProductFiles
+    if (Test-Path -LiteralPath $ProductBackupRoot) {
+        Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force
+    }
     Write-Host ""
     Write-Host "=== Local RAG install: FAILED ===" -ForegroundColor Red
     Write-Host "Failed stage: $InstallStage"
     Write-Host "Runtime: $RuntimeStatus"
     Write-Host "Databases: $DatabaseListStatus"
-    Write-Host "VS Code approvals: $VSCodeStatus"
-    Write-Host "Policy effectiveness: $PolicyEffectiveness"
+    Write-Host "MCP: $MCPStatus"
     throw
 }
