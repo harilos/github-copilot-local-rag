@@ -71,6 +71,8 @@ PUBLIC_CA_BUNDLE_PATHS = frozenset(
     {
         ".copilot/rag/query/.venv/lib/site-packages/certifi/cacert.pem",
         ".copilot/rag/query/.venv/lib/site-packages/grpc/_cython/_credentials/roots.pem",
+        ".copilot/rag/query/.venv/scripts/lib/site-packages/certifi/cacert.pem",
+        ".copilot/rag/query/.venv/scripts/lib/site-packages/grpc/_cython/_credentials/roots.pem",
     }
 )
 

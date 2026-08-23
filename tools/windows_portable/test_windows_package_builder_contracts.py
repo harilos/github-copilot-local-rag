@@ -579,6 +579,8 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
         for relative in (
             Path("Lib/site-packages/certifi/cacert.pem"),
             Path("Lib/site-packages/grpc/_cython/_credentials/roots.pem"),
+            Path("Scripts/Lib/site-packages/certifi/cacert.pem"),
+            Path("Scripts/Lib/site-packages/grpc/_cython/_credentials/roots.pem"),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
                 request = _request(Path(directory), no_database=True)
