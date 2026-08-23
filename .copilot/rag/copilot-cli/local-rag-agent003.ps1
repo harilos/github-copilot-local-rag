@@ -141,6 +141,54 @@ function Assert-RegularOwnedFile {
     return $item
 }
 
+function Ensure-SafeDirectory {
+    param([string]$Path, [string]$Boundary)
+    $candidate = [System.IO.Path]::GetFullPath($Path)
+    $boundaryPath = [System.IO.Path]::GetFullPath($Boundary).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    if (-not (Test-PathInside -Path $candidate -Root $boundaryPath)) {
+        throw "Expected temporary directory escapes the install root: $candidate"
+    }
+    $boundaryItem = Get-Item -LiteralPath $boundaryPath -Force -ErrorAction Stop
+    if (-not $boundaryItem.PSIsContainer -or
+        ($boundaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Expected temporary directory root is not a regular directory: $boundaryPath"
+    }
+    $separatorCharacters = [char[]]@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $relative = $candidate.Substring($boundaryPath.Length).TrimStart(
+        $separatorCharacters
+    )
+    $current = $boundaryPath
+    foreach ($segment in $relative.Split(
+        $separatorCharacters,
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $current = Join-Path $current $segment
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            try {
+                [void][System.IO.Directory]::CreateDirectory($current)
+            }
+            catch {
+                throw "Expected temporary directory could not be created safely: $current"
+            }
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        }
+        if (-not $item.PSIsContainer) {
+            throw "Expected temporary path is not a directory: $current"
+        }
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Expected temporary path crosses a reparse point: $current"
+        }
+    }
+    return $candidate
+}
+
 $ReservedFlags = @(
     "--acp", "--attachment", "--autopilot", "--mode", "--plan",
     "--agent", "--model", "--additional-mcp-config", "--available-tools",
@@ -267,6 +315,7 @@ for ($index = 0; $index -lt $ExpectedServerArgs.Count; $index++) {
         throw "Pinned MCP server arguments are not exact"
     }
 }
+[void](Ensure-SafeDirectory -Path $ExpectedTemporary -Boundary $InstallRoot)
 
 $TierMap = @{
     savings = @{ Agent = "local-rag-agent003-savings"; Model = "claude-haiku-4.5" }

@@ -125,6 +125,19 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertIn(evidence_cap, text)
             self.assertIn("Never promote notices, related material", text)
             self.assertIn("unconfirmed Evidence", text)
+            self.assertIn(
+                "normal question that does not explicitly name a fixture", text
+            )
+            self.assertIn(
+                "routing metadata explicitly labels them as `decoy` or `synthetic`",
+                text,
+            )
+            self.assertIn("if one candidate remains, treat it as the clear match", text)
+            self.assertIn(
+                "same turn with the unchanged question and exact returned database name",
+                text,
+            )
+            self.assertIn("Routing metadata is never answer evidence", text)
 
     def test_install_pins_absolute_cli_config_and_preserves_foreign_jsonc(self) -> None:
         config = self.home / "mcp-config.json"
@@ -186,6 +199,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
         )
         self.assertTrue(manifest["config_existed_before_install"])
         self.assertEqual(5, len(manifest["artifacts"]))
+        self.assertTrue(setup._temporary_path(self.product).is_dir())
         for path, content in sentinels.items():
             self.assertEqual(content, path.read_bytes())
 
@@ -317,6 +331,119 @@ class CopilotCliSetupContracts(unittest.TestCase):
                 )
         self.assertTrue(failed)
         self.assertEqual(original, config.read_bytes())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_install_and_repair_safely_create_expected_temporary_directory(self) -> None:
+        temporary = setup._temporary_path(self.product)
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        self.assertTrue(temporary.is_dir())
+        temporary.rmdir()
+
+        result = setup.install_or_repair(
+            "repair",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+
+        self.assertEqual("repaired", result["status"])
+        self.assertTrue(temporary.is_dir())
+
+    def test_existing_temporary_directory_and_foreign_content_are_preserved(self) -> None:
+        temporary = setup._temporary_path(self.product)
+        temporary.mkdir(parents=True)
+        sentinel = temporary / "foreign.keep"
+        sentinel.write_bytes(b"foreign-temporary-content")
+
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+
+        self.assertEqual(b"foreign-temporary-content", sentinel.read_bytes())
+
+    def test_temporary_file_or_reparse_chain_is_rejected_before_writes(self) -> None:
+        temporary = setup._temporary_path(self.product)
+        temporary.parent.mkdir(parents=True)
+        temporary.write_bytes(b"foreign-file")
+        with self.assertRaisesRegex(
+            setup.OwnedArtifactCollisionError,
+            "expected temporary path is not a regular directory",
+        ):
+            setup.install_or_repair(
+                "install",
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+            )
+        self.assertEqual(b"foreign-file", temporary.read_bytes())
+        self.assertFalse((self.home / "mcp-config.json").exists())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+        temporary.unlink()
+
+        original_reparse_check = setup.mcp_config._path_has_reparse
+
+        def report_temporary_reparse(path: Path, boundary: Path) -> bool:
+            if setup._absolute(path) == temporary:
+                return True
+            return original_reparse_check(path, boundary)
+
+        with mock.patch.object(
+            setup.mcp_config,
+            "_path_has_reparse",
+            side_effect=report_temporary_reparse,
+        ):
+            with self.assertRaisesRegex(
+                setup.OwnedArtifactCollisionError,
+                "expected temporary directory crosses a reparse point",
+            ):
+                setup.install_or_repair(
+                    "install",
+                    self.home,
+                    install_root=self.product,
+                    profile_path=self.profile,
+                )
+        self.assertFalse((self.home / "mcp-config.json").exists())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_temporary_directories_created_by_failed_transaction_are_removed(self) -> None:
+        config = self.home / "mcp-config.json"
+        original = b'{"foreign":true}\n'
+        config.write_bytes(original)
+        temporary = setup._temporary_path(self.product)
+        original_writer = setup._write_and_readback
+
+        def fail_manifest(path: Path, content: bytes, *, boundary: Path) -> None:
+            if path == setup._manifest_path(self.product):
+                raise OSError("injected manifest failure after temporary creation")
+            original_writer(path, content, boundary=boundary)
+
+        with mock.patch.object(
+            setup,
+            "_write_and_readback",
+            side_effect=fail_manifest,
+        ):
+            with self.assertRaises(OSError):
+                setup.install_or_repair(
+                    "install",
+                    self.home,
+                    install_root=self.product,
+                    profile_path=self.profile,
+                )
+
+        self.assertEqual(original, config.read_bytes())
+        self.assertFalse(temporary.exists())
+        self.assertFalse(temporary.parent.exists())
         for path in self._owned_paths():
             self.assertFalse(path.exists(), path)
 
@@ -574,6 +701,9 @@ class CopilotCliSetupContracts(unittest.TestCase):
             profile_path=self.profile,
         )
         launcher = self.product / setup.BUNDLE_NAME / setup.LAUNCHER_NAME
+        temporary = setup._temporary_path(self.product)
+        self.assertTrue(temporary.is_dir())
+        temporary.rmdir()
         project = self.root / "project"
         nested = project / "one" / "two"
         nested.mkdir(parents=True)
@@ -627,7 +757,37 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn("LARGE=1310720", captured)
         self.assertIn("CACHE=false", captured)
         self.assertIn(f"CWD={nested}", captured)
+        self.assertTrue(temporary.is_dir())
 
+        sentinel = temporary / "foreign.keep"
+        sentinel.write_bytes(b"preserve-on-launch")
+        capture.unlink()
+        quoted_launcher = str(launcher).replace("'", "''")
+        diagnostic_command = (
+            "$ErrorActionPreference='Stop';"
+            f"try {{ & '{quoted_launcher}' }} catch {{ "
+            "[Console]::Error.WriteLine($_.Exception.Message);"
+            "[Console]::Error.WriteLine($_.ScriptStackTrace);exit 1 }"
+        )
+        reused = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                diagnostic_command,
+            ],
+            cwd=nested,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, reused.returncode, reused.stdout + reused.stderr)
+        self.assertEqual(b"preserve-on-launch", sentinel.read_bytes())
         capture.unlink()
         for reserved_argument in ("--session-id=foreign", "-rforeign"):
             rejected_reserved = subprocess.run(
@@ -694,6 +854,81 @@ class CopilotCliSetupContracts(unittest.TestCase):
         )
         self.assertFalse(capture.exists())
 
+        shadow.unlink()
+        sentinel.unlink()
+        temporary.rmdir()
+        temporary.write_bytes(b"foreign-file")
+        rejected_file = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                diagnostic_command,
+            ],
+            cwd=nested,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertNotEqual(0, rejected_file.returncode)
+        self.assertIn(
+            "Expected temporary path is not a directory",
+            rejected_file.stdout + rejected_file.stderr,
+        )
+        self.assertEqual(b"foreign-file", temporary.read_bytes())
+        self.assertFalse(capture.exists())
+        temporary.unlink()
+
+        if os.name == "nt":
+            reparse_target = self.root / "foreign-reparse-target"
+            reparse_target.mkdir()
+            junction = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(temporary),
+                    str(reparse_target),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            self.assertEqual(0, junction.returncode, junction.stdout + junction.stderr)
+            rejected_reparse = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    diagnostic_command,
+                ],
+                cwd=nested,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertNotEqual(0, rejected_reparse.returncode)
+            self.assertIn(
+                "Expected temporary path crosses a reparse point",
+                rejected_reparse.stdout + rejected_reparse.stderr,
+            )
+            self.assertFalse(capture.exists())
+            os.rmdir(temporary)
+
     def test_launcher_contract_and_powershell_syntax(self) -> None:
         launcher = TEMPLATE_ROOT / setup.LAUNCHER_NAME
         text = launcher.read_text(encoding="utf-8")
@@ -727,6 +962,13 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn('"--spool-root", $ExpectedSpool', text)
         self.assertIn("$server.env.TEMP", text)
         self.assertIn("$server.env.TMP", text)
+        self.assertIn("function Ensure-SafeDirectory", text)
+        self.assertIn("[System.IO.Directory]::CreateDirectory", text)
+        self.assertIn("Expected temporary path crosses a reparse point", text)
+        self.assertIn(
+            "Ensure-SafeDirectory -Path $ExpectedTemporary -Boundary $InstallRoot",
+            text,
+        )
         self.assertIn("Reserved Copilot CLI flag", text)
         self.assertIn('"--resume", "-r"', text)
         self.assertIn('"--continue"', text)

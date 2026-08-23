@@ -19,6 +19,7 @@ BUNDLE_NAME = "copilot-cli"
 MANIFEST_NAME = "owned-manifest.json"
 PINNED_CONFIG_NAME = "local-rag-agent003.pinned-mcp.json"
 LAUNCHER_NAME = "local-rag-agent003.ps1"
+TEMPORARY_RELATIVE = Path("rag") / "query" / "run" / "tmp"
 AGENT_NAMES = (
     "local-rag-agent003-savings.agent.md",
     "local-rag-agent003-standard.agent.md",
@@ -138,6 +139,87 @@ def _validate_runtime(install_root: Path) -> Path:
     ):
         _assert_safe_file(path, boundary=root, allow_missing=False)
     return root
+
+
+def _temporary_path(install_root: Path) -> Path:
+    root = _absolute(install_root)
+    temporary = _absolute(root / TEMPORARY_RELATIVE)
+    if not temporary.is_relative_to(root):
+        raise OwnedArtifactCollisionError(
+            "expected temporary directory escapes install root"
+        )
+    return temporary
+
+
+def _validate_temporary_directory(
+    install_root: Path, *, allow_missing: bool
+) -> Path:
+    root = _absolute(install_root)
+    temporary = _temporary_path(root)
+    if mcp_config._path_has_reparse(temporary, root):
+        raise OwnedArtifactCollisionError(
+            "expected temporary directory crosses a reparse point"
+        )
+    current = root
+    for part in temporary.relative_to(root).parts:
+        current = current / part
+        if not _lexists(current):
+            if not allow_missing:
+                raise OwnedArtifactCollisionError(
+                    f"expected temporary directory is missing: {current}"
+                )
+            continue
+        if not current.is_dir() or mcp_config._is_reparse(current):
+            raise OwnedArtifactCollisionError(
+                f"expected temporary path is not a regular directory: {current}"
+            )
+    return temporary
+
+
+def _remove_created_temporary_directories(paths: tuple[Path, ...]) -> None:
+    for path in reversed(paths):
+        try:
+            if (
+                _lexists(path)
+                and path.is_dir()
+                and not mcp_config._is_reparse(path)
+            ):
+                path.rmdir()
+        except OSError:
+            # A non-empty or concurrently replaced directory is foreign state.
+            # Never recurse into it during rollback.
+            pass
+
+
+def _ensure_temporary_directory(install_root: Path) -> tuple[Path, ...]:
+    root = _absolute(install_root)
+    temporary = _validate_temporary_directory(root, allow_missing=True)
+    created: list[Path] = []
+    current = root
+    try:
+        for part in temporary.relative_to(root).parts:
+            current = current / part
+            if not _lexists(current):
+                try:
+                    current.mkdir()
+                except FileExistsError:
+                    pass
+                else:
+                    created.append(current)
+            if (
+                not _lexists(current)
+                or not current.is_dir()
+                or mcp_config._is_reparse(current)
+                or mcp_config._path_has_reparse(current, root)
+            ):
+                raise OwnedArtifactCollisionError(
+                    f"expected temporary path is not a regular directory: {current}"
+                )
+        _validate_temporary_directory(root, allow_missing=False)
+    except BaseException:
+        _remove_created_temporary_directories(tuple(created))
+        raise
+    return tuple(created)
 
 
 def _strict_json(content: bytes, *, label: str) -> object:
@@ -666,6 +748,8 @@ def install_or_repair(
     profile = _absolute(profile_path)
     vscode = _absolute(vscode_mcp_config) if vscode_mcp_config is not None else None
     _validate_distinct_targets(home, root, profile, vscode)
+    temporary = _validate_temporary_directory(root, allow_missing=True)
+    temporary_missing = not temporary.is_dir()
     artifacts = _desired_artifacts(home, root)
     manifest_path = _manifest_path(root)
     existing_manifest: dict[str, object] | None = None
@@ -719,7 +803,11 @@ def install_or_repair(
         ),
     )
     desired_manifest_bytes = _manifest_bytes(manifest)
-    changed = existing_manifest is None or original_profile != profile_bytes
+    changed = (
+        existing_manifest is None
+        or original_profile != profile_bytes
+        or temporary_missing
+    )
     if existing_manifest is not None:
         changed = changed or manifest_path.read_bytes() != desired_manifest_bytes
         changed = changed or any(
@@ -727,6 +815,7 @@ def install_or_repair(
             for path, content in artifacts.values()
         )
     snapshots = _transaction_snapshots(home, root, profile, vscode)
+    created_temporary_directories: tuple[Path, ...] = ()
     try:
         home.mkdir(parents=True, exist_ok=True)
         if vscode is None:
@@ -746,6 +835,7 @@ def install_or_repair(
                 path, content, boundary=_root_path(key[0], home, root)
             )
         _write_and_readback(profile, profile_bytes, boundary=profile.parent)
+        created_temporary_directories = _ensure_temporary_directory(root)
         _write_and_readback(manifest_path, desired_manifest_bytes, boundary=root)
         readback = _load_manifest(home, root, profile, vscode)
         if readback != manifest:
@@ -754,6 +844,7 @@ def install_or_repair(
         _verify_profile_owned(profile, readback["profile"])  # type: ignore[arg-type]
     except BaseException as exc:
         try:
+            _remove_created_temporary_directories(created_temporary_directories)
             _restore(snapshots)
             _cleanup_empty_directories(home, root)
         except BaseException as rollback_exc:
