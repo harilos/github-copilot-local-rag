@@ -23,8 +23,14 @@ Windows PowerShell:
 
 The official Windows x64 package embeds its fixed Python, locked dependencies,
 and ONNX model. Packaged setup is offline and never falls back to system
-Python. In VS Code Copilot Chat, use Agent mode and enable `runInTerminal` in
-Configure Tools; also enable `readFile` for file result delivery.
+Python. In VS Code Copilot Chat, select one of the three LOCAL-RAG Agents; they
+use only `local_rag_search` and `local_rag_get_evidence` through the read-only
+`localragagent003` MCP server. No terminal or file-read tool is required.
+
+For GitHub Copilot CLI in PowerShell 7, run `local-rag-copilot` (standard), or
+add `-Tier savings|standard|thorough`. The dedicated launcher pins the owned
+MCP definition and grants session-scoped permission only to those two tools.
+It does not replace normal `copilot` or write persistent global permissions.
 
 The receiving user's `~/.copilot/copilot-instructions.md` must contain:
 

@@ -40,7 +40,10 @@ $ModelPublished = $false
 $InstallStage = "validate_package"
 $RuntimeStatus = "NOT_READY"
 $DatabaseStatus = "NOT_CHECKED"
-$MCPStatus = "NOT_CONFIGURED"
+$CopilotCliMCPStatus = "not_reached"
+$CopilotCliAgentsStatus = "not_reached"
+$CopilotCliApprovalStatus = "not_reached"
+$CopilotCliExecutableStatus = "not_detected"
 $InstallLogPath = ""
 $InstallTranscriptStarted = $false
 
@@ -126,7 +129,13 @@ function Write-InstallSummary {
     Write-Host (($Utf8.GetString([Convert]::FromBase64String(
         "44OH44O844K/44OZ44O844K5OiA="
     ))) + $DatabaseStatus)
-    Write-Host ("MCP: " + $MCPStatus)
+    Write-Host ("Copilot CLI MCP: " + $CopilotCliMCPStatus)
+    Write-Host ("Copilot CLI agents: " + $CopilotCliAgentsStatus)
+    Write-Host (
+        "Copilot CLI launcher-scoped read-only approval: " +
+        $CopilotCliApprovalStatus
+    )
+    Write-Host ("Copilot CLI executable: " + $CopilotCliExecutableStatus)
     if (-not $Succeeded -and -not [string]::IsNullOrWhiteSpace($Reason)) {
         Write-Host (($Utf8.GetString([Convert]::FromBase64String(
             "55CG55SxOiA="
@@ -555,41 +564,106 @@ try {
     $RuntimePublished = $true
     $RuntimeStatus = "READY"
 
-    $InstallStage = "mcp_config"
-    $McpRelative = "mcp-config.json"
-    $McpTarget = Join-Path $Target $McpRelative
+    $InstallStage = "copilot_cli_setup"
     if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
         throw "APPDATA is required to configure the normal VS Code Default Profile."
     }
     $VSCodeMcpTarget = [System.IO.Path]::GetFullPath((
         Join-Path $env:APPDATA "Code\User\mcp.json"
     ))
-    Assert-NoReparsePath -Path $McpTarget
     Assert-NoReparsePath -Path $VSCodeMcpTarget
-    if (Test-Path -LiteralPath $McpTarget -PathType Leaf) {
-        Backup-ProductFile -Relative $McpRelative -Destination $McpTarget
+    if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+        if (-not [System.IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
+            throw "COPILOT_HOME must be an absolute path."
+        }
+        $CopilotCliHome = [System.IO.Path]::GetFullPath($env:COPILOT_HOME)
     } else {
-        $script:ProductCreatedFiles += $McpTarget
+        if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            throw "USERPROFILE is required when COPILOT_HOME is unset."
+        }
+        if (-not [System.IO.Path]::IsPathRooted($env:USERPROFILE)) {
+            throw "USERPROFILE must be an absolute path."
+        }
+        $CopilotCliHome = [System.IO.Path]::GetFullPath((
+            Join-Path $env:USERPROFILE ".copilot"
+        ))
     }
-    $McpText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
-        Join-Path $TargetQuery "mcp_config.py"
-    ) --copilot-home $Target --vscode-mcp-config $VSCodeMcpTarget `
-        --no-backup | Out-String)
-    $McpExitCode = $LASTEXITCODE
-    try {
-        $McpResult = $McpText | ConvertFrom-Json
-    } catch {
-        throw "Local RAG MCP configuration returned invalid JSON."
-    }
-    if (
-        $McpExitCode -ne 0 -or
-        @("configured_on_disk", "already_configured") -inotcontains (
-            [string]$McpResult.status
+    if (-not [string]::IsNullOrWhiteSpace(
+        $env:LOCAL_RAG_COPILOT_PROFILE_PATH
+    )) {
+        if (-not [System.IO.Path]::IsPathRooted(
+            $env:LOCAL_RAG_COPILOT_PROFILE_PATH
+        )) {
+            throw "LOCAL_RAG_COPILOT_PROFILE_PATH must be an absolute path."
+        }
+        $CopilotProfilePath = [System.IO.Path]::GetFullPath(
+            $env:LOCAL_RAG_COPILOT_PROFILE_PATH
         )
-    ) {
-        throw "Local RAG MCP configuration failed."
+    } else {
+        if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+            throw "USERPROFILE is required to select the PowerShell profile."
+        }
+        $CopilotProfilePath = [System.IO.Path]::GetFullPath((
+            Join-Path $env:USERPROFILE "Documents\PowerShell\profile.ps1"
+        ))
     }
-    $MCPStatus = [string]$McpResult.status
+    if ($null -ne (Get-Command "copilot" -CommandType Application `
+        -ErrorAction SilentlyContinue)) {
+        $CopilotCliExecutableStatus = "detected"
+    } else {
+        Write-Warning (
+            "GitHub Copilot CLI was not detected. Local RAG CLI files will " +
+            "still be installed."
+        )
+    }
+    $CopilotCliArguments = @(
+        "install",
+        "--copilot-home", $CopilotCliHome,
+        "--install-root", $Target,
+        "--profile-path", $CopilotProfilePath,
+        "--vscode-mcp-config", $VSCodeMcpTarget
+    )
+    $CopilotCliText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
+        Join-Path $TargetQuery "copilot_cli_setup.py"
+    ) @CopilotCliArguments | Out-String)
+    $CopilotCliExitCode = $LASTEXITCODE
+    try {
+        $CopilotCliResult = $CopilotCliText | ConvertFrom-Json
+    } catch {
+        throw "Copilot CLI setup returned invalid JSON."
+    }
+    if ($CopilotCliExitCode -ne 0) {
+        $CopilotCliError = [string]$CopilotCliResult.error
+        if ($CopilotCliError -match (
+            "(?i)(collision|already owned|unowned artifact)"
+        )) {
+            $CopilotCliMCPStatus = "blocked_collision"
+        }
+        throw ("Copilot CLI setup failed: " + $CopilotCliError)
+    }
+    if (@("installed", "updated", "already_installed") -inotcontains (
+        [string]$CopilotCliResult.status
+    )) {
+        throw "Copilot CLI setup returned an invalid success status."
+    }
+    $CopilotCliConfigStatus = [string]$CopilotCliResult.config.status
+    if ($CopilotCliConfigStatus -ieq "configured_on_disk") {
+        $CopilotCliMCPStatus = "configured"
+    } elseif ($CopilotCliConfigStatus -ieq "already_configured") {
+        $CopilotCliMCPStatus = "already_configured"
+    } else {
+        throw "Copilot CLI setup returned an invalid MCP status."
+    }
+    if ([string]$CopilotCliResult.status -ieq "updated") {
+        $CopilotCliAgentsStatus = "updated"
+    } else {
+        $CopilotCliAgentsStatus = "installed"
+    }
+    if ([string]$CopilotCliResult.status -ieq "already_installed") {
+        $CopilotCliApprovalStatus = "already_enabled"
+    } else {
+        $CopilotCliApprovalStatus = "enabled"
+    }
 } catch {
     foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
         $Current = Join-Path $TargetDbs $Name

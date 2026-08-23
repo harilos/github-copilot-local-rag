@@ -41,13 +41,25 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
     def test_mcp_config_uses_installed_runtime_without_global_approval(self) -> None:
         for fragment in (
             "[switch]$ConfigureVSCodeAutoApprove",
-            'Join-Path $Target "rag\\query\\mcp_config.py"',
-            "--copilot-home $Target",
-            '"configured_on_disk", "already_configured"',
-            'MCP: $MCPStatus',
+            'Join-Path $Target "rag\\query\\copilot_cli_setup.py"',
+            '"--copilot-home", $CopilotCliHome',
+            '"--install-root", $Target',
+            '"--profile-path", $CopilotProfilePath',
+            "$env:COPILOT_HOME",
+            "$env:USERPROFILE",
+            "$env:LOCAL_RAG_COPILOT_PROFILE_PATH",
+            'Write-Host "Copilot CLI MCP:',
+            'Write-Host "Copilot CLI agents:',
+            "Copilot CLI launcher-scoped read-only approval:",
+            'Write-Host "Copilot CLI executable:',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.installer)
+        self.assertEqual(1, self.installer.count("copilot_cli_setup.py"))
+        self.assertNotIn(
+            'Join-Path $Target "rag\\query\\mcp_config.py"',
+            self.installer,
+        )
         self.assertNotIn("if ($ConfigureVSCodeAutoApprove)", self.installer)
         self.assertNotIn('Join-Path $Target "rag\\query\\vscode_settings.py"', self.installer)
 
@@ -59,7 +71,7 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
             '$InstallStage = "validate_payload"',
             '$InstallStage = "runtime_create"',
             '$InstallStage = "list_dbs"',
-            '$InstallStage = "mcp_config"',
+            '$InstallStage = "copilot_cli_setup"',
             'Runtime: $RuntimeStatus',
         ):
             with self.subTest(fragment=fragment):

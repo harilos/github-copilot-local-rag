@@ -158,8 +158,11 @@ PATH外のPythonを使う場合は
 `-BootstrapPython "C:\path\to\python.exe"`を追加してください。
 既存の`%USERPROFILE%\.copilot\rag\dbs`はsource cloneの内容で上書きしません。
 installerは固定user-level `localragagent003` MCP serverを
-`%USERPROFILE%\.copilot\mcp-config.json`へJSONCとしてmergeし、無関係なserver、
+`COPILOT_HOME`、未設定時は`%USERPROFILE%\.copilot`の
+`mcp-config.json`へCLI形式の`mcpServers`としてmergeし、無関係なserver、
 comment、BOM、改行を保持します。同名の利用者設定とは衝突として停止します。
+同じCLI設定rootへCLI用の節約／標準／徹底検索Agentを配置し、install rootの
+`copilot-cli`にはhash検証付きlauncherとpinned MCP設定を配置します。
 VS Codeのapproval settingsは変更しません。
 完了時は`Local RAG install: SUCCESS`、失敗時は`FAILED`と停止工程を表示します。
 
@@ -191,6 +194,17 @@ fallbackを行いません。installerは節約／標準／徹底検索の3 Agen
 `local_rag_search`／`local_rag_get_evidence`だけを公開するread-only MCPを登録します。
 terminalやfile pointerは使わず、VS Codeのapproval settingsも変更しません。
 Copilotによる実地受入はinstallerや製品testでは実行しません。
+
+GitHub Copilot CLIをPowerShell 7から使う場合は、標準profileを次で起動します。
+
+```powershell
+local-rag-copilot
+```
+
+`-Tier savings|standard|thorough`で三段階を選べます。この専用launcherは現在の
+作業folderを維持し、pinned `localragagent003`のread-only 2 toolだけをsession内で
+自動許可します。通常の`copilot` command、認証、session、永続permissions、
+VS Code approval設定は変更しません。
 
 既存のCopilot instructions、作成済みDB、Python環境、検索daemonの状態、
 端末固有のnetwork設定、Source接続設定はinstallerで不用意に上書きしません。
@@ -349,10 +363,12 @@ WindowsでManagerが利用者向けpackageを作るとき、管理者PCのPython
 network、PATH変更、管理者権限は不要です。installerも最終結果を
 `Local RAG install: SUCCESS`または`FAILED`で表示します。既存のPython環境や
 端末固有設定は削除しません。固定user-level MCP設定は
-`%USERPROFILE%\.copilot\mcp-config.json`と通常VS Code Default Profileの
+CLI設定rootの`mcp-config.json`と通常VS Code Default Profileの
 `%APPDATA%\Code\User\mcp.json`の両方へJSONCを保持して登録します。
-3つの製品Agentは既知の製品revisionだけをtransaction内で更新します。
-MCP登録に失敗した場合はruntime、選択DB、Agent、両MCP configを元へ戻します。
+3つのVS Code製品Agentに加えて3つのCLI Agent、pinned MCP、専用launcher、
+PowerShell 7の所有markerだけをtransaction内で配置・更新します。
+CLIまたはMCP登録に失敗した場合はruntime、選択DB、Agent、profile marker、
+両MCP configを元へ戻します。
 VS Codeのapproval settingsは変更しません。また、
 `~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
 追加します。管理PC引っ越しpackageは、Managerの

@@ -21,6 +21,13 @@ RAG_ROOT = Path(__file__).resolve().parents[1]
 TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 LOCK_PATH = Path(__file__).with_name("windows-runtime-lock.json")
 INSTALL_TEMPLATE = Path(__file__).with_name("windows-install-template.ps1")
+COPILOT_CLI_TEMPLATE_ROOT = RAG_ROOT / "copilot-cli"
+COPILOT_CLI_TEMPLATES = (
+    "local-rag-agent003-savings.agent.md",
+    "local-rag-agent003-standard.agent.md",
+    "local-rag-agent003-thorough.agent.md",
+    "local-rag-agent003.ps1",
+)
 SEARCH_REQUIREMENTS = (
     RAG_ROOT / "query" / "requirements-windows-search.lock"
 )
@@ -482,8 +489,12 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "failure guidance and writes the same class of run log.\n\n"
         "The package registers the fixed user-level `localragagent003` MCP "
         "server in both the portable Copilot configuration and the normal "
-        "VS Code Default Profile. It does not change VS Code approval "
-        "settings. Copilot "
+        "VS Code Default Profile. PowerShell 7 users can run "
+        "`local-rag-copilot` and select savings, standard, or thorough; that "
+        "launcher pins the owned MCP definition and auto-approves only the "
+        "two read-only Local RAG tools in any working directory. It does not "
+        "replace the normal `copilot` command or write persistent global "
+        "permissions. It does not change VS Code approval settings. Copilot "
         "acceptance is not run by the installer or product tests.\n",
         encoding="utf-8",
     )
@@ -495,6 +506,13 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
             source_root=INSTALL_TEMPLATE.parent,
         ),
         packages._Entry(readme, "README-WINDOWS.md", source_root=generated),
+    ] + [
+        packages._Entry(
+            COPILOT_CLI_TEMPLATE_ROOT / name,
+            f".copilot/rag/copilot-cli/{name}",
+            source_root=COPILOT_CLI_TEMPLATE_ROOT,
+        )
+        for name in COPILOT_CLI_TEMPLATES
     ]
 
 

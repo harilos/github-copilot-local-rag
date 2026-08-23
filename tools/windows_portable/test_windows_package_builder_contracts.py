@@ -55,6 +55,19 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (payload / "rag" / "query" / "search.py").write_text(
         "print('search')\n", encoding="utf-8"
     )
+    for filename in (
+        "mcp_config.py",
+        "mcp_server.py",
+        "copilot_cli_setup.py",
+    ):
+        shutil.copy2(
+            REPOSITORY_ROOT / ".copilot" / "rag" / "query" / filename,
+            payload / "rag" / "query" / filename,
+        )
+    shutil.copytree(
+        REPOSITORY_ROOT / ".copilot" / "rag" / "copilot-cli",
+        payload / "rag" / "copilot-cli",
+    )
     (payload / "rag" / "VERSION").write_text("1.2.3\n", encoding="utf-8")
     (payload / "rag" / "config").mkdir()
     (payload / "rag" / "config" / "network.example.json").write_text(
@@ -166,6 +179,24 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                         (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
                         archive.read(member),
                     )
+                for filename in (
+                    "local-rag-agent003-savings.agent.md",
+                    "local-rag-agent003-standard.agent.md",
+                    "local-rag-agent003-thorough.agent.md",
+                    "local-rag-agent003.ps1",
+                ):
+                    member = prefix + ".copilot/rag/copilot-cli/" + filename
+                    self.assertIn(member, names)
+                    self.assertEqual(
+                        (
+                            REPOSITORY_ROOT
+                            / ".copilot"
+                            / "rag"
+                            / "copilot-cli"
+                            / filename
+                        ).read_bytes(),
+                        archive.read(member),
+                    )
                 launcher_bytes = archive.read(prefix + "install.cmd")
                 self.assertIn(b"\r\n", launcher_bytes)
                 self.assertNotIn(b"\n", launcher_bytes.replace(b"\r\n", b""))
@@ -267,7 +298,7 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer.index("$PayloadRoot ="),
                 )
                 self.assertGreater(
-                    installer.index('$InstallStage = "mcp_config"'),
+                    installer.index('$InstallStage = "copilot_cli_setup"'),
                     installer.index(
                         "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
                     ),
@@ -277,7 +308,11 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer,
                 )
                 self.assertIn(
-                    "--vscode-mcp-config $VSCodeMcpTarget", installer
+                    '"--vscode-mcp-config", $VSCodeMcpTarget', installer
+                )
+                self.assertEqual(1, installer.count("copilot_cli_setup.py"))
+                self.assertNotIn(
+                    'Join-Path $TargetQuery "mcp_config.py"', installer
                 )
                 readme = archive.read(prefix + "README-WINDOWS.md").decode(
                     "utf-8"
@@ -614,9 +649,22 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
-        shutil.copy2(
-            REPOSITORY_ROOT / ".copilot" / "rag" / "query" / "mcp_config.py",
-            query / "mcp_config.py",
+        for filename in (
+            "mcp_config.py",
+            "mcp_server.py",
+            "copilot_cli_setup.py",
+        ):
+            shutil.copy2(
+                REPOSITORY_ROOT
+                / ".copilot"
+                / "rag"
+                / "query"
+                / filename,
+                query / filename,
+            )
+        shutil.copytree(
+            REPOSITORY_ROOT / ".copilot" / "rag" / "copilot-cli",
+            package / ".copilot" / "rag" / "copilot-cli",
         )
         shutil.copytree(
             REPOSITORY_ROOT / ".copilot" / "agents",
@@ -641,11 +689,16 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         package: Path,
         profile: Path,
         *arguments: str,
+        environment_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
+        environment.pop("COPILOT_HOME", None)
+        environment.pop("LOCAL_RAG_COPILOT_PROFILE_PATH", None)
         environment["USERPROFILE"] = str(profile)
         environment["APPDATA"] = str(profile / "AppData" / "Roaming")
         environment["LOCALAPPDATA"] = str(profile / "AppData" / "Local")
+        if environment_overrides is not None:
+            environment.update(environment_overrides)
         powershell = (
             Path(os.environ.get("SystemRoot", r"C:\Windows"))
             / "System32"
@@ -878,13 +931,95 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             self.assertIn(b"// keep vscode\r\n", vscode_rendered)
             self.assertIn(b'"inputs"', vscode_rendered)
             self.assertIn(b'"localragagent003"', vscode_rendered)
-            self.assertIn("MCP: configured_on_disk", completed.stdout)
+            self.assertIn("Copilot CLI MCP: configured", completed.stdout)
+            self.assertIn("Copilot CLI agents: installed", completed.stdout)
+            self.assertIn(
+                "Copilot CLI launcher-scoped read-only approval: enabled",
+                completed.stdout,
+            )
 
             second = self._run(package, profile, "-ReplaceExistingDatabases")
             self.assertEqual(0, second.returncode, second.stderr)
             self.assertEqual(rendered, config.read_bytes())
             self.assertEqual(vscode_rendered, vscode_config.read_bytes())
-            self.assertIn("MCP: already_configured", second.stdout)
+            self.assertIn(
+                "Copilot CLI MCP: already_configured", second.stdout
+            )
+            self.assertIn(
+                "Copilot CLI launcher-scoped read-only approval: already_enabled",
+                second.stdout,
+            )
+
+    def test_missing_copilot_cli_warns_without_failing_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            cli_free_path = os.pathsep.join(
+                entry
+                for entry in os.environ.get("PATH", "").split(os.pathsep)
+                if entry
+                and not any(
+                    (Path(entry) / name).is_file()
+                    for name in ("copilot", "copilot.cmd", "copilot.exe")
+                )
+            )
+
+            completed = self._run(
+                package,
+                profile,
+                environment_overrides={"PATH": cli_free_path},
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn(
+                "GitHub Copilot CLI was not detected", completed.stdout
+            )
+            self.assertIn(
+                "Copilot CLI executable: not_detected", completed.stdout
+            )
+            self.assertIn("Copilot CLI MCP: configured", completed.stdout)
+
+    def test_explicit_copilot_home_and_profile_path_are_respected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            cli_home = root / "cli-config-root"
+            cli_profile = root / "PowerShell" / "profile.ps1"
+            package = self._package(root)
+
+            completed = self._run(
+                package,
+                profile,
+                environment_overrides={
+                    "COPILOT_HOME": str(cli_home),
+                    "LOCAL_RAG_COPILOT_PROFILE_PATH": str(cli_profile),
+                },
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue((cli_home / "mcp-config.json").is_file())
+            for filename in (
+                "local-rag-agent003-savings.agent.md",
+                "local-rag-agent003-standard.agent.md",
+                "local-rag-agent003-thorough.agent.md",
+            ):
+                self.assertTrue((cli_home / "agents" / filename).is_file())
+                self.assertFalse(
+                    (profile / ".copilot" / "agents" / filename).exists()
+                )
+            self.assertTrue(
+                (
+                    profile
+                    / ".copilot"
+                    / "copilot-cli"
+                    / "owned-manifest.json"
+                ).is_file()
+            )
+            self.assertIn(
+                "# >>> Local RAG Agent003 CLI (owned) >>>",
+                cli_profile.read_text(encoding="utf-8"),
+            )
 
     def test_foreign_mcp_name_collision_rolls_back_every_published_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -907,7 +1042,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             config = profile / ".copilot" / "mcp-config.json"
             config.parent.mkdir(parents=True, exist_ok=True)
             original_config = (
-                b'{"servers":{"localragagent003":{"type":"http",'
+                b'{"mcpServers":{"localragagent003":{"type":"http",'
                 b'"url":"https://foreign.example"}}}\n'
             )
             config.write_bytes(original_config)
@@ -926,7 +1061,14 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
             self.assertEqual(original_config, config.read_bytes())
-            self.assertIn("Local RAG MCP configuration failed", completed.stdout)
+            self.assertIn("Copilot CLI setup failed", completed.stdout)
+            self.assertIn(
+                "Copilot CLI MCP: blocked_collision", completed.stdout
+            )
+            self.assertFalse(
+                (profile / "Documents" / "PowerShell" / "profile.ps1").exists()
+            )
+            self.assertFalse((profile / ".copilot" / "copilot-cli").exists())
 
     def test_vscode_mcp_collision_rolls_back_every_published_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -980,7 +1122,14 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(portable_original, portable_config.read_bytes())
             self.assertEqual(vscode_original, vscode_config.read_bytes())
-            self.assertIn("Local RAG MCP configuration failed", completed.stdout)
+            self.assertIn("Copilot CLI setup failed", completed.stdout)
+            self.assertIn(
+                "Copilot CLI MCP: blocked_collision", completed.stdout
+            )
+            self.assertFalse(
+                (profile / "Documents" / "PowerShell" / "profile.ps1").exists()
+            )
+            self.assertFalse((profile / ".copilot" / "copilot-cli").exists())
 
 
 if __name__ == "__main__":

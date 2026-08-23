@@ -446,6 +446,11 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは固定user-level
 `localragagent003` MCP serverをportable Copilot設定と通常VS Code Default Profileの
 両方へ、3つのLOCAL-RAG Agentとともにtransaction内で登録します。
+GitHub Copilot CLI向けにはCLI設定rootへ3 Agentを登録し、install rootへ
+hash検証付きの`local-rag-copilot` launcherとpinned MCP設定を配置します。
+PowerShell 7から`local-rag-copilot -Tier savings|standard|thorough`で起動すると、
+作業folderにかかわらずread-only 2 toolだけがsession内で自動許可されます。
+通常の`copilot`、認証、session、永続permissionsは変更しません。
 VS Codeのapproval settingsは変更しません。Managerとinstallerは最終結果を
 `SUCCESS`または`FAILED`で表示し、MCP登録が失敗した場合はruntime、選択DB、
 製品Agent、両MCP configを元へ戻します。

@@ -1,8 +1,12 @@
 from __future__ import annotations
 import argparse, contextlib, json, os, shutil, tempfile, uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone; from pathlib import Path
 SERVER_NAME = "localragagent003"; MCP_CONFIG_NAME = "mcp-config.json"
+CLI_ROOT_KEY = "mcpServers"; VSCODE_ROOT_KEY = "servers"
+CLI_TOOLS = ("local_rag_search", "local_rag_get_evidence")
+CLI_TOOL_TIMEOUT_MS = 180_000
 RUNTIME_COMMAND = "${userHome}\\.copilot\\rag\\query\\.venv\\Scripts\\python.exe"; SERVER_SCRIPT = "${userHome}\\.copilot\\rag\\query\\mcp_server.py"
 RAG_ROOT = "${userHome}\\.copilot\\rag"
 _LEGACY_SERVER_NAME = "localRagAgent003"
@@ -133,12 +137,38 @@ class _JsoncLexer:
             if self.clean[index] != ",":
                 raise ValueError("missing JSONC property comma")
             index = self.skip(index + 1)
-def _server(script: str) -> dict[str, object]:
+def _vscode_server(script: str) -> dict[str, object]:
     return {"type": "stdio", "command": RUNTIME_COMMAND, "args": ["-B", script, "--rag-root", RAG_ROOT], "cwd": RAG_ROOT}
+def owned_vscode_server_config() -> dict[str, object]:
+    return _vscode_server(SERVER_SCRIPT)
 def owned_server_config() -> dict[str, object]:
-    return _server(SERVER_SCRIPT)
+    """Compatibility alias for the VS Code MCP server definition."""
+    return owned_vscode_server_config()
+def owned_cli_server_config(install_root: Path) -> dict[str, object]:
+    root = Path(os.path.abspath(install_root))
+    rag_root = root / "rag"
+    python = rag_root / "query" / ".venv" / "Scripts" / "python.exe"
+    temporary = rag_root / "query" / "run" / "tmp"
+    spool_root = temporary / "GitHubCopilotLocalRAG" / "results"
+    return {
+        "type": "local",
+        "command": str(python),
+        "args": [
+            "-B",
+            str(rag_root / "query" / "mcp_server.py"),
+            "--rag-root",
+            str(rag_root),
+            "--python",
+            str(python),
+            "--spool-root",
+            str(spool_root),
+        ],
+        "env": {"TEMP": str(temporary), "TMP": str(temporary)},
+        "tools": list(CLI_TOOLS),
+        "timeout": CLI_TOOL_TIMEOUT_MS,
+    }
 def _legacy_owned_server_configs() -> tuple[dict[str, object], ...]:
-    return (_server(_LEGACY_SERVER_SCRIPT),)
+    return (_vscode_server(_LEGACY_SERVER_SCRIPT),)
 def _render(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 def _insert(text: str, view: _ObjectView, key: str, value: str) -> str:
@@ -166,24 +196,36 @@ def _insert(text: str, view: _ObjectView, key: str, value: str) -> str:
         text = text[:comma] + "," + text[comma:]
         insert_at += comma <= insert_at
     return text[:insert_at] + insertion + text[insert_at:]
-def _replace_owned(text: str, item: _Property, *, rename: bool) -> str:
-    text = text[:item.value_start] + _render(owned_server_config()) + text[item.value_end:]
+def _replace_owned(
+    text: str, item: _Property, value: dict[str, object], *, rename: bool
+) -> str:
+    text = text[:item.value_start] + _render(value) + text[item.value_end:]
     if rename:
         text = text[:item.key_start] + json.dumps(SERVER_NAME) + text[item.key_end:]
     return text
-def patch_mcp_config(text: str) -> str:
+
+
+def _patch_server_config(
+    text: str,
+    *,
+    root_key: str,
+    owned: dict[str, object],
+    legacy_configs: tuple[dict[str, object], ...] = (),
+    accept_legacy_name: bool = False,
+) -> str:
     bom, body = ("\ufeff", text[1:]) if text.startswith("\ufeff") else ("", text)
     if not body.strip():
         ending = "\r\n" if body.endswith("\r\n") else "\n" if body.endswith("\n") else ""
         body = "{}" + ending
     lexer = _JsoncLexer(body)
     _, root = lexer.document()
-    servers = root.property("servers")
+    servers = root.property(root_key)
     if servers is None:
-        return bom + _insert(body, root, "servers", _render({SERVER_NAME: owned_server_config()}))
+        return bom + _insert(body, root, root_key, _render({SERVER_NAME: owned}))
     view = lexer.object_view(servers.value_start)
-    current, legacy = view.property(SERVER_NAME), view.property(_LEGACY_SERVER_NAME)
-    accepted = (owned_server_config(),) + _legacy_owned_server_configs()
+    current = view.property(SERVER_NAME)
+    legacy = view.property(_LEGACY_SERVER_NAME) if accept_legacy_name else None
+    accepted = (owned,) + legacy_configs
     if current is not None and current.value not in accepted:
         raise McpConfigCollisionError(f"MCP server name is already owned: {SERVER_NAME}")
     if legacy is not None and legacy.value not in accepted:
@@ -191,10 +233,141 @@ def patch_mcp_config(text: str) -> str:
     if current is not None and legacy is not None:
         raise McpConfigCollisionError("both Local RAG MCP server names are present")
     if legacy is not None:
-        return bom + _replace_owned(body, legacy, rename=True)
+        return bom + _replace_owned(body, legacy, owned, rename=True)
     if current is None:
-        return bom + _insert(body, view, SERVER_NAME, _render(owned_server_config()))
-    return text if current.value == owned_server_config() else bom + _replace_owned(body, current, rename=False)
+        return bom + _insert(body, view, SERVER_NAME, _render(owned))
+    return text if current.value == owned else bom + _replace_owned(body, current, owned, rename=False)
+
+
+def patch_cli_mcp_config(text: str, install_root: Path) -> str:
+    patched = _patch_server_config(
+        text,
+        root_key=CLI_ROOT_KEY,
+        owned=owned_cli_server_config(install_root),
+    )
+    return _remove_known_vscode_entries(patched)
+
+
+def patch_vscode_mcp_config(text: str) -> str:
+    return _patch_server_config(
+        text,
+        root_key=VSCODE_ROOT_KEY,
+        owned=owned_vscode_server_config(),
+        legacy_configs=_legacy_owned_server_configs(),
+        accept_legacy_name=True,
+    )
+
+
+def patch_mcp_config(text: str) -> str:
+    """Compatibility alias for the VS Code `servers` configuration."""
+    return patch_vscode_mcp_config(text)
+
+
+def _remove_known_vscode_entries(text: str) -> str:
+    bom, body = ("\ufeff", text[1:]) if text.startswith("\ufeff") else ("", text)
+    accepted = (owned_vscode_server_config(),) + _legacy_owned_server_configs()
+    for name in (SERVER_NAME, _LEGACY_SERVER_NAME):
+        lexer = _JsoncLexer(body)
+        _, root = lexer.document()
+        servers = root.property(VSCODE_ROOT_KEY)
+        if servers is None:
+            break
+        view = lexer.object_view(servers.value_start)
+        current = view.property(name)
+        if current is None or current.value not in accepted:
+            continue
+        body = _remove_property(body, view, current)
+    return bom + body
+
+
+def _remove_property(text: str, view: _ObjectView, item: _Property) -> str:
+    properties = list(view.properties)
+    index = properties.index(item)
+    masked, _ = _jsonc_text(text)
+    line_start = text.rfind("\n", view.start, item.key_start) + 1
+    own_line = not text[line_start:item.key_start].strip()
+
+    comma_after = masked.find(",", item.value_end, view.end)
+    has_comma_after = comma_after >= 0 and (
+        index < len(properties) - 1 or view.trailing_comma
+    )
+    if has_comma_after:
+        start = line_start if own_line else item.key_start
+        end = comma_after + 1
+        if own_line:
+            line_end = text.find("\n", end, view.end + 1)
+            if line_end >= 0 and not text[end:line_end].strip():
+                end = line_end + 1
+        else:
+            while end < view.end and text[end] in " \t":
+                end += 1
+        output = text[:start] + text[end:]
+    elif len(properties) == 1:
+        start = line_start if own_line else item.key_start
+        end = item.value_end
+        if own_line:
+            line_end = text.find("\n", end, view.end + 1)
+            if line_end >= 0 and not text[end:line_end].strip():
+                end = line_end + 1
+        output = text[:start] + text[end:]
+    else:
+        previous = properties[index - 1]
+        separator = masked.find(",", previous.value_end, item.key_start)
+        if separator < 0:
+            raise ValueError("missing JSONC property comma")
+        start = line_start if own_line else item.key_start
+        end = item.value_end
+        if own_line:
+            line_end = text.find("\n", end, view.end + 1)
+            if line_end >= 0 and not text[end:line_end].strip():
+                end = line_end + 1
+        output = text[:start] + text[end:]
+        output = output[:separator] + output[separator + 1:]
+    _JsoncLexer(output).document()
+    return output
+
+
+def remove_cli_mcp_config(text: str, install_root: Path) -> str:
+    bom, body = ("\ufeff", text[1:]) if text.startswith("\ufeff") else ("", text)
+    if not body.strip():
+        return text
+    lexer = _JsoncLexer(body)
+    _, root = lexer.document()
+    servers = root.property(CLI_ROOT_KEY)
+    if servers is None:
+        return text
+    view = lexer.object_view(servers.value_start)
+    current = view.property(SERVER_NAME)
+    if current is None:
+        return text
+    if current.value != owned_cli_server_config(install_root):
+        raise McpConfigCollisionError(
+            f"MCP server name is no longer owned: {SERVER_NAME}"
+        )
+    return bom + _remove_property(body, view, current)
+
+
+def remove_vscode_mcp_config(text: str) -> str:
+    bom, body = ("\ufeff", text[1:]) if text.startswith("\ufeff") else ("", text)
+    if not body.strip():
+        return text
+    accepted = (owned_vscode_server_config(),) + _legacy_owned_server_configs()
+    for name in (SERVER_NAME, _LEGACY_SERVER_NAME):
+        lexer = _JsoncLexer(body)
+        _, root = lexer.document()
+        servers = root.property(VSCODE_ROOT_KEY)
+        if servers is None:
+            break
+        view = lexer.object_view(servers.value_start)
+        current = view.property(name)
+        if current is None:
+            continue
+        if current.value not in accepted:
+            raise McpConfigCollisionError(
+                f"MCP server name is no longer owned: {name}"
+            )
+        body = _remove_property(body, view, current)
+    return bom + body
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
 def _is_reparse(path: Path) -> bool:
@@ -220,6 +393,16 @@ def _atomic_write_bytes(path: Path, content: bytes, *, boundary: Path) -> None:
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content); stream.flush(); os.fsync(stream.fileno())
+        readback = temporary.read_bytes()
+        if readback != content:
+            raise OSError("MCP configuration temporary readback mismatch")
+        if readback.startswith((b"\xff\xfe", b"\xfe\xff")):
+            raise ValueError("MCP configuration must use UTF-8")
+        try:
+            decoded = readback.decode("utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValueError("MCP configuration must use UTF-8") from exc
+        _JsoncLexer(decoded).document()
         if path.is_file():
             shutil.copymode(path, temporary)
         if _path_has_reparse(path, boundary):
@@ -242,7 +425,13 @@ class _ConfigPlan:
     backup: Path | None = None
 
 
-def _plan_mcp_config(kind: str, target: Path, *, boundary: Path) -> _ConfigPlan:
+def _plan_mcp_config(
+    kind: str,
+    target: Path,
+    *,
+    boundary: Path,
+    patcher: Callable[[str], str],
+) -> _ConfigPlan:
     target = Path(os.path.abspath(target))
     boundary = Path(os.path.abspath(boundary))
     if _path_has_reparse(target, boundary):
@@ -257,7 +446,7 @@ def _plan_mcp_config(kind: str, target: Path, *, boundary: Path) -> _ConfigPlan:
         original = original_bytes.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError as exc:
         raise ValueError("MCP configuration must use UTF-8") from exc
-    patched = patch_mcp_config(original)
+    patched = patcher(original)
     if patched == original:
         patched_bytes = original_bytes
         status = "already_configured"
@@ -350,12 +539,21 @@ def _apply_plans(
     }
 
 
-def configure_mcp(copilot_home: Path, *, create_backup: bool = True) -> dict[str, object]:
+def configure_mcp(
+    copilot_home: Path,
+    *,
+    install_root: Path | None = None,
+    create_backup: bool = True,
+) -> dict[str, object]:
     home = Path(os.path.abspath(copilot_home))
+    product_root = Path(os.path.abspath(install_root or home))
     return _apply_plans(
         (
             _plan_mcp_config(
-                "copilot", home / MCP_CONFIG_NAME, boundary=home
+                "copilot_cli",
+                home / MCP_CONFIG_NAME,
+                boundary=home,
+                patcher=lambda text: patch_cli_mcp_config(text, product_root),
             ),
         ),
         create_backup=create_backup,
@@ -366,38 +564,105 @@ def configure_mcp_targets(
     copilot_home: Path,
     vscode_mcp_config: Path,
     *,
+    install_root: Path | None = None,
     create_backup: bool = True,
 ) -> dict[str, object]:
     home = Path(os.path.abspath(copilot_home))
+    product_root = Path(os.path.abspath(install_root or home))
     vscode_target = Path(os.path.abspath(vscode_mcp_config))
     copilot_target = home / MCP_CONFIG_NAME
     if os.path.normcase(copilot_target) == os.path.normcase(vscode_target):
         raise ValueError("MCP configuration targets must be distinct")
     plans = (
-        _plan_mcp_config("copilot", copilot_target, boundary=home),
+        _plan_mcp_config(
+            "copilot_cli",
+            copilot_target,
+            boundary=home,
+            patcher=lambda text: patch_cli_mcp_config(text, product_root),
+        ),
         _plan_mcp_config(
             "vscode_default_profile",
             vscode_target,
             boundary=vscode_target.parent,
+            patcher=patch_vscode_mcp_config,
         ),
     )
     return _apply_plans(plans, create_backup=create_backup)
 
 
+def unconfigure_mcp_targets(
+    copilot_home: Path,
+    vscode_mcp_config: Path,
+    *,
+    install_root: Path | None = None,
+    create_backup: bool = True,
+) -> dict[str, object]:
+    home = Path(os.path.abspath(copilot_home))
+    product_root = Path(os.path.abspath(install_root or home))
+    vscode_target = Path(os.path.abspath(vscode_mcp_config))
+    copilot_target = home / MCP_CONFIG_NAME
+    if os.path.normcase(copilot_target) == os.path.normcase(vscode_target):
+        raise ValueError("MCP configuration targets must be distinct")
+    plans = (
+        _plan_mcp_config(
+            "copilot_cli",
+            copilot_target,
+            boundary=home,
+            patcher=lambda text: remove_cli_mcp_config(
+                text, product_root
+            ),
+        ),
+        _plan_mcp_config(
+            "vscode_default_profile",
+            vscode_target,
+            boundary=vscode_target.parent,
+            patcher=remove_vscode_mcp_config,
+        ),
+    )
+    return _apply_plans(plans, create_backup=create_backup)
+
+
+def unconfigure_mcp(
+    copilot_home: Path,
+    *,
+    install_root: Path | None = None,
+    create_backup: bool = True,
+) -> dict[str, object]:
+    home = Path(os.path.abspath(copilot_home))
+    product_root = Path(os.path.abspath(install_root or home))
+    return _apply_plans(
+        (
+            _plan_mcp_config(
+                "copilot_cli",
+                home / MCP_CONFIG_NAME,
+                boundary=home,
+                patcher=lambda text: remove_cli_mcp_config(
+                    text, product_root
+                ),
+            ),
+        ),
+        create_backup=create_backup,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--copilot-home", type=Path, default=Path.home() / ".copilot")
+    parser.add_argument("--install-root", type=Path)
     parser.add_argument("--vscode-mcp-config", type=Path)
     parser.add_argument("--no-backup", action="store_true"); args = parser.parse_args(argv)
     try:
         if args.vscode_mcp_config is None:
             result = configure_mcp(
-                args.copilot_home, create_backup=not args.no_backup
+                args.copilot_home,
+                install_root=args.install_root,
+                create_backup=not args.no_backup,
             )
         else:
             result = configure_mcp_targets(
                 args.copilot_home,
                 args.vscode_mcp_config,
+                install_root=args.install_root,
                 create_backup=not args.no_backup,
             )
         code = 0

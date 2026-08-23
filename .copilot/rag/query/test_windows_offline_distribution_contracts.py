@@ -177,6 +177,11 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
                 ".copilot/agents/internal-doc-deep-research.agent.md",
                 names,
             )
+            for filename in windows_distribution.COPILOT_CLI_TEMPLATES:
+                self.assertIn(
+                    f".copilot/rag/copilot-cli/{filename}",
+                    names,
+                )
             with zipfile.ZipFile(output) as archive:
                 install_cmd = archive.read("install.cmd").decode("utf-8")
             self.assertNotIn(
@@ -213,7 +218,8 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             template = windows_distribution.INSTALL_TEMPLATE.read_text(
                 encoding="utf-8"
             )
-            self.assertIn('$InstallStage = "mcp_config"', template)
+            self.assertIn('$InstallStage = "copilot_cli_setup"', template)
+            self.assertEqual(1, template.count("copilot_cli_setup.py"))
             self.assertIn('"rag\\query\\vscode_settings.py"', template)
             self.assertNotIn(
                 'Join-Path $TargetQuery "vscode_settings.py"', template
@@ -267,14 +273,17 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             "portable-install-{0}-{1}.log",
             '$env:LOCALAPPDATA',
             '$env:TEMP',
-            '$InstallStage = "mcp_config"',
+            '$InstallStage = "copilot_cli_setup"',
             'Join-Path $env:APPDATA "Code\\User\\mcp.json"',
-            "--vscode-mcp-config $VSCodeMcpTarget",
-            '"configured_on_disk"',
-            '"already_configured"',
+            '"--vscode-mcp-config", $VSCodeMcpTarget',
+            'Join-Path $TargetQuery "copilot_cli_setup.py"',
+            '"Copilot CLI MCP: "',
+            '"Copilot CLI agents: "',
+            "Copilot CLI launcher-scoped read-only approval:",
+            '"Copilot CLI executable: "',
         ):
             self.assertIn(fragment, template)
-        settings_index = template.index('$InstallStage = "mcp_config"')
+        settings_index = template.index('$InstallStage = "copilot_cli_setup"')
         self.assertLess(
             template.index(
                 "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
@@ -282,6 +291,8 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             settings_index,
         )
         self.assertLess(template.index('$DatabaseStatus = "READY"'), settings_index)
+        self.assertEqual(1, template.count("copilot_cli_setup.py"))
+        self.assertNotIn('Join-Path $TargetQuery "mcp_config.py"', template)
         self.assertNotIn("$VscodeText.Trim()", template)
         self.assertNotIn("list_dbs.py", template)
         self.assertNotIn("Read-Host", template)
@@ -293,12 +304,20 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         for fragment in (
             "Runtime:",
             "Databases:",
-            "MCP:",
-            '$InstallStage = "mcp_config"',
-            '"configured_on_disk"',
-            '"already_configured"',
+            "Copilot CLI MCP:",
+            "Copilot CLI agents:",
+            "Copilot CLI launcher-scoped read-only approval:",
+            "Copilot CLI executable:",
+            '$InstallStage = "copilot_cli_setup"',
+            'Join-Path $Target "rag\\query\\copilot_cli_setup.py"',
         ):
             self.assertIn(fragment, source_installer)
+        self.assertEqual(1, source_installer.count("copilot_cli_setup.py"))
+        self.assertNotIn(
+            'Join-Path $Target "rag\\query\\mcp_config.py"',
+            source_installer,
+        )
+        self.assertNotIn("--vscode-mcp-config", source_installer)
 
     def test_readmes_describe_thin_mcp_and_unchanged_approval_boundary(self) -> None:
         repository = RAG_ROOT.parents[1]
@@ -366,6 +385,20 @@ class McpConfigContractTests(unittest.TestCase):
         rendered = json.dumps(config)
         for forbidden in ("workspaceFolder", "http://", "https://", '"env"'):
             self.assertNotIn(forbidden, rendered)
+        cli = mcp_config.owned_cli_server_config(Path(r"C:\Local RAG"))
+        self.assertEqual("local", cli["type"])
+        self.assertEqual(
+            ["local_rag_search", "local_rag_get_evidence"], cli["tools"]
+        )
+        self.assertEqual(180000, cli["timeout"])
+        self.assertTrue(Path(cli["command"]).is_absolute())
+        self.assertEqual({"TEMP", "TMP"}, set(cli["env"]))
+        self.assertTrue(
+            all(Path(value).is_absolute() for value in cli["env"].values())
+        )
+        self.assertIn("--python", cli["args"])
+        self.assertIn("--spool-root", cli["args"])
+        self.assertNotIn("cwd", cli)
 
     def test_fresh_add_and_idempotence(self) -> None:
         source = "{}\n"
@@ -443,21 +476,13 @@ class McpConfigContractTests(unittest.TestCase):
             home.mkdir()
             target = home / mcp_config.MCP_CONFIG_NAME
             original = (
-                b'{"servers":{"localragagent003":'
-                b'{"type":"stdio","command":"foreign"}}}\r\n'
+                b'{"mcpServers":{"localragagent003":'
+                b'{"type":"local","command":"foreign"}}}\r\n'
             )
             target.write_bytes(original)
             with self.assertRaises(mcp_config.McpConfigCollisionError):
                 mcp_config.configure_mcp(home)
             self.assertEqual(original, target.read_bytes())
-            self.assertEqual([], list(home.glob("*.local-rag-backup-*")))
-            camel_original = original.replace(
-                b"localragagent003", b"localRagAgent003"
-            )
-            target.write_bytes(camel_original)
-            with self.assertRaises(mcp_config.McpConfigCollisionError):
-                mcp_config.configure_mcp(home)
-            self.assertEqual(camel_original, target.read_bytes())
             self.assertEqual([], list(home.glob("*.local-rag-backup-*")))
 
     def test_disk_write_is_atomic_optional_backup_and_idempotent(self) -> None:
@@ -465,7 +490,7 @@ class McpConfigContractTests(unittest.TestCase):
             home = Path(directory) / ".copilot"
             home.mkdir()
             target = home / mcp_config.MCP_CONFIG_NAME
-            original = b'\xef\xbb\xbf{\r\n  // keep\r\n  "servers": {}\r\n}\r\n'
+            original = b'\xef\xbb\xbf{\r\n  // keep\r\n  "mcpServers": {}\r\n}\r\n'
             target.write_bytes(original)
             with mock.patch.object(
                 mcp_config.os,
@@ -506,21 +531,27 @@ class McpConfigContractTests(unittest.TestCase):
 
             self.assertEqual("configured_on_disk", result["status"])
             self.assertEqual(
-                ["copilot", "vscode_default_profile"],
+                ["copilot_cli", "vscode_default_profile"],
                 [target["kind"] for target in result["targets"]],
             )
             self.assertIn(b"// portable\r\n", portable.read_bytes())
             self.assertTrue(vscode.read_bytes().startswith(b"\xef\xbb\xbf"))
             self.assertIn(b"// vscode\r\n", vscode.read_bytes())
             self.assertIn(b'"foreign"', vscode.read_bytes())
-            for target in (portable, vscode):
-                parsed = _parse_mcp_config(
-                    target.read_text(encoding="utf-8-sig")
-                )
-                self.assertEqual(
-                    mcp_config.owned_server_config(),
-                    parsed["servers"][mcp_config.SERVER_NAME],
-                )
+            portable_parsed = _parse_mcp_config(
+                portable.read_text(encoding="utf-8-sig")
+            )
+            self.assertEqual(
+                mcp_config.owned_cli_server_config(home),
+                portable_parsed["mcpServers"][mcp_config.SERVER_NAME],
+            )
+            vscode_parsed = _parse_mcp_config(
+                vscode.read_text(encoding="utf-8-sig")
+            )
+            self.assertEqual(
+                mcp_config.owned_server_config(),
+                vscode_parsed["servers"][mcp_config.SERVER_NAME],
+            )
             before = (portable.read_bytes(), vscode.read_bytes())
             second = mcp_config.configure_mcp_targets(
                 home, vscode, create_backup=False
@@ -593,6 +624,52 @@ class McpConfigContractTests(unittest.TestCase):
             self.assertEqual(vscode_original, vscode.read_bytes())
             self.assertEqual([], list(root.rglob("*.local-rag-backup-*")))
 
+    def test_dual_target_uninstall_preserves_foreign_jsonc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / ".copilot"
+            vscode = root / "Code" / "User" / "mcp.json"
+            home.mkdir()
+            vscode.parent.mkdir(parents=True)
+            portable = home / mcp_config.MCP_CONFIG_NAME
+            portable.write_text(
+                '{\n  "unknown": true,\n  "mcpServers": {}\n}\n',
+                encoding="utf-8",
+            )
+            vscode.write_text(
+                '{\n  // keep\n  "servers": '
+                '{"foreign":{"url":"https://example.test"}}\n}\n',
+                encoding="utf-8",
+            )
+            mcp_config.configure_mcp_targets(
+                home,
+                vscode,
+                install_root=home,
+                create_backup=False,
+            )
+
+            result = mcp_config.unconfigure_mcp_targets(
+                home,
+                vscode,
+                install_root=home,
+                create_backup=False,
+            )
+
+            self.assertEqual("configured_on_disk", result["status"])
+            cli_document = _parse_mcp_config(
+                portable.read_text(encoding="utf-8")
+            )
+            vscode_document = _parse_mcp_config(
+                vscode.read_text(encoding="utf-8")
+            )
+            self.assertEqual(True, cli_document["unknown"])
+            self.assertEqual({}, cli_document["mcpServers"])
+            self.assertEqual(
+                {"foreign": {"url": "https://example.test"}},
+                vscode_document["servers"],
+            )
+            self.assertIn("// keep", vscode.read_text(encoding="utf-8"))
+
     def test_fresh_disk_write_can_disable_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / ".copilot"
@@ -600,13 +677,57 @@ class McpConfigContractTests(unittest.TestCase):
             self.assertEqual("configured_on_disk", result["status"])
             self.assertIsNone(result["backup"])
             self.assertEqual(
-                mcp_config.owned_server_config(),
+                mcp_config.owned_cli_server_config(home),
                 _parse_mcp_config(
                     (home / mcp_config.MCP_CONFIG_NAME).read_text(
                         encoding="utf-8"
                     )
-                )["servers"][mcp_config.SERVER_NAME],
+                )["mcpServers"][mcp_config.SERVER_NAME],
             )
+
+    def test_cli_merge_preserves_vscode_root_and_uninstall_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".copilot"
+            home.mkdir()
+            target = home / mcp_config.MCP_CONFIG_NAME
+            original = (
+                b'{\r\n  // keep VS Code compatibility\r\n'
+                b'  "servers": {"foreign":{"command":"keep"},'
+                b'"localragagent003":'
+                + json.dumps(
+                    mcp_config.owned_vscode_server_config(),
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b'},\r\n'
+                b'  "unknown": {"keep":true}\r\n}\r\n'
+            )
+            target.write_bytes(original)
+            configured = mcp_config.configure_mcp(
+                home, install_root=home, create_backup=False
+            )
+            self.assertEqual("configured_on_disk", configured["status"])
+            configured_bytes = target.read_bytes()
+            self.assertIn(b'"servers"', configured_bytes)
+            self.assertIn(b'"unknown"', configured_bytes)
+            self.assertIn(b'"mcpServers"', configured_bytes)
+            self.assertEqual(
+                1, configured_bytes.count(b'"localragagent003"')
+            )
+
+            removed = mcp_config.unconfigure_mcp(
+                home, install_root=home, create_backup=False
+            )
+            self.assertEqual("configured_on_disk", removed["status"])
+            parsed = _parse_mcp_config(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"foreign": {"command": "keep"}}, parsed["servers"]
+            )
+            self.assertEqual({"keep": True}, parsed["unknown"])
+            self.assertEqual({}, parsed["mcpServers"])
+            second = mcp_config.unconfigure_mcp(
+                home, install_root=home, create_backup=False
+            )
+            self.assertEqual("already_configured", second["status"])
 
     def test_rejects_reparse_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -635,6 +756,15 @@ class McpConfigContractTests(unittest.TestCase):
         for source in invalid:
             with self.subTest(source=source), self.assertRaises(ValueError):
                 mcp_config.patch_mcp_config(source)
+        cli_invalid = (
+            '{"mcpServers":[]}',
+            '{"mcpServers":',
+            '{"mcpServers":{},"mcpServers":{}}',
+            '{"mcpServers":{"x":1,"x":2}}',
+        )
+        for source in cli_invalid:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                mcp_config.patch_cli_mcp_config(source, Path(r"C:\LocalRAG"))
 
     def test_cli_returns_json_for_success_and_collision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -651,7 +781,7 @@ class McpConfigContractTests(unittest.TestCase):
 
             target = home / mcp_config.MCP_CONFIG_NAME
             target.write_text(
-                '{"servers":{"localragagent003":{"command":"foreign"}}}',
+                '{"mcpServers":{"localragagent003":{"command":"foreign"}}}',
                 encoding="utf-8",
             )
             output = io.StringIO()

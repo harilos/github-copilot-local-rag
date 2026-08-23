@@ -501,6 +501,11 @@ In VS Code Copilot Chat, select one of the three installed LOCAL-RAG Agents.
 They expose only the two read-only Local RAG MCP tools. The installer registers
 the fixed user-level `localragagent003` MCP server in both the portable Copilot
 configuration and the normal VS Code Default Profile.
+In PowerShell 7, run `local-rag-copilot` for the standard CLI profile, or add
+`-Tier savings|standard|thorough`. That launcher pins the owned MCP definition
+and auto-approves only those two read-only tools in any working directory.
+It does not replace the normal `copilot` command or write persistent global
+permissions.
 The installer does not change VS Code approval settings.
 Copilot acceptance is never run by the installer or product tests.
 """

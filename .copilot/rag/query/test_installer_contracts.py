@@ -94,7 +94,17 @@ class InstallerExclusionContractTests(unittest.TestCase):
             '".DS_Store"',
         ):
             self.assertIn(fragment, powershell)
-        self.assertNotIn("Remove-Item", powershell)
+        self.assertNotIn(
+            "Remove-Item -LiteralPath $Target -Recurse",
+            powershell,
+        )
+        self.assertEqual(
+            2,
+            powershell.count(
+                "Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force `"
+            ),
+        )
+        self.assertEqual(2, powershell.count("-ErrorAction Stop"))
         self.assertNotIn("rm -rf", shell)
         self.assertIn("--refresh-completion-marker", shell)
         self.assertIn("--refresh-completion-marker", powershell)
@@ -446,8 +456,28 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (query / "product.py").write_text("NEW\n", encoding="utf-8")
+            rag = source / ".copilot" / "rag"
+            (rag / "list_dbs.py").write_text(
+                "raise SystemExit(0)\n", encoding="utf-8"
+            )
+            for filename in (
+                "mcp_config.py",
+                "mcp_server.py",
+                "copilot_cli_setup.py",
+            ):
+                shutil.copy2(QUERY_ROOT / filename, query / filename)
+            shutil.copytree(
+                QUERY_ROOT.parent / "copilot-cli",
+                rag / "copilot-cli",
+            )
 
-            def run_case(name: str, *, fail: bool, runtime: bool):
+            def run_case(
+                name: str,
+                *,
+                fail: bool,
+                runtime: bool,
+                cli_collision: bool = False,
+            ):
                 target = root / name
                 target_query = target / "rag" / "query"
                 (target_query / ".venv" / "Scripts").mkdir(parents=True)
@@ -463,7 +493,17 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 marker = target_query / ".venv" / ".rag-deps-installed"
                 marker.write_bytes(b"old-marker")
                 (target_query / "product.py").write_text("OLD\n", encoding="utf-8")
+                if cli_collision:
+                    (target / "mcp-config.json").write_bytes(
+                        b'{"mcpServers":{"localragagent003":{"type":"http",'
+                        b'"url":"https://foreign.example"}}}\n'
+                    )
                 environment = os.environ.copy()
+                environment["COPILOT_HOME"] = str(target)
+                environment["USERPROFILE"] = str(root / (name + "-profile"))
+                environment["LOCAL_RAG_COPILOT_PROFILE_PATH"] = str(
+                    root / (name + "-profile.ps1")
+                )
                 if fail:
                     environment["FAIL_REFRESH"] = "1"
                 completed = subprocess.run(
@@ -497,6 +537,69 @@ class InstallerExclusionContractTests(unittest.TestCase):
             self.assertEqual(
                 [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
             )
+            target = target_query.parents[1]
+            self.assertTrue((target / "mcp-config.json").is_file())
+            self.assertTrue((target / "copilot-cli" / "owned-manifest.json").is_file())
+            for filename in (
+                "local-rag-agent003-savings.agent.md",
+                "local-rag-agent003-standard.agent.md",
+                "local-rag-agent003-thorough.agent.md",
+            ):
+                self.assertTrue((target / "agents" / filename).is_file())
+            profile_path = root / "managed-success-profile.ps1"
+            self.assertIn(
+                "# >>> Local RAG Agent003 CLI (owned) >>>",
+                profile_path.read_text(encoding="utf-8"),
+            )
+            for summary in (
+                "Copilot CLI MCP: configured",
+                "Copilot CLI agents: installed",
+                "Copilot CLI launcher-scoped read-only approval: enabled",
+            ):
+                self.assertIn(summary, completed.stdout)
+            self.assertRegex(
+                completed.stdout,
+                r"(?m)^Copilot CLI executable: (detected|not_detected)\r?$",
+            )
+            for label in (
+                "Copilot CLI MCP:",
+                "Copilot CLI agents:",
+                "Copilot CLI launcher-scoped read-only approval:",
+                "Copilot CLI executable:",
+            ):
+                self.assertEqual(1, completed.stdout.count(label))
+
+            collision, collision_query, _ = run_case(
+                "cli-collision",
+                fail=False,
+                runtime=True,
+                cli_collision=True,
+            )
+            self.assertNotEqual(0, collision.returncode)
+            collision_target = collision_query.parents[1]
+            self.assertEqual(
+                b'{"mcpServers":{"localragagent003":{"type":"http",'
+                b'"url":"https://foreign.example"}}}\n',
+                (collision_target / "mcp-config.json").read_bytes(),
+            )
+            self.assertEqual(
+                "OLD\n",
+                (collision_query / "product.py").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((collision_target / "agents").exists())
+            self.assertFalse((collision_target / "copilot-cli").exists())
+            self.assertFalse((root / "cli-collision-profile.ps1").exists())
+            self.assertIn(
+                "Copilot CLI MCP: blocked_collision",
+                collision.stdout,
+            )
+            for label in (
+                "Copilot CLI MCP:",
+                "Copilot CLI agents:",
+                "Copilot CLI launcher-scoped read-only approval:",
+                "Copilot CLI executable:",
+            ):
+                self.assertEqual(1, collision.stdout.count(label))
 
             for name, runtime in (("postvalidate-failure", True), ("python-missing", False)):
                 completed, target_query, marker = run_case(
@@ -504,7 +607,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 )
                 self.assertNotEqual(0, completed.returncode)
                 self.assertFalse(marker.exists())
-                self.assertEqual("NEW\n", (target_query / "product.py").read_text())
+                self.assertEqual("OLD\n", (target_query / "product.py").read_text())
                 backups = list(target_query.glob(
                     ".rag-deps-installed.*.pre-update.*"
                 ))

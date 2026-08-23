@@ -16,7 +16,10 @@ $ProductBackupRoot = Join-Path $QueryRoot (".source-product-backup-" + $Transact
 $ProductBackedUp = @()
 $ProductCreatedFiles = @()
 $ProductCreatedDirectories = @()
-$MCPStatus = "NOT_CONFIGURED"
+$CopilotCliMCPStatus = "not_reached"
+$CopilotCliAgentsStatus = "not_reached"
+$CopilotCliApprovalStatus = "not_reached"
+$CopilotCliExecutableStatus = "not_detected"
 
 function Resolve-BootstrapPython {
     param([string]$Requested)
@@ -414,33 +417,96 @@ if ($LASTEXITCODE -ne 0) {
 }
 $DatabaseListStatus = "READY"
 
-$InstallStage = "mcp_config"
-$McpRelative = "mcp-config.json"
-$McpTarget = Join-Path $Target $McpRelative
-if (Test-PathHasReparse -Path $McpTarget -Boundary $Target) {
-    throw "MCP configuration target contains a reparse point."
-}
-if (Test-Path -LiteralPath $McpTarget -PathType Leaf) {
-    Backup-ProductFile -Relative $McpRelative -Destination $McpTarget
+$InstallStage = "copilot_cli_setup"
+if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+    if (-not [System.IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
+        throw "COPILOT_HOME must be an absolute path."
+    }
+    $CopilotCliHome = [System.IO.Path]::GetFullPath($env:COPILOT_HOME)
 } else {
-    $ProductCreatedFiles += $McpTarget
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        throw "USERPROFILE is required when COPILOT_HOME is unset."
+    }
+    if (-not [System.IO.Path]::IsPathRooted($env:USERPROFILE)) {
+        throw "USERPROFILE must be an absolute path."
+    }
+    $CopilotCliHome = [System.IO.Path]::GetFullPath((
+        Join-Path $env:USERPROFILE ".copilot"
+    ))
 }
-$McpOutput = & $RuntimePython -B (
-    Join-Path $Target "rag\query\mcp_config.py"
-) --copilot-home $Target --no-backup
-$McpExitCode = $LASTEXITCODE
-try {
-    $McpPayload = $McpOutput | ConvertFrom-Json
-} catch {
-    throw "Local RAG MCP configuration returned invalid status output."
-}
-if ($McpExitCode -ne 0 -or
-    @("configured_on_disk", "already_configured") -inotcontains (
-        [string]$McpPayload.status
+if (-not [string]::IsNullOrWhiteSpace($env:LOCAL_RAG_COPILOT_PROFILE_PATH)) {
+    if (-not [System.IO.Path]::IsPathRooted(
+        $env:LOCAL_RAG_COPILOT_PROFILE_PATH
     )) {
-    throw "Local RAG MCP configuration failed."
+        throw "LOCAL_RAG_COPILOT_PROFILE_PATH must be an absolute path."
+    }
+    $CopilotProfilePath = [System.IO.Path]::GetFullPath(
+        $env:LOCAL_RAG_COPILOT_PROFILE_PATH
+    )
+} else {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        throw "USERPROFILE is required to select the PowerShell profile."
+    }
+    $CopilotProfilePath = [System.IO.Path]::GetFullPath((
+        Join-Path $env:USERPROFILE "Documents\PowerShell\profile.ps1"
+    ))
 }
-$MCPStatus = [string]$McpPayload.status
+if ($null -ne (Get-Command "copilot" -CommandType Application `
+    -ErrorAction SilentlyContinue)) {
+    $CopilotCliExecutableStatus = "detected"
+} else {
+    Write-Warning (
+        "GitHub Copilot CLI was not detected. Local RAG CLI files will " +
+        "still be installed."
+    )
+}
+$CopilotCliArguments = @(
+    "install",
+    "--copilot-home", $CopilotCliHome,
+    "--install-root", $Target,
+    "--profile-path", $CopilotProfilePath
+)
+$CopilotCliOutput = & $RuntimePython -B (
+    Join-Path $Target "rag\query\copilot_cli_setup.py"
+) @CopilotCliArguments
+$CopilotCliExitCode = $LASTEXITCODE
+try {
+    $CopilotCliPayload = $CopilotCliOutput | ConvertFrom-Json
+} catch {
+    throw "Copilot CLI setup returned invalid status output."
+}
+if ($CopilotCliExitCode -ne 0) {
+    $CopilotCliError = [string]$CopilotCliPayload.error
+    if ($CopilotCliError -match (
+        "(?i)(collision|already owned|unowned artifact)"
+    )) {
+        $CopilotCliMCPStatus = "blocked_collision"
+    }
+    throw ("Copilot CLI setup failed: " + $CopilotCliError)
+}
+if (@("installed", "updated", "already_installed") -inotcontains (
+    [string]$CopilotCliPayload.status
+)) {
+    throw "Copilot CLI setup returned an invalid success status."
+}
+$CopilotCliConfigStatus = [string]$CopilotCliPayload.config.status
+if ($CopilotCliConfigStatus -ieq "configured_on_disk") {
+    $CopilotCliMCPStatus = "configured"
+} elseif ($CopilotCliConfigStatus -ieq "already_configured") {
+    $CopilotCliMCPStatus = "already_configured"
+} else {
+    throw "Copilot CLI setup returned an invalid MCP status."
+}
+if ([string]$CopilotCliPayload.status -ieq "updated") {
+    $CopilotCliAgentsStatus = "updated"
+} else {
+    $CopilotCliAgentsStatus = "installed"
+}
+if ([string]$CopilotCliPayload.status -ieq "already_installed") {
+    $CopilotCliApprovalStatus = "already_enabled"
+} else {
+    $CopilotCliApprovalStatus = "enabled"
+}
 
 $InstallStage = "complete"
 Write-Host "Installed Copilot Local RAG files to: $Target"
@@ -451,20 +517,48 @@ Write-Host ""
 Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
 Write-Host "Runtime: $RuntimeStatus"
 Write-Host "Databases: $DatabaseListStatus"
-Write-Host "MCP: $MCPStatus"
+Write-Host "Copilot CLI MCP: $CopilotCliMCPStatus"
+Write-Host "Copilot CLI agents: $CopilotCliAgentsStatus"
+Write-Host (
+    "Copilot CLI launcher-scoped read-only approval: " +
+    $CopilotCliApprovalStatus
+)
+Write-Host "Copilot CLI executable: $CopilotCliExecutableStatus"
 if (Test-Path -LiteralPath $ProductBackupRoot) {
-    Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force
+    try {
+        Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force `
+            -ErrorAction Stop
+    } catch {
+        Write-Warning (
+            "install retained a product transaction directory: " +
+            $ProductBackupRoot
+        )
+    }
 }
 } catch {
     Restore-ProductFiles
     if (Test-Path -LiteralPath $ProductBackupRoot) {
-        Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force
+        try {
+            Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force `
+                -ErrorAction Stop
+        } catch {
+            Write-Warning (
+                "install retained a product transaction directory: " +
+                $ProductBackupRoot
+            )
+        }
     }
     Write-Host ""
     Write-Host "=== Local RAG install: FAILED ===" -ForegroundColor Red
     Write-Host "Failed stage: $InstallStage"
     Write-Host "Runtime: $RuntimeStatus"
     Write-Host "Databases: $DatabaseListStatus"
-    Write-Host "MCP: $MCPStatus"
+    Write-Host "Copilot CLI MCP: $CopilotCliMCPStatus"
+    Write-Host "Copilot CLI agents: $CopilotCliAgentsStatus"
+    Write-Host (
+        "Copilot CLI launcher-scoped read-only approval: " +
+        $CopilotCliApprovalStatus
+    )
+    Write-Host "Copilot CLI executable: $CopilotCliExecutableStatus"
     throw
 }
