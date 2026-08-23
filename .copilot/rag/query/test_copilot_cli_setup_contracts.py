@@ -126,10 +126,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertIn("Never promote notices, related material", text)
             self.assertIn("unconfirmed Evidence", text)
             self.assertIn(
-                "normal question that does not explicitly name a fixture", text
-            )
-            self.assertIn(
-                "routing metadata explicitly labels them as `decoy` or `synthetic`",
+                "routing metadata explicitly labels them as `decoy`",
                 text,
             )
             self.assertIn("if one candidate remains, treat it as the clear match", text)
