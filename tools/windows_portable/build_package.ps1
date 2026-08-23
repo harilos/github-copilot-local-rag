@@ -16,6 +16,18 @@ $RepositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $ToolRoot "..\.."))
 $Lock = Get-Content -Raw -Encoding UTF8 (Join-Path $ToolRoot "runtime-lock.json") |
     ConvertFrom-Json
 $Python = Get-Command python -ErrorAction Stop
+$RuntimePython = Join-Path $RuntimeRoot "Scripts\python.exe"
+$RuntimeVerifier = Join-Path $ToolRoot "verify_runtime_requirements.py"
+$RuntimeRequirements = Join-Path $RepositoryRoot ".copilot\rag\query\requirements-windows-admin.lock"
+if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
+    throw "Windows portable runtime is missing Scripts\python.exe"
+}
+& $RuntimePython -B $RuntimeVerifier `
+    --lock $RuntimeRequirements `
+    --python-version ([string]$Lock.python.version)
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows portable runtime does not match the canonical dependency lock"
+}
 
 $Arguments = @(
     (Join-Path $ToolRoot "build_package.py"),
