@@ -238,6 +238,18 @@ function Get-PowerShellExecutable {
     return (Get-FullPath -Path $candidate)
 }
 
+function New-LauncherProcessArguments {
+    param(
+        [Parameter(Mandatory)][string]$Launcher,
+        [Parameter(Mandatory)][string]$Tier,
+        [string[]]$CopilotArguments = @()
+    )
+    return @(
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $Launcher, "-Tier", $Tier
+    ) + @($CopilotArguments)
+}
+
 function New-BoundaryFixtureServerSource {
     return @'
 from __future__ import annotations
@@ -462,6 +474,17 @@ if ($SelfTest) {
         if ($fixtureSyntax.ExitCode -ne 0) {
             throw "Boundary fixture syntax self-test failed in $selfTestRoot"
         }
+        $launcherArguments = @(New-LauncherProcessArguments `
+            -Launcher "C:\sentinel\launcher.ps1" `
+            -Tier "standard" `
+            -CopilotArguments @("--prompt", "sentinel prompt"))
+        if ($launcherArguments.Count -ne 10 -or
+            $launcherArguments[5] -cne "C:\sentinel\launcher.ps1" -or
+            $launcherArguments[7] -cne "standard" -or
+            $launcherArguments[8] -cne "--prompt" -or
+            $launcherArguments[9] -cne "sentinel prompt") {
+            throw "Launcher process argument assembly self-test failed."
+        }
         Write-Output "SELF-TEST OK: runner authority and collector synthetic gates passed; no launcher or prompt was invoked."
     }
     finally {
@@ -560,12 +583,13 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
         "--no-remote-export",
         "--log-dir", $logRoot
     )
+    $powerShellArguments = @(New-LauncherProcessArguments `
+        -Launcher $activeLauncher `
+        -Tier ([string]$case.tier) `
+        -CopilotArguments $copilotArguments)
     $result = Invoke-NativeProcessToFiles `
         -FileName $powerShell `
-        -Arguments @(
-            "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-File", $activeLauncher, "-Tier", [string]$case.tier
-        ) + $copilotArguments `
+        -Arguments $powerShellArguments `
         -WorkingDirectory $neutralWorkspace `
         -StdoutPath $stdout `
         -StderrPath $stderr `
