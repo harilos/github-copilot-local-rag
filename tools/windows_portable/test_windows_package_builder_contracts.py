@@ -520,6 +520,42 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 (request.output_dir / "local-rag-windows-x64-1.2.3.zip").exists()
             )
 
+    def test_prunes_only_known_foreign_arch_setuptools_launcher_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            resource = (
+                request.runtime_root
+                / "Scripts"
+                / "Lib"
+                / "site-packages"
+                / "setuptools"
+                / "cli-32.exe"
+            )
+            _write_pe(resource, 0x014C)
+
+            result = build_package(request)
+
+            with zipfile.ZipFile(result.zip_path) as archive:
+                self.assertFalse(
+                    any(name.endswith("/setuptools/cli-32.exe") for name in archive.namelist())
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            unknown = (
+                request.runtime_root
+                / "Scripts"
+                / "Lib"
+                / "site-packages"
+                / "unrelated"
+                / "cli-32.exe"
+            )
+            _write_pe(unknown, 0x014C)
+            with self.assertRaisesRegex(ValueError, "not AMD64"):
+                build_package(request)
+
     def test_rejects_unknown_profile_and_database_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = _request(Path(directory), profile="unknown")

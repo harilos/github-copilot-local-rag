@@ -127,6 +127,7 @@ def build_package(request: BuildRequest) -> BuildResult:
             except PackageError as exc:
                 raise ValueError(str(exc)) from exc
 
+        _prune_foreign_arch_setuptools_launchers(runtime_target)
         _assert_amd64_runtime(runtime_target)
         _write_text(
             package_root / "install.cmd",
@@ -334,6 +335,37 @@ def _assert_amd64_runtime(runtime_root: Path) -> None:
         if _pe_machine(binary) != 0x8664:
             relative = binary.relative_to(runtime_root).as_posix()
             raise ValueError(f"runtime PE is not AMD64: {relative}")
+
+
+def _prune_foreign_arch_setuptools_launchers(runtime_root: Path) -> None:
+    """Remove setuptools' inert cross-architecture launcher templates.
+
+    Setuptools redistributes these files as package data for creating future
+    entry points.  Local RAG never installs packages after packaging, and the
+    Windows x64 artifact must not retain executable PE files for x86/ARM64.
+    Only these exact upstream resource names and locations are eligible.
+    """
+    names = {
+        "cli-32.exe",
+        "cli-arm64.exe",
+        "cli.exe",
+        "gui-32.exe",
+        "gui-arm64.exe",
+        "gui.exe",
+    }
+    roots = (
+        runtime_root / "Lib" / "site-packages" / "setuptools",
+        runtime_root / "Scripts" / "Lib" / "site-packages" / "setuptools",
+    )
+    for root in roots:
+        for name in names:
+            path = root / name
+            if not path.exists():
+                continue
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(f"setuptools launcher resource is unsafe: {path}")
+            if _pe_machine(path) != 0x8664:
+                path.unlink()
 
 
 def _pe_machine(path: Path) -> int:
