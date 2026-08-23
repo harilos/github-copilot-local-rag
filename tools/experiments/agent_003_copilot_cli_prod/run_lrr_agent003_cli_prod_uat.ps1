@@ -365,7 +365,13 @@ function New-TemporaryBoundaryInstall {
     $sourceRoot = Get-FullPath -Path $SourceRuntimeRoot
     $sourceVenv = Join-Path $sourceRoot "rag\query\.venv"
     $sourceSetup = Join-Path $sourceRoot "rag\query\copilot_cli_setup.py"
-    foreach ($source in @($sourceVenv, $sourceSetup, (Join-Path $sourceRoot "rag\copilot-cli"))) {
+    $sourceMcpConfig = Join-Path $sourceRoot "rag\query\mcp_config.py"
+    foreach ($source in @(
+        $sourceVenv,
+        $sourceSetup,
+        $sourceMcpConfig,
+        (Join-Path $sourceRoot "rag\copilot-cli")
+    )) {
         if (-not (Test-Path -LiteralPath $source)) {
             throw "Candidate runtime prerequisite is missing: $source"
         }
@@ -376,6 +382,7 @@ function New-TemporaryBoundaryInstall {
     $profilePath = Join-Path $Root "profile.ps1"
     [void](New-Item -ItemType Directory -Path $queryRoot -Force)
     Copy-Item -LiteralPath $sourceVenv -Destination $queryRoot -Recurse
+    Copy-Item -LiteralPath $sourceMcpConfig -Destination (Join-Path $queryRoot "mcp_config.py")
     $fixtureServer = Join-Path $queryRoot "mcp_server.py"
     Write-Utf8NoBom -Path $fixtureServer -Value (New-BoundaryFixtureServerSource)
     $temporaryPython = Join-Path $queryRoot ".venv\Scripts\python.exe"

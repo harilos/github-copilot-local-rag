@@ -200,20 +200,23 @@ def _assistant_response(events: list[dict[str, Any]]) -> str:
         if phase in ("final", "final_answer") and tool_requests in (None, []):
             terminal = content
             continue
-        # Copilot CLI 1.0.75 compatibility: phase-less, explicitly terminal,
-        # empty toolRequests and a matching immediate turn_end.
+        # Copilot CLI 1.0.77 emits a phase-less final message followed by
+        # optional reasoning/message bookkeeping before the same turn_end.
         if phase is not None or tool_requests != []:
             continue
         turn_id = data.get("turnId")
         if not isinstance(turn_id, str) or not turn_id:
             continue
-        if index + 1 >= len(events):
-            continue
-        following = events[index + 1]
-        if _event_type(following) != "assistant.turn_end":
-            continue
-        if _event_data(following).get("turnId") == turn_id:
-            terminal = content
+        for following in events[index + 1 :]:
+            following_type = _event_type(following)
+            if following_type == "assistant.turn_start":
+                break
+            if (
+                following_type == "assistant.turn_end"
+                and _event_data(following).get("turnId") == turn_id
+            ):
+                terminal = content
+                break
     return terminal
 
 
@@ -265,47 +268,63 @@ def _otel_evidence(otel: list[dict[str, Any]]) -> dict[str, Any]:
     responded: set[str] = set()
     agent_ids: set[str] = set()
     agent_names: set[str] = set()
-    token_values: dict[str, list[int]] = {
-        "input": [],
-        "prompt": [],
-        "output": [],
-        "completion": [],
-    }
+    input_values: list[int] = []
+    output_values: list[int] = []
     invalid_tokens = False
+    parent_span_ids = {
+        event.get("parentSpanId")
+        for event in otel
+        if isinstance(event.get("parentSpanId"), str)
+        and event.get("parentSpanId")
+    }
     for event in otel:
         for key, value in _otel_pairs(event):
             normalized = key.lower().replace("-", "_")
-            if normalized.endswith("gen_ai.request.model"):
-                if isinstance(value, str) and value:
-                    requested.add(value)
-            elif normalized.endswith("gen_ai.response.model"):
-                if isinstance(value, str) and value:
-                    responded.add(value)
-            elif normalized.endswith("gen_ai.agent.id"):
+            if normalized.endswith("gen_ai.agent.id"):
                 if isinstance(value, str) and value:
                     agent_ids.add(value)
             elif normalized.endswith("gen_ai.agent.name"):
                 if isinstance(value, str) and value:
                     agent_names.add(value)
-            else:
-                token_kind = None
-                for candidate, suffix in (
-                    ("input", "gen_ai.usage.input_tokens"),
-                    ("prompt", "gen_ai.usage.prompt_tokens"),
-                    ("output", "gen_ai.usage.output_tokens"),
-                    ("completion", "gen_ai.usage.completion_tokens"),
-                ):
-                    if normalized.endswith(suffix):
-                        token_kind = candidate
-                        break
-                if token_kind is not None:
-                    parsed = _as_nonnegative_int(value)
-                    if parsed is None:
-                        invalid_tokens = True
-                    else:
-                        token_values[token_kind].append(parsed)
-    input_values = token_values["input"] or token_values["prompt"]
-    output_values = token_values["output"] or token_values["completion"]
+        attributes = event.get("attributes")
+        if not isinstance(attributes, dict):
+            continue
+        response_model = attributes.get("gen_ai.response.model")
+        operation = attributes.get("gen_ai.operation.name")
+        span_name = event.get("name")
+        span_id = event.get("spanId")
+        is_leaf_chat = (
+            isinstance(response_model, str)
+            and bool(response_model)
+            and isinstance(span_id, str)
+            and bool(span_id)
+            and span_id not in parent_span_ids
+            and (
+                operation == "chat"
+                or (isinstance(span_name, str) and span_name.startswith("chat "))
+            )
+        )
+        if not is_leaf_chat:
+            continue
+        responded.add(response_model)
+        request_model = attributes.get("gen_ai.request.model")
+        if isinstance(request_model, str) and request_model:
+            requested.add(request_model)
+        input_value = attributes.get(
+            "gen_ai.usage.input_tokens",
+            attributes.get("gen_ai.usage.prompt_tokens"),
+        )
+        output_value = attributes.get(
+            "gen_ai.usage.output_tokens",
+            attributes.get("gen_ai.usage.completion_tokens"),
+        )
+        parsed_input = _as_nonnegative_int(input_value)
+        parsed_output = _as_nonnegative_int(output_value)
+        if parsed_input is None or parsed_output is None:
+            invalid_tokens = True
+        else:
+            input_values.append(parsed_input)
+            output_values.append(parsed_output)
     return {
         "requested_models": requested,
         "response_models": responded,
@@ -588,23 +607,34 @@ def evaluate_case(
     owned_mcp_listed = False
     mcp_state_ready = False
     for event in events:
-        if _event_type(event) != "session.mcp_servers_loaded":
-            continue
-        mcp_event_seen = True
-        servers = _event_data(event).get("servers")
-        if not isinstance(servers, list):
-            continue
-        for server in servers:
-            if not isinstance(server, dict):
+        event_type = _event_type(event)
+        data = _event_data(event)
+        if event_type == "session.mcp_servers_loaded":
+            mcp_event_seen = True
+            servers = data.get("servers")
+            if not isinstance(servers, list):
                 continue
-            name = server.get("name") or server.get("serverName")
-            state = str(server.get("status") or server.get("state") or "").lower()
+            for server in servers:
+                if not isinstance(server, dict):
+                    continue
+                name = server.get("name") or server.get("serverName")
+                state = str(
+                    server.get("status") or server.get("state") or ""
+                ).lower()
+                if name == "localragagent003":
+                    owned_mcp_listed = True
+                    if state in ("connected", "loaded", "ready", "running"):
+                        mcp_state_ready = True
+        elif event_type == "session.mcp_server_status_changed":
+            mcp_event_seen = True
+            name = data.get("serverName") or data.get("name")
+            state = str(data.get("status") or data.get("state") or "").lower()
             if name == "localragagent003":
                 owned_mcp_listed = True
                 if state in ("connected", "loaded", "ready", "running"):
                     mcp_state_ready = True
     if not mcp_event_seen:
-        failures.append("mcp_servers_loaded_missing")
+        failures.append("mcp_status_evidence_missing")
     elif not owned_mcp_listed:
         failures.append("owned_mcp_not_loaded")
 
@@ -633,9 +663,9 @@ def evaluate_case(
                 continue
             completions[call_id] = data
             content = _tool_result_content(data)
-            if content is None:
+            if data.get("success") is True and content is None:
                 failures.append("tool_result_content_missing")
-            else:
+            elif content is not None:
                 result_bytes.append(len(content.encode("utf-8")))
                 result_texts.append(content)
     if set(starts) != set(completions):
@@ -961,22 +991,33 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
             )
         events = [
             {
-                "type": "session.mcp_servers_loaded",
-                "data": {
-                    "servers": [
-                        {
-                            "name": "localragagent003",
-                            ("state" if ordinal % 2 == 0 else "status"): (
-                                "loaded" if ordinal % 2 == 0 else "connected"
-                            ),
-                        }
-                    ]
-                },
+                "type": "session.mcp_server_status_changed",
+                "data": {"serverName": "localragagent003", "status": "pending"},
+            },
+            {
+                "type": "session.mcp_server_status_changed",
+                "data": {"serverName": "localragagent003", "status": "connected"},
             },
             *tool_events,
             {
+                "type": "assistant.turn_start",
+                "data": {"turnId": f"final-turn-{ordinal}"},
+            },
+            {
                 "type": "assistant.message",
-                "data": {"phase": "final_answer", "content": synthetic_answer},
+                "data": {
+                    "turnId": f"final-turn-{ordinal}",
+                    "toolRequests": [],
+                    "content": synthetic_answer,
+                },
+            },
+            {
+                "type": "assistant.reasoning",
+                "data": {"turnId": f"final-turn-{ordinal}"},
+            },
+            {
+                "type": "assistant.turn_end",
+                "data": {"turnId": f"final-turn-{ordinal}"},
             },
             {
                 "type": "result",
@@ -1000,29 +1041,30 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
             run_root / "otel.jsonl",
             [
                 {
-                    "attributes": [
-                        {
-                            "key": "gen_ai.request.model",
-                            "value": {"stringValue": request_model},
-                        },
-                        {
-                            "key": "gen_ai.response.model",
-                            "value": {"stringValue": actual_model},
-                        },
-                        {
-                            "key": agent_key,
-                            "value": {"stringValue": case["expected_agent"]},
-                        },
-                        {
-                            "key": "gen_ai.usage.input_tokens",
-                            "value": {"intValue": input_tokens},
-                        },
-                        {
-                            "key": "gen_ai.usage.output_tokens",
-                            "value": {"intValue": output_tokens},
-                        },
-                    ]
-                }
+                    "type": "span",
+                    "spanId": f"root-{ordinal}",
+                    "name": f"invoke_agent {case['expected_agent']}",
+                    "attributes": {
+                        "gen_ai.operation.name": "invoke_agent",
+                        agent_key: case["expected_agent"],
+                        # Aggregate/root usage must not be double-counted.
+                        "gen_ai.usage.input_tokens": input_tokens,
+                        "gen_ai.usage.output_tokens": output_tokens,
+                    },
+                },
+                {
+                    "type": "span",
+                    "spanId": f"chat-{ordinal}",
+                    "parentSpanId": f"root-{ordinal}",
+                    "name": f"chat {actual_model}",
+                    "attributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.request.model": request_model,
+                        "gen_ai.response.model": actual_model,
+                        "gen_ai.usage.input_tokens": input_tokens,
+                        "gen_ai.usage.output_tokens": output_tokens,
+                    },
+                },
             ],
         )
 
@@ -1093,6 +1135,25 @@ def self_test(cases_path: Path) -> int:
                 raise AssertionError(
                     f"permission/user-input/subagent gate did not fail: {event_type}"
                 )
+
+        values = json.loads(json.dumps(original_values))
+        failed_call_id = None
+        for value in values:
+            if value.get("type") == "tool.execution_complete":
+                failed_call_id = value["data"]["toolCallId"]
+                value["data"]["success"] = False
+                value["data"]["error"] = "sanitized synthetic failure"
+                value["data"].pop("result", None)
+                break
+        _write_jsonl(first, values)
+        report = collect(cases_path, raw_root, 1)
+        failures = report["cases"][0]["failures"]
+        if (
+            report["overall_status"] != "FAIL"
+            or f"tool_failed:{failed_call_id}" not in failures
+            or "tool_result_content_missing" in failures
+        ):
+            raise AssertionError("failed tool content compatibility gate is invalid")
 
         first_db = _synthetic_db(raw_root, cases[0], 1)
         database = sqlite3.connect(first_db)
