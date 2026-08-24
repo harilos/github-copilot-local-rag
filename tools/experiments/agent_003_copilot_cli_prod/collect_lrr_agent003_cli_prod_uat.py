@@ -202,6 +202,8 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
             minimum_bytes = value.get("minimum_tool_result_bytes")
             tail_window = value.get("tool_result_tail_window_bytes")
             required_fragment = value.get("required_response_fragment")
+            response_contract = value.get("response_contract")
+            required_reference_ids = value.get("required_reference_ids")
             revision = value.get("compatibility_revision")
             if (
                 isinstance(minimum_bytes, bool)
@@ -212,11 +214,16 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
                 or not 1 <= tail_window <= 4096
                 or not isinstance(required_fragment, str)
                 or not required_fragment
+                or response_contract
+                != "exact_primary_then_required_references_v1"
+                or required_reference_ids != ["E1"]
                 or not isinstance(revision, dict)
                 or revision.get("fixture_schema")
                 != "lrr-agent003-cli-prod-large-output-fixture-v1"
             ):
                 raise EvidenceError(f"{case_id}: boundary fixture contract is invalid")
+        elif "response_contract" in value or "required_reference_ids" in value:
+            raise EvidenceError(f"{case_id}: unexpected boundary response contract")
         cases.append(value)
     return cases
 
@@ -990,7 +997,45 @@ def evaluate_case(
     minimum_result_bytes = case.get("minimum_tool_result_bytes")
     tail_window = case.get("tool_result_tail_window_bytes")
     if isinstance(required_fragment, str):
-        if response.strip() != required_fragment:
+        normalized_response = (
+            response.replace("\r\n", "\n").replace("\r", "\n").strip()
+        )
+        reference_headers = list(
+            re.finditer(r"(?m)^## References[ \t]*$", normalized_response)
+        )
+        if case.get("response_contract") == "exact_primary_then_required_references_v1":
+            if normalized_response.count(required_fragment) != 1:
+                failures.append("required_response_marker_count_mismatch")
+            if len(reference_headers) != 1:
+                failures.append("required_references_section_invalid")
+            else:
+                header = reference_headers[0]
+                primary_response = normalized_response[: header.start()].strip()
+                references = normalized_response[header.end() :].strip()
+                if primary_response != required_fragment:
+                    failures.append("required_primary_response_exact_mismatch")
+                if not references:
+                    failures.append("required_references_section_empty")
+                reference_ids: list[str] = []
+                invalid_reference_line = False
+                for line in references.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    match = re.fullmatch(
+                        r"(?:[-*+]\s+)?\[([A-Za-z][A-Za-z0-9_-]*)\]"
+                        r"(?:\s+-\s+|\s+).+",
+                        line,
+                    )
+                    if match is None:
+                        invalid_reference_line = True
+                        continue
+                    reference_ids.append(match.group(1))
+                if invalid_reference_line:
+                    failures.append("required_references_section_invalid")
+                if reference_ids != case.get("required_reference_ids"):
+                    failures.append("required_reference_ids_mismatch")
+        elif response.strip() != required_fragment:
             failures.append("required_response_exact_mismatch")
         qualifying_results = [
             content
@@ -1480,7 +1525,10 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
             )
         if case.get("launcher_scope") == "temporary_boundary_fixture":
             synthetic_content = "X" * 33000 + str(case["required_response_fragment"])
-            synthetic_answer = str(case["required_response_fragment"])
+            synthetic_answer = (
+                str(case["required_response_fragment"])
+                + "\n\n## References\n\n[E1] - Synthetic boundary evidence"
+            )
         tool_events: list[dict[str, Any]] = []
         for call_index in range(case["minimum_search_calls"]):
             search_id = f"search-{ordinal}-{call_index + 1}"
@@ -1759,16 +1807,102 @@ def self_test(cases_path: Path) -> int:
         for value in boundary_values:
             if value.get("type") == "assistant.message":
                 value["data"]["content"] = (
-                    str(boundary_case["required_response_fragment"]) + " extra"
+                    str(boundary_case["required_response_fragment"])
+                    + " extra\n\n## References\n\n[E1] - Synthetic boundary evidence"
                 )
         _write_jsonl(boundary_events_path, boundary_values)
         report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
         if (
             report["overall_status"] != "FAIL"
-            or "required_response_exact_mismatch"
+            or "required_primary_response_exact_mismatch"
             not in report["cases"][4]["failures"]
         ):
-            raise AssertionError("non-exact boundary response did not fail")
+            raise AssertionError("non-exact boundary primary response did not fail")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = str(
+                    boundary_case["required_response_fragment"]
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_references_section_invalid"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("missing required References section did not fail")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        marker = str(boundary_case["required_response_fragment"])
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    marker
+                    + "\n\n## References\n\n[E1] - Synthetic boundary evidence "
+                    + marker
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_response_marker_count_mismatch"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("duplicate boundary marker did not fail")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    marker
+                    + "\n\n## References\n\n[E1] - Synthetic boundary evidence"
+                    + "\n- [E2] - Unexpected evidence"
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_reference_ids_mismatch"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("unexpected boundary reference ID did not fail")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    marker
+                    + "\n\n## References\n\n[E1] - Synthetic boundary evidence"
+                    + "\nunstructured reference text"
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_references_section_invalid"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("unstructured boundary reference did not fail")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    marker
+                    + "\r\n\r\n## References\r\n\r\n"
+                    + "- [E1] - Synthetic boundary evidence"
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if report["overall_status"] != PASS_WITH_RESIDUAL:
+            raise AssertionError("CRLF Markdown-bullet References did not pass")
         boundary_events_path.write_text(boundary_original, encoding="utf-8")
 
         first = raw_root / f"01-{cases[0]['id']}" / "copilot.jsonl"

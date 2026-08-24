@@ -312,9 +312,23 @@ function Read-CanonicalCases {
             throw "The case authority is not canonical at ordinal $($index + 1)."
         }
     }
+    $boundaryProperties = $values[4].PSObject.Properties.Name
     if ($values[4].required_response_fragment -cne $BoundaryMarker -or
         $values[4].launcher_scope -cne "temporary_boundary_fixture" -or
-        [int]$values[4].tool_result_tail_window_bytes -ne 256) {
+        $values[4].minimum_tool_result_bytes -isnot [long] -or
+        [long]$values[4].minimum_tool_result_bytes -le 32768 -or
+        $values[4].tool_result_tail_window_bytes -isnot [long] -or
+        [long]$values[4].tool_result_tail_window_bytes -ne 256 -or
+        $boundaryProperties -notcontains "response_contract" -or
+        $values[4].response_contract -cne
+            "exact_primary_then_required_references_v1" -or
+        $boundaryProperties -notcontains "required_reference_ids" -or
+        $values[4].required_reference_ids -isnot [System.Array] -or
+        @($values[4].required_reference_ids).Count -ne 1 -or
+        $values[4].required_reference_ids[0] -cne "E1" -or
+        $values[4].compatibility_revision -isnot [pscustomobject] -or
+        $values[4].compatibility_revision.fixture_schema -cne
+            "lrr-agent003-cli-prod-large-output-fixture-v1") {
         throw "The deterministic boundary fixture revision is not canonical."
     }
     for ($index = 0; $index -lt $values.Count; $index++) {
@@ -324,6 +338,15 @@ function Read-CanonicalCases {
             "allow_bare_source_urls"
         $hasResponseEvidenceContract = $values[$index].PSObject.Properties.Name -contains
             "require_all_response_urls_from_tool_evidence"
+        $hasBoundaryResponseContract = $values[$index].PSObject.Properties.Name -contains
+            "response_contract"
+        $hasRequiredReferenceIds = $values[$index].PSObject.Properties.Name -contains
+            "required_reference_ids"
+        if ($index -ne 4 -and (
+            $hasBoundaryResponseContract -or $hasRequiredReferenceIds
+        )) {
+            throw "Unexpected boundary response contract at ordinal $($index + 1)."
+        }
         if ($index -in @(2, 3)) {
             if (-not $hasUrlContract -or
                 $values[$index].minimum_markdown_source_urls -isnot [long] -or
