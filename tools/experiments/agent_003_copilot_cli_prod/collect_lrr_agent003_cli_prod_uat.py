@@ -73,9 +73,6 @@ FORBIDDEN_TOOL_RE = re.compile(
     r"delete|web|fetch|browser|ask[_-]?user)(?:$|[-_/])",
     re.IGNORECASE,
 )
-MARKDOWN_SOURCE_URL_RE = re.compile(
-    r"(?<!!)\[[^\]\r\n]+\]\((https://[^\s<>()]+)\)"
-)
 HTTPS_URL_RE = re.compile(r"https://[^\s<>()\]]+")
 URL_TRAILING_PUNCTUATION = ".,;:!?\"'。．、，；：！？」』】〕〉》"
 
@@ -423,11 +420,61 @@ def _response_https_urls(response: str) -> set[str]:
 
 
 def _markdown_source_urls(response: str) -> set[str]:
+    def escaped(position: int) -> bool:
+        backslashes = 0
+        position -= 1
+        while position >= 0 and response[position] == "\\":
+            backslashes += 1
+            position -= 1
+        return backslashes % 2 == 1
+
     values: set[str] = set()
-    for match in MARKDOWN_SOURCE_URL_RE.finditer(response):
-        normalized = _normalize_https_url(match.group(1))
-        if normalized is not None:
-            values.add(normalized)
+    index = 0
+    while index < len(response):
+        if response[index] != "[" or escaped(index):
+            index += 1
+            continue
+        is_image = (
+            index > 0
+            and response[index - 1] == "!"
+            and not escaped(index - 1)
+        )
+        depth = 1
+        cursor = index + 1
+        while cursor < len(response) and response[cursor] not in "\r\n":
+            if response[cursor] == "\\":
+                cursor += 2
+                continue
+            if response[cursor] == "[":
+                depth += 1
+            elif response[cursor] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+            cursor += 1
+        if (
+            depth != 0
+            or is_image
+            or cursor + 2 >= len(response)
+            or response[cursor + 1] != "("
+            or not response.startswith("https://", cursor + 2)
+        ):
+            index = max(cursor + 1, index + 1)
+            continue
+        url_start = cursor + 2
+        url_end = url_start
+        while (
+            url_end < len(response)
+            and response[url_end] not in "\r\n\t <>()"
+        ):
+            url_end += 1
+        if url_end < len(response) and response[url_end] == ")":
+            normalized = _normalize_https_url(response[url_start:url_end])
+            if normalized is not None:
+                values.add(normalized)
+            index = url_end + 1
+        else:
+            index += 1
     return values
 
 
@@ -1411,7 +1458,9 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                 "status": "ok",
                 "evidence": [{"id": "E1", "url": synthetic_url}],
             }
-            synthetic_answer = f"Synthetic answer [source]({synthetic_url})."
+            synthetic_answer = (
+                f"Synthetic answer [source [nested label]]({synthetic_url})."
+            )
         if case.get("launcher_scope") == "temporary_boundary_fixture":
             synthetic_content = "X" * 33000 + str(case["required_response_fragment"])
             synthetic_answer = str(case["required_response_fragment"])
@@ -1530,6 +1579,23 @@ def _synthetic_db(raw_root: Path, case: dict[str, Any], ordinal: int) -> Path:
 
 def self_test(cases_path: Path) -> int:
     cases = load_cases(cases_path)
+    parser_url = "https://example.invalid/evidence/nested"
+    if _markdown_source_urls(
+        f"[outer [nested label]]({parser_url})"
+    ) != {parser_url}:
+        raise AssertionError("nested Markdown link label was not recognized")
+    for malformed_link in (
+        f"bare {parser_url}",
+        f"![image]({parser_url})",
+        f"\\[escaped]({parser_url})",
+        f"[missing close]({parser_url}",
+        f"![outer [inner]({parser_url})]",
+        f"[outer [inner]({parser_url})",
+    ):
+        if _markdown_source_urls(malformed_link):
+            raise AssertionError(
+                f"malformed or non-link Markdown was accepted: {malformed_link}"
+            )
     with tempfile.TemporaryDirectory(prefix="lrr-agent003-cli-prod-collector-") as tmp:
         raw_root = Path(tmp) / "raw"
         _synthetic_case_files(raw_root, cases)
