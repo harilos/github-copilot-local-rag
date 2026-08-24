@@ -19,28 +19,18 @@ Copilotの通常検索は読み取り専用です。管理依頼をした場合�
 
 ## 2. 起動
 
-完全な新規インストールでは、先に検索runtimeを検証します。Windows x64の
-公式ZIPには固定Python、依存package、ONNX modelが含まれ、初期設定はofflineで
-動作します。macOS/Linuxでは従来どおりsystem Pythonから環境を準備します。
-Copilotへ`ローカルRAGの初期設定をして`と依頼することもできます。
+Managerは管理版（管理者向けsource版）に含まれます。利用者向けWindows
+配布版は検索専用で、Managerを含みません。管理版のcloneとinstallはrepository
+rootの[README](../../../README.md)にあるOS別commandを使ってください。
 
-macOS/Linux:
+Windowsの`install.ps1`はCPython 3.13.xを検出し、runtime作成と検証まで行います。
+macOS/Linuxの完全な新規installでは、file配置後に次を実行します。
 
 ```bash
-python3 -B ~/.copilot/rag/setup.py --format human
+python3.13 -B ~/.copilot/rag/setup.py --format human
 ```
 
-Windows PowerShell:
-
-```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
-```
-
-system Python、`py` launcher、PATH変更、管理者権限は不要です。
-
-初期設定後、Managerを起動します。
+runtime準備後、Managerを起動します。
 
 macOS/Linux:
 
@@ -64,25 +54,21 @@ Windows Git Bash:
   "$HOME/.copilot/rag/manage.py"
 ```
 
-### Copilotで使う2つのAgent
+### Copilotで使う3つのAgent
 
-製品側の定義は`.copilot/agents`にあります。Windows installerは、GitHub
-CopilotのAgent選択欄から人間が選べる次の2つを
-`%USERPROFILE%\.copilot\agents`へ配置します。
+Windows配布版と管理版は、`~/.copilot/agents`（Windowsでは
+`%USERPROFILE%\.copilot\agents`）へ次の3つのuser-level Agentを配置します。
 
-| Agent | 用途 | 情報源 |
+| Agent | 用途 | model設定 |
 |---|---|---|
-| 社内文書検索 | 社内資料だけから短い回答を得る | Local RAGを1回検索。Workspace／公開Webは読まない |
-| 社内文書徹底調査 | 社内資料、現行実装、必要な公開情報を照合する | Local RAGを最初に1回検索後、Workspace／公開Webを読み取り専用で調査 |
+| `LOCAL-RAG-標準` | 普段の質問。質問に応じて検索量を調整する | VS Codeの選択（Autoを含む）を継承 |
+| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認する | GPT-5 mini |
+| `LOCAL-RAG-徹底検索` | 複数観点の比較と矛盾確認を行う | GPT-5.3-Codex |
 
-両方ともDB変更、Source更新、file編集、Manager起動を行いません。`社内文書検索`は
-軽量な固定model、`社内文書徹底調査`は現在のmodel選択（Autoを含む）を使います。
-後者も社内固有情報を公開Webへ送らず、情報源を分けて回答します。自動testは
-Agent定義と配布・更新contractを検証し、実際のGitHub Copilot UIは起動しません。
-
-```text
-COPILOT_REAL_TEST: NOT_RUN_BY_DESIGN
-```
+3 Agentとも`local_rag_search`と`local_rag_get_evidence`だけを使うread-only
+Agentです。terminal、PowerShell、Workspace file、Web、Manager、別toolは使わず、
+DB、Source、設定、fileを変更しません。Agentを選んだ後は普通の文章で質問します。
+DBを一意に選べない場合は、管理者が案内した`<DB名>-rag`を質問へ付けます。
 
 共通入力:
 
@@ -209,13 +195,16 @@ titleとquery hintはCopilotが一覧からDBを選ぶための公開情報で�
 Sourceは、同じ取得元、同じ更新方法、同じURL生成設定を共有する単位です。
 Source追加画面では次から選びます。
 
-1. GitHub repository
+1. Gitリポジトリ
 2. SVN
 3. Redmine project
 4. SharePoint同期folder
 5. Teams共有folder
 6. GitLab Issue
-7. 手元の資料を一度だけ取り込むOther
+7. GitLab Wiki
+8. 手元の資料を一度だけ取り込むOther
+9. GitHub Issues
+10. GitHub Wiki
 
 Sourceの安定IDは索引と更新stateを結びます。後から変更しません。新しいSourceは
 登録だけでは検索対象にならず、取得・索引登録が成功した後にSource inventoryへ
@@ -230,15 +219,36 @@ Source取得は固定のwork pathへ行い、providerごとのcheckpointを保�
 中断後は同じ設定とcheckpointから再開します。credentialやlocal absolute pathを
 Source設定へ永続化せず、必要な値は環境変数またはmachine-local設定から解決します。
 
-### GitHub
+`Gitリポジトリ`を選ぶと、Gitサービスを次から選びます。
 
-初回登録で入力するのはrepository URLとSourceの名前です。リポジトリ全体を
+1. GitHub
+2. GitLab
+3. Azure DevOps
+4. その他のGitサーバー（Webリンク自動生成なし）
+
+### Gitリポジトリ
+
+初回登録で入力するのはGit repository URLとSourceの名前です。HTTP(S)、SSH、
+`git@...`形式を利用でき、選択したGitサービスに応じてURLを検証します。
+リポジトリ全体を
 DB内の固定作業場所へ取得し、remoteが示す既定branchを実際の取得結果から確認
 します。`main`や`master`を推測しません。
 
-検索結果リンクは取得設定と別に確認します。安全に導出できるGitHub browser URLと
-実際に取得したbranchを候補にし、commit permalinkやrepository内追加pathを使う
-場合だけリンク画面で設定します。tokenやGit credentialはDBへ保存しません。
+検索結果リンクは取得設定と別に確認します。安全に導出できるbrowser URLと実際に
+取得したbranchを候補にできないGit hostでは、RAG保存pathを表示します。tokenや
+Git credentialはDBへ保存しません。
+
+### GitHub Issues
+
+GitHub repository URLとSource名を入力します。認証済みの`gh` CLIを使い、
+open／closedのIssue本文とコメントをMarkdownへ変換します。Pull Requestは
+Issue一覧から除外します。検索結果には対応するIssue URLを自動設定します。
+
+### GitHub Wiki
+
+GitHub repository URLとSource名を入力し、repositoryの`.wiki.git`をGit HTTPSで
+同期します。Wiki全ページをMarkdownとして取り込み、検索結果には対応するWiki URLを
+自動設定します。
 
 ### SVN
 
@@ -284,6 +294,13 @@ open／closed両方のIssue本文、担当者、label、Discussion、システ�
 上書きします。初回取込後はGitLab本体URLとproject URLを変更できません。別の
 projectへ切り替える場合は、新しいSourceとして追加します。
 
+### GitLab Wiki
+
+GitLab本体URL、project URL、Source名を入力します。GitLab Issueと同じ
+machine-local access tokenを使い、Wiki全ページを取得します。更新時は全ページを
+比較して削除済みページも反映し、中断した処理は保存済み位置から再開できます。
+初回取込後に別projectへ切り替える場合は、新しいSourceとして追加します。
+
 ### SharePoint
 
 追加・更新はWindowsだけです。SharePoint同期clientが作ったlocal folderを、
@@ -318,10 +335,11 @@ Teams Sourceもabsolute pathをDBへ保存しません。検索結果のWebリ�
 人間が選択したlocal file/folderを一度だけcopyして索引化します。継続同期を
 意味しません。
 
-### GitHub・SVN・Otherの除外と取込前preview
+### Gitリポジトリ・SVN・Otherの除外と取込前preview
 
-この3種類だけ、Source rootを基準にした相対pathまたはglobを除外条件へ指定
-できます。Source追加時は`除外パス／glob（カンマ区切り）`へ入力します。取得
+Gitリポジトリの4 providerすべて、SVN、Otherでは、Source rootを基準にした
+相対pathまたはglobを除外条件へ指定できます。Source追加時は
+`除外パス／glob（カンマ区切り）`へ入力します。取得
 設定の変更画面でも同じ条件を編集できます。
 
 ```text
@@ -355,8 +373,9 @@ vector、catalog、clean、取込stateから照合・削除します。除外後
 
 ### 取り込むfile種類
 
-GitHub、SVN、SharePoint、Teams、Otherでは、Source追加時と取得設定変更時に
-次から選びます。RedmineとGitLab IssueはIssueをMarkdownへ変換するため、この
+Gitリポジトリの4 providerすべて、SVN、SharePoint、Teams、Otherでは、
+Source追加時と取得設定変更時に次から選びます。RedmineとGitLab Issueは
+IssueをMarkdownへ変換するため、この
 選択はありません。
 
 1. 対応する全file
@@ -434,10 +453,10 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 ### 利用者向け検索package
 
 - Windows x64 offline ZIP（Windows x64の管理者PCで作成）
-- 現在の全DB
+- 選択したDB（初期状態は全選択）
 - 公開wrapperと新規に組み立てた固定Python・検索runtime
 - 必要なmodel
-- 現行schemaとして検証済みのSource Metadata全体
+- 選択DBの現行schemaとして検証済みのSource Metadata
 - 管理用取得stateは含めない
 
 作成時だけ管理者PCのPythonとnetworkを使います。受取側はZIPを展開して
@@ -453,7 +472,7 @@ VS Codeのapproval settingsは変更しません。Managerとinstallerは最終�
 ### 管理PC引っ越しpackage
 
 - resumable folder
-- 現在の全DBと管理用code
+- 選択したDB（初期状態は全選択）と管理用code
 - Source設定とcheckpoint
 - 途中中断後に同じ出力先で再開可能
 

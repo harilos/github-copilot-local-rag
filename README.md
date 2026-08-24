@@ -1,439 +1,324 @@
 # GitHub Copilot Local RAG
 
-> Current development version: 1.0.1
+> 開発版: `1.0.1`
 >
-> Release status: Unreleased release candidate
+> GitHub Release: 未公開
 
-ローカル文書や社内資料を、GitHub Copilotから自然な日本語で検索するための
-RAGパックです。普段の検索ではコマンドや検索方式を覚える必要はありません。
-Copilotへ「ローカルRAGを使って」と伝え、知りたいことをそのまま質問します。
+ローカル文書や社内資料を、VS CodeのGitHub Copilotから自然な日本語で
+検索するためのRAGパックです。利用者は専用Agentを選んで質問するだけで、
+検索コマンドや検索方式を覚える必要はありません。
 
-文書の抽出、索引作成、検索はPC内で行われます。Copilotへ渡るのはDB全文ではなく、
-選ばれた抜粋、出典、検索メタデータです。通常検索中に外部URLへアクセスする
-ことはありません。
+文書の抽出、索引作成、検索はPC内で行います。Copilotへ渡るのはDB全文ではなく、
+質問に応じて選ばれた抜粋、出典、検索メタデータです。検索処理は元資料のURLを
+自動で開きませんが、最終回答の生成にはGitHub Copilotへの接続が必要です。
 
-| やりたいこと | 使うもの | 操作する人 |
+現在、正式に案内している一般利用経路は、管理者が作成したWindows x64配布版と、
+VS Codeの3つの`LOCAL-RAG` Agentです。GitHub上のtag／Releaseから配布物を
+公開する段階にはまだ進んでいません。
+
+## まず選ぶ：2つの利用形態
+
+このリポジトリには、別々の検索エンジンがあるのではなく、用途に応じた2つの
+導入形態があります。
+
+| | 配布版（利用者向け） | 管理版（管理者向けソース版） |
 |---|---|---|
-| 資料を検索して回答を得る | GitHub Copilotのチャット | 利用者 |
-| DBや取得元を追加・更新する | Local RAG Manager | 管理者 |
-| 検索用packageを配布する | Local RAG Manager | 管理者 |
+| 主な利用者 | 社内資料を検索する人 | DBと取得元を管理する人 |
+| 入手方法 | 管理者からWindows x64 offline ZIPを受け取る | このリポジトリをcloneする |
+| 検索 | 3つの`LOCAL-RAG` Agentを使う | 同じ検索機能を利用できる |
+| DBの作成・更新 | できない | できる |
+| Sourceの追加・再開 | できない | できる |
+| 配布ZIPの作成 | できない | できる |
+| 利用者PCのPython | 不要 | CPython 3.13.xが必要 |
 
-## 利用者：Copilotから検索する
+配布版のDBは、管理版で作成した時点のsnapshotです。元資料が更新された場合は、
+管理者がDBを更新して新しい配布ZIPを作ります。通常の検索AgentがDBやSourceを
+変更することはありません。
 
-### 1. 初回、または初期設定が必要と表示されたとき
+資料を検索するだけなら、次の「配布版」から読んでください。DBを作成・更新する
+場合は、後半の「管理版」へ進んでください。
 
-インストール後の最初のチャットや、検索時に初期設定が必要と表示されたときは、
-Copilotへ次のように依頼します。
-
-```text
-ローカルRAGの初期設定をして
-```
-
-CopilotがPython環境、必要package、検索modelを準備します。この端末ですでに
-初期設定が完了している場合だけ、この手順を飛ばせます。
-
-### 2. 使えるDBを確認する
-
-一覧だけ先に確認したい場合は、次のように依頼します。
-
-```text
-使えるローカルRAGのDBと、それぞれ何が入っているか教えて
-```
-
-DB名は`project-rag`のように`-rag`で終わります。以後の質問でDB名を指定すると、
-一覧確認を省いてそのDBを検索できます。DB名が分からないまま質問しても、
-Copilotが内部で一覧を確認するため問題ありません。
-
-### 3. 普通の文章で質問する
-
-「ローカルRAG」「社内資料」「インストール済みの資料」など、ローカル資料を
-使うことを明示してください。単に専門用語を質問しただけでは、Copilotは勝手に
-RAG検索を始めません。
-
-### 目的で選ぶ2つのAgent
-
-製品側の定義は`.copilot/agents`にあります。Windows installerは、GitHub
-CopilotのAgent選択欄から人間が明示的に選べる2つのAgentを
-`%USERPROFILE%\.copilot\agents`へ配置します。どちらもLocal RAGの管理、
-DB変更、Source更新、file編集は行いません。
-
-| Agent | 向いている質問 | 調べる範囲 |
-|---|---|---|
-| 社内文書検索 | 社内資料だけを根拠に、短く答えてほしい | 指定したLocal RAGを1回だけ検索する。Workspaceと公開Webは読まない |
-| 社内文書徹底調査 | 社内資料と現行実装、必要なら公開情報も照合したい | Local RAGを最初に1回だけ検索し、その成功後にWorkspaceと公開Webを読み取り専用で調べる |
-
-`社内文書検索`は軽量な固定modelを使います。`社内文書徹底調査`はCopilotで現在
-選ばれているmodel（Autoを含む）を引き継ぎ、社内資料、Workspace、公開Webの
-出典を混同せずに示します。社内固有情報を公開Webの検索語へ送りません。
-
-この2つのAgentは配布・更新contractの自動testで検証しています。実際のGitHub
-Copilot UIを起動するtestは製品testの範囲外です。
-
-```text
-COPILOT_REAL_TEST: NOT_RUN_BY_DESIGN
-```
-
-| やりたいこと | Copilotへの依頼例 |
-|---|---|
-| 用語や識別子を調べる | `project-ragで、A2Lとは何か根拠付きで教えて` |
-| 関連資料を広く探す | `project-ragで、A2Lの直接根拠と関連資料を広く探し、資料ごとの観点を整理して` |
-| 複数の方式を比較する | `project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
-| DBをCopilotに選ばせる | `ローカルRAGで、A2Lの設計意図を社内資料から調べて` |
-| 結果の前後を詳しく読む | `さっきの[E2]の前後をもっと詳しく見せて` |
-
-キーワードを並べるより、知りたい目的、条件、比較軸まで含めた質問のほうが
-意図に合った結果になります。検索信号はPython側で内部的に組み合わされるため、
-利用者がベクトル検索、全文検索、完全一致検索などを指定する必要はありません。
-
-DB名を省略した場合、CopilotはDB一覧を1回確認します。収録内容から1つに
-絞れるときだけ検索し、候補が複数ある場合は検索前に利用者へ確認します。
-
-### 回答と出典の見方
-
-```text
-あなた > project-ragで、A2Lの目的と採用理由を根拠付きで教えて。
-
-Copilot > A2Lの目的は……です。[E1]
-          採用理由は……と説明されています。[E2]
-          次の文書は関連候補ですが、直接根拠ではありません。[D1]
-
-          ## References
-
-          - [E1] design.md
-          - [E2] specification.pdf
-          - [D1] operations-guide.md
-```
-
-- `[E…]`: 質問へ直接答える根拠
-- `[B…]`: 理解を補う背景情報
-- `[D…]`: 関連文書の候補。自動的に直接根拠とは扱いません
-
-複数の検索結果を組み合わせた回答では、`[R1-E1]`、`[R2-D1]`のように、
-何回目の検索結果かを示す番号が付きます。
-
-出典は回答末尾の`## References`にまとまります。検索結果リンクが設定されて
-いれば、ファイル名からGitHub、SVN、Redmine、SharePointなどの元資料を開けます。
-
-単純な質問は1回の検索で答えます。広い調査、比較、複数論点の質問では、同じDB
-の中で観点の異なる検索を必要な分だけ行います。上限は4回で、資料が十分なら
-そこで止めます。`[E2]を詳しく`のような依頼は、直前の検索結果のcacheが
-残っている間は、検索をやり直さず詳しい部分を読みます。
-
-DBの内容更新から30日以上たっている場合は、同じチャットで1回だけ警告します。
-古い可能性を承知で回答を読むか、管理者へDB更新を依頼してください。
-
-## 管理者：インストールする
+## 配布版：インストールする
 
 ### 必要なもの
 
-- macOS、Linux、またはWindows x64
-- source installと管理用build端末ではCPython 3.13.x（>=3.13,<3.14）
-- Windows一般利用者向けZIPではsystem Python、`py` launcher、PATH変更は不要
-- ローカルコマンドを実行できるGitHub Copilot環境
-- macOS/Linuxの初期設定時に依存packageとmodelを取得できるnetwork
-- Windows一般利用者向けZIPの初期設定はofflineでnetwork requestを行わない
-- DB、model、索引用のdisk容量
-- 旧`.doc`や`.ppt`を扱う場合のみLibreOffice
+- Windows 10以降（x64）
+- VS CodeとGitHub Copilot Chat
+- 管理者から受け取った配布ZIP
+- ZIPを展開できる空き容量
 
-repository rootでinstallerを実行します。
+インストール時にsystem Python、pip、PATH変更、管理者権限、network接続は
+不要です。Agentで質問するときは、通常どおりGitHub Copilotへ接続できる必要が
+あります。
 
-macOS/Linux:
+### 初回インストール
+
+1. 配布ZIPを通常のフォルダへすべて展開します。ZIP内から直接実行しないでください。
+2. 展開したフォルダ直下の`install.cmd`をダブルクリックします。
+3. 最後に`Local RAG インストール結果: 成功 (SUCCESS)`と表示されたことを確認します。
+4. VS Codeを完全に終了し、もう一度起動します。
+
+PowerShellから実行する場合は、展開先へ移動して次を実行します。
+
+```powershell
+.\install.cmd
+```
+
+配布版には固定Python、検索用package、ONNX model、選択されたDB、3つのAgentが
+含まれています。インストール後にCopilotへ「初期設定をして」と依頼する必要は
+ありません。
+
+installerはLocal RAGを`%USERPROFILE%\.copilot`へ配置し、read-only MCPを
+Copilotと通常のVS Code Default Profileへ登録します。既存の無関係なCopilot設定、
+別名のDB、system Python、VS Codeのapproval設定は変更しません。
+
+### 同じDBを新しい配布版へ更新する
+
+同名DBは、誤った上書きを防ぐため初期状態では置き換えません。管理者から同じDBの
+更新版を受け取った場合だけ、次を実行します。
+
+```powershell
+.\install.cmd -ReplaceExistingDatabases
+```
+
+この指定で置き換わるのは、配布ZIPに含まれる同名DBだけです。別名のDBは保持されます。
+自動試験などで終了待ちを省く場合は`-NoPause`も指定できます。
+
+## 配布版：3つのAgentで検索する
+
+### 最初の質問
+
+1. VS CodeでCopilot Chatを開きます。
+2. ChatをAgentモードにします。
+3. Agent選択欄から、まず`LOCAL-RAG-標準`を選びます。
+4. 普通の文章で知りたいことを質問します。
+
+専用Agentを選んだ時点でLocal RAGの使用は必須になるため、毎回「RAGを使って」と
+付ける必要はありません。
+
+```text
+project-ragで、A2Lの目的と採用理由を根拠付きで教えて
+```
+
+### Agentの選び方
+
+| Agent | 向いている質問 | 現在のmodel設定 |
+|---|---|---|
+| `LOCAL-RAG-標準` | 普段の質問。必要な量だけ検索して答えてほしい | VS CodeのAuto選択を継承 |
+| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認したい | GPT-5 mini (copilot) |
+| `LOCAL-RAG-徹底検索` | 複数観点の比較、矛盾確認、複雑な調査をしたい | GPT-5.3-Codex (copilot) |
+
+迷った場合は`LOCAL-RAG-標準`を使ってください。`LOCAL-RAG-節約`は検索回数と
+根拠確認を最小限にし、`LOCAL-RAG-徹底検索`は同じDBを異なる観点から検索して
+Evidenceを突き合わせます。
+
+3 Agentが利用できるのは、Local RAGの次の2つのread-only toolだけです。
+
+- `local_rag_search`
+- `local_rag_get_evidence`
+
+terminal、PowerShell、Workspace file、Web、別のtoolは使いません。DB、Source、
+設定、fileの作成・変更・削除も行いません。徹底検索も公開Webへ迂回せず、
+配布されたLocal RAGのEvidenceだけで回答します。
+
+### 質問の例
+
+| やりたいこと | 質問例 |
+|---|---|
+| 用語を確認する | `project-ragで、A2Lとは何か根拠付きで教えて` |
+| 採用理由を調べる | `project-ragで、方式Aを採用した理由と制約を整理して` |
+| 方式を比較する | `project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
+| 関連資料を広く探す | `project-ragで、この障害に関係する仕様・実装・運用資料を観点別に調べて` |
+| 根拠を詳しく読む | `さっきの[E2]の前後を詳しく確認して` |
+
+DB名を省略した場合、AgentはDBの説明と質問が明確に一致するときだけ自動で
+選びます。選べない場合は推測で検索しません。配布元から案内された
+`<DB名>-rag`を質問に付けて、もう一度実行してください。
+
+キーワードだけを並べるより、目的、期間、条件、比較軸を含めて質問するほうが
+意図に合った結果になります。ベクトル検索、全文検索、完全一致検索などの
+内部方式を利用者が指定する必要はありません。
+
+### 回答と出典の見方
+
+Agentは、根拠のある主張へEvidence IDを付け、回答末尾の`## References`へ
+出典をまとめます。
+
+- `[E…]`: 質問へ直接答える根拠
+- `[B…]`: 理解を補う背景情報
+- `[D…]`: 関連文書の候補。直接根拠とは限らない
+
+複数回検索した場合は`[R1-E1]`、`[R2-D1]`のように、何回目の検索結果かも
+表示します。元資料の安全なリンクがDBへ設定されていれば、Referencesから
+GitHub、SVN、Redmine、SharePointなどの資料を開けます。
+
+### 困ったとき
+
+| 状況 | 対応 |
+|---|---|
+| Agent選択欄に`LOCAL-RAG`がない | VS Codeを完全に終了して再起動する。直らなければinstallerの最終結果を確認する |
+| 同名DBがあるためinstallできない | 更新版であることを確認し、`-ReplaceExistingDatabases`を付けて再実行する |
+| installが`FAILED`になった | 画面に表示されたlogを管理者へ渡す |
+| 質問に合うDBを選べない | 配布元から案内されたDB名を質問へ明記する |
+| 根拠が不足している | 条件や比較軸を追加するか、`LOCAL-RAG-徹底検索`で質問し直す |
+
+installerは毎回、`%LOCALAPPDATA%\LocalRAG\logs`へlogを1つ作り、成功時も失敗時も
+画面にabsolute pathを表示します。
+
+## 管理版：インストールする
+
+管理版は、DBとSourceの作成・更新、処理の再開、診断、配布版の作成を行う端末へ
+source cloneから導入します。日常の管理操作は対話式のLocal RAG Managerを使います。
+
+### 必要なもの
+
+- Windows x64、macOS、またはLinux
+- CPython 3.13.x（`>=3.13,<3.14`）
+- Git
+- 初期設定時に依存packageとmodelを取得できるnetwork
+- DB、取得資料、model、索引用のdisk容量
+- 旧`.doc`／`.ppt`を取り込む場合だけLibreOffice
+
+Windows利用者向けoffline ZIPの作成はWindows上で行います。SharePoint／Teamsの
+Source追加・更新もWindowsだけです。
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/harilos/github-copilot-local-rag.git
+Set-Location .\github-copilot-local-rag
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+PATH外のCPython 3.13.xを使う場合は、最後のコマンドを次に置き換えます。
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -BootstrapPython "C:\path\to\python.exe"
+```
+
+更新時はrepositoryで次を実行します。
+
+```powershell
+git pull --ff-only
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Windowsのruntime Pythonは次の固定pathに作られます。
+
+```text
+%USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe
+```
+
+### macOS／Linux
 
 ```bash
+git clone https://github.com/harilos/github-copilot-local-rag.git
+cd github-copilot-local-rag
 bash ./install.sh
+python3.13 -B ~/.copilot/rag/setup.py --format human
 ```
+
+更新時はrepositoryで次を実行します。
+
+```bash
+git pull --ff-only
+bash ./install.sh
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/setup.py --format human
+```
+
+source installerは、端末固有のnetwork設定とSource接続設定を保持します。
+Windowsの`install.ps1`は、cloneに含まれる同名DBで既存DBを上書きしません。
+
+## 管理版：Managerを使う
+
+### 起動する
 
 Windows PowerShell:
 
 ```powershell
-.\install.ps1
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\manage.py"
 ```
 
-管理者・開発者がsource cloneからWindowsへinstallする場合は、
-`%USERPROFILE%\.copilot\rag\query\.venv`
-がなければ`py -3`、`python`、`python3`の順にCPython 3.13.xを検出し、
-`.venv`、依存package、model検証、`list_dbs`確認まで同じコマンドで行います。
-このsource clone経路では`.venv`をrepositoryからコピーせず、管理者PC上で作成します。
-PATH外のPythonを使う場合は
-`-BootstrapPython "C:\path\to\python.exe"`を追加してください。
-既存の`%USERPROFILE%\.copilot\rag\dbs`はsource cloneの内容で上書きしません。
-installerは固定user-level `localragagent003` MCP serverを
-`%USERPROFILE%\.copilot\mcp-config.json`へJSONCとしてmergeし、無関係なserver、
-comment、BOM、改行を保持します。同名の利用者設定とは衝突として停止します。
-VS Codeのapproval settingsは変更しません。
-完了時は`Local RAG install: SUCCESS`、失敗時は`FAILED`と停止工程を表示します。
-
-既存の`~/.copilot/copilot-instructions.md`には次の1行を追加してください。
-
-<!-- markdownlint-disable MD013 -->
-
-```text
-For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
-```
-
-<!-- markdownlint-enable MD013 -->
-
-installerはLocal RAGのファイルを`~/.copilot/`へ配置します。macOS/Linuxでは、
-完全な新規インストール後にCopilotへ`ローカルRAGの初期設定をして`と依頼します。
-手動で行う場合は次を実行します。
-
-macOS/Linux:
-
-```bash
-python3 -B ~/.copilot/rag/setup.py --format human
-```
-
-Windowsのsource cloneでは上記`install.ps1`が初期設定まで完了します。
-
-Windows x64の公式copy-ready ZIPには固定Python、依存package、ONNX modelが
-含まれます。初期設定はvenv作成、pip、model download／変換、system Pythonへの
-fallbackを行いません。installerは節約／標準／徹底検索の3 Agentと、
-`local_rag_search`／`local_rag_get_evidence`だけを公開するread-only MCPを登録します。
-terminalやfile pointerは使わず、VS Codeのapproval settingsも変更しません。
-Copilotによる実地受入はinstallerや製品testでは実行しません。
-
-既存のCopilot instructions、作成済みDB、Python環境、検索daemonの状態、
-端末固有のnetwork設定、Source接続設定はinstallerで不用意に上書きしません。
-
-## 管理者：Local RAG Managerを使う
-
-DB作成、Source追加、更新、再開、DBコピー、検索修復、配布は、人間が
-対話式のManagerから行います。Copilotの通常検索はこれらを自動実行しません。
-
-macOS/Linux:
+macOS／Linux:
 
 ```bash
 ~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/manage.py
 ```
 
-Windows PowerShell:
+Managerでは次の操作を行えます。
 
-```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\manage.py"
-```
-
-![Local RAG Managerのメインメニュー](docs/images/manage-main-menu.svg)
-
-### 初めてDBとSourceを作る
-
-1. メインメニューで`1. 新しいDBを作る`を選びます。
-2. `-rag`で終わるDB名、一覧表示名、Copilot向け検索ヒントを入力します。
-3. メインメニューへ戻り、`2. DBを選んで管理する`から作ったDBを開きます。
-4. `2. 新しいSourceを追加する`を選び、取得元と条件を入力します。
-5. 内容を確認して`保存して取得を開始`を選びます。
-6. 取得後に表示される対象件数と時間目安を確認し、検索への反映を開始します。
-
-![DB作成からSource追加までの画面例](docs/images/manage-create-source.svg)
-
-画面例は流れを見やすくするため、入力欄の説明と長いラベルの一部を省略しています。
-検索への反映前に`1文書あたり1～5分`で計算した時間目安が表示され、もう一度
-確認を求められます。ここで開始しなくてもSource設定と再開情報は残るため、
-Source詳細の`更新・再開する`から続けられます。
-
-選べる取得元は次の7種類です。
-
-| 取得元 | 取り込み方 |
+| やりたいこと | Managerの入口 |
 |---|---|
-| GitHub | repository全体を取得し、remoteの既定branchを使う |
-| SVN | 再帰／直下のみと、fileの最終更新日で検索への新規取り込み対象を絞れる |
-| Redmine | projectのIssue詳細を1件ずつ取得し、今回処理する安定集合が揃った後に検索へ1回反映する |
-| SharePoint | OneDriveで同期済みのfolderを使う。追加・更新はWindowsのみ |
-| Teams | SharePoint同期root内のTeams共有folderを使う。追加・更新はWindowsのみ |
-| GitLab Issue | projectのIssue本文・Discussionを取得し、5件ごとに検索へ反映する |
-| Other | 手元のfileまたはfolderを一度だけ取り込む |
+| DBを作る | `1. 新しいDBを作る` |
+| DBごとのSourceを追加・更新・再開する | `2. DBを選んで管理する` |
+| 全DBのSourceをまとめて更新する | `3. 全DBの全Sourceを更新・再開` |
+| 配布版や管理PC引っ越しpackageを扱う | `4. 配布・管理PCの引っ越し` |
+| 端末設定と検索動作を確認する | `5. この端末の設定・動作確認` |
+| 検索daemonを終了する | `6. 検索daemonを終了` |
 
-GitHub、SVN、SharePoint、Teams、Otherでは、`対応する全ファイル`または
-`文書のみ取得`を選べます。文書のみ取得にはOffice、PDF、テキスト、
-Markdown（`.md`）、Astah（`.asta`）、PlantUML（`.pu`、`.puml`）が含まれます。
-`.plantuml`も文書のみ取得の対象です。
-
-GitHub、SVN、Otherでは、Source rootからの相対pathまたはglobを除外条件として
-設定できます。例は`build`、`**/*.tmp`、`docs/*/draft.md`です。取得後、初回の
-検索反映前に、除外後の追加対象と除外対象をそれぞれfile件数／bytesで表示し、
-開始確認を行います。絶対path、drive／UNC path、`..`によるroot外参照は指定
-できません。Redmine、GitLab Issue、SharePoint、Teamsにはこの除外設定は
-適用されません。
-
-既に検索へ反映済みのGitHub／SVN／Otherで除外条件を追加した場合は、次回の
-検索反映で該当する旧文書もそのSourceの検索索引から削除されます。除外後の
-対象が0件でも、この旧文書の照合と削除を行います。
-
-SharePointとTeamsの同期root、Redmine API key、GitLab access tokenは
-`5. この端末の設定・動作確認` → `3. Source接続設定`へ登録します。秘密値や
-端末固有のabsolute pathはDBへ保存しません。
-
-GitLab Issueでは、GitLab本体のURLとprojectのトップURLを入力し、open／closed
-両方のIssueとDiscussionを取得します。tokenには`read_api`権限が必要です。
-GitLab上で削除された、または取得用アカウントから見えなくなったIssueは、
-RAG内の既存文書を削除せず、そのまま保持します。次回以降の更新では、取得用
-アカウントから見えるIssueだけを新規作成または上書きします。初回取込後は
-GitLab本体URLとproject URLを変更できません。別のprojectへ切り替える場合は、
-新しいSourceとして追加します。
-
-Redmineは取得中のIssue番号と詳細取得件数を進捗へ表示します。再開用の内部
-checkpointは5 Issueごとと末尾に保存しますが、その単位では検索DBへ反映
-しません。今回の更新で処理する安定したIssue集合がすべて揃ってから、外側の
-ADDを1回だけ実行します。中断時は最後の保存済みcheckpointから詳細取得を
-再開し、最大5件を再取得することがあります。
-
-### Sourceを更新する・中断した処理を再開する
-
-用途に応じて次の入口を使います。
-
-| 更新範囲 | メニューの進み方 |
-|---|---|
-| 1つのSource | `2. DBを選んで管理` → DB → `1. Sourceを見る・更新` → Source → `1. 更新・再開` |
-| 1つのDBすべて | `2. DBを選んで管理` → DB → `3. このDBの全Sourceを更新・再開` |
-| 全DBすべて | メインメニューの`3. 全DBの全Sourceを更新・再開` |
-
-![Sourceの更新と再開の画面例](docs/images/manage-resume-source.svg)
-
-取得と検索反映は進捗、処理件数、現在のfile、経過時間を表示します。中断や失敗が
-起きても、保存済みcheckpointから同じ`更新・再開する`で続けられます。
-
-### DBをコピーする
-
-`2. DBを選んで管理する` → DB → `5. このDBのコピーを作る`と進みます。
-初期状態では全Sourceがコピー対象です。番号を入力すると、コピーしないSourceへ
-切り替わり、端末上では取り消し線付きで表示されます。コピー先は元DBから独立し、
-以後のSource更新や削除も別々に行えます。Sourceの取得設定も引き継ぐため、
-コピー先でも元DBと同じ取得元を更新できます。
-
-### そのほかの主な操作
-
-| やりたいこと | 入口 |
-|---|---|
-| DBの表示名・検索ヒントを変える | DBメニューの`4` |
-| 検索を試す・検索索引を修復する | DBメニューの`6. 問題があるとき` |
-| 利用者用packageを作る | メインメニューの`4. 配布・管理PCの引っ越し` |
-| 管理PCを引っ越す | メインメニューの`4. 配布・管理PCの引っ越し` |
-| 端末の接続設定や動作を確認する | メインメニューの`5` |
-| 検索daemonを終了する | メインメニューの`6` |
-
-検索daemonを終了すると、次回検索時に自動起動します。待機中または実行中の検索が
-失敗する可能性があるため、検索している人がいないことを確認してから使います。
-
-Manager共通の入力方法:
-
-- `【必須】`: 空欄では進みません
-- `【任意】`: 空欄で未設定です
-- `:q`: 保存せず前の画面へ戻ります
-- Enter: 編集画面では現在値を維持します
-- `-`: 任意項目の現在値を消します
-- `Ctrl+C`: 未保存の変更を破棄します
-
-全画面とProviderごとの詳しい入力項目は
+Sourceは、Git repository（GitHub・GitLab・Azure DevOps・その他のGit）、SVN、
+Redmine、SharePoint、Teams、
+GitLab Issue／Wiki、GitHub Issues／Wiki、手元のfile／folderなどの取得元を管理する
+単位です。入力項目、更新、再開、除外、
+配布、管理PCの移行は
 [Local RAG Manager 日本語操作ガイド](.copilot/rag/docs/local-rag-manager-guide-ja.md)
 を参照してください。
 
-## 配布と管理PCの引っ越し
+### Windows配布版をコマンドで作る
 
-Managerは用途の異なる2種類を作成します。
-
-| 種類 | 用途 | 形式 |
-|---|---|---|
-| 利用者向け検索package | 現在の全DBを別PCで検索する | Windows x64 offline ZIP |
-| 管理PC引っ越しpackage | 現在の全DBとSource再開情報を含めて管理を移す | 再開可能なfolder |
-
-WindowsでManagerが利用者向けpackageを作るとき、管理者PCのPythonとnetworkを
-使って固定Python、検索用依存package、準備済みONNX model、選択DBをZIPへ
-組み込みます。完成前には固定Pythonの構造・AMD64、依存ファイル、modelの
-必須ファイル、DB snapshot、manifestとchecksumを検証します。`list_dbs`や
-実検索の実行はrelease／回帰test側で行い、package作成のたびには実行しません。
-どれかが失敗した場合はZIPを公開せず
-`Package creation: FAILED`、全て合格した場合だけ`SUCCESS`を表示します。
-
-利用者はZIPを展開して`install.cmd`を実行します。利用者PCにはPython、pip、
-network、PATH変更、管理者権限は不要です。installerも最終結果を
-`Local RAG install: SUCCESS`または`FAILED`で表示します。既存のPython環境や
-端末固有設定は削除しません。固定user-level MCP設定は
-`%USERPROFILE%\.copilot\mcp-config.json`と通常VS Code Default Profileの
-`%APPDATA%\Code\User\mcp.json`の両方へJSONCを保持して登録します。
-3つの製品Agentは既知の製品revisionだけをtransaction内で更新します。
-MCP登録に失敗した場合はruntime、選択DB、Agent、両MCP configを元へ戻します。
-VS Codeのapproval settingsは変更しません。また、
-`~/.copilot/copilot-instructions.md`へインストール節と同じRAG routingの1行を
-追加します。管理PC引っ越しpackageは、Managerの
-`パッケージを取り込む・検証する`から取り込みます。
-
-packageには検索資料と内部URLが含まれる場合があります。機密資料として安全に
-扱ってください。credential、端末固有設定、実行中の一時fileは含めません。
-
-## 直接CLIで確認する場合
-
-通常の利用者はこの節を使いません。Copilotを介さず、人間がDB一覧や検索結果
-（直接根拠、背景、関連文書候補）を確認したい場合の入口です。手動検索は
-最終回答を作文しません。
-
-### macOS/Linux
-
-```bash
-~/.copilot/rag/query/.venv/bin/python \
-  -B \
-  ~/.copilot/rag/list_dbs.py --format text
-
-~/.copilot/rag/query/.venv/bin/python \
-  -B \
-  ~/.copilot/rag/search.py \
-  --db project-rag \
-  --include-db-hint \
-  --result-delivery stdout \
-  --format prompt \
-  "A2Lの目的と採用理由を教えて"
-```
-
-### Windows PowerShell
+出力ZIPと同じpathが既に存在する場合は上書きしません。`--db`を繰り返すと複数DBを
+含められ、省略すると全DBが対象になります。
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\list_dbs.py" `
-  --format text
-
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\search.py" `
-  --db project-rag `
-  --include-db-hint `
-  --result-delivery stdout `
-  --format prompt `
-  "A2Lの目的と採用理由を教えて"
+$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $python -B "$env:USERPROFILE\.copilot\rag\make_distribution_package.py" --output "C:\LocalRAG\local-rag-distribution.zip" --db project-rag
 ```
 
-Copilotが内部で利用する公開入口は`~/.copilot/rag/list_dbs.py`と
-`~/.copilot/rag/search.py`の2つです。検索の内部構造、結果JSON、Source Metadata、
-path規則、network/proxy、package検証については
-[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を
-参照してください。
+完成したZIPを展開すると、利用者向けの`install.cmd`と`README-WINDOWS.md`が
+入っています。package作成時に固定Python、依存package、model、DB、manifest、
+checksumを検証します。利用者PCではPythonやnetworkを使いません。
+
+### 管理PC引っ越しpackageをコマンドで作る
+
+```powershell
+$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $python -B "$env:USERPROFILE\.copilot\rag\make_admin_transfer_package.py" --output "C:\LocalRAG\admin-transfer"
+```
+
+管理PC引っ越しpackageにはDBだけでなく、Source設定と再開情報も含まれます。
+credentialと端末固有設定は含めません。
+
+### コマンドで動作確認する
+
+Windows PowerShell:
+
+```powershell
+$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $python -B "$env:USERPROFILE\.copilot\rag\list_dbs.py" --format text
+& $python -B "$env:USERPROFILE\.copilot\rag\search.py" --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
+```
+
+macOS／Linux:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/list_dbs.py --format text
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/search.py --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
+```
+
+この直接CLIはDB一覧と検索結果を確認する診断用です。利用者向けの最終回答は
+作文しません。通常の利用者は3つのAgentを使ってください。
+
+## データの扱い
+
+- 配布ZIPには検索対象の資料、抜粋、内部URLが含まれる場合があります。元資料と同じ機密区分で扱ってください。
+- credential、端末固有の接続設定、実行中の一時fileは配布ZIPへ含めません。
+- Local RAGの検索はPC内で完結しますが、選ばれたEvidenceは回答生成のためGitHub Copilotへ渡ります。
+- 検索Agentはread-onlyです。DBやSourceの変更は、管理者がManagerから明示的に行います。
+
+検索の内部構造、MCP、結果contract、Source Metadata、package検証については
+[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を参照してください。
 
 ## License
 
-repository内のlicenseと、同梱する各dependency/modelのlicenseを確認して
+repositoryの[LICENSE](LICENSE)と、同梱する各dependency／modelのlicenseを確認して
 利用してください。
-
-
-### Windows portable multi-database ZIP
-
-The Windows portable builder selects databases from one trusted parent directory.
-Use `-DatabasesRoot` with repeatable `-DatabaseNames`, or omit the names to
-open the shared toggle selector. Use `-NoDatabase` only for an explicit
-runtime-only package. Extract the completed ZIP and run the top-level ASCII
-`install.cmd`; its implementation is at `internal\install.ps1`. The installer
-checks only that the embedded Windows binaries are AMD64 before changing the
-target. Existing unrelated databases are preserved, and a selected same-name
-database is replaced only with `-ReplaceExistingDatabases`.
-
-The launcher waits exactly once after both success and failure in normal mode.
-For automation, `-NoPause` may appear anywhere in the `install.cmd` arguments;
-the launcher consumes it before PowerShell and emits no wait prompt. Every run
-writes one `portable-install-<timestamp>-<pid>.log` under
-`%LOCALAPPDATA%\LocalRAG\logs` with a TEMP fallback. The PowerShell installer
-prints a Japanese result summary and the absolute log path, but never waits for
-input.
-
-Package hashes, closed-set manifests, model or database health checks, internal
-`list_dbs`, and search smoke tests are not part of installation. Release or
-acceptance automation must exercise the public commands from outside the
-installer.
