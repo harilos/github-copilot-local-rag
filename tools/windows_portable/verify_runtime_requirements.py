@@ -77,14 +77,23 @@ def verify(
         for name, (display, expected) in sorted(pins.items())
         if installed.get(name) != expected
     ]
+    unexpected = [
+        {"name": name, "actual": installed[name]}
+        for name in sorted(installed.keys() - pins.keys())
+    ]
     actual_python = platform.python_version()
     return {
         "schema": "local-rag-portable-runtime-requirements-v1",
-        "status": "pass" if actual_python == python_version and not mismatches else "fail",
+        "status": (
+            "pass"
+            if actual_python == python_version and not mismatches and not unexpected
+            else "fail"
+        ),
         "python_expected": python_version,
         "python_actual": actual_python,
         "checked_requirements": len(pins),
         "mismatches": mismatches,
+        "unexpected_distributions": unexpected,
     }
 
 

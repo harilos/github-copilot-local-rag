@@ -40,6 +40,7 @@ class RuntimeRequirementGateTests(unittest.TestCase):
             self.assertEqual(2, len(pins))
             self.assertEqual("pass", result["status"])
             self.assertEqual([], result["mismatches"])
+            self.assertEqual([], result["unexpected_distributions"])
 
     def test_version_mismatch_and_missing_distribution_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -62,6 +63,28 @@ class RuntimeRequirementGateTests(unittest.TestCase):
                     {"name": "Missing", "expected": "2.0", "actual": None},
                 ],
                 result["mismatches"],
+            )
+
+    def test_unexpected_distribution_fails_exact_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "runtime.lock"
+            lock.write_text("Alpha==1.0\n", encoding="utf-8")
+            site = root / "site-packages"
+            _distribution(site, "Alpha", "1.0")
+            _distribution(site, "Foreign_Pkg", "9.9")
+
+            result = verify(
+                lock,
+                python_version=platform.python_version(),
+                site_packages=site,
+            )
+
+            self.assertEqual("fail", result["status"])
+            self.assertEqual([], result["mismatches"])
+            self.assertEqual(
+                [{"name": "foreign-pkg", "actual": "9.9"}],
+                result["unexpected_distributions"],
             )
 
     def test_non_exact_requirement_is_rejected(self) -> None:
