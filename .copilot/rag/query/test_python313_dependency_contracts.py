@@ -84,8 +84,8 @@ class Python313DependencyContracts(unittest.TestCase):
     def test_windows_profiles_are_complete_exact_and_separate(self) -> None:
         search = _locked_requirements(SEARCH_LOCK)
         admin = _locked_requirements(ADMIN_LOCK)
-        self.assertEqual(92, len(search))
-        self.assertEqual(118, len(admin))
+        self.assertEqual(93, len(search))
+        self.assertEqual(120, len(admin))
         self.assertLess(set(search), set(admin))
         for name in (
             "sentence-transformers",
@@ -102,6 +102,8 @@ class Python313DependencyContracts(unittest.TestCase):
         self.assertEqual("20250515", search["sudachidict-core"])
         self.assertEqual("1.5.9", search["chromadb"])
         self.assertEqual("2.15.0", search["pydantic-settings"])
+        self.assertEqual("1.5.2", search["hf-xet"])
+        self.assertEqual("24.3.1", admin["pip"])
 
     def test_direct_metadata_and_source_requirements_are_exact_and_aligned(self) -> None:
         tool_root = RAG_ROOT / "gen_db" / "software_rag_tool"
