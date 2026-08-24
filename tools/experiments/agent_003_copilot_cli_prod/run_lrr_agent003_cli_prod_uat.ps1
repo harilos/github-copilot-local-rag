@@ -26,6 +26,17 @@ param(
     [switch]$AllowMeteredRun,
 
     [Parameter()]
+    [ValidateRange(1, 30)]
+    [int]$PerCaseMaxAiCredits = 30,
+
+    [Parameter()]
+    [ValidateRange(0.0, 50.0)]
+    [double]$PreviouslyConsumedAiCredits = 0.0,
+
+    [Parameter()]
+    [switch]$ResumeValidatedOutput,
+
+    [Parameter()]
     [switch]$SelfTest
 )
 
@@ -35,8 +46,13 @@ $ErrorActionPreference = "Stop"
 $CaseSchema = "lrr-agent003-cli-prod-uat-case-v1"
 $RunSchema = "lrr-agent003-cli-prod-uat-run-v1"
 $ExpectedCaseCount = 5
-$PerCaseMaxAiCredits = 30
-$AggregateCreditCap = 50
+$ApprovedCreditCap = 50.0
+$AggregateCreditCap = [int][System.Math]::Floor(
+    $ApprovedCreditCap - $PreviouslyConsumedAiCredits
+)
+if ($AggregateCreditCap -le 0) {
+    throw "No approved AI Credit capacity remains for this UAT run."
+}
 $BoundaryMarker = "LRR-CLI-LARGE-OUTPUT-TAIL-7F3C9A21"
 $SupportedCopilotCliVersion = "1.0.77"
 $ExpectedAvailableTools = @(
@@ -163,6 +179,96 @@ function Get-LauncherManifestIdentity {
         ManifestSha256 = Get-Sha256File -Path $manifestPath
         CopilotHome = $copilotHome
         InstallRoot = $installRoot
+    }
+}
+
+function Assert-OwnedMcpSpoolWritable {
+    param([Parameter(Mandatory)][object]$LauncherIdentity)
+
+    $pinnedPath = Join-Path `
+        (Join-Path ([string]$LauncherIdentity.InstallRoot) "copilot-cli") `
+        "local-rag-agent003.pinned-mcp.json"
+    if (-not (Test-Path -LiteralPath $pinnedPath -PathType Leaf)) {
+        throw "Pinned MCP configuration is missing: $pinnedPath"
+    }
+    $pinned = Get-Content -Raw -LiteralPath $pinnedPath -Encoding UTF8 |
+        ConvertFrom-Json -Depth 20
+    $server = $pinned.mcpServers.localragagent003
+    if ($null -eq $server -or [string]$server.type -cne "local") {
+        throw "Pinned MCP configuration has no owned local server."
+    }
+    $temporaryRoot = Get-FullPath -Path ([string]$server.env.TEMP)
+    $arguments = @($server.args)
+    $spoolFlagIndex = [System.Array]::IndexOf($arguments, "--spool-root")
+    if ($spoolFlagIndex -lt 0 -or $spoolFlagIndex + 1 -ge $arguments.Count) {
+        throw "Pinned MCP configuration has no spool root."
+    }
+    $spoolRoot = Get-FullPath -Path ([string]$arguments[$spoolFlagIndex + 1])
+    foreach ($path in @($temporaryRoot, $spoolRoot)) {
+        if (-not [System.IO.Path]::IsPathRooted($path) -or
+            -not (Test-PathInside -Path $path -Root ([string]$LauncherIdentity.InstallRoot))) {
+            throw "Pinned MCP temporary path escapes the installed product: $path"
+        }
+    }
+    if (-not (Test-PathInside -Path $spoolRoot -Root $temporaryRoot)) {
+        throw "Pinned MCP spool root escapes its owned temporary root."
+    }
+
+    $probeContainer = $spoolRoot
+    while (-not (Test-Path -LiteralPath $probeContainer)) {
+        $parent = [System.IO.Path]::GetDirectoryName($probeContainer)
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            -not (Test-PathInside -Path $parent -Root $temporaryRoot)) {
+            throw "No writable MCP spool ancestor exists inside the owned temporary root."
+        }
+        $probeContainer = $parent
+    }
+    $containerItem = Get-Item -LiteralPath $probeContainer -Force
+    if (-not $containerItem.PSIsContainer -or
+        ($containerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "MCP spool probe target is not a regular directory: $probeContainer"
+    }
+    $installBoundary = Get-FullPath -Path ([string]$LauncherIdentity.InstallRoot)
+    $currentItem = $containerItem
+    $reachedBoundary = $false
+    while ($null -ne $currentItem -and
+        (Test-PathInside -Path $currentItem.FullName -Root $installBoundary)) {
+        if ($currentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "MCP spool probe path crosses a reparse point: $($currentItem.FullName)"
+        }
+        if ($currentItem.FullName.Equals(
+            $installBoundary,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            $reachedBoundary = $true
+            break
+        }
+        $currentItem = $currentItem.Parent
+    }
+    if (-not $reachedBoundary) {
+        throw "MCP spool probe path did not resolve to the installed-product boundary."
+    }
+
+    $probe = Join-Path $probeContainer (".lrr-uat-write-probe-" + [guid]::NewGuid().ToString("N"))
+    $probeFile = Join-Path $probe "probe"
+    try {
+        [void][System.IO.Directory]::CreateDirectory($probe)
+        [System.IO.File]::WriteAllText(
+            $probeFile,
+            "probe",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
+    catch {
+        throw "Current UAT principal cannot write the owned MCP spool path '$probeContainer': $($_.Exception.Message)"
+    }
+    finally {
+        if (Test-Path -LiteralPath $probeFile -PathType Leaf) {
+            [System.IO.File]::Delete($probeFile)
+        }
+        if (Test-Path -LiteralPath $probe -PathType Container) {
+            [System.IO.Directory]::Delete($probe)
+        }
     }
 }
 
@@ -359,6 +465,53 @@ function Get-PowerShellExecutable {
         throw "PowerShell 7 executable was not found in PSHOME."
     }
     return (Get-FullPath -Path $candidate)
+}
+
+function Assert-ResumeIdentityMatches {
+    param(
+        [Parameter(Mandatory)][object]$Report,
+        [Parameter(Mandatory)][object]$LauncherIdentity,
+        [Parameter(Mandatory)][object]$CliIdentity,
+        [Parameter(Mandatory)][int]$PerCaseCreditCap
+    )
+
+    $completedCases = @($Report.cases)
+    if ($completedCases.Count -lt 1) {
+        throw "Resume identity authority has no completed case."
+    }
+    foreach ($completedCase in $completedCases) {
+        if ([int]$completedCase.max_ai_credits -ne $PerCaseCreditCap) {
+            throw "Resume per-case Credit cap differs from the completed prefix."
+        }
+    }
+    $expectedLauncher = $completedCases[0].launcher_identity
+    $expectedCli = $completedCases[0].cli_identity
+    foreach ($comparison in @(
+        @([string]$LauncherIdentity.InstallRoot, [string]$expectedLauncher.install_root),
+        @([string]$LauncherIdentity.CopilotHome, [string]$expectedLauncher.copilot_home),
+        @([string]$LauncherIdentity.LauncherPath, [string]$expectedLauncher.launcher_path),
+        @([string]$LauncherIdentity.ManifestPath, [string]$expectedLauncher.launcher_manifest_path),
+        @([string]$CliIdentity.Path, [string]$expectedCli.path)
+    )) {
+        if ([string]::IsNullOrWhiteSpace($comparison[1]) -or
+            -not $comparison[0].Equals(
+                $comparison[1],
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Current executable path identity differs from the completed prefix."
+        }
+    }
+    foreach ($comparison in @(
+        @([string]$LauncherIdentity.LauncherSha256, [string]$expectedLauncher.launcher_sha256),
+        @([string]$LauncherIdentity.ManifestSha256, [string]$expectedLauncher.launcher_manifest_sha256),
+        @([string]$CliIdentity.Sha256, [string]$expectedCli.sha256),
+        @([string]$CliIdentity.Version, [string]$expectedCli.version)
+    )) {
+        if ([string]::IsNullOrWhiteSpace($comparison[1]) -or
+            $comparison[0] -cne $comparison[1]) {
+            throw "Current executable hash or version identity differs from the completed prefix."
+        }
+    }
 }
 
 function New-LauncherProcessArguments {
@@ -654,6 +807,57 @@ $child = Start-Process -FilePath $PowerShellPath -ArgumentList @(
             $launcherArguments[9] -cne "sentinel prompt") {
             throw "Launcher process argument assembly self-test failed."
         }
+        $syntheticLauncherIdentity = [pscustomobject]@{
+            InstallRoot = "C:\sentinel\install"
+            CopilotHome = "C:\sentinel\home"
+            LauncherPath = "C:\sentinel\install\launcher.ps1"
+            ManifestPath = "C:\sentinel\install\manifest.json"
+            LauncherSha256 = "a" * 64
+            ManifestSha256 = "b" * 64
+        }
+        $syntheticCliIdentity = [pscustomobject]@{
+            Path = "C:\sentinel\copilot.exe"
+            Sha256 = "c" * 64
+            Version = $SupportedCopilotCliVersion
+        }
+        $syntheticResumeReport = [pscustomobject]@{
+            cases = @([pscustomobject]@{
+                max_ai_credits = $PerCaseMaxAiCredits
+                launcher_identity = [pscustomobject]@{
+                    install_root = $syntheticLauncherIdentity.InstallRoot
+                    copilot_home = $syntheticLauncherIdentity.CopilotHome
+                    launcher_path = $syntheticLauncherIdentity.LauncherPath
+                    launcher_manifest_path = $syntheticLauncherIdentity.ManifestPath
+                    launcher_sha256 = $syntheticLauncherIdentity.LauncherSha256
+                    launcher_manifest_sha256 = $syntheticLauncherIdentity.ManifestSha256
+                }
+                cli_identity = [pscustomobject]@{
+                    path = $syntheticCliIdentity.Path
+                    sha256 = $syntheticCliIdentity.Sha256
+                    version = $syntheticCliIdentity.Version
+                }
+            })
+        }
+        Assert-ResumeIdentityMatches `
+            -Report $syntheticResumeReport `
+            -LauncherIdentity $syntheticLauncherIdentity `
+            -CliIdentity $syntheticCliIdentity `
+            -PerCaseCreditCap $PerCaseMaxAiCredits
+        $syntheticCliIdentity.Sha256 = "d" * 64
+        $identityMismatchRejected = $false
+        try {
+            Assert-ResumeIdentityMatches `
+                -Report $syntheticResumeReport `
+                -LauncherIdentity $syntheticLauncherIdentity `
+                -CliIdentity $syntheticCliIdentity `
+                -PerCaseCreditCap $PerCaseMaxAiCredits
+        }
+        catch {
+            $identityMismatchRejected = $true
+        }
+        if (-not $identityMismatchRejected) {
+            throw "Resume identity swap self-test failed."
+        }
         Write-Output "SELF-TEST OK: runner authority and collector synthetic gates passed; no launcher or prompt was invoked."
     }
     finally {
@@ -686,22 +890,133 @@ $OutputRoot = Get-FullPath -Path $OutputRoot
 if (Test-PathInside -Path $OutputRoot -Root $repoRoot) {
     throw "Raw UAT output must be outside the repository."
 }
+$reportPath = Join-Path $OutputRoot "lrr-agent003-cli-prod-uat-report.json"
+$resumeCompletedCount = 0
+$resumeReportSha256 = $null
+$resumeValidationReportPath = $null
+$resumeValidationReportSha256 = $null
 if (Test-Path -LiteralPath $OutputRoot) {
-    if (@(Get-ChildItem -LiteralPath $OutputRoot -Force).Count -ne 0) {
+    if ($ResumeValidatedOutput) {
+        if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            throw "Resume requires an existing authoritative aggregate report."
+        }
+        $resumeReport = Get-Content -Raw -LiteralPath $reportPath -Encoding UTF8 |
+            ConvertFrom-Json -Depth 20
+        $resumeCompletedCount = [int]$resumeReport.completed_count
+        if ($resumeReport.schema_version -cne "lrr-agent003-cli-prod-uat-report-v1" -or
+            $resumeCompletedCount -lt 1 -or
+            $resumeCompletedCount -ge $ExpectedCaseCount -or
+            [int]$resumeReport.canonical_case_count -ne $ExpectedCaseCount -or
+            [int]$resumeReport.aggregate_credit_cap -ne $AggregateCreditCap -or
+            $resumeReport.overall_status -cne "PASS_WITH_RESIDUAL" -or
+            $resumeReport.stop_required -ne $false -or
+            @($resumeReport.cases).Count -ne $resumeCompletedCount) {
+            throw "Existing aggregate report is not a resumable PASS_WITH_RESIDUAL prefix."
+        }
+        for ($resumeIndex = 0; $resumeIndex -lt $resumeCompletedCount; $resumeIndex++) {
+            if ($resumeReport.cases[$resumeIndex].case_id -cne $cases[$resumeIndex].id -or
+                $resumeReport.cases[$resumeIndex].status -cne "PASS_WITH_RESIDUAL" -or
+                $resumeReport.cases[$resumeIndex].timed_out -ne $false) {
+                throw "Existing aggregate report has an invalid completed case prefix."
+            }
+            $completedOrdinal = $resumeIndex + 1
+            $completedCaseRoot = Join-Path $OutputRoot (
+                "{0:D2}-{1}" -f $completedOrdinal, $cases[$resumeIndex].id
+            )
+            $completedRunPath = Join-Path $completedCaseRoot "run.json"
+            if (-not (Test-Path -LiteralPath $completedRunPath -PathType Leaf)) {
+                throw "Resume completed run metadata is missing: $completedRunPath"
+            }
+            $completedRun = Get-Content -Raw -LiteralPath $completedRunPath -Encoding UTF8 |
+                ConvertFrom-Json -Depth 20
+            if ([double]$completedRun.approved_credit_cap -ne $ApprovedCreditCap -or
+                [math]::Abs(
+                    [double]$completedRun.previously_consumed_ai_credits -
+                    $PreviouslyConsumedAiCredits
+                ) -gt 0.000000001 -or
+                [int]$completedRun.remaining_run_credit_cap -ne $AggregateCreditCap) {
+                throw "Resume Credit continuity does not match the completed prefix."
+            }
+        }
+        for ($futureIndex = $resumeCompletedCount; $futureIndex -lt $ExpectedCaseCount; $futureIndex++) {
+            $futureOrdinal = $futureIndex + 1
+            $futureCaseRoot = Join-Path $OutputRoot (
+                "{0:D2}-{1}" -f $futureOrdinal, $cases[$futureIndex].id
+            )
+            foreach ($futureArtifact in @(
+                $futureCaseRoot,
+                (Join-Path $OutputRoot "collector-$futureOrdinal.stdout.log"),
+                (Join-Path $OutputRoot "collector-$futureOrdinal.stderr.log")
+            )) {
+                if (Test-Path -LiteralPath $futureArtifact) {
+                    throw "Resume refuses an unvalidated future artifact: $futureArtifact"
+                }
+            }
+        }
+        foreach ($resumeArtifact in @(
+            (Join-Path $OutputRoot "boundary-fixture"),
+            (Join-Path $OutputRoot "copilot-version-resume-$resumeCompletedCount.stdout.log"),
+            (Join-Path $OutputRoot "copilot-version-resume-$resumeCompletedCount.stderr.log")
+        )) {
+            if (Test-Path -LiteralPath $resumeArtifact) {
+                throw "Resume refuses an existing continuation artifact: $resumeArtifact"
+            }
+        }
+        $resumeReportSha256 = Get-Sha256File -Path $reportPath
+    }
+    elseif (@(Get-ChildItem -LiteralPath $OutputRoot -Force).Count -ne 0) {
         throw "OutputRoot must be absent or empty; existing evidence is never overwritten."
     }
 }
 else {
+    if ($ResumeValidatedOutput) {
+        throw "Resume requires an existing OutputRoot."
+    }
     [void](New-Item -ItemType Directory -Path $OutputRoot)
 }
 
 $neutralWorkspace = Join-Path $OutputRoot "neutral-workspace"
-[void](New-Item -ItemType Directory -Path $neutralWorkspace)
+if ($ResumeValidatedOutput) {
+    if (-not (Test-Path -LiteralPath $neutralWorkspace -PathType Container)) {
+        throw "Resume neutral workspace is missing."
+    }
+}
+else {
+    [void](New-Item -ItemType Directory -Path $neutralWorkspace)
+}
 $CollectorPython = Get-FullPath -Path $CollectorPython
 $LauncherPath = Get-FullPath -Path $LauncherPath
 $CandidateRuntimeRoot = Get-FullPath -Path $CandidateRuntimeRoot
 if (-not (Test-Path -LiteralPath $CandidateRuntimeRoot -PathType Container)) {
     throw "Candidate runtime root is missing: $CandidateRuntimeRoot"
+}
+if ($ResumeValidatedOutput) {
+    $resumeValidationRoot = Join-Path $OutputRoot (
+        "resume-validation-$resumeCompletedCount-" + [guid]::NewGuid().ToString("N")
+    )
+    [void](New-Item -ItemType Directory -Path $resumeValidationRoot)
+    $resumeValidationReportPath = Join-Path $resumeValidationRoot "report.json"
+    $resumeValidation = Invoke-NativeProcessToFiles `
+        -FileName $CollectorPython `
+        -Arguments @(
+            "-B", $CollectorPath,
+            "--cases", $CasesPath,
+            "--raw-root", $OutputRoot,
+            "--output", $resumeValidationReportPath,
+            "--completed-count", [string]$resumeCompletedCount,
+            "--aggregate-credit-cap", [string]$AggregateCreditCap
+        ) `
+        -WorkingDirectory $neutralWorkspace `
+        -StdoutPath (Join-Path $resumeValidationRoot "stdout.log") `
+        -StderrPath (Join-Path $resumeValidationRoot "stderr.log")
+    if ($resumeValidation.ExitCode -ne 0 -or
+        -not (Test-Path -LiteralPath $resumeValidationReportPath -PathType Leaf)) {
+        throw "Resume prefix failed independent collector revalidation: $resumeValidationRoot"
+    }
+    $resumeValidationReportSha256 = Get-Sha256File -Path $resumeValidationReportPath
+    if ($resumeValidationReportSha256 -cne $resumeReportSha256) {
+        throw "Resume prefix report differs from independent collector revalidation."
+    }
 }
 $powerShell = Get-PowerShellExecutable
 $installedLauncherIdentity = Get-LauncherManifestIdentity -Launcher $LauncherPath
@@ -711,11 +1026,25 @@ if (-not $installedLauncherIdentity.InstallRoot.Equals(
 )) {
     throw "Installed-product launcher manifest install_root does not match CandidateRuntimeRoot."
 }
+Assert-OwnedMcpSpoolWritable -LauncherIdentity $installedLauncherIdentity
+$versionEvidenceStem = if ($ResumeValidatedOutput) {
+    "copilot-version-resume-$resumeCompletedCount"
+}
+else {
+    "copilot-version"
+}
 $copilotCliIdentity = Get-CopilotCliIdentity `
     -PowerShell $powerShell `
     -WorkingDirectory $neutralWorkspace `
-    -StdoutPath (Join-Path $OutputRoot "copilot-version.stdout.log") `
-    -StderrPath (Join-Path $OutputRoot "copilot-version.stderr.log")
+    -StdoutPath (Join-Path $OutputRoot "$versionEvidenceStem.stdout.log") `
+    -StderrPath (Join-Path $OutputRoot "$versionEvidenceStem.stderr.log")
+if ($ResumeValidatedOutput) {
+    Assert-ResumeIdentityMatches `
+        -Report $resumeReport `
+        -LauncherIdentity $installedLauncherIdentity `
+        -CliIdentity $copilotCliIdentity `
+        -PerCaseCreditCap $PerCaseMaxAiCredits
+}
 $caseTimeoutSeconds = $CaseTimeoutMinutes * 60
 $permissionContract = [ordered]@{
     available_tools = @($ExpectedAvailableTools)
@@ -732,9 +1061,9 @@ $permissionContract = [ordered]@{
 }
 $boundaryLauncher = $null
 $finalCollectorExit = 1
-$reportPath = Join-Path $OutputRoot "lrr-agent003-cli-prod-uat-report.json"
 
-for ($index = 0; $index -lt $cases.Count; $index++) {
+for ($index = $resumeCompletedCount; $index -lt $cases.Count; $index++) {
+    $priorCredits = 0.0
     if ($index -gt 0) {
         if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
             throw "The prior aggregate Credit report is missing; refusing the next metered run."
@@ -746,10 +1075,10 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
             throw "The prior aggregate Credit report is not authoritative; refusing the next metered run."
         }
         $priorCredits = [double]$priorReport.aggregate_ai_credits
-        if ($priorCredits -lt 0 -or
-            ($priorCredits + $PerCaseMaxAiCredits) -gt $AggregateCreditCap) {
-            throw "The next CLI minimum soft cap could exceed the aggregate Credit cap; stopping before case $($index + 1)."
-        }
+    }
+    if ($priorCredits -lt 0 -or
+        ($priorCredits + $PerCaseMaxAiCredits) -gt $AggregateCreditCap) {
+        throw "The next CLI soft cap could exceed the aggregate Credit cap; stopping before case $($index + 1)."
     }
     $case = $cases[$index]
     $ordinal = $index + 1
@@ -831,6 +1160,13 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
         noninteractive_permission_contract = $permissionContract
         prompt_sha256 = Get-Sha256Text -Value ([string]$case.prompt)
         max_ai_credits = $PerCaseMaxAiCredits
+        approved_credit_cap = $ApprovedCreditCap
+        previously_consumed_ai_credits = $PreviouslyConsumedAiCredits
+        remaining_run_credit_cap = $AggregateCreditCap
+        resume_from_completed_count = $resumeCompletedCount
+        resume_report_sha256 = $resumeReportSha256
+        resume_validation_report_path = $resumeValidationReportPath
+        resume_validation_report_sha256 = $resumeValidationReportSha256
         fresh_session = $true
         retry_count = 0
         process_id = $result.ProcessId

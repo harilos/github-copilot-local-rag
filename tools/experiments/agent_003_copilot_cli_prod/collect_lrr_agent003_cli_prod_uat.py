@@ -783,7 +783,14 @@ def evaluate_case(
     exit_code = run.get("exit_code")
     if isinstance(exit_code, bool) or not isinstance(exit_code, int) or exit_code != 0:
         failures.append("cli_exit_nonzero")
-    if run.get("max_ai_credits") != 30:
+    per_case_credit_cap = run.get("max_ai_credits")
+    valid_per_case_credit_cap = not (
+        isinstance(per_case_credit_cap, bool)
+        or not isinstance(per_case_credit_cap, int)
+        or per_case_credit_cap < 1
+        or per_case_credit_cap > 30
+    )
+    if not valid_per_case_credit_cap:
         failures.append("per_case_credit_cap_mismatch")
     if run.get("launcher_scope") != case["launcher_scope"]:
         failures.append("launcher_scope_mismatch")
@@ -1011,6 +1018,12 @@ def evaluate_case(
 
     nano_aiu = session_usage["total_nano_aiu"]
     credit_observable = isinstance(nano_aiu, int) and nano_aiu >= 0
+    if (
+        credit_observable
+        and valid_per_case_credit_cap
+        and nano_aiu > per_case_credit_cap * NANO_AIU_PER_CREDIT
+    ):
+        failures.append("per_case_credit_cap_exceeded")
     result = {
         "case_id": case_id,
         "tier": case["tier"],
@@ -1043,6 +1056,7 @@ def evaluate_case(
         "tool_evidence_url_count": len(evidence_urls),
         "tool_evidence_url_sha256": _url_set_sha256(evidence_urls),
         "result_premium_requests": result_premium_requests,
+        "max_ai_credits": per_case_credit_cap,
         "timeout_seconds": timeout_seconds,
         "timed_out": timed_out,
         "process_tree_terminated": process_tree_terminated,
@@ -1073,8 +1087,13 @@ def collect(
     cases = load_cases(cases_path)
     if completed_count < 1 or completed_count > len(cases):
         raise EvidenceError("completed_count is outside the canonical case range")
-    if aggregate_credit_cap != DEFAULT_AGGREGATE_CREDIT_CAP:
-        raise EvidenceError("aggregate credit cap is fixed at 50")
+    if (
+        isinstance(aggregate_credit_cap, bool)
+        or not isinstance(aggregate_credit_cap, int)
+        or aggregate_credit_cap < 1
+        or aggregate_credit_cap > DEFAULT_AGGREGATE_CREDIT_CAP
+    ):
+        raise EvidenceError("aggregate credit cap must be an integer from 1 through 50")
     results: list[dict[str, Any]] = []
     total_nano = 0
     credit_stop = False
@@ -1096,6 +1115,8 @@ def collect(
         )
         result = evaluate_case(case, run, events, otel)
         results.append(result)
+        if "per_case_credit_cap_exceeded" in result["failures"]:
+            credit_stop = True
         if not result["credit_observable"]:
             credit_stop = True
         else:
@@ -1864,13 +1885,18 @@ def self_test(cases_path: Path) -> int:
         database = sqlite3.connect(first_db)
         database.execute(
             "UPDATE assistant_usage_events SET model = ?, total_nano_aiu = ?",
-            ("claude-haiku-4.5", 51 * NANO_AIU_PER_CREDIT),
+            ("claude-haiku-4.5", 31 * NANO_AIU_PER_CREDIT),
         )
         database.commit()
         database.close()
         report = collect(cases_path, raw_root, 1)
-        if report["overall_status"] != "STOP_CREDIT_GATE":
-            raise AssertionError("aggregate credit gate did not stop")
+        if (
+            report["overall_status"] != "FAIL"
+            or report["stop_required"] is not True
+            or "per_case_credit_cap_exceeded"
+            not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("isolated per-case credit gate did not stop")
 
         database = sqlite3.connect(first_db)
         database.execute(
@@ -1889,6 +1915,32 @@ def self_test(cases_path: Path) -> int:
         )
         database.commit()
         database.close()
+
+        reduced_cap_report = collect(
+            cases_path,
+            raw_root,
+            1,
+            aggregate_credit_cap=48,
+        )
+        if (
+            reduced_cap_report["overall_status"] != PASS_WITH_RESIDUAL
+            or reduced_cap_report["aggregate_credit_cap"] != 48
+        ):
+            raise AssertionError("reduced aggregate credit cap was not preserved")
+        for invalid_cap in (0, 51):
+            try:
+                collect(
+                    cases_path,
+                    raw_root,
+                    1,
+                    aggregate_credit_cap=invalid_cap,
+                )
+            except EvidenceError:
+                pass
+            else:
+                raise AssertionError(
+                    f"invalid aggregate credit cap was accepted: {invalid_cap}"
+                )
 
         values = json.loads(json.dumps(original_values))
         for value in values:
