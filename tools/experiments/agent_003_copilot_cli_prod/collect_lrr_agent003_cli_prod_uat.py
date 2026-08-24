@@ -18,6 +18,7 @@ REPORT_SCHEMA = "lrr-agent003-cli-prod-uat-report-v1"
 EXPECTED_CASE_COUNT = 5
 NANO_AIU_PER_CREDIT = 1_000_000_000
 DEFAULT_AGGREGATE_CREDIT_CAP = 50
+MAX_AGGREGATE_CREDIT_CAP = 80
 SUPPORTED_COPILOT_CLI_VERSION = "1.0.77"
 PASS_WITH_RESIDUAL = "PASS_WITH_RESIDUAL"
 APPROVAL_OBSERVATION = "NO_OBSERVED_PROMPT"
@@ -787,8 +788,7 @@ def evaluate_case(
     valid_per_case_credit_cap = not (
         isinstance(per_case_credit_cap, bool)
         or not isinstance(per_case_credit_cap, int)
-        or per_case_credit_cap < 1
-        or per_case_credit_cap > 30
+        or per_case_credit_cap != 30
     )
     if not valid_per_case_credit_cap:
         failures.append("per_case_credit_cap_mismatch")
@@ -1091,9 +1091,9 @@ def collect(
         isinstance(aggregate_credit_cap, bool)
         or not isinstance(aggregate_credit_cap, int)
         or aggregate_credit_cap < 1
-        or aggregate_credit_cap > DEFAULT_AGGREGATE_CREDIT_CAP
+        or aggregate_credit_cap > MAX_AGGREGATE_CREDIT_CAP
     ):
-        raise EvidenceError("aggregate credit cap must be an integer from 1 through 50")
+        raise EvidenceError("aggregate credit cap must be an integer from 1 through 80")
     results: list[dict[str, Any]] = []
     total_nano = 0
     credit_stop = False
@@ -1927,7 +1927,7 @@ def self_test(cases_path: Path) -> int:
             or reduced_cap_report["aggregate_credit_cap"] != 48
         ):
             raise AssertionError("reduced aggregate credit cap was not preserved")
-        for invalid_cap in (0, 51):
+        for invalid_cap in (0, 81):
             try:
                 collect(
                     cases_path,

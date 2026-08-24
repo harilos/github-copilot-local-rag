@@ -26,12 +26,16 @@ param(
     [switch]$AllowMeteredRun,
 
     [Parameter()]
-    [ValidateRange(1, 30)]
+    [ValidateSet(30)]
     [int]$PerCaseMaxAiCredits = 30,
 
     [Parameter()]
     [ValidateRange(0.0, 50.0)]
     [double]$PreviouslyConsumedAiCredits = 0.0,
+
+    [Parameter()]
+    [ValidateRange(50.0, 80.0)]
+    [double]$ApprovedCreditCap = 50.0,
 
     [Parameter()]
     [switch]$ResumeValidatedOutput,
@@ -46,7 +50,6 @@ $ErrorActionPreference = "Stop"
 $CaseSchema = "lrr-agent003-cli-prod-uat-case-v1"
 $RunSchema = "lrr-agent003-cli-prod-uat-run-v1"
 $ExpectedCaseCount = 5
-$ApprovedCreditCap = 50.0
 $AggregateCreditCap = [int][System.Math]::Floor(
     $ApprovedCreditCap - $PreviouslyConsumedAiCredits
 )
