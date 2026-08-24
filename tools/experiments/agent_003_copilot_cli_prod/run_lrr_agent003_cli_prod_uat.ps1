@@ -19,6 +19,10 @@ param(
     [string]$OutputRoot,
 
     [Parameter()]
+    [ValidateSet(15)]
+    [int]$CaseTimeoutMinutes = 15,
+
+    [Parameter()]
     [switch]$AllowMeteredRun,
 
     [Parameter()]
@@ -34,6 +38,16 @@ $ExpectedCaseCount = 5
 $PerCaseMaxAiCredits = 30
 $AggregateCreditCap = 50
 $BoundaryMarker = "LRR-CLI-LARGE-OUTPUT-TAIL-7F3C9A21"
+$SupportedCopilotCliVersion = "1.0.77"
+$ExpectedAvailableTools = @(
+    "localragagent003-local_rag_search",
+    "localragagent003-local_rag_get_evidence"
+)
+$ExpectedAllowedTools = @(
+    "localragagent003(local_rag_search)",
+    "localragagent003(local_rag_get_evidence)"
+)
+$ApprovalObservation = "NO_OBSERVED_PROMPT"
 
 function Get-FullPath {
     param([Parameter(Mandatory)][string]$Path)
@@ -127,12 +141,28 @@ function Get-LauncherManifestIdentity {
         [long]$entries[0].bytes -ne $launcherBytes) {
         throw "Launcher bytes do not match the owned manifest."
     }
+    $launcherText = [System.IO.File]::ReadAllText(
+        $resolvedLauncher,
+        [System.Text.Encoding]::UTF8
+    )
+    foreach ($requiredFragment in @(
+        '$ToolList = "localragagent003-local_rag_search,localragagent003-local_rag_get_evidence"',
+        '$AllowList = "localragagent003(local_rag_search),localragagent003(local_rag_get_evidence)"',
+        '"--available-tools=$ToolList"',
+        '"--allow-tool=$AllowList"',
+        '"--no-custom-instructions"'
+    )) {
+        if (-not $launcherText.Contains($requiredFragment)) {
+            throw "Launcher is missing the fixed noninteractive permission contract."
+        }
+    }
     return [pscustomobject]@{
         LauncherPath = $resolvedLauncher
         LauncherSha256 = $launcherHash
         ManifestPath = $manifestPath
         ManifestSha256 = Get-Sha256File -Path $manifestPath
         CopilotHome = $copilotHome
+        InstallRoot = $installRoot
     }
 }
 
@@ -174,8 +204,23 @@ function Read-CanonicalCases {
         }
     }
     if ($values[4].required_response_fragment -cne $BoundaryMarker -or
-        $values[4].launcher_scope -cne "temporary_boundary_fixture") {
+        $values[4].launcher_scope -cne "temporary_boundary_fixture" -or
+        [int]$values[4].tool_result_tail_window_bytes -ne 256) {
         throw "The deterministic boundary fixture revision is not canonical."
+    }
+    for ($index = 0; $index -lt $values.Count; $index++) {
+        $hasUrlContract = $values[$index].PSObject.Properties.Name -contains
+            "minimum_markdown_source_urls"
+        if ($index -in @(2, 3)) {
+            if (-not $hasUrlContract -or
+                [int]$values[$index].minimum_markdown_source_urls -lt 1 -or
+                $values[$index].require_all_response_urls_from_tool_evidence -ne $true) {
+                throw "The source URL provenance contract is not canonical at ordinal $($index + 1)."
+            }
+        }
+        elseif ($hasUrlContract) {
+            throw "Unexpected source URL provenance contract at ordinal $($index + 1)."
+        }
     }
     return $values
 }
@@ -187,7 +232,8 @@ function Invoke-NativeProcessToFiles {
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [Parameter(Mandatory)][string]$StdoutPath,
         [Parameter(Mandatory)][string]$StderrPath,
-        [Parameter()][hashtable]$Environment = @{}
+        [Parameter()][hashtable]$Environment = @{},
+        [Parameter()][ValidateRange(0, 86400)][int]$TimeoutSeconds = 0
     )
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FileName
@@ -207,26 +253,103 @@ function Invoke-NativeProcessToFiles {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
     $startedAt = [DateTimeOffset]::UtcNow
+    $timedOut = $false
+    $processTreeTerminated = $false
     try {
         if (-not $process.Start()) { throw "Process did not start: $FileName" }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                $timedOut = $true
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill($true)
+                    }
+                }
+                catch {
+                    if (-not $process.HasExited) { throw }
+                }
+                if (-not $process.WaitForExit(30000)) {
+                    throw "Timed-out process tree did not terminate: $FileName"
+                }
+                $processTreeTerminated = $true
+            }
+        }
+        else {
+            $process.WaitForExit()
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         Write-Utf8NoBom -Path $StdoutPath -Value $stdout
         Write-Utf8NoBom -Path $StderrPath -Value $stderr
         return [pscustomobject]@{
-            ExitCode = $process.ExitCode
+            ExitCode = if ($timedOut) { $null } else { $process.ExitCode }
             ProcessId = $process.Id
             StartedAt = $startedAt.ToString("o")
             FinishedAt = [DateTimeOffset]::UtcNow.ToString("o")
             StdoutBytes = [System.Text.Encoding]::UTF8.GetByteCount($stdout)
             StderrBytes = [System.Text.Encoding]::UTF8.GetByteCount($stderr)
+            TimedOut = $timedOut
+            TimeoutSeconds = $TimeoutSeconds
+            ProcessTreeTerminated = $processTreeTerminated
         }
     }
     finally {
         $process.Dispose()
+    }
+}
+
+function Get-CopilotCliIdentity {
+    param(
+        [Parameter(Mandatory)][string]$PowerShell,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string]$StdoutPath,
+        [Parameter(Mandatory)][string]$StderrPath
+    )
+    $commands = @(Get-Command "copilot" -CommandType Application -All -ErrorAction Stop)
+    if ($commands.Count -lt 1) { throw "Copilot CLI executable was not found." }
+    $cliPath = Get-FullPath -Path ([string]$commands[0].Source)
+    if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+        throw "Resolved Copilot CLI executable is not a file: $cliPath"
+    }
+    $versionResult = Invoke-NativeProcessToFiles `
+        -FileName $PowerShell `
+        -Arguments @(
+            "-NoProfile", "-NonInteractive", "-Command",
+            '& ([System.Environment]::GetEnvironmentVariable(''LOCAL_RAG_UAT_CLI_PATH'', ''Process'')) --version'
+        ) `
+        -WorkingDirectory $WorkingDirectory `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath `
+        -Environment @{ LOCAL_RAG_UAT_CLI_PATH = $cliPath } `
+        -TimeoutSeconds 30
+    if ($versionResult.TimedOut -or $versionResult.ExitCode -ne 0) {
+        throw "Copilot CLI version preflight failed."
+    }
+    $versionOutput = [System.IO.File]::ReadAllText(
+        $StdoutPath,
+        [System.Text.Encoding]::UTF8
+    ).Trim()
+    $versionLines = @($versionOutput -split "\r?\n")
+    $match = [regex]::Match(
+        [string]$versionLines[0],
+        '^GitHub Copilot CLI (?<version>[0-9]+\.[0-9]+\.[0-9]+)\.?$'
+    )
+    if (-not $match.Success) {
+        throw "Copilot CLI version output is not recognized."
+    }
+    $version = $match.Groups['version'].Value
+    if ($version -cne $SupportedCopilotCliVersion) {
+        throw "Unsupported Copilot CLI event schema version: $version"
+    }
+    return [pscustomobject]@{
+        Path = $cliPath
+        Sha256 = Get-Sha256File -Path $cliPath
+        Version = $version
+        VersionEvidencePath = Get-FullPath -Path $StdoutPath
+        VersionEvidenceSha256 = Get-Sha256File -Path $StdoutPath
     }
 }
 
@@ -481,6 +604,45 @@ if ($SelfTest) {
         if ($fixtureSyntax.ExitCode -ne 0) {
             throw "Boundary fixture syntax self-test failed in $selfTestRoot"
         }
+        $selfTestPowerShell = Get-PowerShellExecutable
+        $childPidPath = Join-Path $selfTestRoot "timeout-child.pid"
+        $timeoutParentPath = Join-Path $selfTestRoot "timeout-parent.ps1"
+        $timeoutParentSource = @'
+param(
+    [Parameter(Mandatory)][string]$PowerShellPath,
+    [Parameter(Mandatory)][string]$ChildPidPath
+)
+$child = Start-Process -FilePath $PowerShellPath -ArgumentList @(
+    '-NoProfile', '-NonInteractive', '-Command',
+    '[System.Threading.Thread]::Sleep(30000)'
+) -PassThru -WindowStyle Hidden
+[System.IO.File]::WriteAllText($ChildPidPath, [string]$child.Id)
+[System.Threading.Thread]::Sleep(30000)
+'@
+        Write-Utf8NoBom -Path $timeoutParentPath -Value $timeoutParentSource
+        $timeoutResult = Invoke-NativeProcessToFiles `
+            -FileName $selfTestPowerShell `
+            -Arguments @(
+                "-NoProfile", "-NonInteractive", "-File", $timeoutParentPath,
+                "-PowerShellPath", $selfTestPowerShell,
+                "-ChildPidPath", $childPidPath
+            ) `
+            -WorkingDirectory $selfTestRoot `
+            -StdoutPath (Join-Path $selfTestRoot "timeout.stdout.log") `
+            -StderrPath (Join-Path $selfTestRoot "timeout.stderr.log") `
+            -TimeoutSeconds 2
+        if (-not (Test-Path -LiteralPath $childPidPath -PathType Leaf)) {
+            throw "Process-tree timeout self-test did not start its child."
+        }
+        $childPid = [int]([System.IO.File]::ReadAllText($childPidPath).Trim())
+        if (-not $timeoutResult.TimedOut -or
+            -not $timeoutResult.ProcessTreeTerminated -or
+            $null -ne $timeoutResult.ExitCode -or
+            $timeoutResult.TimeoutSeconds -ne 2 -or
+            $null -ne (Get-Process -Id $timeoutResult.ProcessId -ErrorAction SilentlyContinue) -or
+            $null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue)) {
+            throw "Process-tree timeout self-test failed."
+        }
         $launcherArguments = @(New-LauncherProcessArguments `
             -Launcher "C:\sentinel\launcher.ps1" `
             -Tier "standard" `
@@ -537,7 +699,37 @@ $neutralWorkspace = Join-Path $OutputRoot "neutral-workspace"
 [void](New-Item -ItemType Directory -Path $neutralWorkspace)
 $CollectorPython = Get-FullPath -Path $CollectorPython
 $LauncherPath = Get-FullPath -Path $LauncherPath
+$CandidateRuntimeRoot = Get-FullPath -Path $CandidateRuntimeRoot
+if (-not (Test-Path -LiteralPath $CandidateRuntimeRoot -PathType Container)) {
+    throw "Candidate runtime root is missing: $CandidateRuntimeRoot"
+}
 $powerShell = Get-PowerShellExecutable
+$installedLauncherIdentity = Get-LauncherManifestIdentity -Launcher $LauncherPath
+if (-not $installedLauncherIdentity.InstallRoot.Equals(
+    $CandidateRuntimeRoot,
+    [System.StringComparison]::OrdinalIgnoreCase
+)) {
+    throw "Installed-product launcher manifest install_root does not match CandidateRuntimeRoot."
+}
+$copilotCliIdentity = Get-CopilotCliIdentity `
+    -PowerShell $powerShell `
+    -WorkingDirectory $neutralWorkspace `
+    -StdoutPath (Join-Path $OutputRoot "copilot-version.stdout.log") `
+    -StderrPath (Join-Path $OutputRoot "copilot-version.stderr.log")
+$caseTimeoutSeconds = $CaseTimeoutMinutes * 60
+$permissionContract = [ordered]@{
+    available_tools = @($ExpectedAvailableTools)
+    allow_tools = @($ExpectedAllowedTools)
+    no_custom_instructions = $true
+    no_ask_user = $true
+    output_format = "json"
+    stream = "off"
+    no_auto_update = $true
+    no_remote = $true
+    no_remote_export = $true
+    approval_observation = $ApprovalObservation
+    approval_prompt_count_directly_observable = $false
+}
 $boundaryLauncher = $null
 $finalCollectorExit = 1
 $reportPath = Join-Path $OutputRoot "lrr-agent003-cli-prod-uat-report.json"
@@ -576,6 +768,13 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
         $activeLauncher = $boundaryLauncher
     }
     $launcherIdentity = Get-LauncherManifestIdentity -Launcher $activeLauncher
+    if ($case.launcher_scope -ceq "installed_product" -and
+        -not $launcherIdentity.InstallRoot.Equals(
+            $CandidateRuntimeRoot,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Installed-product launcher escaped CandidateRuntimeRoot."
+    }
     $stdout = Join-Path $caseRoot "copilot.jsonl"
     $stderr = Join-Path $caseRoot "stderr.log"
     $otel = Join-Path $caseRoot "otel.jsonl"
@@ -606,17 +805,30 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
             COPILOT_OTEL_FILE_EXPORTER_PATH = $otel
             COPILOT_OTEL_SOURCE_NAME = "lrr-agent003-cli-prod-uat"
             OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "false"
-        }
+        } `
+        -TimeoutSeconds $caseTimeoutSeconds
+    if (-not (Test-Path -LiteralPath $otel -PathType Leaf)) {
+        Write-Utf8NoBom -Path $otel -Value ""
+    }
     Write-JsonFile -Path (Join-Path $caseRoot "run.json") -Value ([ordered]@{
         schema_version = $RunSchema
         case_id = [string]$case.id
         tier = [string]$case.tier
         launcher_scope = [string]$case.launcher_scope
+        candidate_runtime_root = $CandidateRuntimeRoot
+        launcher_path = $launcherIdentity.LauncherPath
+        launcher_install_root = $launcherIdentity.InstallRoot
         launcher_sha256 = $launcherIdentity.LauncherSha256
         launcher_manifest_schema = 1
         launcher_manifest_path = $launcherIdentity.ManifestPath
         launcher_manifest_sha256 = $launcherIdentity.ManifestSha256
         copilot_home = $launcherIdentity.CopilotHome
+        cli_path = $copilotCliIdentity.Path
+        cli_sha256 = $copilotCliIdentity.Sha256
+        cli_version = $copilotCliIdentity.Version
+        cli_version_evidence_path = $copilotCliIdentity.VersionEvidencePath
+        cli_version_evidence_sha256 = $copilotCliIdentity.VersionEvidenceSha256
+        noninteractive_permission_contract = $permissionContract
         prompt_sha256 = Get-Sha256Text -Value ([string]$case.prompt)
         max_ai_credits = $PerCaseMaxAiCredits
         fresh_session = $true
@@ -625,6 +837,9 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
         started_at = $result.StartedAt
         finished_at = $result.FinishedAt
         exit_code = $result.ExitCode
+        timeout_seconds = $result.TimeoutSeconds
+        timed_out = $result.TimedOut
+        process_tree_terminated = $result.ProcessTreeTerminated
         stdout_bytes = $result.StdoutBytes
         stderr_bytes = $result.StderrBytes
     })
@@ -636,7 +851,10 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
         -CompletedCount $ordinal `
         -WorkingDirectory $neutralWorkspace
     $finalCollectorExit = $collector.ExitCode
-    if ($collector.ExitCode -in @(2, 3)) {
+    if ($result.TimedOut) {
+        throw "Case $ordinal timed out after $caseTimeoutSeconds seconds; its process tree was terminated and no retry is permitted."
+    }
+    if ($collector.ExitCode -ne 0) {
         throw "Evidence or aggregate Credit gate stopped after case $ordinal; inspect $reportPath and collector logs."
     }
 }
@@ -644,4 +862,11 @@ for ($index = 0; $index -lt $cases.Count; $index++) {
 if ($finalCollectorExit -ne 0) {
     throw "The five-case UAT completed with one or more failed gates; inspect the aggregate report in OutputRoot."
 }
-Write-Output "PASS: five fresh, sequential, retry-free UAT cases completed within the aggregate Credit gate."
+$finalReport = Get-Content -Raw -LiteralPath $reportPath -Encoding UTF8 |
+    ConvertFrom-Json -Depth 20
+if ($finalReport.schema_version -cne "lrr-agent003-cli-prod-uat-report-v1" -or
+    $finalReport.overall_status -cne "PASS_WITH_RESIDUAL" -or
+    $finalReport.approval_observation -cne $ApprovalObservation) {
+    throw "The final collector report did not satisfy PASS_WITH_RESIDUAL / NO_OBSERVED_PROMPT."
+}
+Write-Output "PASS_WITH_RESIDUAL: five fresh, sequential, retry-free UAT cases completed; approval state is NO_OBSERVED_PROMPT because CLI 1.0.77 does not expose a direct prompt counter."

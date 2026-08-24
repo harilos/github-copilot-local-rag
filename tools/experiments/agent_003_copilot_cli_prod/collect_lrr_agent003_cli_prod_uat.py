@@ -18,6 +18,9 @@ REPORT_SCHEMA = "lrr-agent003-cli-prod-uat-report-v1"
 EXPECTED_CASE_COUNT = 5
 NANO_AIU_PER_CREDIT = 1_000_000_000
 DEFAULT_AGGREGATE_CREDIT_CAP = 50
+SUPPORTED_COPILOT_CLI_VERSION = "1.0.77"
+PASS_WITH_RESIDUAL = "PASS_WITH_RESIDUAL"
+APPROVAL_OBSERVATION = "NO_OBSERVED_PROMPT"
 
 TIER_CONTRACTS = {
     "savings": ("local-rag-agent003-savings", "claude-haiku-4.5"),
@@ -33,6 +36,27 @@ ALLOWED_AGENT_TOOLS = frozenset(
         "localragagent003/local_rag_get_evidence",
     )
 )
+EXPECTED_AVAILABLE_TOOLS = (
+    "localragagent003-local_rag_search",
+    "localragagent003-local_rag_get_evidence",
+)
+EXPECTED_ALLOWED_TOOLS = (
+    "localragagent003(local_rag_search)",
+    "localragagent003(local_rag_get_evidence)",
+)
+EXPECTED_PERMISSION_CONTRACT = {
+    "available_tools": list(EXPECTED_AVAILABLE_TOOLS),
+    "allow_tools": list(EXPECTED_ALLOWED_TOOLS),
+    "no_custom_instructions": True,
+    "no_ask_user": True,
+    "output_format": "json",
+    "stream": "off",
+    "no_auto_update": True,
+    "no_remote": True,
+    "no_remote_export": True,
+    "approval_observation": APPROVAL_OBSERVATION,
+    "approval_prompt_count_directly_observable": False,
+}
 FORBIDDEN_EVENT_TYPES = frozenset(
     (
         "permission.requested",
@@ -42,11 +66,17 @@ FORBIDDEN_EVENT_TYPES = frozenset(
         "subagent.started",
     )
 )
+CREDIT_GATE_FAILURES = frozenset(("session_usage_total_nano_aiu_missing",))
 FORBIDDEN_TOOL_RE = re.compile(
     r"(?:^|[-_/])(shell|powershell|bash|cmd|terminal|file|read|write|edit|"
     r"delete|web|fetch|browser|ask[_-]?user)(?:$|[-_/])",
     re.IGNORECASE,
 )
+MARKDOWN_SOURCE_URL_RE = re.compile(
+    r"(?<!!)\[[^\]\r\n]+\]\((https://[^\s<>()]+)\)"
+)
+HTTPS_URL_RE = re.compile(r"https://[^\s<>()\]]+")
+URL_TRAILING_PUNCTUATION = ".,;:!?\"'。．、，；：！？」』】〕〉》"
 
 
 class EvidenceError(ValueError):
@@ -71,7 +101,9 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+def _load_jsonl(
+    path: Path, *, allow_empty: bool = False
+) -> list[dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8-sig", errors="strict").splitlines()
     except (OSError, UnicodeError) as exc:
@@ -91,7 +123,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
                 f"JSONL value is not an object at {path}:{line_number}"
             )
         values.append(value)
-    if not values:
+    if not values and not allow_empty:
         raise EvidenceError(f"JSONL is empty: {path}")
     return values
 
@@ -149,14 +181,31 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
         )
         if scope != expected_scope:
             raise EvidenceError(f"{case_id}: launcher_scope is not canonical")
+        has_url_contract = "minimum_markdown_source_urls" in value
+        if ordinal in (3, 4):
+            minimum_urls = value.get("minimum_markdown_source_urls")
+            if (
+                isinstance(minimum_urls, bool)
+                or not isinstance(minimum_urls, int)
+                or minimum_urls < 1
+                or value.get("require_all_response_urls_from_tool_evidence")
+                is not True
+            ):
+                raise EvidenceError(f"{case_id}: source URL contract is invalid")
+        elif has_url_contract or "require_all_response_urls_from_tool_evidence" in value:
+            raise EvidenceError(f"{case_id}: unexpected source URL contract")
         if scope == "temporary_boundary_fixture":
             minimum_bytes = value.get("minimum_tool_result_bytes")
+            tail_window = value.get("tool_result_tail_window_bytes")
             required_fragment = value.get("required_response_fragment")
             revision = value.get("compatibility_revision")
             if (
                 isinstance(minimum_bytes, bool)
                 or not isinstance(minimum_bytes, int)
                 or minimum_bytes <= 32768
+                or isinstance(tail_window, bool)
+                or not isinstance(tail_window, int)
+                or not 1 <= tail_window <= 4096
                 or not isinstance(required_fragment, str)
                 or not required_fragment
                 or not isinstance(revision, dict)
@@ -356,6 +405,66 @@ def _tool_result_content(data: dict[str, Any]) -> str | None:
     return "".join(texts)
 
 
+def _normalize_https_url(value: str) -> str | None:
+    normalized = value.strip().rstrip(URL_TRAILING_PUNCTUATION)
+    if re.fullmatch(r"https://[^\s<>()]+", normalized):
+        return normalized
+    return None
+
+
+def _response_https_urls(response: str) -> set[str]:
+    values: set[str] = set()
+    for match in HTTPS_URL_RE.finditer(response):
+        normalized = _normalize_https_url(match.group(0))
+        if normalized is not None:
+            values.add(normalized)
+    return values
+
+
+def _markdown_source_urls(response: str) -> set[str]:
+    values: set[str] = set()
+    for match in MARKDOWN_SOURCE_URL_RE.finditer(response):
+        normalized = _normalize_https_url(match.group(1))
+        if normalized is not None:
+            values.add(normalized)
+    return values
+
+
+def _packet_evidence_urls(parsed: Any) -> set[str]:
+    if not isinstance(parsed, dict):
+        return set()
+    evidence = parsed.get("evidence")
+    if not isinstance(evidence, list):
+        return set()
+    values: set[str] = set()
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if isinstance(url, str):
+            normalized = _normalize_https_url(url)
+            if normalized is not None:
+                values.add(normalized)
+    return values
+
+
+def _tool_evidence_urls(content: str, structured_content: Any) -> set[str]:
+    values = _packet_evidence_urls(structured_content)
+    if values:
+        return values
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return set()
+    return _packet_evidence_urls(parsed)
+
+
+def _url_set_sha256(values: set[str]) -> str | None:
+    if not values:
+        return None
+    return _sha256_text("\n".join(sorted(values)))
+
+
 def _result_contract(
     events: list[dict[str, Any]], run_exit_code: Any
 ) -> tuple[str | None, float | None, list[str]]:
@@ -398,6 +507,72 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_cli_identity(
+    run: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
+    failures: list[str] = []
+    evidence: dict[str, Any] = {}
+    path_value = run.get("cli_path")
+    version_path_value = run.get("cli_version_evidence_path")
+    if (
+        not isinstance(path_value, str)
+        or not path_value
+        or not Path(path_value).is_absolute()
+    ):
+        return evidence, ["cli_path_invalid"]
+    cli_path = Path(path_value)
+    if not cli_path.is_file() or cli_path.is_symlink():
+        return evidence, ["cli_file_unreadable"]
+    cli_path = cli_path.resolve()
+    live_hash = _sha256_file(cli_path)
+    if run.get("cli_sha256") != live_hash:
+        failures.append("cli_file_hash_mismatch")
+    if run.get("cli_version") != SUPPORTED_COPILOT_CLI_VERSION:
+        failures.append("cli_version_unsupported")
+    if (
+        not isinstance(version_path_value, str)
+        or not version_path_value
+        or not Path(version_path_value).is_absolute()
+    ):
+        failures.append("cli_version_evidence_path_invalid")
+    else:
+        version_path = Path(version_path_value)
+        if not version_path.is_file() or version_path.is_symlink():
+            failures.append("cli_version_evidence_unreadable")
+        else:
+            version_path = version_path.resolve()
+            version_hash = _sha256_file(version_path)
+            if run.get("cli_version_evidence_sha256") != version_hash:
+                failures.append("cli_version_evidence_hash_mismatch")
+            try:
+                version_output = version_path.read_text(
+                    encoding="utf-8-sig", errors="strict"
+                ).strip()
+            except (OSError, UnicodeError):
+                failures.append("cli_version_evidence_unreadable")
+            else:
+                lines = version_output.splitlines()
+                version_match = (
+                    re.fullmatch(
+                        r"GitHub Copilot CLI ([0-9]+\.[0-9]+\.[0-9]+)\.?",
+                        lines[0],
+                    )
+                    if lines
+                    else None
+                )
+                if (
+                    version_match is None
+                    or version_match.group(1) != SUPPORTED_COPILOT_CLI_VERSION
+                ):
+                    failures.append("cli_version_evidence_mismatch")
+    evidence = {
+        "path": str(cli_path),
+        "sha256": live_hash,
+        "version": run.get("cli_version"),
+    }
+    return evidence, sorted(set(failures))
+
+
 def _validate_launcher_manifest(
     run: dict[str, Any]
 ) -> tuple[Path | None, dict[str, Any], list[str]]:
@@ -433,6 +608,28 @@ def _validate_launcher_manifest(
     install_path = Path(install_root).resolve()
     expected_manifest = install_path / "copilot-cli" / "owned-manifest.json"
     launcher_path = install_path / "copilot-cli" / "local-rag-agent003.ps1"
+    run_install_root = run.get("launcher_install_root")
+    if (
+        not isinstance(run_install_root, str)
+        or not Path(run_install_root).is_absolute()
+        or Path(run_install_root).resolve() != install_path
+    ):
+        failures.append("launcher_install_root_mismatch")
+    run_launcher_path = run.get("launcher_path")
+    if (
+        not isinstance(run_launcher_path, str)
+        or not Path(run_launcher_path).is_absolute()
+        or Path(run_launcher_path).resolve() != launcher_path.resolve()
+    ):
+        failures.append("launcher_path_mismatch")
+    candidate_root = run.get("candidate_runtime_root")
+    if not isinstance(candidate_root, str) or not Path(candidate_root).is_absolute():
+        failures.append("candidate_runtime_root_invalid")
+    elif (
+        run.get("launcher_scope") == "installed_product"
+        and Path(candidate_root).resolve() != install_path
+    ):
+        failures.append("installed_launcher_outside_candidate_runtime")
     if manifest_path != expected_manifest.resolve():
         failures.append("launcher_manifest_location_mismatch")
     entries = manifest.get("artifacts")
@@ -460,7 +657,11 @@ def _validate_launcher_manifest(
             failures.append("launcher_artifact_hash_mismatch")
         evidence = {
             "launcher_manifest_sha256": manifest_hash,
+            "launcher_manifest_path": str(manifest_path),
             "launcher_sha256": live_hash,
+            "launcher_path": str(launcher_path.resolve()),
+            "install_root": str(install_path),
+            "copilot_home": str(copilot_home),
         }
     return copilot_home, evidence, failures
 
@@ -590,14 +791,42 @@ def evaluate_case(
         failures.append("fresh_session_not_asserted")
     if run.get("retry_count") != 0:
         failures.append("retry_observed")
+    timeout_seconds = run.get("timeout_seconds")
+    if isinstance(timeout_seconds, bool) or timeout_seconds != 900:
+        failures.append("case_timeout_contract_invalid")
+    timed_out = run.get("timed_out")
+    process_tree_terminated = run.get("process_tree_terminated")
+    if not isinstance(timed_out, bool) or not isinstance(
+        process_tree_terminated, bool
+    ):
+        failures.append("case_timeout_metadata_invalid")
+    elif timed_out:
+        failures.append("case_timeout_observed")
+        if not process_tree_terminated:
+            failures.append("timeout_process_tree_not_terminated")
+    elif process_tree_terminated:
+        failures.append("unexpected_process_tree_termination")
+    if run.get("noninteractive_permission_contract") != EXPECTED_PERMISSION_CONTRACT:
+        failures.append("noninteractive_permission_contract_mismatch")
 
     event_types = [_event_type(event) for event in events]
+    interaction_request_observed = any(
+        event_type.startswith("permission.")
+        or event_type.startswith("user_input.")
+        for event_type in event_types
+    )
     for event_type in event_types:
-        if event_type in FORBIDDEN_EVENT_TYPES:
+        if (
+            event_type in FORBIDDEN_EVENT_TYPES
+            or event_type.startswith("permission.")
+            or event_type.startswith("user_input.")
+        ):
             failures.append(f"forbidden_event:{event_type}")
 
     manifest_home, launcher_evidence, manifest_failures = _validate_launcher_manifest(run)
     failures.extend(manifest_failures)
+    cli_evidence, cli_failures = _validate_cli_identity(run)
+    failures.extend(cli_failures)
     session_id, result_premium_requests, result_failures = _result_contract(
         events, exit_code
     )
@@ -640,8 +869,8 @@ def evaluate_case(
 
     starts: dict[str, str] = {}
     completions: dict[str, dict[str, Any]] = {}
-    result_bytes: list[int] = []
-    result_texts: list[str] = []
+    completion_contents: dict[str, str] = {}
+    completion_structured: dict[str, Any] = {}
     for event in events:
         event_type = _event_type(event)
         data = _event_data(event)
@@ -666,16 +895,25 @@ def evaluate_case(
             if data.get("success") is True and content is None:
                 failures.append("tool_result_content_missing")
             elif content is not None:
-                result_bytes.append(len(content.encode("utf-8")))
-                result_texts.append(content)
+                completion_contents[call_id] = content
+            result_value = data.get("result")
+            if isinstance(result_value, dict) and "structuredContent" in result_value:
+                completion_structured[call_id] = result_value["structuredContent"]
     if set(starts) != set(completions):
         failures.append("tool_completion_mismatch")
     successful_owned_tool = False
+    result_texts: list[str] = []
+    successful_call_ids: list[str] = []
     for call_id, completion in completions.items():
         if completion.get("success") is not True or completion.get("error"):
             failures.append(f"tool_failed:{call_id}")
         elif starts.get(call_id) in ALLOWED_RUNTIME_TOOLS:
             successful_owned_tool = True
+            successful_call_ids.append(call_id)
+            content = completion_contents.get(call_id)
+            if content is not None:
+                result_texts.append(content)
+    result_bytes = [len(content.encode("utf-8")) for content in result_texts]
     if owned_mcp_listed and not (mcp_state_ready or successful_owned_tool):
         failures.append("owned_mcp_not_operational")
     search_count = sum(name == SEARCH_TOOL for name in starts.values())
@@ -689,15 +927,40 @@ def evaluate_case(
     if not response:
         failures.append("final_assistant_response_missing")
     required_fragment = case.get("required_response_fragment")
-    if isinstance(required_fragment, str) and required_fragment not in response:
-        failures.append("required_response_fragment_missing")
-    if isinstance(required_fragment, str) and not any(
-        required_fragment in rendered for rendered in result_texts
-    ):
-        failures.append("required_tool_result_fragment_missing")
     minimum_result_bytes = case.get("minimum_tool_result_bytes")
-    if isinstance(minimum_result_bytes, int) and max(result_bytes, default=0) < minimum_result_bytes:
-        failures.append("tool_result_boundary_not_observed")
+    tail_window = case.get("tool_result_tail_window_bytes")
+    if isinstance(required_fragment, str):
+        if response.strip() != required_fragment:
+            failures.append("required_response_exact_mismatch")
+        qualifying_results = [
+            content
+            for content in result_texts
+            if isinstance(minimum_result_bytes, int)
+            and len(content.encode("utf-8")) >= minimum_result_bytes
+        ]
+        if not qualifying_results:
+            failures.append("tool_result_boundary_not_observed")
+        elif not any(
+            required_fragment.encode("utf-8")
+            in content.encode("utf-8")[-int(tail_window) :]
+            for content in qualifying_results
+        ):
+            failures.append("required_tool_result_tail_fragment_missing")
+
+    response_urls = _response_https_urls(response)
+    markdown_urls = _markdown_source_urls(response)
+    evidence_urls: set[str] = set()
+    for call_id in successful_call_ids:
+        content = completion_contents.get(call_id, "")
+        evidence_urls.update(
+            _tool_evidence_urls(content, completion_structured.get(call_id))
+        )
+    minimum_source_urls = case.get("minimum_markdown_source_urls")
+    if isinstance(minimum_source_urls, int):
+        if len(markdown_urls) < minimum_source_urls:
+            failures.append("source_markdown_url_count_below_minimum")
+        if not response_urls.issubset(evidence_urls):
+            failures.append("response_url_not_from_tool_evidence")
 
     session_usage: dict[str, Any] = {
         "row_count": 0,
@@ -751,7 +1014,7 @@ def evaluate_case(
     result = {
         "case_id": case_id,
         "tier": case["tier"],
-        "status": "PASS" if not failures else "FAIL",
+        "status": PASS_WITH_RESIDUAL if not failures else "FAIL",
         "failures": sorted(set(failures)),
         "expected_agent": case["expected_agent"],
         "otel_agent_ids": sorted(otel_evidence["agent_ids"]),
@@ -773,14 +1036,29 @@ def evaluate_case(
         "maximum_tool_result_content_bytes": max(result_bytes, default=0),
         "assistant_response_bytes": len(response.encode("utf-8")),
         "assistant_response_sha256": _sha256_text(response) if response else None,
+        "response_source_url_count": len(response_urls),
+        "response_source_url_sha256": _url_set_sha256(response_urls),
+        "markdown_source_url_count": len(markdown_urls),
+        "markdown_source_url_sha256": _url_set_sha256(markdown_urls),
+        "tool_evidence_url_count": len(evidence_urls),
+        "tool_evidence_url_sha256": _url_set_sha256(evidence_urls),
         "result_premium_requests": result_premium_requests,
+        "timeout_seconds": timeout_seconds,
+        "timed_out": timed_out,
+        "process_tree_terminated": process_tree_terminated,
         "launcher_identity": launcher_evidence,
+        "cli_identity": cli_evidence,
         "credit_observable": credit_observable,
         "total_nano_aiu": nano_aiu if credit_observable else None,
         "ai_credits": nano_aiu / NANO_AIU_PER_CREDIT if credit_observable else None,
-        "permission_evidence": "fixed_launcher_manifest_and_exact_successful_tool_calls",
+        "permission_evidence": EXPECTED_PERMISSION_CONTRACT,
+        "approval_observation": (
+            "INTERACTION_REQUEST_OBSERVED"
+            if interaction_request_observed
+            else APPROVAL_OBSERVATION
+        ),
         "residuals": [
-            "permission_and_user_input_events_not_exposed_by_copilot_cli_1.0.77"
+            "approval_prompt_count_not_directly_observable_in_copilot_cli_1.0.77"
         ],
     }
     return result
@@ -803,8 +1081,19 @@ def collect(
     for ordinal, case in enumerate(cases[:completed_count], 1):
         run_root = raw_root / f"{ordinal:02d}-{case['id']}"
         run = _load_json(run_root / "run.json")
-        events = _load_jsonl(run_root / "copilot.jsonl")
-        otel = _load_jsonl(run_root / "otel.jsonl")
+        allow_empty = run.get("timed_out") is True
+        event_path = run_root / "copilot.jsonl"
+        otel_path = run_root / "otel.jsonl"
+        events = (
+            _load_jsonl(event_path, allow_empty=allow_empty)
+            if event_path.exists()
+            else ([] if allow_empty else _load_jsonl(event_path))
+        )
+        otel = (
+            _load_jsonl(otel_path, allow_empty=allow_empty)
+            if otel_path.exists()
+            else ([] if allow_empty else _load_jsonl(otel_path))
+        )
         result = evaluate_case(case, run, events, otel)
         results.append(result)
         if not result["credit_observable"]:
@@ -825,9 +1114,86 @@ def collect(
                     set(owner["failures"]) | {"fresh_session_id_reused"}
                 )
                 owner["status"] = "FAIL"
-    overall = "PASS" if all(item["status"] == "PASS" for item in results) else "FAIL"
-    if credit_stop:
+    installed_results = results[: min(4, len(results))]
+    installed_identity_keys = {
+        (
+            str(item.get("launcher_identity", {}).get("install_root", "")),
+            str(item.get("launcher_identity", {}).get("copilot_home", "")),
+            str(item.get("launcher_identity", {}).get("launcher_path", "")),
+            str(
+                item.get("launcher_identity", {}).get(
+                    "launcher_manifest_path", ""
+                )
+            ),
+            str(item.get("launcher_identity", {}).get("launcher_sha256", "")),
+            str(
+                item.get("launcher_identity", {}).get(
+                    "launcher_manifest_sha256", ""
+                )
+            ),
+        )
+        for item in installed_results
+    }
+    if len(installed_identity_keys) != 1:
+        for item in installed_results:
+            item["failures"] = sorted(
+                set(item["failures"]) | {"installed_identity_changed_across_cases"}
+            )
+            item["status"] = "FAIL"
+    if len(results) == EXPECTED_CASE_COUNT:
+        boundary_identity = results[4].get("launcher_identity", {})
+        expected_boundary_root = (
+            raw_root / "boundary-fixture" / "install"
+        ).resolve()
+        boundary_root_value = boundary_identity.get("install_root")
+        installed_root_value = (
+            installed_results[0].get("launcher_identity", {}).get("install_root")
+            if installed_results
+            else None
+        )
+        if (
+            not isinstance(boundary_root_value, str)
+            or Path(boundary_root_value).resolve() != expected_boundary_root
+            or boundary_root_value == installed_root_value
+        ):
+            results[4]["failures"] = sorted(
+                set(results[4]["failures"])
+                | {"boundary_fixture_launcher_scope_invalid"}
+            )
+            results[4]["status"] = "FAIL"
+    cli_identity_keys = {
+        (
+            str(item.get("cli_identity", {}).get("path", "")),
+            str(item.get("cli_identity", {}).get("sha256", "")),
+            str(item.get("cli_identity", {}).get("version", "")),
+        )
+        for item in results
+    }
+    if len(cli_identity_keys) != 1:
+        for item in results:
+            item["failures"] = sorted(
+                set(item["failures"]) | {"cli_identity_changed_across_cases"}
+            )
+            item["status"] = "FAIL"
+    overall = (
+        PASS_WITH_RESIDUAL
+        if all(item["status"] == PASS_WITH_RESIDUAL for item in results)
+        else "FAIL"
+    )
+    hard_failures = any(
+        any(failure not in CREDIT_GATE_FAILURES for failure in item["failures"])
+        for item in results
+    )
+    if credit_stop and not hard_failures:
         overall = "STOP_CREDIT_GATE"
+    aggregate_approval_observation = (
+        APPROVAL_OBSERVATION
+        if all(
+            item.get("approval_observation") == APPROVAL_OBSERVATION
+            for item in results
+        )
+        else "INTERACTION_REQUEST_OBSERVED"
+    )
     return {
         "schema_version": REPORT_SCHEMA,
         "overall_status": overall,
@@ -837,6 +1203,23 @@ def collect(
         "aggregate_total_nano_aiu": total_nano,
         "aggregate_ai_credits": total_nano / NANO_AIU_PER_CREDIT,
         "stop_required": credit_stop,
+        "approval_observation": aggregate_approval_observation,
+        "noninteractive_permission_contract": EXPECTED_PERMISSION_CONTRACT,
+        "cli_identities": [
+            {"path": path, "sha256": sha256, "version": version}
+            for path, sha256, version in sorted(cli_identity_keys)
+        ],
+        "case_timeout_seconds": sorted(
+            {
+                int(item["timeout_seconds"])
+                for item in results
+                if isinstance(item.get("timeout_seconds"), int)
+                and not isinstance(item.get("timeout_seconds"), bool)
+            }
+        ),
+        "residuals": [
+            "approval_prompt_count_not_directly_observable_in_copilot_cli_1.0.77"
+        ],
         "compatibility_revisions": [
             {
                 "case_id": case["id"],
@@ -875,14 +1258,36 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
         "standard": "gpt-5-mini",
         "thorough": "gpt-5.3-codex",
     }
+    synthetic_cli = raw_root / "_synthetic-cli" / "copilot.cmd"
+    synthetic_version = raw_root / "_synthetic-cli" / "version.stdout.log"
+    synthetic_cli.parent.mkdir(parents=True, exist_ok=True)
+    synthetic_cli.write_text("@echo off\r\n", encoding="utf-8")
+    synthetic_version.write_text(
+        f"GitHub Copilot CLI {SUPPORTED_COPILOT_CLI_VERSION}.\n"
+        "Run 'copilot update' to check for updates.\n",
+        encoding="utf-8",
+    )
+    cli_hash = _sha256_file(synthetic_cli)
+    version_hash = _sha256_file(synthetic_version)
+    shared_install_root = raw_root / "_synthetic-candidate-runtime"
+    shared_copilot_home = raw_root / "_synthetic-copilot-home"
     for ordinal, case in enumerate(cases, 1):
         run_root = raw_root / f"{ordinal:02d}-{case['id']}"
         actual_model = resolved[case["tier"]]
         session_id = f"synthetic-session-{ordinal}"
         input_tokens = 100 + ordinal
         output_tokens = 20 + ordinal
-        install_root = raw_root / f"_synthetic-install-{ordinal}"
-        copilot_home = raw_root / f"_synthetic-copilot-home-{ordinal}"
+        is_boundary = case["launcher_scope"] == "temporary_boundary_fixture"
+        install_root = (
+            raw_root / "boundary-fixture" / "install"
+            if is_boundary
+            else shared_install_root
+        )
+        copilot_home = (
+            raw_root / "boundary-fixture" / "copilot-home"
+            if is_boundary
+            else shared_copilot_home
+        )
         launcher = install_root / "copilot-cli" / "local-rag-agent003.ps1"
         manifest_path = install_root / "copilot-cli" / "owned-manifest.json"
         launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -906,17 +1311,20 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                 ],
             },
         )
-        database = sqlite3.connect(copilot_home / "session-store.db")
+        database_path = copilot_home / "session-store.db"
+        database_exists = database_path.exists()
+        database = sqlite3.connect(database_path)
         try:
-            database.executescript(
-                "CREATE TABLE sessions (id TEXT PRIMARY KEY);"
-                "CREATE TABLE assistant_usage_events ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
-                "turn_index INTEGER, agent_id TEXT, model TEXT NOT NULL, "
-                "input_tokens INTEGER, output_tokens INTEGER, "
-                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
-                "reasoning_tokens INTEGER, total_nano_aiu INTEGER);"
-            )
+            if not database_exists:
+                database.executescript(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY);"
+                    "CREATE TABLE assistant_usage_events ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
+                    "turn_index INTEGER, agent_id TEXT, model TEXT NOT NULL, "
+                    "input_tokens INTEGER, output_tokens INTEGER, "
+                    "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                    "reasoning_tokens INTEGER, total_nano_aiu INTEGER);"
+                )
             database.execute("INSERT INTO sessions(id) VALUES (?)", (session_id,))
             database.execute(
                 "INSERT INTO assistant_usage_events("
@@ -946,26 +1354,54 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                 "case_id": case["id"],
                 "tier": case["tier"],
                 "launcher_scope": case["launcher_scope"],
+                "candidate_runtime_root": str(shared_install_root.resolve()),
+                "launcher_path": str(launcher.resolve()),
+                "launcher_install_root": str(install_root.resolve()),
                 "launcher_sha256": launcher_hash,
                 "launcher_manifest_schema": 1,
                 "launcher_manifest_path": str(manifest_path.resolve()),
                 "launcher_manifest_sha256": _sha256_file(manifest_path),
                 "copilot_home": str(copilot_home.resolve()),
+                "cli_path": str(synthetic_cli.resolve()),
+                "cli_sha256": cli_hash,
+                "cli_version": SUPPORTED_COPILOT_CLI_VERSION,
+                "cli_version_evidence_path": str(synthetic_version.resolve()),
+                "cli_version_evidence_sha256": version_hash,
+                "noninteractive_permission_contract": EXPECTED_PERMISSION_CONTRACT,
                 "prompt_sha256": _sha256_text(case["prompt"]),
                 "max_ai_credits": 30,
                 "fresh_session": True,
                 "retry_count": 0,
                 "exit_code": 0,
+                "timeout_seconds": 900,
+                "timed_out": False,
+                "process_tree_terminated": False,
             },
         )
         synthetic_content = '{"status":"ok"}'
+        synthetic_structured: dict[str, Any] | None = None
         synthetic_answer = "Synthetic answer."
+        if isinstance(case.get("minimum_markdown_source_urls"), int):
+            synthetic_url = f"https://example.invalid/evidence/{ordinal}"
+            synthetic_content = (
+                "Local RAG synthetic status=ok; use structuredContent."
+            )
+            synthetic_structured = {
+                "status": "ok",
+                "evidence": [{"id": "E1", "url": synthetic_url}],
+            }
+            synthetic_answer = f"Synthetic answer [source]({synthetic_url})."
         if case.get("launcher_scope") == "temporary_boundary_fixture":
             synthetic_content = "X" * 33000 + str(case["required_response_fragment"])
             synthetic_answer = str(case["required_response_fragment"])
         tool_events: list[dict[str, Any]] = []
         for call_index in range(case["minimum_search_calls"]):
             search_id = f"search-{ordinal}-{call_index + 1}"
+            result_value: dict[str, Any] = {
+                "content": [{"type": "text", "text": synthetic_content}]
+            }
+            if synthetic_structured is not None:
+                result_value["structuredContent"] = synthetic_structured
             tool_events.extend(
                 [
                     {
@@ -980,11 +1416,7 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                         "data": {
                             "toolCallId": search_id,
                             "success": True,
-                            "result": {
-                                "content": [
-                                    {"type": "text", "text": synthetic_content}
-                                ]
-                            },
+                            "result": result_value,
                         },
                     },
                 ]
@@ -1081,7 +1513,16 @@ def self_test(cases_path: Path) -> int:
         raw_root = Path(tmp) / "raw"
         _synthetic_case_files(raw_root, cases)
         report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
-        if report["overall_status"] != "PASS":
+        if (
+            report["overall_status"] != PASS_WITH_RESIDUAL
+            or report["approval_observation"] != APPROVAL_OBSERVATION
+            or len(report["cli_identities"]) != 1
+            or any(
+                report["cases"][index]["markdown_source_url_count"] < 1
+                for index in (2, 3)
+            )
+            or "https://example.invalid" in json.dumps(report)
+        ):
             raise AssertionError(report)
         for ordinal, case in enumerate(cases, 1):
             values = _load_jsonl(
@@ -1095,9 +1536,256 @@ def self_test(cases_path: Path) -> int:
             if forbidden_synthetic & {_event_type(value) for value in values}:
                 raise AssertionError("synthetic stdout does not match CLI 1.0.77")
 
+        source_case = cases[2]
+        source_events_path = (
+            raw_root / f"03-{source_case['id']}" / "copilot.jsonl"
+        )
+        source_original = source_events_path.read_text(encoding="utf-8")
+        source_values = [
+            json.loads(line) for line in source_original.splitlines() if line
+        ]
+        for value in source_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    "Synthetic source https://example.invalid/evidence/3"
+                )
+        _write_jsonl(source_events_path, source_values)
+        report = collect(cases_path, raw_root, 3)
+        if (
+            report["overall_status"] != "FAIL"
+            or "source_markdown_url_count_below_minimum"
+            not in report["cases"][2]["failures"]
+        ):
+            raise AssertionError("missing Markdown source URL did not fail")
+
+        source_values = [
+            json.loads(line) for line in source_original.splitlines() if line
+        ]
+        for value in source_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    "Synthetic [source](https://example.invalid/not-returned)."
+                )
+        _write_jsonl(source_events_path, source_values)
+        report = collect(cases_path, raw_root, 3)
+        if (
+            report["overall_status"] != "FAIL"
+            or "response_url_not_from_tool_evidence"
+            not in report["cases"][2]["failures"]
+        ):
+            raise AssertionError("invented source URL did not fail")
+
+        source_values = [
+            json.loads(line) for line in source_original.splitlines() if line
+        ]
+        for value in source_values:
+            if value.get("type") == "tool.execution_complete":
+                value["data"]["result"]["structuredContent"] = {
+                    "metadata": {"url": "https://example.invalid/evidence/3"}
+                }
+        _write_jsonl(source_events_path, source_values)
+        report = collect(cases_path, raw_root, 3)
+        if (
+            report["overall_status"] != "FAIL"
+            or "response_url_not_from_tool_evidence"
+            not in report["cases"][2]["failures"]
+        ):
+            raise AssertionError("non-evidence URL field authorized a source")
+        source_events_path.write_text(source_original, encoding="utf-8")
+
+        boundary_case = cases[4]
+        boundary_events_path = (
+            raw_root / f"05-{boundary_case['id']}" / "copilot.jsonl"
+        )
+        boundary_original = boundary_events_path.read_text(encoding="utf-8")
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "tool.execution_complete":
+                value["data"]["result"]["content"][0]["text"] = (
+                    str(boundary_case["required_response_fragment"]) + "X" * 33000
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_tool_result_tail_fragment_missing"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("non-tail boundary marker did not fail")
+
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        marker = str(boundary_case["required_response_fragment"])
+        exact_boundary = "X" * (32768 - len(marker.encode("utf-8"))) + marker
+        for value in boundary_values:
+            if value.get("type") == "tool.execution_complete":
+                value["data"]["result"]["content"][0]["text"] = exact_boundary
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "tool_result_boundary_not_observed"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("exactly 32 KiB tool result did not fail")
+
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        completion_index = 0
+        for value in boundary_values:
+            if value.get("type") == "tool.execution_complete":
+                completion_index += 1
+                value["data"]["result"]["content"][0]["text"] = (
+                    "X" * 33000 if completion_index == 1 else marker
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_tool_result_tail_fragment_missing"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("marker from a separate small result was accepted")
+
+        boundary_values = [
+            json.loads(line) for line in boundary_original.splitlines() if line
+        ]
+        for value in boundary_values:
+            if value.get("type") == "assistant.message":
+                value["data"]["content"] = (
+                    str(boundary_case["required_response_fragment"]) + " extra"
+                )
+        _write_jsonl(boundary_events_path, boundary_values)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "required_response_exact_mismatch"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("non-exact boundary response did not fail")
+        boundary_events_path.write_text(boundary_original, encoding="utf-8")
+
         first = raw_root / f"01-{cases[0]['id']}" / "copilot.jsonl"
         original = first.read_text(encoding="utf-8")
         original_values = [json.loads(line) for line in original.splitlines() if line]
+        first_run_path = raw_root / f"01-{cases[0]['id']}" / "run.json"
+        first_run_original = first_run_path.read_text(encoding="utf-8")
+        first_otel = raw_root / f"01-{cases[0]['id']}" / "otel.jsonl"
+        first_otel_original = first_otel.read_text(encoding="utf-8")
+
+        timeout_run = json.loads(first_run_original)
+        timeout_run["timed_out"] = True
+        timeout_run["process_tree_terminated"] = True
+        timeout_run["exit_code"] = None
+        _write_json(first_run_path, timeout_run)
+        first.write_text("", encoding="utf-8")
+        first_otel.write_text("", encoding="utf-8")
+        report = collect(cases_path, raw_root, 1)
+        if (
+            report["overall_status"] != "FAIL"
+            or "case_timeout_observed" not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("timed-out case did not fail")
+        first_run_path.write_text(first_run_original, encoding="utf-8")
+        first.write_text(original, encoding="utf-8")
+        first_otel.write_text(first_otel_original, encoding="utf-8")
+
+        invalid_run = json.loads(first_run_original)
+        invalid_run["timeout_seconds"] = 899
+        _write_json(first_run_path, invalid_run)
+        report = collect(cases_path, raw_root, 1)
+        if (
+            report["overall_status"] != "FAIL"
+            or "case_timeout_contract_invalid"
+            not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("non-900-second timeout contract did not fail")
+
+        invalid_run = json.loads(first_run_original)
+        invalid_run["candidate_runtime_root"] = str((raw_root / "elsewhere").resolve())
+        _write_json(first_run_path, invalid_run)
+        report = collect(cases_path, raw_root, 1)
+        if (
+            report["overall_status"] != "FAIL"
+            or "installed_launcher_outside_candidate_runtime"
+            not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("installed launcher scope mismatch did not fail")
+
+        invalid_run = json.loads(first_run_original)
+        invalid_run["cli_version"] = "1.0.78"
+        _write_json(first_run_path, invalid_run)
+        report = collect(cases_path, raw_root, 1)
+        if (
+            report["overall_status"] != "FAIL"
+            or "cli_version_unsupported" not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("unsupported CLI version did not fail")
+
+        invalid_run = json.loads(first_run_original)
+        invalid_run["noninteractive_permission_contract"]["no_ask_user"] = False
+        _write_json(first_run_path, invalid_run)
+        report = collect(cases_path, raw_root, 1)
+        if (
+            report["overall_status"] != "FAIL"
+            or "noninteractive_permission_contract_mismatch"
+            not in report["cases"][0]["failures"]
+        ):
+            raise AssertionError("noninteractive permission mismatch did not fail")
+        first_run_path.write_text(first_run_original, encoding="utf-8")
+
+        second_run_path = raw_root / f"02-{cases[1]['id']}" / "run.json"
+        second_run_original = second_run_path.read_text(encoding="utf-8")
+        second_run = json.loads(second_run_original)
+        boundary_run = _load_json(
+            raw_root / f"05-{cases[4]['id']}" / "run.json"
+        )
+        for key in (
+            "candidate_runtime_root",
+            "launcher_path",
+            "launcher_install_root",
+            "launcher_sha256",
+            "launcher_manifest_path",
+            "launcher_manifest_sha256",
+            "copilot_home",
+        ):
+            second_run[key] = boundary_run[key]
+        _write_json(second_run_path, second_run)
+        report = collect(cases_path, raw_root, 2)
+        if (
+            report["overall_status"] != "FAIL"
+            or "installed_identity_changed_across_cases"
+            not in report["cases"][1]["failures"]
+        ):
+            raise AssertionError("cross-case installed identity change did not fail")
+        second_run_path.write_text(second_run_original, encoding="utf-8")
+
+        boundary_run_path = raw_root / f"05-{cases[4]['id']}" / "run.json"
+        boundary_run_original = boundary_run_path.read_text(encoding="utf-8")
+        relocated_boundary = json.loads(boundary_run_original)
+        installed_run = json.loads(first_run_original)
+        for key in (
+            "launcher_path",
+            "launcher_install_root",
+            "launcher_sha256",
+            "launcher_manifest_path",
+            "launcher_manifest_sha256",
+            "copilot_home",
+        ):
+            relocated_boundary[key] = installed_run[key]
+        _write_json(boundary_run_path, relocated_boundary)
+        report = collect(cases_path, raw_root, EXPECTED_CASE_COUNT)
+        if (
+            report["overall_status"] != "FAIL"
+            or "boundary_fixture_launcher_scope_invalid"
+            not in report["cases"][4]["failures"]
+        ):
+            raise AssertionError("relocated boundary launcher did not fail")
+        boundary_run_path.write_text(boundary_run_original, encoding="utf-8")
         for tool_name in ("shell", "read_file", "web_fetch", "ask_user"):
             values = json.loads(json.dumps(original_values))
             values.insert(
@@ -1122,7 +1810,9 @@ def self_test(cases_path: Path) -> int:
             ):
                 raise AssertionError(f"unknown tool gate did not fail: {tool_name}")
 
-        for event_type in sorted(FORBIDDEN_EVENT_TYPES):
+        for event_type in sorted(
+            FORBIDDEN_EVENT_TYPES | {"permission.unexpected_schema"}
+        ):
             values = json.loads(json.dumps(original_values))
             values.insert(-1, {"type": event_type, "data": {}})
             _write_jsonl(first, values)
@@ -1222,8 +1912,9 @@ def self_test(cases_path: Path) -> int:
 
     print(
         "SELF-TEST OK: CLI 1.0.77 JSONL, read-only session-store contract, "
-        "OTel model/token/agent, launcher, tool and aggregate Credit gates are "
-        "fail-closed. No prompt was sent."
+        "OTel model/token/agent, URL provenance, tail boundary, timeout, "
+        "launcher scope, CLI identity, permission and aggregate Credit gates "
+        "are fail-closed. No prompt was sent."
     )
     return 0
 
@@ -1268,7 +1959,10 @@ def main() -> int:
         )
         if report["overall_status"] == "STOP_CREDIT_GATE":
             return 3
-        return 0 if report["overall_status"] == "PASS" else 1
+        return 0 if report["overall_status"] in {
+            "PASS",
+            PASS_WITH_RESIDUAL,
+        } else 1
     except (OSError, EvidenceError) as exc:
         print(f"collection failed closed: {exc}", file=sys.stderr)
         return 2
