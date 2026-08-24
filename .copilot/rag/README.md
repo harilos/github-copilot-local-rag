@@ -1,36 +1,36 @@
 # Copilot Local RAG Pack
 
-This directory is installed under `~/.copilot/rag`. From a repository clone,
-use the repository installers; an overlay install preserves machine-local
-runtime state and removes only explicitly retired product files. A
-Manager-generated package includes `install.sh` and `install.ps1` at its root.
-Extract the package and run the installer for the receiving operating system;
-it copies the contained `.copilot` directory into the user's home directory.
-
-On a clean installation, prepare the runtime before lookup or Manager use:
+This directory is installed under `~/.copilot/rag`. For a source/admin
+installation from a repository clone, use the repository-root installer. On
+Windows, `install.ps1` copies the files and prepares the runtime. On a clean
+macOS/Linux installation, run `install.sh`, then prepare the runtime with an
+explicit CPython 3.13 executable:
 
 ```bash
-python3 -B ~/.copilot/rag/setup.py --format human
+python3.13 -B ~/.copilot/rag/setup.py --format human
 ```
 
-Windows PowerShell:
+Source/admin overlay installation preserves machine-local runtime state and
+removes only explicitly retired product files. A Manager-generated
+management-PC transfer folder is imported from the receiving Manager; it is
+not installed by running a script from the transfer folder.
 
-```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" `
-  -B `
-  "$env:USERPROFILE\.copilot\rag\setup.py" --format human
-```
-
-The official Windows x64 package embeds its fixed Python, locked dependencies,
-and ONNX model. Packaged setup is offline and never falls back to system
-Python. In VS Code Copilot Chat, select one of the three LOCAL-RAG Agents; they
-use only `local_rag_search` and `local_rag_get_evidence` through the read-only
-`localragagent003` MCP server. No terminal or file-read tool is required.
+The separate official Windows x64 distribution ZIP embeds its fixed Python,
+locked dependencies, and ONNX model. After extracting the ZIP, the recipient
+runs its top-level `install.cmd`. Packaged installation is offline, never falls
+back to system Python, and needs no setup request after installation succeeds.
+It installs three user-level `LOCAL-RAG` custom Agents and registers their
+fixed read-only MCP server for the normal VS Code Default Profile. Restart VS Code after
+installation or update. These Agents do not use `runInTerminal`, `readFile`,
+Workspace files, or Web, and the installer does not change approval settings.
 
 For GitHub Copilot CLI in PowerShell 7, run `local-rag-copilot` (standard), or
-add `-Tier savings|standard|thorough`. The dedicated launcher pins the owned
-MCP definition and grants session-scoped permission only to those two tools.
-It does not replace normal `copilot` or write persistent global permissions.
+add `-Tier savings|standard|thorough`. The dedicated launcher preserves the
+current working directory, pins the owned Agent and MCP definition, and grants
+session-scoped permission only to `local_rag_search` and
+`local_rag_get_evidence`. It does not replace normal `copilot`, change
+authentication or existing sessions, write persistent global permissions, or
+change VS Code approval settings.
 
 The receiving user's `~/.copilot/copilot-instructions.md` must contain:
 
@@ -42,9 +42,28 @@ For requests to use RAG, local documents, internal or company information, or in
 
 <!-- markdownlint-enable MD013 -->
 
-## Public lookup boundary
+## VS Code custom Agents
 
-Ordinary read-only lookup has two public entry points:
+Select one of these user-level Agents in VS Code Copilot Chat Agent mode:
+
+| Agent | Use it for | Model policy |
+|---|---|---|
+| `LOCAL-RAG-標準` | Ordinary questions; adjusts search depth to the question | Inherits the current VS Code selection, including Auto |
+| `LOCAL-RAG-節約` | Short checks of terms, identifiers, and simple facts | `GPT-5 mini (copilot)` |
+| `LOCAL-RAG-徹底検索` | Multi-angle comparisons and contradiction checks | `GPT-5.3-Codex (copilot)` |
+
+All three expose only `local_rag_search` and `local_rag_get_evidence`
+through `localragagent003/*`. They cannot use terminal, PowerShell, file,
+Workspace, Web, subagents, Manager, or write operations. Once an Agent is
+selected, ask the question directly; no separate setup or RAG-routing prompt is
+required. If database routing is not unambiguous, repeat the question with the
+administrator-provided `<database>-rag` name.
+
+## Diagnostic Python lookup boundary
+
+This diagnostic Python CLI is separate from the GitHub Copilot CLI Agent
+profiles above. It has two public entry points. The custom Agents use the MCP
+tools above instead of invoking these scripts directly:
 
 ```text
 ~/.copilot/rag/list_dbs.py
@@ -155,9 +174,10 @@ Selected-database menu:
 ```
 
 A Source is the unit of acquisition and URL generation. The Source Manager
-supports GitHub repositories, GitHub Issues, GitHub Wiki, SVN, Redmine,
+supports Git repositories (GitHub, GitLab, Azure DevOps, and other Git
+servers), GitHub Issues, GitHub Wiki, SVN, Redmine,
 SharePoint synchronized folders, Teams shared folders synchronized through
-OneDrive, GitLab Issues, and a local one-time import. GitHub Issues uses the
+OneDrive, GitLab Issues, GitLab Wiki, and a local one-time import. GitHub Issues uses the
 authenticated `gh` CLI and materializes Issue bodies and comments as Markdown.
 GitHub Wiki synchronizes the repository's `.wiki.git` remote. File-based
 Sources can ingest all supported files or documents only;
@@ -199,8 +219,8 @@ The Manager provides two distinct package types:
   `%LOCALAPPDATA%\LocalRAG\logs` with a TEMP fallback, and prints the absolute
   log path in the Japanese result summary.
 - Management-PC transfer: a resumable folder for another management computer.
-  It also carries all current databases, administration code, and Source
-  acquisition state.
+  It carries the selected databases (all by default), administration code,
+  and Source acquisition state, and is imported from the receiving Manager.
 
 Package creation takes no global Local RAG lock. It reads files defensively
 and aborts if a source file changes during the copy. The validated manifest
@@ -272,6 +292,7 @@ interpreters.
     docs/
 ```
 
-The lower runtime and ingestion scripts are implementation details. Copilot
-ordinary lookup uses only the two root public entry points. Human changes go
-through Local RAG Manager.
+The lower runtime and ingestion scripts are implementation details. The three
+custom Agents use only the two read-only MCP tools. The two root public entry
+points are for direct diagnostic CLI lookup, not the Agent execution path.
+Human changes go through Local RAG Manager.
