@@ -659,11 +659,30 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
         for relative in (
             Path("Lib/site-packages/certifi/cacert.pem"),
             Path("Lib/site-packages/grpc/_cython/_credentials/roots.pem"),
+            Path("Lib/site-packages/pip/_vendor/certifi/cacert.pem"),
             Path("Scripts/Lib/site-packages/certifi/cacert.pem"),
             Path("Scripts/Lib/site-packages/grpc/_cython/_credentials/roots.pem"),
+            Path("Scripts/Lib/site-packages/pip/_vendor/certifi/cacert.pem"),
         ):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
                 request = _request(Path(directory), no_database=True)
+                if relative.parts[:5] == (
+                    "Scripts",
+                    "Lib",
+                    "site-packages",
+                    "pip",
+                    "_vendor",
+                ):
+                    source = request.runtime_root / "Lib" / "site-packages"
+                    destination = (
+                        request.runtime_root / "Scripts" / "Lib" / "site-packages"
+                    )
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source / "pip"), str(destination / "pip"))
+                    shutil.move(
+                        str(source / "pip-24.3.1.dist-info"),
+                        str(destination / "pip-24.3.1.dist-info"),
+                    )
                 target = request.runtime_root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"public CA roots")
@@ -674,6 +693,22 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             private_key = request.runtime_root / "Lib" / "site-packages" / "private.pem"
             private_key.parent.mkdir(parents=True, exist_ok=True)
             private_key.write_bytes(b"private")
+            with self.assertRaisesRegex(ValueError, "possible credential"):
+                build_package(request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            request = _request(Path(directory), no_database=True)
+            near_match = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+                / "_vendor"
+                / "certifi"
+                / "nearby.pem"
+            )
+            near_match.parent.mkdir(parents=True, exist_ok=True)
+            near_match.write_bytes(b"not an allowlisted CA bundle")
             with self.assertRaisesRegex(ValueError, "possible credential"):
                 build_package(request)
 
