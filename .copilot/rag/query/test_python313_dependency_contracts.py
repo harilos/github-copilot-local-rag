@@ -84,7 +84,7 @@ class Python313DependencyContracts(unittest.TestCase):
     def test_windows_profiles_are_complete_exact_and_separate(self) -> None:
         search = _locked_requirements(SEARCH_LOCK)
         admin = _locked_requirements(ADMIN_LOCK)
-        self.assertEqual(93, len(search))
+        self.assertEqual(94, len(search))
         self.assertEqual(120, len(admin))
         self.assertLess(set(search), set(admin))
         for name in (
@@ -103,6 +103,7 @@ class Python313DependencyContracts(unittest.TestCase):
         self.assertEqual("1.5.9", search["chromadb"])
         self.assertEqual("2.15.0", search["pydantic-settings"])
         self.assertEqual("1.5.2", search["hf-xet"])
+        self.assertEqual("24.3.1", search["pip"])
         self.assertEqual("24.3.1", admin["pip"])
 
     def test_direct_metadata_and_source_requirements_are_exact_and_aligned(self) -> None:
@@ -142,6 +143,13 @@ class Python313DependencyContracts(unittest.TestCase):
                 f"../../{canonical.relative_to(REPOSITORY_ROOT).as_posix()}",
                 content.split("-r ", 1)[1].strip(),
             )
+
+        builder = (
+            REPOSITORY_ROOT / "tools/windows_portable/build_package.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn('$Profile -eq "search-only"', builder)
+        self.assertIn('"requirements-windows-search.lock"', builder)
+        self.assertIn('"requirements-windows-admin.lock"', builder)
 
 
 if __name__ == "__main__":

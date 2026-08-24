@@ -691,7 +691,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertFalse(path.exists(), path)
 
     def test_launcher_executes_fixed_default_contract_and_rejects_nested_shadow(self) -> None:
-        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
         if powershell is None:
             self.skipTest("PowerShell is unavailable")
         setup.install_or_repair(
@@ -929,6 +929,195 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertFalse(capture.exists())
             os.rmdir(temporary)
 
+    def test_launcher_fails_closed_for_project_jsonc_shadows_and_uses_git_boundary(
+        self,
+    ) -> None:
+        powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("PowerShell is unavailable")
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        launcher = self.product / setup.BUNDLE_NAME / setup.LAUNCHER_NAME
+        binary_dir = self.root / "global-bin"
+        binary_dir.mkdir()
+        capture = self.root / "semantic-shadow-capture.txt"
+        fake = binary_dir / "copilot.cmd"
+        fake.write_text(
+            "@echo off\r\n"
+            "> \"%LRR_CAPTURE%\" echo ARGS=%*\r\n"
+            "exit /b 0\r\n",
+            encoding="ascii",
+        )
+        environment = os.environ.copy()
+        environment["PATH"] = str(binary_dir) + os.pathsep + environment["PATH"]
+        environment["LRR_CAPTURE"] = str(capture)
+
+        def invoke(directory: Path, *, custom_environment: dict[str, str] | None = None):
+            capture.unlink(missing_ok=True)
+            return subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(launcher),
+                ],
+                cwd=directory,
+                env=custom_environment or environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        non_git = self.root / "non-git"
+        non_git.mkdir()
+        agent_shadow = (
+            non_git
+            / ".github"
+            / "agents"
+            / "local-rag-agent003-standard.md"
+        )
+        agent_shadow.parent.mkdir(parents=True)
+        agent_shadow.write_text("foreign", encoding="utf-8")
+        rejected_agent = invoke(non_git)
+        self.assertNotEqual(0, rejected_agent.returncode)
+        self.assertIn(
+            "project-shadowed Agent definition",
+            rejected_agent.stdout + rejected_agent.stderr,
+        )
+        self.assertFalse(capture.exists())
+        agent_shadow.unlink()
+
+        local_binary_dir = non_git / "bin"
+        local_binary_dir.mkdir()
+        shutil.copyfile(fake, local_binary_dir / "copilot.cmd")
+        local_environment = environment.copy()
+        local_environment["PATH"] = (
+            str(local_binary_dir) + os.pathsep + environment["PATH"]
+        )
+        rejected_executable = invoke(
+            non_git,
+            custom_environment=local_environment,
+        )
+        self.assertNotEqual(0, rejected_executable.returncode)
+        self.assertIn(
+            "project-shadowed Copilot CLI executable",
+            rejected_executable.stdout + rejected_executable.stderr,
+        )
+        self.assertFalse(capture.exists())
+
+        escaped_server = "LOCALRAGAGENT\\u0030\\u0030\\u0033"
+        shadow_documents = (
+            (
+                ".copilot/mcp-config.json",
+                f'{{ // comment\n "mcpServers": {{ "{escaped_server}": {{"command":"x"}}, }}, }}',
+            ),
+            (
+                ".vscode/mcp.json",
+                f'{{ /* comment */ "servers": {{ "{escaped_server}": {{"command":"x"}}, }}, }}',
+            ),
+            (
+                ".mcp.json",
+                f'{{ "{escaped_server}": {{"command":"x"}}, }}',
+            ),
+            (
+                ".github/mcp.json",
+                f'{{ "servers": {{ "{escaped_server}": {{"command":"x"}}, }}, }}',
+            ),
+        )
+        for relative, document in shadow_documents:
+            with self.subTest(relative=relative):
+                config = non_git / Path(relative)
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text(document, encoding="utf-8")
+                rejected_config = invoke(non_git)
+                self.assertNotEqual(0, rejected_config.returncode)
+                self.assertIn(
+                    "project-shadowed MCP server",
+                    rejected_config.stdout + rejected_config.stderr,
+                )
+                self.assertFalse(capture.exists())
+                config.unlink()
+
+        unrelated = non_git / ".mcp.json"
+        unrelated.write_text(
+            "{\n"
+            "  // Markers and a server-looking fragment inside a string are data.\n"
+            '  "foreign": {"command": "literal // /* \\"localragagent003\\": text"},\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        accepted_unrelated = invoke(non_git)
+        self.assertEqual(
+            0,
+            accepted_unrelated.returncode,
+            accepted_unrelated.stdout + accepted_unrelated.stderr,
+        )
+        self.assertTrue(capture.exists())
+        unrelated.unlink()
+
+        malformed = non_git / ".mcp.json"
+        malformed.write_text('{"foreign": /* unterminated', encoding="utf-8")
+        rejected_malformed = invoke(non_git)
+        self.assertNotEqual(0, rejected_malformed.returncode)
+        self.assertIn(
+            "Invalid project MCP config",
+            rejected_malformed.stdout + rejected_malformed.stderr,
+        )
+        self.assertFalse(capture.exists())
+        malformed.unlink()
+
+        wrong_schema = non_git / ".vscode" / "mcp.json"
+        wrong_schema.parent.mkdir(parents=True, exist_ok=True)
+        wrong_schema.write_text('{"servers":[]}', encoding="utf-8")
+        rejected_schema = invoke(non_git)
+        self.assertNotEqual(0, rejected_schema.returncode)
+        self.assertIn(
+            "Invalid project MCP config",
+            rejected_schema.stdout + rejected_schema.stderr,
+        )
+        self.assertFalse(capture.exists())
+        wrong_schema.unlink()
+
+        outer = self.root / "outer"
+        repository = outer / "repository"
+        nested = repository / "one" / "two"
+        nested.mkdir(parents=True)
+        (repository / ".git").mkdir()
+        outer_shadow = outer / ".mcp.json"
+        outer_shadow.write_text(
+            f'{{"{escaped_server}":{{"command":"x"}}}}',
+            encoding="utf-8",
+        )
+        accepted_above_boundary = invoke(nested)
+        self.assertEqual(
+            0,
+            accepted_above_boundary.returncode,
+            accepted_above_boundary.stdout + accepted_above_boundary.stderr,
+        )
+        self.assertTrue(capture.exists())
+
+        ancestor_shadow = repository / ".github" / "mcp.json"
+        ancestor_shadow.parent.mkdir(parents=True)
+        ancestor_shadow.write_text(
+            f'{{"mcpServers":{{"{escaped_server}":{{"command":"x"}}}}}}',
+            encoding="utf-8",
+        )
+        rejected_ancestor = invoke(nested)
+        self.assertNotEqual(0, rejected_ancestor.returncode)
+        self.assertIn(
+            "project-shadowed MCP server",
+            rejected_ancestor.stdout + rejected_ancestor.stderr,
+        )
+        self.assertFalse(capture.exists())
+
     def test_launcher_contract_and_powershell_syntax(self) -> None:
         launcher = TEMPLATE_ROOT / setup.LAUNCHER_NAME
         text = launcher.read_text(encoding="utf-8")
@@ -954,9 +1143,14 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn("Refusing a project-shadowed Copilot CLI executable", text)
         self.assertIn("Refusing a project-shadowed Agent definition", text)
         self.assertIn("Refusing a project-shadowed MCP server", text)
+        self.assertIn("Invalid project MCP config", text)
         self.assertIn("Project shadow path crosses a reparse point", text)
         self.assertIn('".github/agents/$AgentId.md"', text)
         self.assertIn('".claude/agents/$AgentId.md"', text)
+        self.assertIn('".github/mcp.json"', text)
+        self.assertIn("function ConvertFrom-ProjectJsonc", text)
+        self.assertIn("[System.Text.UTF8Encoding]::new($false, $true)", text)
+        self.assertNotIn("[System.Text.RegularExpressions.Regex]::IsMatch", text)
         self.assertIn("-StartDirectory ([System.Environment]::CurrentDirectory)", text)
         self.assertIn('"--python", $ExpectedPython', text)
         self.assertIn('"--spool-root", $ExpectedSpool', text)
@@ -995,7 +1189,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn("Owned artifact hash mismatch", text)
         self.assertIn("@CopilotArguments", text)
 
-        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
         if powershell is None:
             self.skipTest("PowerShell parser is unavailable")
         quoted = str(launcher).replace("'", "''")

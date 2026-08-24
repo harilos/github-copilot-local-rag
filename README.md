@@ -76,6 +76,7 @@ installerはLocal RAGを`%USERPROFILE%\.copilot`へ配置し、read-only MCPを
 Copilot CLIの設定rootと通常のVS Code Default Profileへ別々のschemaで登録します。
 既存の無関係なCopilot設定、別名のDB、system Python、VS Codeのapproval設定は
 変更しません。
+Copilotによる実地受入はinstallerや製品testでは実行しません。
 
 ### 同じDBを新しい配布版へ更新する
 
@@ -195,8 +196,9 @@ command、認証、既存session、永続permissions、VS Codeのapproval設定�
 | 質問に合うDBを選べない | 配布元から案内されたDB名を質問へ明記する |
 | 根拠が不足している | 条件や比較軸を追加するか、`LOCAL-RAG-徹底検索`で質問し直す |
 
-installerは毎回、`%LOCALAPPDATA%\LocalRAG\logs`へlogを1つ作り、成功時も失敗時も
-画面にabsolute pathを表示します。
+installerは毎回、`%LOCALAPPDATA%\LocalRAG\logs`へ
+`portable-install-<timestamp>-<pid>.log`を1つ作り、成功時も失敗時も画面に
+absolute pathを表示します。
 
 ## 管理版：インストールする
 

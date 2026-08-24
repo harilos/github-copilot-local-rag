@@ -39,11 +39,15 @@ def _decoded_banner(launcher: str) -> str:
 
 
 def _write_amd64_pe(path: Path) -> None:
+    _write_pe(path, 0x8664)
+
+
+def _write_pe(path: Path, machine: int) -> None:
     payload = bytearray(512)
     payload[:2] = b"MZ"
     struct.pack_into("<I", payload, 0x3C, 0x80)
     payload[0x80:0x84] = b"PE\0\0"
-    struct.pack_into("<H", payload, 0x84, 0x8664)
+    struct.pack_into("<H", payload, 0x84, machine)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
 
@@ -72,6 +76,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         for required in (
             "chromadb==",
             "onnxruntime==",
+            "pip==24.3.1",
             "transformers==",
             "SudachiPy==",
         ):
@@ -109,6 +114,79 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
                 ".copilot/rag/query/.venv/Scripts/Lib/site-packages/demo.py",
                 destinations,
             )
+
+    def test_search_runtime_keeps_pip_and_prunes_exact_distlib_launchers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "runtime"
+            scripts = runtime / "Scripts"
+            _write_amd64_pe(scripts / "python.exe")
+            (scripts / "python313._pth").write_text(
+                "python313.zip\n.\n..\\..\nLib\\site-packages\nimport site\n",
+                encoding="ascii",
+            )
+            (scripts / "python313.zip").write_bytes(b"stdlib")
+            site = scripts / "Lib" / "site-packages"
+            pip_root = site / "pip"
+            (pip_root / "__init__.py").parent.mkdir(parents=True)
+            (pip_root / "__init__.py").write_text(
+                '__version__ = "24.3.1"\n', encoding="utf-8"
+            )
+            (site / "pip-24.3.1.dist-info").mkdir()
+            for name, machine in windows_distribution.PIP_DISTLIB_LAUNCHERS.items():
+                _write_pe(pip_root / "_vendor" / "distlib" / name, machine)
+            public_ca = pip_root / "_vendor" / "certifi" / "cacert.pem"
+            public_ca.parent.mkdir(parents=True)
+            public_ca.write_bytes(b"public roots")
+
+            windows_distribution._prune_pip_distlib_launchers(runtime)
+
+            self.assertTrue((pip_root / "__init__.py").is_file())
+            self.assertTrue((site / "pip-24.3.1.dist-info").is_dir())
+            for name in windows_distribution.PIP_DISTLIB_LAUNCHERS:
+                self.assertFalse((pip_root / "_vendor" / "distlib" / name).exists())
+            destinations = {
+                entry.destination
+                for entry in windows_distribution._runtime_entries(runtime)
+            }
+            self.assertIn(
+                ".copilot/rag/query/.venv/Scripts/Lib/site-packages/pip/__init__.py",
+                destinations,
+            )
+            self.assertIn(
+                ".copilot/rag/query/.venv/Scripts/Lib/site-packages/pip/_vendor/certifi/cacert.pem",
+                destinations,
+            )
+
+    def test_search_runtime_rejects_noncanonical_distlib_launchers(self) -> None:
+        for mutation in ("unexpected", "wrong-machine"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                runtime = Path(directory) / "runtime"
+                site = runtime / "Scripts" / "Lib" / "site-packages"
+                pip_root = site / "pip"
+                (pip_root / "__init__.py").parent.mkdir(parents=True)
+                (pip_root / "__init__.py").write_text(
+                    '__version__ = "24.3.1"\n', encoding="utf-8"
+                )
+                (site / "pip-24.3.1.dist-info").mkdir()
+                for name, machine in windows_distribution.PIP_DISTLIB_LAUNCHERS.items():
+                    _write_pe(pip_root / "_vendor" / "distlib" / name, machine)
+                if mutation == "unexpected":
+                    _write_pe(
+                        pip_root / "_vendor" / "distlib" / "unexpected.exe",
+                        0x8664,
+                    )
+                    expected = "windows_runtime_pip_launcher_set_invalid"
+                else:
+                    _write_pe(
+                        pip_root / "_vendor" / "distlib" / "t64.exe",
+                        0x014C,
+                    )
+                    expected = "windows_runtime_pip_launcher_invalid"
+                with self.assertRaisesRegex(
+                    windows_distribution.packages.PackageError,
+                    expected,
+                ):
+                    windows_distribution._prune_pip_distlib_launchers(runtime)
 
     def test_windows_builder_publishes_runtime_and_installer(self) -> None:
         def prepare_runtime(

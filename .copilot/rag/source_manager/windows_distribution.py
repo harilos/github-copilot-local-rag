@@ -42,8 +42,17 @@ PUBLIC_CA_BUNDLES = frozenset(
     {
         "scripts/lib/site-packages/certifi/cacert.pem",
         "scripts/lib/site-packages/grpc/_cython/_credentials/roots.pem",
+        "scripts/lib/site-packages/pip/_vendor/certifi/cacert.pem",
     }
 )
+PIP_DISTLIB_LAUNCHERS = {
+    "t32.exe": 0x014C,
+    "t64-arm.exe": 0xAA64,
+    "t64.exe": 0x8664,
+    "w32.exe": 0x014C,
+    "w64-arm.exe": 0xAA64,
+    "w64.exe": 0x8664,
+}
 
 
 def create_windows_distribution_package(
@@ -246,6 +255,7 @@ def _prepare_runtime(
             shutil.rmtree(path, ignore_errors=True)
         elif path.is_file() and path.suffix.casefold() in {".pyc", ".pyo"}:
             path.unlink(missing_ok=True)
+    _prune_pip_distlib_launchers(runtime)
     _validate_runtime(runtime)
 
 
@@ -374,6 +384,41 @@ def _runtime_entries(runtime: Path) -> list[packages._Entry]:
     return entries
 
 
+def _prune_pip_distlib_launchers(runtime: Path) -> None:
+    site_packages = runtime / "Scripts" / "Lib" / "site-packages"
+    pip_root = site_packages / "pip"
+    metadata = sorted(site_packages.glob("pip-*.dist-info"))
+    if (
+        not pip_root.is_dir()
+        or pip_root.is_symlink()
+        or len(metadata) != 1
+        or not metadata[0].is_dir()
+        or metadata[0].is_symlink()
+        or not (pip_root / "__init__.py").is_file()
+    ):
+        raise packages.PackageError("windows_runtime_pip_invalid")
+    launcher_root = pip_root / "_vendor" / "distlib"
+    actual = {
+        path.name
+        for path in launcher_root.glob("*.exe")
+        if path.is_file() and not path.is_symlink()
+    }
+    if actual != set(PIP_DISTLIB_LAUNCHERS):
+        raise packages.PackageError("windows_runtime_pip_launcher_set_invalid")
+    for name, expected_machine in PIP_DISTLIB_LAUNCHERS.items():
+        path = launcher_root / name
+        try:
+            machine = _pe_machine(path)
+        except packages.PackageError as exc:
+            raise packages.PackageError(
+                "windows_runtime_pip_launcher_invalid"
+            ) from exc
+        if machine != expected_machine:
+            raise packages.PackageError("windows_runtime_pip_launcher_invalid")
+    for name in PIP_DISTLIB_LAUNCHERS:
+        (launcher_root / name).unlink()
+
+
 def _validate_runtime(runtime: Path) -> None:
     scripts = runtime / "Scripts"
     python = scripts / "python.exe"
@@ -387,6 +432,11 @@ def _validate_runtime(runtime: Path) -> None:
 
 
 def _assert_amd64_pe(path: Path) -> None:
+    if _pe_machine(path) != 0x8664:
+        raise packages.PackageError("windows_runtime_not_amd64")
+
+
+def _pe_machine(path: Path) -> int:
     try:
         with path.open("rb") as stream:
             if stream.read(2) != b"MZ":
@@ -397,10 +447,9 @@ def _assert_amd64_pe(path: Path) -> None:
             if stream.read(4) != b"PE\0\0":
                 raise ValueError
             machine = int.from_bytes(stream.read(2), "little")
-        if machine != 0x8664:
-            raise ValueError
     except (OSError, ValueError) as exc:
         raise packages.PackageError("windows_runtime_not_amd64") from exc
+    return machine
 
 
 def _validate_pth(path: Path) -> None:

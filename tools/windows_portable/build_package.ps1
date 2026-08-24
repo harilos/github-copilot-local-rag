@@ -18,7 +18,14 @@ $Lock = Get-Content -Raw -Encoding UTF8 (Join-Path $ToolRoot "runtime-lock.json"
 $Python = Get-Command python -ErrorAction Stop
 $RuntimePython = Join-Path $RuntimeRoot "Scripts\python.exe"
 $RuntimeVerifier = Join-Path $ToolRoot "verify_runtime_requirements.py"
-$RuntimeRequirements = Join-Path $RepositoryRoot ".copilot\rag\query\requirements-windows-admin.lock"
+$RuntimeRequirementsName = if ($Profile -eq "search-only") {
+    "requirements-windows-search.lock"
+} else {
+    "requirements-windows-admin.lock"
+}
+$RuntimeRequirements = Join-Path $RepositoryRoot (
+    ".copilot\rag\query\$RuntimeRequirementsName"
+)
 if (-not (Test-Path -LiteralPath $RuntimePython -PathType Leaf)) {
     throw "Windows portable runtime is missing Scripts\python.exe"
 }

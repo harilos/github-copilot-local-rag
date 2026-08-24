@@ -27,7 +27,8 @@ function Test-PathInside {
 
 function Get-ProjectRoot {
     param([string]$Start)
-    $current = [System.IO.DirectoryInfo]::new([System.IO.Path]::GetFullPath($Start))
+    $startPath = [System.IO.Path]::GetFullPath($Start)
+    $current = [System.IO.DirectoryInfo]::new($startPath)
     while ($null -ne $current) {
         if (Test-Path -LiteralPath (Join-Path $current.FullName ".git")) {
             return $current.FullName
@@ -39,7 +40,184 @@ function Get-ProjectRoot {
             $current.Directory
         }
     }
-    return $null
+    return $startPath
+}
+
+function Test-JsonObject {
+    param([object]$Value)
+    return $null -ne $Value -and
+        $Value -is [System.Management.Automation.PSCustomObject]
+}
+
+function ConvertFrom-ProjectJsonc {
+    param([string]$Path)
+    try {
+        $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $raw = [System.IO.File]::ReadAllText($Path, $strictUtf8)
+        $withoutComments = [System.Text.StringBuilder]::new($raw.Length)
+        $inString = $false
+        $escaped = $false
+        $inLineComment = $false
+        $inBlockComment = $false
+        for ($index = 0; $index -lt $raw.Length; $index++) {
+            $character = $raw[$index]
+            $next = if ($index + 1 -lt $raw.Length) { $raw[$index + 1] } else { [char]0 }
+            if ($inLineComment) {
+                if ($character -eq "`r" -or $character -eq "`n") {
+                    $inLineComment = $false
+                    [void]$withoutComments.Append($character)
+                }
+                else {
+                    [void]$withoutComments.Append(" ")
+                }
+                continue
+            }
+            if ($inBlockComment) {
+                if ($character -eq "*" -and $next -eq "/") {
+                    [void]$withoutComments.Append("  ")
+                    $index++
+                    $inBlockComment = $false
+                }
+                elseif ($character -eq "`r" -or $character -eq "`n") {
+                    [void]$withoutComments.Append($character)
+                }
+                else {
+                    [void]$withoutComments.Append(" ")
+                }
+                continue
+            }
+            if ($inString) {
+                [void]$withoutComments.Append($character)
+                if ($escaped) {
+                    $escaped = $false
+                }
+                elseif ($character -eq "\") {
+                    $escaped = $true
+                }
+                elseif ($character -eq '"') {
+                    $inString = $false
+                }
+                continue
+            }
+            if ($character -eq '"') {
+                $inString = $true
+                [void]$withoutComments.Append($character)
+            }
+            elseif ($character -eq "/" -and $next -eq "/") {
+                [void]$withoutComments.Append("  ")
+                $index++
+                $inLineComment = $true
+            }
+            elseif ($character -eq "/" -and $next -eq "*") {
+                [void]$withoutComments.Append("  ")
+                $index++
+                $inBlockComment = $true
+            }
+            else {
+                [void]$withoutComments.Append($character)
+            }
+        }
+        if ($inBlockComment) {
+            throw "Unterminated block comment"
+        }
+
+        $commentFree = $withoutComments.ToString()
+        $withoutTrailingCommas = [System.Text.StringBuilder]::new($commentFree.Length)
+        $inString = $false
+        $escaped = $false
+        for ($index = 0; $index -lt $commentFree.Length; $index++) {
+            $character = $commentFree[$index]
+            if ($inString) {
+                [void]$withoutTrailingCommas.Append($character)
+                if ($escaped) {
+                    $escaped = $false
+                }
+                elseif ($character -eq "\") {
+                    $escaped = $true
+                }
+                elseif ($character -eq '"') {
+                    $inString = $false
+                }
+                continue
+            }
+            if ($character -eq '"') {
+                $inString = $true
+                [void]$withoutTrailingCommas.Append($character)
+                continue
+            }
+            if ($character -eq ",") {
+                $lookahead = $index + 1
+                while ($lookahead -lt $commentFree.Length -and
+                    [char]::IsWhiteSpace($commentFree[$lookahead])) {
+                    $lookahead++
+                }
+                if ($lookahead -lt $commentFree.Length -and
+                    ($commentFree[$lookahead] -eq "}" -or $commentFree[$lookahead] -eq "]")) {
+                    [void]$withoutTrailingCommas.Append(" ")
+                    continue
+                }
+            }
+            [void]$withoutTrailingCommas.Append($character)
+        }
+        $document = $withoutTrailingCommas.ToString() | ConvertFrom-Json -ErrorAction Stop
+        if (-not (Test-JsonObject -Value $document)) {
+            throw "Root must be a JSON object"
+        }
+        return $document
+    }
+    catch {
+        throw "Invalid project MCP config: $Path ($($_.Exception.Message))"
+    }
+}
+
+function Get-JsonObjectPropertiesNamed {
+    param([object]$Value, [string]$Name)
+    if (-not (Test-JsonObject -Value $Value)) { return @() }
+    return @($Value.PSObject.Properties | Where-Object {
+        $_.Name.Equals($Name, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+}
+
+function Assert-NoMcpServerName {
+    param([object]$ServerMap, [string]$Path, [string]$ServerName)
+    if (-not (Test-JsonObject -Value $ServerMap)) {
+        throw "Invalid project MCP config: $Path (server container must be a JSON object)"
+    }
+    foreach ($property in @($ServerMap.PSObject.Properties)) {
+        if ($property.Name.Equals($ServerName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing a project-shadowed MCP server: $Path"
+        }
+    }
+}
+
+function Assert-NoMcpShadowInConfig {
+    param([string]$Path, [string]$RelativePath, [string]$ServerName)
+    $document = ConvertFrom-ProjectJsonc -Path $Path
+    if ($RelativePath -eq ".copilot/mcp-config.json") {
+        $containers = @(Get-JsonObjectPropertiesNamed -Value $document -Name "mcpServers")
+        if ($containers.Count -ne 1) {
+            throw "Invalid project MCP config: $Path (expected one mcpServers object)"
+        }
+        Assert-NoMcpServerName -ServerMap $containers[0].Value -Path $Path -ServerName $ServerName
+        return
+    }
+    if ($RelativePath -eq ".vscode/mcp.json") {
+        $containers = @(Get-JsonObjectPropertiesNamed -Value $document -Name "servers")
+        if ($containers.Count -ne 1) {
+            throw "Invalid project MCP config: $Path (expected one servers object)"
+        }
+        Assert-NoMcpServerName -ServerMap $containers[0].Value -Path $Path -ServerName $ServerName
+        return
+    }
+
+    Assert-NoMcpServerName -ServerMap $document -Path $Path -ServerName $ServerName
+    $wrappedContainers = @(
+        @(Get-JsonObjectPropertiesNamed -Value $document -Name "mcpServers")
+        @(Get-JsonObjectPropertiesNamed -Value $document -Name "servers")
+    )
+    foreach ($container in $wrappedContainers) {
+        Assert-NoMcpServerName -ServerMap $container.Value -Path $Path -ServerName $ServerName
+    }
 }
 
 function Assert-NoReparseChain {
@@ -91,20 +269,21 @@ function Assert-NoProjectAgentOrMcpShadow {
                 throw "Refusing a project-shadowed Agent definition: $candidate"
             }
         }
-        foreach ($relative in @(".copilot/mcp-config.json", ".vscode/mcp.json", ".mcp.json")) {
+        foreach ($relative in @(
+            ".copilot/mcp-config.json",
+            ".vscode/mcp.json",
+            ".mcp.json",
+            ".github/mcp.json"
+        )) {
             $candidate = Join-Path $current.FullName $relative
             if (-not (Test-Path -LiteralPath $candidate)) { continue }
             Assert-NoReparseChain -Path $candidate -Root $ProjectRoot
             $item = Get-Item -LiteralPath $candidate -Force
             if ($item.PSIsContainer) { throw "Project MCP config is not a regular file: $candidate" }
-            $raw = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8
-            if ([System.Text.RegularExpressions.Regex]::IsMatch(
-                $raw,
-                '"localragagent003"\s*:',
-                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-            )) {
-                throw "Refusing a project-shadowed MCP server: $candidate"
-            }
+            Assert-NoMcpShadowInConfig `
+                -Path $candidate `
+                -RelativePath $relative `
+                -ServerName "localragagent003"
         }
         if ($current.FullName.Equals($ProjectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
             break
@@ -206,6 +385,7 @@ $ReservedFlags = @(
     "--worktree", "-w", "--prefer-version"
 )
 foreach ($argument in @($CopilotArguments)) {
+    if ($null -eq $argument) { continue }
     if ($argument -match '^--(?:allow|deny)-') {
         throw "Reserved Copilot CLI flag is controlled by the launcher: $argument"
     }
@@ -338,15 +518,13 @@ $commands = @(Get-Command "copilot" -CommandType Application -All -ErrorAction S
 if ($commands.Count -lt 1) { throw "Copilot CLI executable was not found" }
 $CopilotPath = [System.IO.Path]::GetFullPath($commands[0].Source)
 $projectRoot = Get-ProjectRoot -Start ([System.Environment]::CurrentDirectory)
-if ($null -ne $projectRoot -and (Test-PathInside -Path $CopilotPath -Root $projectRoot)) {
+if (Test-PathInside -Path $CopilotPath -Root $projectRoot) {
     throw "Refusing a project-shadowed Copilot CLI executable: $CopilotPath"
 }
-if ($null -ne $projectRoot) {
-    Assert-NoProjectAgentOrMcpShadow `
-        -ProjectRoot $projectRoot `
-        -StartDirectory ([System.Environment]::CurrentDirectory) `
-        -AgentId $selection.Agent
-}
+Assert-NoProjectAgentOrMcpShadow `
+    -ProjectRoot $projectRoot `
+    -StartDirectory ([System.Environment]::CurrentDirectory) `
+    -AgentId $selection.Agent
 
 $EnvironmentNames = @(
     "COPILOT_HOME", "COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES", "COPILOT_MCP_TOOL_CACHE",

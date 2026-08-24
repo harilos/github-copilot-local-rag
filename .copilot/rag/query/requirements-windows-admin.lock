@@ -16,7 +16,6 @@ openpyxl==3.1.5
 optimum-onnx==0.0.3
 optimum[onnxruntime]==2.0.0
 pillow==12.3.0
-pip==24.3.1
 pycparser==3.0
 pypdf==6.0.0
 python-docx==1.2.0
