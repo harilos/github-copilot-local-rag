@@ -364,6 +364,112 @@ class CoordinatedInput:
         return b""
 
 
+class QueuedCallsInput:
+    def __init__(
+        self,
+        prefix: bytes,
+        all_requests_delivered: threading.Event,
+        all_responses_written: threading.Event,
+    ) -> None:
+        self._lines = deque(prefix.splitlines(keepends=True))
+        self.all_requests_delivered = all_requests_delivered
+        self.all_responses_written = all_responses_written
+        self.timed_out = False
+
+    def readline(self, _maximum: int) -> bytes:
+        if self._lines:
+            line = self._lines.popleft()
+            if not self._lines:
+                self.all_requests_delivered.set()
+            return line
+        if not self.all_responses_written.wait(3):
+            self.timed_out = True
+        return b""
+
+
+class ResponseTrackingOutput(io.BytesIO):
+    def __init__(self, all_responses_written: threading.Event) -> None:
+        super().__init__()
+        self.all_responses_written = all_responses_written
+        self.tool_response_ids: set[object] = set()
+
+    def write(self, value: bytes) -> int:
+        written = super().write(value)
+        response = json.loads(value)
+        if response.get("id") in {41, 42}:
+            self.tool_response_ids.add(response["id"])
+            if self.tool_response_ids == {41, 42}:
+                self.all_responses_written.set()
+        return written
+
+
+class SerialExecutionProbeTools:
+    def __init__(self, all_requests_delivered: threading.Event) -> None:
+        self.all_requests_delivered = all_requests_delivered
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.call_order: list[object] = []
+        self.delivery_timed_out = False
+
+    def call(
+        self,
+        _name: str,
+        _arguments: object,
+        *,
+        request_id: object,
+        cancelled: threading.Event,
+    ) -> dict[str, object]:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.call_order.append(request_id)
+        try:
+            if not self.all_requests_delivered.wait(2):
+                self.delivery_timed_out = True
+            time.sleep(0.05)
+            if cancelled.is_set():
+                raise AssertionError("probe call was unexpectedly cancelled")
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "structuredContent": {"status": "ok"},
+            }
+        finally:
+            with self._lock:
+                self.active -= 1
+
+    @staticmethod
+    def cancel(_request_id: object) -> None:
+        return None
+
+    @staticmethod
+    def cancel_all() -> None:
+        return None
+
+
+class FirstCallFailureProbeTools(SerialExecutionProbeTools):
+    def call(
+        self,
+        name: str,
+        arguments: object,
+        *,
+        request_id: object,
+        cancelled: threading.Event,
+    ) -> dict[str, object]:
+        if request_id == 41:
+            with self._lock:
+                self.call_order.append(request_id)
+            if not self.all_requests_delivered.wait(2):
+                self.delivery_timed_out = True
+            raise RuntimeError("synthetic unexpected failure")
+        return super().call(
+            name,
+            arguments,
+            request_id=request_id,
+            cancelled=cancelled,
+        )
+
+
 class McpLifecycleContractTests(unittest.TestCase):
     def test_initialize_initialized_ping_and_preinit_rejection(self) -> None:
         with fake_runtime() as fixture:
@@ -506,6 +612,122 @@ class McpLifecycleContractTests(unittest.TestCase):
                 for item in responses[2]["result"]["tools"]
             ],
         )
+
+    def test_two_outstanding_tool_calls_are_serialized_without_busy_error(
+        self,
+    ) -> None:
+        all_requests_delivered = threading.Event()
+        all_responses_written = threading.Event()
+        tools = SerialExecutionProbeTools(all_requests_delivered)
+        stdin = QueuedCallsInput(
+            wire(
+                request(
+                    1,
+                    "initialize",
+                    {"protocolVersion": mcp_server.LATEST_PROTOCOL},
+                ),
+                notification("notifications/initialized"),
+                request(
+                    41,
+                    "tools/call",
+                    {
+                        "name": mcp_server.SEARCH_TOOL,
+                        "arguments": {"question": "first"},
+                    },
+                ),
+                request(
+                    42,
+                    "tools/call",
+                    {
+                        "name": mcp_server.SEARCH_TOOL,
+                        "arguments": {"question": "second"},
+                    },
+                ),
+            ),
+            all_requests_delivered,
+            all_responses_written,
+        )
+        stdout = ResponseTrackingOutput(all_responses_written)
+
+        return_code = mcp_server.serve(
+            stdin,
+            stdout,
+            mcp_server.McpServer(tools),
+        )
+
+        responses = [
+            json.loads(line) for line in stdout.getvalue().splitlines()
+        ]
+        tool_responses = [
+            item for item in responses if item.get("id") in {41, 42}
+        ]
+        self.assertEqual(0, return_code)
+        self.assertFalse(stdin.timed_out)
+        self.assertFalse(tools.delivery_timed_out)
+        self.assertEqual([41, 42], tools.call_order)
+        self.assertEqual(1, tools.max_active)
+        self.assertEqual([41, 42], [item["id"] for item in tool_responses])
+        self.assertTrue(all("result" in item for item in tool_responses))
+        self.assertTrue(all("error" not in item for item in tool_responses))
+        self.assertNotIn("busy", rendered(tool_responses).lower())
+
+    def test_worker_contains_one_unexpected_failure_and_serves_next_call(
+        self,
+    ) -> None:
+        all_requests_delivered = threading.Event()
+        all_responses_written = threading.Event()
+        tools = FirstCallFailureProbeTools(all_requests_delivered)
+        stdin = QueuedCallsInput(
+            wire(
+                request(
+                    1,
+                    "initialize",
+                    {"protocolVersion": mcp_server.LATEST_PROTOCOL},
+                ),
+                notification("notifications/initialized"),
+                request(
+                    41,
+                    "tools/call",
+                    {
+                        "name": mcp_server.SEARCH_TOOL,
+                        "arguments": {"question": "first"},
+                    },
+                ),
+                request(
+                    42,
+                    "tools/call",
+                    {
+                        "name": mcp_server.SEARCH_TOOL,
+                        "arguments": {"question": "second"},
+                    },
+                ),
+            ),
+            all_requests_delivered,
+            all_responses_written,
+        )
+        stdout = ResponseTrackingOutput(all_responses_written)
+
+        return_code = mcp_server.serve(
+            stdin,
+            stdout,
+            mcp_server.McpServer(tools),
+        )
+
+        responses = {
+            item["id"]: item
+            for item in (
+                json.loads(line) for line in stdout.getvalue().splitlines()
+            )
+            if item.get("id") in {41, 42}
+        }
+        self.assertEqual(0, return_code)
+        self.assertFalse(stdin.timed_out)
+        self.assertFalse(tools.delivery_timed_out)
+        self.assertEqual([41, 42], tools.call_order)
+        self.assertEqual(-32603, responses[41]["error"]["code"])
+        self.assertEqual("Internal error", responses[41]["error"]["message"])
+        self.assertIn("result", responses[42])
+        self.assertNotIn("error", responses[42])
 
 
 class SearchAndTokenContractTests(unittest.TestCase):

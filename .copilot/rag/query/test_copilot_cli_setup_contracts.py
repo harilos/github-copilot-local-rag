@@ -135,6 +135,9 @@ class CopilotCliSetupContracts(unittest.TestCase):
                 text,
             )
             self.assertIn("Routing metadata is never answer evidence", text)
+            self.assertIn("strictly one at a time", text)
+            self.assertIn("Wait for each tool result", text)
+            self.assertIn("never issue tool calls in parallel", text)
 
     def test_install_pins_absolute_cli_config_and_preserves_foreign_jsonc(self) -> None:
         config = self.home / "mcp-config.json"

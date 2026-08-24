@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import secrets
 import stat
@@ -45,6 +46,7 @@ MAX_STATE_BYTES, MAX_QUESTION_CHARS = 64 * 1024, 16_000
 LIST_TIMEOUT_SECONDS, SEARCH_TIMEOUT_SECONDS = 30.0, 180.0
 SEARCH_RUNTIME_TIMEOUT_SECONDS = 170.0
 EOF_JOIN_SECONDS, TOKEN_TTL_SECONDS, TOKEN_REGISTRY_SIZE = 2.0, 15 * 60, 32
+MAX_OUTSTANDING_TOOL_CALLS = 8
 _DATABASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
 _TOKEN_RE = re.compile(r"^lrt_[A-Za-z0-9_-]{20,92}$")
 _EVIDENCE_ID_RE = re.compile(r"^E[1-9]\d?$")
@@ -495,6 +497,8 @@ class McpServer:
 
     def _call_tool(self, request_id: object, params: object,
                    cancelled: threading.Event) -> dict[str, Any] | None:
+        if cancelled.is_set():
+            return None
         if not isinstance(params, dict) or not isinstance(params.get("name"), str):
             return self.error(request_id, -32602, "Invalid tool call")
         try:
@@ -524,8 +528,11 @@ class McpServer:
 
 
 def serve(stdin: BinaryIO, stdout: BinaryIO, server: McpServer) -> int:
-    output_lock, active_lock = threading.Lock(), threading.Lock()
-    active: dict[object, tuple[threading.Event, threading.Thread]] = {}
+    output_lock, calls_lock = threading.Lock(), threading.Lock()
+    calls: dict[object, threading.Event] = {}
+    call_queue: queue.Queue[
+        tuple[dict[str, Any], object, threading.Event]
+    ] = queue.Queue(maxsize=MAX_OUTSTANDING_TOOL_CALLS)
     closing = threading.Event()
 
     def write(response: dict[str, Any] | None) -> None:
@@ -537,29 +544,53 @@ def serve(stdin: BinaryIO, stdout: BinaryIO, server: McpServer) -> int:
                 stdout.write(encoded)
                 stdout.flush()
 
-    def run_call(message: dict[str, Any], request_id: object,
-                 event: threading.Event) -> None:
-        try:
-            response = server.handle(message, cancelled=event)
-            if not event.is_set():
-                write(response)
-        finally:
-            with active_lock:
-                active.pop(request_id, None)
+    def run_calls() -> None:
+        while True:
+            try:
+                message, request_id, event = call_queue.get(timeout=0.05)
+            except queue.Empty:
+                if closing.is_set():
+                    return
+                continue
+            try:
+                if not event.is_set():
+                    try:
+                        response = server.handle(message, cancelled=event)
+                    except Exception:
+                        response = McpServer.error(
+                            request_id, -32603, "Internal error"
+                        )
+                    if not event.is_set():
+                        write(response)
+            finally:
+                with calls_lock:
+                    calls.pop(request_id, None)
+                call_queue.task_done()
 
-    while True:  # This reader remains responsive while one tools/call worker runs.
+    worker = threading.Thread(target=run_calls, daemon=True)
+    worker.start()
+
+    while True:  # The reader stays responsive while one worker serializes calls.
         line = stdin.readline(MAX_MESSAGE_BYTES + 1)
         if not line:
+            # A finite stdin is also used by deterministic smoke tests and
+            # one-shot clients.  Give already accepted calls the bounded EOF
+            # window to finish before cancelling genuinely stuck work.
+            deadline = time.monotonic() + EOF_JOIN_SECONDS
+            while True:
+                with calls_lock:
+                    outstanding = list(calls.items())
+                if not outstanding or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
             closing.set()
-            with active_lock:
-                calls = list(active.items())
-            for request_id, (event, _thread) in calls:
+            with calls_lock:
+                outstanding = list(calls.items())
+            for request_id, event in outstanding:
                 event.set()
                 server.tools.cancel(request_id)
-            deadline = time.monotonic() + EOF_JOIN_SECONDS
-            for _, (_, thread) in calls:
-                thread.join(max(0.0, deadline - time.monotonic()))
             server.tools.cancel_all()
+            worker.join(0.5)
             return 0
         if len(line) > MAX_MESSAGE_BYTES or not line.endswith(b"\n"):
             write(McpServer.error(None, -32700, "Parse error"))
@@ -572,10 +603,10 @@ def serve(stdin: BinaryIO, stdout: BinaryIO, server: McpServer) -> int:
         if isinstance(message, dict) and message.get("method") == "notifications/cancelled":
             params = message.get("params")
             request_id = params.get("requestId") if isinstance(params, dict) else None
-            with active_lock:
-                call = active.get(request_id)
-            if call:
-                call[0].set()
+            with calls_lock:
+                event = calls.get(request_id)
+            if event:
+                event.set()
                 server.tools.cancel(request_id)
             continue
         if isinstance(message, dict) and message.get("method") == "tools/call" and "id" in message:
@@ -583,17 +614,21 @@ def serve(stdin: BinaryIO, stdout: BinaryIO, server: McpServer) -> int:
             if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
                 write(McpServer.error(None, -32600, "Invalid Request"))
                 continue
-            with active_lock:
-                busy = bool(active)
-                if not busy:
+            rejection: dict[str, Any] | None = None
+            with calls_lock:
+                if request_id in calls:
+                    rejection = McpServer.error(
+                        request_id, -32600, "Duplicate request id"
+                    )
+                elif len(calls) >= MAX_OUTSTANDING_TOOL_CALLS:
+                    rejection = McpServer.error(
+                        request_id, -32000, "Tool call queue is full"
+                    )
+                else:
                     event = threading.Event()
-                    thread = threading.Thread(target=run_call,
-                                              args=(message, request_id, event), daemon=True)
-                    active[request_id] = (event, thread)
-            if busy:
-                write(McpServer.error(request_id, -32000, "Server is busy"))
-            else:
-                thread.start()
+                    calls[request_id] = event
+                    call_queue.put_nowait((message, request_id, event))
+            write(rejection)
             continue
         write(server.handle(message))
 
