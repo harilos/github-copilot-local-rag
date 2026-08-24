@@ -1,6 +1,6 @@
 {
   "schema_version": "lrr-agent003-cli-model-bakeoff-authority-v1",
-  "authority_revision": "2026-08-24.1",
+  "authority_revision": "2026-08-25.1",
   "credit_epoch": "This 50 AI Credit cap starts at zero for this new seven-model bakeoff UAT and does not include any earlier Agent003 UAT run.",
   "aggregate_ai_credit_cap": 50.0,
   "per_session_cli_soft_cap": 30,
@@ -61,6 +61,14 @@
     "minimum_search_calls": 2,
     "maximum_search_calls": 6,
     "maximum_evidence_calls": 2,
+    "expected_database": "fizzbuzz-planet-rag",
+    "expected_routing_search_calls": 1,
+    "minimum_selected_database_search_calls": 3,
+    "maximum_total_tool_calls": 7,
+    "forbid_duplicate_selected_database_queries": true,
+    "require_omitted_inspectable_evidence_follow_up": true,
+    "omitted_evidence_relevance_terms": ["予算", "増額", "確定"],
+    "narrow_follow_up_query_terms": ["確定", "執行", "7%"],
     "minimum_remaining_credit_before_launch": 12.0,
     "minimum_markdown_source_urls": 2,
     "expected_facts": {

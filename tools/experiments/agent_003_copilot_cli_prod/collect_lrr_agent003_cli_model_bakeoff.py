@@ -290,7 +290,11 @@ def _require_case(value: Any, name: str, *, expected_tier: str) -> dict[str, Any
     return value
 
 
-def load_authority(path: Path) -> dict[str, Any]:
+def load_authority(
+    path: Path,
+    *,
+    require_final_review_contract: bool = True,
+) -> dict[str, Any]:
     authority = _load_json(path)
     if authority.get("schema_version") != AUTHORITY_SCHEMA:
         raise BakeoffError("authority schema is invalid")
@@ -327,6 +331,19 @@ def load_authority(path: Path) -> dict[str, Any]:
         raise BakeoffError("thorough expected-fact authority is not canonical")
     if thorough.get("required_classification_sections") != ["確定事項", "提案段階", "未確認"]:
         raise BakeoffError("thorough classification-section authority is not canonical")
+    if require_final_review_contract and (
+        thorough.get("expected_database") != "fizzbuzz-planet-rag"
+        or thorough.get("expected_routing_search_calls") != 1
+        or thorough.get("minimum_selected_database_search_calls") != 3
+        or thorough.get("maximum_total_tool_calls") != 7
+        or thorough.get("forbid_duplicate_selected_database_queries") is not True
+        or thorough.get("require_omitted_inspectable_evidence_follow_up") is not True
+        or thorough.get("omitted_evidence_relevance_terms")
+        != ["予算", "増額", "確定"]
+        or thorough.get("narrow_follow_up_query_terms")
+        != ["確定", "執行", "7%"]
+    ):
+        raise BakeoffError("thorough routing, selected-search, and review authority is not canonical")
     if boundary.get("required_response_fragment") != "LRR-CLI-LARGE-OUTPUT-TAIL-7F3C9A21":
         raise BakeoffError("boundary marker is not canonical")
     unavailable = authority.get("unavailable_policy_contract")
@@ -668,7 +685,10 @@ def _validate_versioned_harness_archive(
         validated_paths[kind] = str(artifact.resolve())
     if _directory_file_map(archive_root) != expected_map:
         raise BakeoffError(f"{context} archive has extra/missing files")
-    load_authority(Path(validated_paths["authority"]))
+    load_authority(
+        Path(validated_paths["authority"]),
+        require_final_review_contract=False,
+    )
     result = dict(identity)
     result["_validated_artifact_paths"] = validated_paths
     return result
@@ -1110,7 +1130,10 @@ def _load_recovery_import(
                 raise BakeoffError("historical harness artifact bytes mismatch")
         validated_artifact_paths[kind] = str((historical_preserved / relative).resolve())
     preserved_authority = Path(validated_artifact_paths["authority"])
-    load_authority(preserved_authority)
+    load_authority(
+        preserved_authority,
+        require_final_review_contract=False,
+    )
     if source_report.get("authority_sha256") != historical["authority_sha256"]:
         raise BakeoffError("source report historical authority identity mismatch")
     historical_for_evaluation = dict(historical)
@@ -2397,9 +2420,79 @@ def _load_recovery_import_v4_from_value(
     }
 
 
-def _event_tool_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
+def _normalized_search_query(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _contains_contract_term(value: str, terms: tuple[str, ...]) -> bool:
+    normalized = " ".join(value.split()).casefold()
+    return any(term.casefold() in normalized for term in terms)
+
+
+def _contains_narrow_follow_up_target(value: str, terms: tuple[str, ...]) -> bool:
+    normalized = " ".join(value.split()).casefold()
+    normalized_terms = {term.casefold() for term in terms}
+    if normalized_terms == {"確定", "執行", "7%"}:
+        return "7%" in normalized or (
+            any(term in normalized for term in ("確定", "執行"))
+            and any(term in normalized for term in ("予算", "増額"))
+        )
+    return _contains_contract_term(normalized, terms)
+
+
+def _omitted_inspectable_ids(
+    value: Any,
+    *,
+    relevance_terms: tuple[str, ...] = (),
+) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    inspectable = {
+        str(item)
+        for item in value.get("inspectable_evidence_ids") or []
+        if isinstance(item, str) and item
+    }
+    if not inspectable:
+        return set()
+    omitted: set[str] = set()
+    for item in value.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "")
+        text = str(item.get("text") or "")
+        if (
+            item_id in inspectable
+            and re.search(r"(?:…|\.\.\.|\btruncated\b)", text, re.IGNORECASE)
+            and (
+                not relevance_terms
+                or _contains_contract_term(text, relevance_terms)
+            )
+        ):
+            omitted.add(item_id)
+    notices = " ".join(str(item) for item in value.get("notices") or [])
+    # Bookkeeping notices such as ``locator_hints_omitted`` do not mean that
+    # evidence content was omitted.  Only explicit excerpt/content omission
+    # notices make every inspectable id require follow-up.
+    if re.search(
+        r"(?:ellipsis|truncated|evidence[_ -]excerpt[_ -]omitted)",
+        notices,
+        re.IGNORECASE,
+    ):
+        if not relevance_terms:
+            omitted.update(inspectable)
+    return omitted
+
+
+def _event_tool_evidence(
+    events: list[dict[str, Any]],
+    *,
+    omitted_relevance_terms: tuple[str, ...] = (),
+    narrow_follow_up_query_terms: tuple[str, ...] = (),
+) -> dict[str, Any]:
     failures: list[str] = []
     starts: dict[str, str] = {}
+    start_arguments: dict[str, dict[str, Any]] = {}
+    call_order: list[str] = []
     completions: dict[str, dict[str, Any]] = {}
     contents: dict[str, str] = {}
     structured: dict[str, Any] = {}
@@ -2413,6 +2506,11 @@ def _event_tool_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
                 failures.append("tool_start_identity_invalid")
                 continue
             starts[call_id] = name
+            call_order.append(call_id)
+            arguments = data.get("arguments")
+            start_arguments[call_id] = (
+                dict(arguments) if isinstance(arguments, dict) else {}
+            )
             if name not in prod.ALLOWED_RUNTIME_TOOLS:
                 failures.append(f"foreign_tool:{name or '<missing>'}")
         elif event_type == "tool.execution_complete":
@@ -2442,15 +2540,108 @@ def _event_tool_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
         all_urls.update(urls)
         if starts.get(call_id) == prod.SEARCH_TOOL:
             search_urls.update(urls)
+
+    search_call_ids = [
+        call_id
+        for call_id in call_order
+        if starts.get(call_id) == prod.SEARCH_TOOL
+    ]
+    routing_call_ids: list[str] = []
+    selected_call_ids: list[str] = []
+    selected_databases: list[str] = []
+    selected_queries: list[str] = []
+    for call_id in search_call_ids:
+        arguments = start_arguments.get(call_id, {})
+        database = arguments.get("database")
+        if isinstance(database, str) and database.strip():
+            selected_call_ids.append(call_id)
+            selected_databases.append(database.strip())
+            selected_queries.append(
+                _normalized_search_query(arguments.get("question"))
+            )
+        else:
+            routing_call_ids.append(call_id)
+
+    seen_queries: set[str] = set()
+    duplicate_queries: set[str] = set()
+    for query in selected_queries:
+        if not query or query in seen_queries:
+            duplicate_queries.add(query)
+        seen_queries.add(query)
+
+    call_positions = {
+        call_id: index for index, call_id in enumerate(call_order)
+    }
+    omitted_follow_up: dict[str, bool] = {}
+    omitted_ids_by_call: dict[str, list[str]] = {}
+    for call_id in selected_call_ids:
+        omitted_ids = _omitted_inspectable_ids(
+            structured.get(call_id),
+            relevance_terms=omitted_relevance_terms,
+        )
+        if not omitted_ids:
+            continue
+        omitted_ids_by_call[call_id] = sorted(omitted_ids)
+        source_query = _normalized_search_query(
+            start_arguments.get(call_id, {}).get("question")
+        )
+        source_database = str(
+            start_arguments.get(call_id, {}).get("database") or ""
+        ).strip()
+        satisfied = False
+        for later_call_id in call_order[call_positions[call_id] + 1 :]:
+            later_name = starts.get(later_call_id)
+            later_arguments = start_arguments.get(later_call_id, {})
+            if later_name == prod.EVIDENCE_TOOL:
+                requested_ids = {
+                    str(item)
+                    for item in later_arguments.get("evidence_ids") or []
+                    if isinstance(item, str)
+                }
+                if omitted_ids & requested_ids:
+                    satisfied = True
+                    break
+            elif later_name == prod.SEARCH_TOOL:
+                later_database = later_arguments.get("database")
+                later_query = _normalized_search_query(
+                    later_arguments.get("question")
+                )
+                if (
+                    isinstance(later_database, str)
+                    and later_database.strip() == source_database
+                    and later_query
+                    and later_query != source_query
+                    and (
+                        not narrow_follow_up_query_terms
+                        or _contains_narrow_follow_up_target(
+                            later_query,
+                            narrow_follow_up_query_terms,
+                        )
+                    )
+                ):
+                    satisfied = True
+                    break
+        omitted_follow_up[call_id] = satisfied
     return {
         "failures": failures,
         "starts": starts,
+        "start_arguments": start_arguments,
+        "call_order": call_order,
         "search_calls": sum(name == prod.SEARCH_TOOL for name in starts.values()),
         "evidence_calls": sum(name == prod.EVIDENCE_TOOL for name in starts.values()),
+        "total_tool_calls": len(starts),
+        "routing_search_calls": len(routing_call_ids),
+        "selected_database_search_calls": len(selected_call_ids),
+        "selected_databases": selected_databases,
+        "selected_database_queries": selected_queries,
+        "duplicate_selected_database_queries": sorted(duplicate_queries),
+        "omitted_inspectable_ids_by_call": omitted_ids_by_call,
+        "omitted_inspectable_follow_up": omitted_follow_up,
         "search_evidence_urls": search_urls,
         "all_evidence_urls": all_urls,
         "result_bytes": result_bytes,
         "contents": list(contents.values()),
+        "structured_contents": structured,
     }
 
 
@@ -2462,6 +2653,21 @@ def _interaction_observed(events: list[dict[str, Any]]) -> bool:
     )
 
 
+def _without_markdown_code(value: str) -> str:
+    """Remove fenced and inline code while preserving surrounding prose."""
+    without_fences = re.sub(
+        r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\r\n]*\r?\n"
+        r".*?^[ \t]*(?P=fence)[ \t]*(?:\r?\n|$)",
+        "\n",
+        value,
+    )
+    return re.sub(
+        r"(?s)(?<!`)``[^`]*?``(?!`)|(?<!`)`[^`]*?`(?!`)",
+        "",
+        without_fences,
+    )
+
+
 def _answer_prose_without_link_destinations(response: str) -> str:
     """Return visible answer prose while excluding inline-link destinations and URLs.
 
@@ -2470,6 +2676,8 @@ def _answer_prose_without_link_destinations(response: str) -> str:
     visible answer prose; the parenthesized destination is omitted.  Bare HTTPS
     URLs and autolink destinations are removed afterwards.
     """
+
+    response = _without_markdown_code(response)
 
     def escaped(position: int) -> bool:
         backslashes = 0
@@ -2542,8 +2750,165 @@ def _answer_prose_without_link_destinations(response: str) -> str:
         visible.append(response[index + 1 : label_end])
         index = destination_end + 1
 
-    prose = "".join(visible)
-    return prod.HTTPS_URL_RE.sub("", prose)
+    prose = prod.HTTPS_URL_RE.sub("", "".join(visible))
+    return re.sub(r"(?:%[0-9A-Fa-f]{2})+", "", prose)
+
+
+_CLASSIFICATION_LABELS = ("確定事項", "提案段階", "未確認")
+
+
+def _classification_bucket(prose: str, label: str) -> str:
+    """Collect a heading section and table/prose lines carrying one label."""
+    collected: list[str] = []
+    current = ""
+    for line in prose.splitlines():
+        stripped = line.strip()
+        heading_text = re.sub(r"^[#*_\s]+|[#*_\s]+$", "", stripped)
+        heading_text = heading_text.strip("：:| ")
+        heading = next(
+            (
+                candidate
+                for candidate in _CLASSIFICATION_LABELS
+                if re.fullmatch(
+                    re.escape(candidate) + r"(?:[（(][^）)]*[）)])?",
+                    heading_text,
+                )
+            ),
+            "",
+        )
+        if heading:
+            current = heading
+            if heading == label:
+                collected.append(line)
+            continue
+        labels_in_line = [
+            candidate for candidate in _CLASSIFICATION_LABELS if candidate in line
+        ]
+        if len(labels_in_line) == 1:
+            collected.append(line if labels_in_line[0] == label else "")
+        elif current == label:
+            collected.append(line)
+    return "\n".join(item for item in collected if item).strip()
+
+
+def _patterns_near(
+    value: str,
+    left: str,
+    right: str,
+    *,
+    distance: int = 48,
+) -> bool:
+    return re.search(
+        rf"(?:{left}).{{0,{distance}}}(?:{right})|"
+        rf"(?:{right}).{{0,{distance}}}(?:{left})",
+        value,
+        re.IGNORECASE | re.DOTALL,
+    ) is not None
+
+
+def _affirmed_pattern_in_clause(
+    value: str,
+    pattern: str,
+    *,
+    contradiction: str,
+    required_context: str | None = None,
+) -> bool:
+    for match in re.finditer(pattern, value, re.IGNORECASE):
+        left = max(value.rfind(marker, 0, match.start()) for marker in ("。", "！", "？", "\n")) + 1
+        right_positions = [
+            position
+            for marker in ("。", "！", "？", "\n")
+            if (position := value.find(marker, match.end())) >= 0
+        ]
+        right = min(right_positions) if right_positions else len(value)
+        clause = value[left:right]
+        if required_context and re.search(required_context, clause) is None:
+            continue
+        if re.search(contradiction, clause, re.IGNORECASE) is None:
+            return True
+    return False
+
+
+def _topic_has_affirmed_prohibition(value: str, topic: str) -> bool:
+    for match in re.finditer(topic, value, re.IGNORECASE):
+        left = max(value.rfind(marker, 0, match.start()) for marker in ("。", "！", "？", "\n")) + 1
+        right_positions = [
+            position
+            for marker in ("。", "！", "？", "\n")
+            if (position := value.find(marker, match.end())) >= 0
+        ]
+        right = min(right_positions) if right_positions else len(value)
+        clause = value[left:right]
+        if re.search(r"禁止|不可|認めない|禁じ|してはならない", clause) is None:
+            continue
+        if re.search(
+            r"禁止(?:では|じゃ)?ない|不可(?:では|じゃ)?ない|"
+            r"認めないわけではない|禁止.{0,8}(?:解除|撤回)|許可(?:する|される)",
+            clause,
+        ) is None:
+            return True
+    return False
+
+
+def _thorough_answer_failures(response: str) -> list[str]:
+    prose = _answer_prose_without_link_destinations(response)
+    confirmed = _classification_bucket(prose, "確定事項")
+    proposed = _classification_bucket(prose, "提案段階")
+    unconfirmed = _classification_bucket(prose, "未確認")
+    failures: list[str] = []
+    if not _patterns_near(
+        confirmed,
+        r"(?<!\d)7\s*(?:%|％)",
+        r"確定|執行|決定|成立",
+    ):
+        failures.append("thorough_confirmed_7_percent_missing_or_misclassified")
+    if not _patterns_near(
+        proposed,
+        r"(?<!\d)12\s*(?:%|％)",
+        r"提案|要求|増額案|討議|審議",
+    ):
+        failures.append("thorough_requested_12_percent_missing_or_misclassified")
+    if not _affirmed_pattern_in_clause(
+        proposed,
+        r"(?<![A-Za-z])open(?![A-Za-z])|オープン|未解決|未完了",
+        contradiction=r"ではない|ではなく|でなく|解決済み|closed|クローズ",
+    ):
+        failures.append("thorough_issue_open_missing_or_misclassified")
+    if not _affirmed_pattern_in_clause(
+        confirmed,
+        r"衛星.{0,12}バズ|バズ.{0,12}衛星",
+        contradiction=r"(?:では|には|で|に|は)?ない|ではなく|でなく|存在しない|所在しない|位置しない",
+        required_context=r"集落|ダム族",
+    ):
+        failures.append("thorough_satellite_buzz_missing_or_misclassified")
+    if not _affirmed_pattern_in_clause(
+        confirmed,
+        r"非接触|直接接触.{0,16}(?:禁止|しない|避け|不可)",
+        contradiction=r"ではない|ではなく|解除|許可(?:する|される)",
+    ):
+        failures.append("thorough_no_direct_contact_missing_or_misclassified")
+    if not _topic_has_affirmed_prohibition(confirmed, r"技術供与|技術提供"):
+        failures.append("thorough_technology_provision_handling_missing")
+    if not _topic_has_affirmed_prohibition(confirmed, r"資源採掘|採掘"):
+        failures.append("thorough_mining_handling_missing")
+    if not unconfirmed or re.search(r"未確認|不足|不明|判断", unconfirmed) is None:
+        failures.append("thorough_unconfirmed_classification_missing")
+    if re.search(
+        r"(?:資料間.{0,20}直接(?:の)?関係|直接(?:の)?関係).{0,48}"
+        r"(?:示されていない|示されていません|明示されていない|明示されていません|"
+        r"確認できない|確認できません|確認されない|確認されません|関係なし|不明)",
+        prose,
+        re.DOTALL,
+    ) is None:
+        failures.append("thorough_direct_relationship_finding_missing")
+    if re.search(
+        r"(?:食い違い|相違|差異|矛盾)(?:が|は|を)?.{0,16}"
+        r"(?:ある|あります|認められる|確認できる|確認された|生じている|存在する|不一致)",
+        prose,
+        re.DOTALL,
+    ) is None:
+        failures.append("thorough_conflict_finding_missing")
+    return failures
 
 
 def _simple_answer_failures(response: str, search_urls: set[str]) -> tuple[list[str], set[str], set[str]]:
@@ -2781,7 +3146,17 @@ def evaluate_run(
     if _interaction_observed(events):
         failures.append("permission_or_user_input_event_observed")
 
-    tool = _event_tool_evidence(events)
+    tool = _event_tool_evidence(
+        events,
+        omitted_relevance_terms=tuple(
+            str(item)
+            for item in case.get("omitted_evidence_relevance_terms") or []
+        ),
+        narrow_follow_up_query_terms=tuple(
+            str(item)
+            for item in case.get("narrow_follow_up_query_terms") or []
+        ),
+    )
     failures.extend(tool["failures"])
     response = prod._assistant_response(events)
     if not response:
@@ -2810,6 +3185,45 @@ def evaluate_run(
         failures.append("search_call_count_out_of_range")
     if not isinstance(maximum_evidence, int) or not 0 <= tool["evidence_calls"] <= maximum_evidence:
         failures.append("evidence_call_count_out_of_range")
+    if case_kind == "thorough":
+        expected_routing = case.get("expected_routing_search_calls")
+        minimum_selected = case.get("minimum_selected_database_search_calls")
+        maximum_total = case.get("maximum_total_tool_calls")
+        expected_database = case.get("expected_database")
+        if (
+            not isinstance(expected_routing, int)
+            or tool["routing_search_calls"] != expected_routing
+        ):
+            failures.append("routing_search_call_count_mismatch")
+        if (
+            not isinstance(minimum_selected, int)
+            or tool["selected_database_search_calls"] < minimum_selected
+        ):
+            failures.append("selected_database_search_call_count_below_minimum")
+        if (
+            not isinstance(expected_database, str)
+            or not expected_database
+            or set(tool["selected_databases"]) != {expected_database}
+        ):
+            failures.append("selected_database_mismatch")
+        if (
+            case.get("forbid_duplicate_selected_database_queries") is not True
+            or tool["duplicate_selected_database_queries"]
+        ):
+            failures.append("duplicate_or_missing_selected_database_query")
+        if (
+            not isinstance(maximum_total, int)
+            or tool["total_tool_calls"] > maximum_total
+        ):
+            failures.append("total_tool_call_cap_exceeded")
+        if case.get("require_omitted_inspectable_evidence_follow_up") is True:
+            for call_id, satisfied in tool[
+                "omitted_inspectable_follow_up"
+            ].items():
+                if not satisfied:
+                    failures.append(
+                        f"omitted_inspectable_evidence_follow_up_missing:{call_id}"
+                    )
 
     response_urls: set[str] = set()
     markdown_urls: set[str] = set()
@@ -2821,26 +3235,11 @@ def evaluate_run(
     elif case_kind == "thorough" and response:
         response_urls = prod._response_https_urls(response)
         markdown_urls = prod._markdown_source_urls(response)
-        answer_prose = _answer_prose_without_link_destinations(response)
         if len(markdown_urls) < int(case.get("minimum_markdown_source_urls", 1)):
             failures.append("thorough_markdown_url_missing")
         if not response_urls.issubset(tool["all_evidence_urls"]):
             failures.append("thorough_response_url_not_from_tool_evidence")
-        thorough_patterns = {
-            "thorough_requested_12_percent_missing": r"(?<!\d)12\s*(?:%|％)",
-            "thorough_confirmed_7_percent_missing": r"(?<!\d)7\s*(?:%|％)",
-            "thorough_issue_open_missing": r"(?<![A-Za-z])open(?![A-Za-z])|オープン|未解決|未完了",
-            "thorough_satellite_buzz_missing": r"衛星.{0,12}バズ|バズ.{0,12}衛星",
-            "thorough_no_direct_contact_missing": r"非接触|直接接触.{0,12}(?:禁止|しない|避け|不可)",
-            "thorough_technology_provision_missing": r"技術供与|技術提供",
-            "thorough_mining_missing": r"採掘",
-        }
-        for failure_name, pattern in thorough_patterns.items():
-            if re.search(pattern, answer_prose, re.IGNORECASE | re.DOTALL) is None:
-                failures.append(failure_name)
-        for section in case.get("required_classification_sections", []):
-            if section not in response:
-                failures.append(f"thorough_section_missing:{section}")
+        failures.extend(_thorough_answer_failures(response))
     elif case_kind == "boundary" and response:
         marker = str(case.get("required_response_fragment", ""))
         normalized = response.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -2923,6 +3322,21 @@ def evaluate_run(
             "result_premium_requests": result_premium,
             "search_calls": tool["search_calls"],
             "evidence_calls": tool["evidence_calls"],
+            "total_tool_calls": tool["total_tool_calls"],
+            "routing_search_calls": tool["routing_search_calls"],
+            "selected_database_search_calls": tool[
+                "selected_database_search_calls"
+            ],
+            "selected_databases": sorted(set(tool["selected_databases"])),
+            "duplicate_selected_database_queries": tool[
+                "duplicate_selected_database_queries"
+            ],
+            "omitted_inspectable_ids_by_call": tool[
+                "omitted_inspectable_ids_by_call"
+            ],
+            "omitted_inspectable_follow_up": tool[
+                "omitted_inspectable_follow_up"
+            ],
             "search_evidence_urls": sorted(tool["search_evidence_urls"]),
             "response_urls": sorted(response_urls),
             "markdown_urls": sorted(markdown_urls),
@@ -3366,6 +3780,311 @@ def self_test(authority_path: Path) -> int:
         or re.search(r"(?<!\d)7\s*(?:%|％)", visible_link_prose) is None
     ):
         raise BakeoffError("visible Markdown link text was excluded from fact scoring")
+    for label, code_only in (
+        ("inline code", "`7%`"),
+        ("fenced code", "```text\n7%\n```"),
+        ("standalone percent encoding", "%E7%84%A1"),
+    ):
+        visible_code_prose = _answer_prose_without_link_destinations(code_only)
+        if re.search(r"(?<!\d)7\s*(?:%|％)", visible_code_prose) is not None:
+            raise BakeoffError(f"{label} satisfied a visible-prose fact check")
+
+    valid_thorough = (
+        "## 確定事項\n"
+        "- 執行確定の増額率は7%。集落は衛星バズ。\n"
+        "- 直接接触、技術供与、資源採掘は原則禁止。\n"
+        "## 提案段階\n"
+        "- 要求された12%増額案は討議中で、Issueはopen。\n"
+        "## 未確認\n"
+        "- 拠点の正確な座標は未確認で判断情報が不足。\n"
+        "資料間の直接の関係は示されていません。\n"
+        "要求12%と確定7%には食い違いがあります。"
+    )
+    thorough_failures = _thorough_answer_failures(valid_thorough)
+    if thorough_failures:
+        raise BakeoffError(
+            f"valid thorough classification fixture failed: {thorough_failures}"
+        )
+    reversed_thorough = valid_thorough.replace(
+        "執行確定の増額率は7%", "要求された増額率は12%"
+    ).replace(
+        "要求された12%増額案は討議中", "執行確定の増額率は7%"
+    )
+    reversed_failures = _thorough_answer_failures(reversed_thorough)
+    if not {
+        "thorough_confirmed_7_percent_missing_or_misclassified",
+        "thorough_requested_12_percent_missing_or_misclassified",
+    }.issubset(reversed_failures):
+        raise BakeoffError(
+            "reversed 12/7 classification was not rejected: "
+            + repr(reversed_failures)
+        )
+    handling_failures = _thorough_answer_failures(
+        valid_thorough.replace("は原則禁止", "を資料で確認")
+    )
+    if not {
+        "thorough_technology_provision_handling_missing",
+        "thorough_mining_handling_missing",
+    }.issubset(handling_failures):
+        raise BakeoffError("missing prohibition handling was not rejected")
+    negated_handling_failures = _thorough_answer_failures(
+        valid_thorough.replace(
+            "直接接触、技術供与、資源採掘は原則禁止。",
+            "直接接触は禁止ではない。技術供与は禁止ではない。資源採掘も禁止ではない。",
+        )
+    )
+    if not {
+        "thorough_no_direct_contact_missing_or_misclassified",
+        "thorough_technology_provision_handling_missing",
+        "thorough_mining_handling_missing",
+    }.issubset(negated_handling_failures):
+        raise BakeoffError("negated prohibition handling was not rejected")
+    negated_core_failures = _thorough_answer_failures(
+        valid_thorough.replace("集落は衛星バズ", "集落は衛星バズにはない")
+        .replace("Issueはopen", "Issueはopenではなく解決済み")
+    )
+    if not {
+        "thorough_issue_open_missing_or_misclassified",
+        "thorough_satellite_buzz_missing_or_misclassified",
+    }.issubset(negated_core_failures):
+        raise BakeoffError("negated location/state was not rejected")
+    wrong_relation_failures = _thorough_answer_failures(
+        valid_thorough.replace(
+            "資料間の直接の関係は示されていません。",
+            "資料間の直接の関係があります。",
+        ).replace(
+            "要求12%と確定7%には食い違いがあります。",
+            "要求12%と確定7%に食い違いはありません。",
+        )
+    )
+    if not {
+        "thorough_direct_relationship_finding_missing",
+        "thorough_conflict_finding_missing",
+    }.issubset(wrong_relation_failures):
+        raise BakeoffError("relationship/conflict polarity was not rejected")
+
+    def synthetic_tool_start(
+        call_id: str, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "type": "tool.execution_start",
+            "data": {
+                "toolCallId": call_id,
+                "toolName": tool_name,
+                "arguments": arguments,
+            },
+        }
+
+    def synthetic_tool_complete(
+        call_id: str, structured_content: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": call_id,
+                "success": True,
+                "result": {
+                    "content": json.dumps(
+                        structured_content, ensure_ascii=False
+                    ),
+                    "structuredContent": structured_content,
+                },
+            },
+        }
+
+    route_packet = {
+        "status": "database_required",
+        "inspectable_evidence_ids": [],
+        "evidence": [],
+    }
+    omitted_packet = {
+        "status": "ok",
+        "next_action": "answer_now",
+        "inspectable_evidence_ids": ["E1"],
+        "evidence": [
+            {"id": "E1", "text": "要求12%。確定済み増額率は…"}
+        ],
+    }
+    complete_packet = {
+        "status": "ok",
+        "next_action": "answer_now",
+        "inspectable_evidence_ids": ["E1"],
+        # This normal packet notice must not be mistaken for excerpt omission.
+        "notices": ["locator_hints_omitted"],
+        "evidence": [
+            {"id": "E1", "text": "要求12%、執行確定値7%。"}
+        ],
+    }
+    review_events = [
+        synthetic_tool_start("route", prod.SEARCH_TOOL, {"question": "原質問"}),
+        synthetic_tool_complete("route", route_packet),
+        synthetic_tool_start(
+            "search-original",
+            prod.SEARCH_TOOL,
+            {"question": "原質問", "database": "fizzbuzz-planet-rag"},
+        ),
+        synthetic_tool_complete("search-original", omitted_packet),
+        synthetic_tool_start(
+            "search-budget",
+            prod.SEARCH_TOOL,
+            {
+                "question": "保護区予算の確定済み増額率だけを確認する",
+                "database": "fizzbuzz-planet-rag",
+            },
+        ),
+        synthetic_tool_complete("search-budget", complete_packet),
+        synthetic_tool_start(
+            "search-relationship",
+            prod.SEARCH_TOOL,
+            {
+                "question": "予算資料と集落資料の直接関係だけを確認する",
+                "database": "fizzbuzz-planet-rag",
+            },
+        ),
+        synthetic_tool_complete("search-relationship", complete_packet),
+    ]
+    review_terms = ("予算", "増額", "確定")
+    narrow_terms = ("確定", "執行", "7%")
+    review_tool = _event_tool_evidence(
+        review_events,
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if (
+        review_tool["failures"]
+        or review_tool["routing_search_calls"] != 1
+        or review_tool["selected_database_search_calls"] != 3
+        or review_tool["total_tool_calls"] != 4
+        or review_tool["selected_databases"]
+        != ["fizzbuzz-planet-rag"] * 3
+        or review_tool["duplicate_selected_database_queries"]
+        or review_tool["omitted_inspectable_follow_up"]
+        != {"search-original": True}
+    ):
+        raise BakeoffError(
+            "routing, selected-database, or narrow-search review contract failed"
+        )
+    missing_follow_up = _event_tool_evidence(
+        review_events[:4],
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if missing_follow_up["omitted_inspectable_follow_up"] != {
+        "search-original": False
+    }:
+        raise BakeoffError("omitted inspectable evidence was accepted without follow-up")
+    evidence_follow_up_events = [
+        *review_events[:4],
+        synthetic_tool_start(
+            "inspect-e1",
+            prod.EVIDENCE_TOOL,
+            {"result_token": "opaque", "evidence_ids": ["E1"]},
+        ),
+        synthetic_tool_complete("inspect-e1", complete_packet),
+    ]
+    evidence_follow_up = _event_tool_evidence(
+        evidence_follow_up_events,
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if evidence_follow_up["omitted_inspectable_follow_up"] != {
+        "search-original": True
+    }:
+        raise BakeoffError("Evidence-detail review did not satisfy omission follow-up")
+    duplicate_review = _event_tool_evidence(
+        [
+            *review_events,
+            synthetic_tool_start(
+                "search-duplicate",
+                prod.SEARCH_TOOL,
+                {"question": " 原質問 ", "database": "fizzbuzz-planet-rag"},
+            ),
+            synthetic_tool_complete("search-duplicate", complete_packet),
+        ],
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if duplicate_review["duplicate_selected_database_queries"] != ["原質問"]:
+        raise BakeoffError("duplicate selected-database query was not detected")
+    unrelated_omission_packet = {
+        "status": "ok",
+        "next_action": "answer_now",
+        "inspectable_evidence_ids": ["E9"],
+        "evidence": [{"id": "E9", "text": "集落の補足史料は…"}],
+    }
+    unrelated_omission_events = [
+        synthetic_tool_start(
+            "unrelated",
+            prod.SEARCH_TOOL,
+            {"question": "集落史料", "database": "fizzbuzz-planet-rag"},
+        ),
+        synthetic_tool_complete("unrelated", unrelated_omission_packet),
+    ]
+    unrelated_omission = _event_tool_evidence(
+        unrelated_omission_events,
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if unrelated_omission["omitted_inspectable_follow_up"]:
+        raise BakeoffError("irrelevant omitted Evidence triggered a required follow-up")
+    unrelated_follow_up_events = [
+        *review_events[:4],
+        synthetic_tool_start(
+            "search-unrelated",
+            prod.SEARCH_TOOL,
+            {"question": "集落の歴史だけ", "database": "fizzbuzz-planet-rag"},
+        ),
+        synthetic_tool_complete("search-unrelated", complete_packet),
+    ]
+    unrelated_follow_up = _event_tool_evidence(
+        unrelated_follow_up_events,
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if unrelated_follow_up["omitted_inspectable_follow_up"] != {
+        "search-original": False
+    }:
+        raise BakeoffError("unrelated narrow search satisfied omission follow-up")
+    budget_relationship_follow_up = _event_tool_evidence(
+        [
+            *review_events[:4],
+            synthetic_tool_start(
+                "search-budget-relationship",
+                prod.SEARCH_TOOL,
+                {
+                    "question": "予算資料との直接関係",
+                    "database": "fizzbuzz-planet-rag",
+                },
+            ),
+            synthetic_tool_complete("search-budget-relationship", complete_packet),
+        ],
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if budget_relationship_follow_up["omitted_inspectable_follow_up"] != {
+        "search-original": False
+    }:
+        raise BakeoffError("budget relationship search satisfied 7% omission follow-up")
+    location_confirmation_follow_up = _event_tool_evidence(
+        [
+            *review_events[:4],
+            synthetic_tool_start(
+                "search-confirmed-location",
+                prod.SEARCH_TOOL,
+                {
+                    "question": "ダム族集落の確定位置",
+                    "database": "fizzbuzz-planet-rag",
+                },
+            ),
+            synthetic_tool_complete("search-confirmed-location", complete_packet),
+        ],
+        omitted_relevance_terms=review_terms,
+        narrow_follow_up_query_terms=narrow_terms,
+    )
+    if location_confirmation_follow_up["omitted_inspectable_follow_up"] != {
+        "search-original": False
+    }:
+        raise BakeoffError("confirmed-location search satisfied 7% omission follow-up")
     boundary_marker = str(authority["boundary_case"]["required_response_fragment"])
     for primary in (
         boundary_marker,
@@ -3641,7 +4360,7 @@ def self_test(authority_path: Path) -> int:
         ),
     )
     tampered_preinference_model = dict(preinference_raw)
-    tampered_preinference_model["requested_model"] = "gpt-5.3-codex"
+    tampered_preinference_model["requested_model"] = "tampered-non-auto-model"
     expect_rejection(
         "r7 pre-inference model tamper",
         lambda: _validate_r7_preinference_semantics(

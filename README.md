@@ -170,7 +170,7 @@ local-rag-copilot
 
 | `-Tier` | 用途 | model |
 |---|---|---|
-| `savings` | 単純な事実を短く確認する | `claude-haiku-4.5` |
+| `savings` | 単純な事実を短く確認する | eligible allowlistとlive一覧の一致（初期値は`claude-haiku-4.5`のみ） |
 | `standard` | 普段の質問へ標準的に回答する | `auto` |
 | `thorough` | 複数観点の比較や矛盾確認を行う | `auto` |
 
@@ -179,6 +179,12 @@ local-rag-copilot -Tier savings
 local-rag-copilot -Tier standard
 local-rag-copilot -Tier thorough
 ```
+
+`savings`は、同条件のfresh sessionを3回すべて合格したeligible
+allowlistと、実行時の`copilot help config`掲載モデルを正規化して厳密に
+照合します。現在のeligibleは`claude-haiku-4.5`だけです。一致するモデルが
+なければ「検証済み節約モデルなし。標準モードを使用してください」と停止し、
+既知不合格モデルや`auto`へ節約モードのままfallbackしません。
 
 専用launcherは現在の作業folderを維持し、検証済みのAgentとpinned
 `localragagent003` MCPを使用します。session内で自動許可するのは

@@ -183,6 +183,7 @@ def build_initial_summary(
     evidence, evidence_details = _summary_evidence(
         payload.get("evidence") or [],
         result_set_id=result_set_id,
+        query=str(payload.get("query") or ""),
     )
     background = _summary_background(
         payload.get("background_context") or []
@@ -629,6 +630,7 @@ def _summary_evidence(
     contexts: Iterable[dict[str, Any]],
     *,
     result_set_id: str,
+    query: str = "",
 ) -> tuple[
     list[dict[str, Any]],
     list[tuple[str, str, dict[str, Any]]],
@@ -644,13 +646,10 @@ def _summary_evidence(
         item_id = f"E{index}"
         source = context.get("source") or {}
         location = context.get("location") or {}
-        excerpt = _shorten(
-            str(
-                context.get("matched_excerpt")
-                or context.get("text")
-                or ""
-            ),
-            450,
+        excerpt = _evidence_excerpt(
+            context,
+            query=query,
+            limit=450,
         )
         warnings = _unique_strings(
             [
@@ -1519,6 +1518,208 @@ def _shorten(value: str, limit: int) -> str:
     if limit <= 1:
         return normalized[:limit]
     return normalized[: limit - 1].rstrip() + "…"
+
+
+def _evidence_excerpt(
+    context: dict[str, Any],
+    *,
+    query: str,
+    limit: int,
+) -> str:
+    """Return a bounded excerpt without systematically discarding late facts."""
+    matched = str(context.get("matched_excerpt") or "")
+    full_text = str(context.get("text") or "")
+    raw = matched or full_text
+    normalized = raw.strip()
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 1:
+        return normalized[:limit]
+
+    leading_trim = len(raw) - len(raw.lstrip())
+    same_as_full_text = not matched or matched.strip() == full_text.strip()
+    focus = _evidence_offset_focus(
+        context,
+        text_length=len(normalized),
+        leading_trim=leading_trim,
+        full_text_coordinates=same_as_full_text,
+    )
+    if focus is None:
+        focus = _evidence_anchor_focus(context, normalized)
+    if focus is None:
+        focus = _query_focus(normalized, query)
+    if focus is not None:
+        return _focused_excerpt(normalized, focus[0], focus[1], limit)
+    return _head_tail_excerpt(normalized, limit)
+
+
+def _evidence_offset_focus(
+    context: dict[str, Any],
+    *,
+    text_length: int,
+    leading_trim: int,
+    full_text_coordinates: bool,
+) -> tuple[int, int] | None:
+    ranges = [
+        value
+        for value in context.get("source_ranges") or []
+        if isinstance(value, dict)
+    ]
+    ranges.sort(key=lambda value: value.get("kind") != "matched")
+    candidates = [context, *ranges]
+    for value in candidates:
+        span = _bounded_offset_span(
+            value.get("anchor_excerpt_start"),
+            value.get("anchor_excerpt_end"),
+            text_length=text_length,
+            leading_trim=leading_trim,
+        )
+        if span is not None:
+            return span
+    if not full_text_coordinates:
+        return None
+    for start_key, end_key in (
+        ("anchor_char_start", "anchor_char_end"),
+        ("char_start", "char_end"),
+    ):
+        for value in candidates:
+            span = _bounded_offset_span(
+                value.get(start_key),
+                value.get(end_key),
+                text_length=text_length,
+                leading_trim=leading_trim,
+            )
+            if span is not None:
+                return span
+    return None
+
+
+def _bounded_offset_span(
+    start: Any,
+    end: Any,
+    *,
+    text_length: int,
+    leading_trim: int,
+) -> tuple[int, int] | None:
+    if (
+        isinstance(start, bool)
+        or isinstance(end, bool)
+        or not isinstance(start, int)
+        or not isinstance(end, int)
+    ):
+        return None
+    adjusted_start = start - leading_trim
+    adjusted_end = end - leading_trim
+    if adjusted_start < 0 or adjusted_end <= adjusted_start:
+        return None
+    if adjusted_start >= text_length or adjusted_end > text_length:
+        return None
+    return adjusted_start, adjusted_end
+
+
+def _evidence_anchor_focus(
+    context: dict[str, Any],
+    text: str,
+) -> tuple[int, int] | None:
+    candidates: list[str] = []
+    for value in (
+        context.get("anchor_term"),
+        context.get("matched_term"),
+        context.get("matched_text"),
+    ):
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    for source_range in context.get("source_ranges") or []:
+        if not isinstance(source_range, dict):
+            continue
+        for key in ("anchor_term", "matched_term", "matched_text"):
+            value = source_range.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+    debug = context.get("debug")
+    if isinstance(debug, dict):
+        exact_match = debug.get("exact_match")
+        if isinstance(exact_match, dict):
+            candidates.extend(
+                str(value).strip()
+                for value in exact_match.get("matched_terms") or []
+                if str(value).strip()
+            )
+    for candidate in sorted(set(candidates), key=len, reverse=True):
+        span = _literal_span(text, candidate)
+        if span is not None:
+            return span
+    return None
+
+
+def _query_focus(text: str, query: str) -> tuple[int, int] | None:
+    tokens = re.findall(
+        r"[0-9A-Za-z_\-\u3040-\u30ff\u3400-\u9fff]+",
+        query,
+    )
+    candidates: set[str] = set()
+    for token in tokens:
+        if len(token) < 4:
+            continue
+        candidates.add(token)
+        maximum = min(len(token), 32)
+        for width in range(maximum, 3, -1):
+            found = False
+            for start in range(0, len(token) - width + 1):
+                fragment = token[start : start + width]
+                if _literal_span(text, fragment) is not None:
+                    candidates.add(fragment)
+                    found = True
+            if found:
+                break
+    for candidate in sorted(candidates, key=len, reverse=True):
+        span = _literal_span(text, candidate)
+        if span is not None:
+            return span
+    return None
+
+
+def _literal_span(text: str, value: str) -> tuple[int, int] | None:
+    match = re.search(re.escape(value), text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return match.start(), match.end()
+
+
+def _focused_excerpt(
+    text: str,
+    focus_start: int,
+    focus_end: int,
+    limit: int,
+) -> str:
+    content_budget = max(1, limit - 2)
+    span_length = max(1, focus_end - focus_start)
+    if span_length >= content_budget:
+        window_start = max(0, min(focus_start, len(text) - content_budget))
+    else:
+        left_context = (content_budget - span_length) // 2
+        window_start = max(0, focus_start - left_context)
+        window_start = min(window_start, len(text) - content_budget)
+        if focus_end > window_start + content_budget:
+            window_start = focus_end - content_budget
+    window_end = min(len(text), window_start + content_budget)
+    prefix = "…" if window_start > 0 else ""
+    suffix = "…" if window_end < len(text) else ""
+    return prefix + text[window_start:window_end].strip() + suffix
+
+
+def _head_tail_excerpt(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    head_length = (limit - 1) // 2
+    tail_length = limit - 1 - head_length
+    return (
+        text[:head_length].rstrip()
+        + "…"
+        + text[-tail_length:].lstrip()
+    )
 
 
 def _unique_strings(

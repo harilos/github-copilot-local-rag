@@ -145,7 +145,12 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn("at least three selected-database", thorough_text)
         self.assertIn("the routing call does not count", thorough_text)
         self.assertIn("never overrides the coverage checklist", thorough_text)
-        self.assertIn("another ellipsis", thorough_text)
+        self.assertIn("Immediately before the final answer", thorough_text)
+        self.assertIn("proposed values are not mixed with confirmed values", thorough_text)
+        self.assertIn("even when `next_action=answer_now`", thorough_text)
+        self.assertIn("do not depend on `next_action` alone", thorough_text)
+        self.assertIn("same selected database again with a narrow semantic query", thorough_text)
+        self.assertIn("Review the checklist once more", thorough_text)
         self.assertIn("inspectable_evidence_ids", thorough_text)
 
     def test_install_pins_absolute_cli_config_and_preserves_foreign_jsonc(self) -> None:
@@ -938,6 +943,111 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertFalse(capture.exists())
             os.rmdir(temporary)
 
+    def test_savings_launcher_intersects_live_help_with_eligible_allowlist(self) -> None:
+        powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if powershell is None:
+            self.skipTest("PowerShell is unavailable")
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        launcher = self.product / setup.BUNDLE_NAME / setup.LAUNCHER_NAME
+        project = self.root / "savings-project"
+        project.mkdir()
+        (project / ".git").mkdir()
+        binary_dir = self.root / "savings-bin"
+        binary_dir.mkdir()
+        capture = self.root / "savings-capture.txt"
+        help_capture = self.root / "savings-help-capture.txt"
+        fake = binary_dir / "copilot.cmd"
+        fake.write_text(
+            "@echo off\r\n"
+            'if /I "%~1"=="help" if /I "%~2"=="config" (\r\n'
+            '  > "%LRR_HELP_CAPTURE%" echo HOME=%COPILOT_HOME%\r\n'
+            "  echo Available models: CLAUDE-HAIKU-4.5 gpt-5.4-mini auto\r\n"
+            "  exit /b 0\r\n"
+            ")\r\n"
+            '> "%LRR_CAPTURE%" echo ARGS=%*\r\n'
+            "exit /b 0\r\n",
+            encoding="ascii",
+        )
+        environment = os.environ.copy()
+        environment["PATH"] = str(binary_dir) + os.pathsep + environment["PATH"]
+        environment["LRR_CAPTURE"] = str(capture)
+        environment["LRR_HELP_CAPTURE"] = str(help_capture)
+
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(launcher),
+                "-Tier",
+                "savings",
+                "--max-ai-credits",
+                "30",
+            ],
+            cwd=project,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        captured = capture.read_text(encoding="utf-8")
+        self.assertIn("--agent=local-rag-agent003-savings", captured)
+        self.assertIn("--model=claude-haiku-4.5", captured)
+        self.assertNotIn("--model=auto", captured)
+        self.assertNotIn("--model=gpt-5.4-mini", captured)
+        self.assertEqual(
+            f"HOME={self.home}",
+            help_capture.read_text(encoding="utf-8").strip(),
+        )
+
+        capture.unlink()
+        help_capture.unlink()
+        fake.write_text(
+            "@echo off\r\n"
+            'if /I "%~1"=="help" if /I "%~2"=="config" (\r\n'
+            "  echo Available models: auto gpt-5.4-mini xclaude-haiku-4.5-preview\r\n"
+            "  exit /b 0\r\n"
+            ")\r\n"
+            '> "%LRR_CAPTURE%" echo ARGS=%*\r\n'
+            "exit /b 0\r\n",
+            encoding="ascii",
+        )
+        rejected = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(launcher),
+                "-Tier",
+                "savings",
+            ],
+            cwd=project,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn(
+            "検証済み節約モデルなし。標準モードを使用してください",
+            rejected.stdout + rejected.stderr,
+        )
+        self.assertFalse(capture.exists())
+
     def test_launcher_fails_closed_for_project_jsonc_shadows_and_uses_git_boundary(
         self,
     ) -> None:
@@ -1158,6 +1268,21 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn('".claude/agents/$AgentId.md"', text)
         self.assertIn('".github/mcp.json"', text)
         self.assertIn("function ConvertFrom-ProjectJsonc", text)
+        self.assertIn('EligibleSavingsModels = @("claude-haiku-4.5")', text)
+        self.assertIn("function Get-EligibleSavingsModel", text)
+        self.assertIn(
+            "検証済み節約モデルなし。標準モードを使用してください",
+            text,
+        )
+        for ineligible in (
+            "gpt-5.4-mini",
+            "gemini-3.5-flash",
+            "mai-code-1-flash-picker",
+            "gpt-5-mini",
+            "gpt-5.6-luna",
+            "gemini-3.6-flash",
+        ):
+            self.assertNotIn(ineligible, text)
         self.assertIn("[System.Text.UTF8Encoding]::new($false, $true)", text)
         self.assertNotIn("[System.Text.RegularExpressions.Regex]::IsMatch", text)
         self.assertIn("-StartDirectory ([System.Environment]::CurrentDirectory)", text)

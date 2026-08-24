@@ -344,6 +344,69 @@ class ResultBundleContractTests(unittest.TestCase):
             " ".join(point["text"] for point in points).casefold(),
         )
 
+    def test_late_confirmed_rate_survives_bounded_evidence_excerpt(self) -> None:
+        payload = synthetic_payload()
+        fact = "確定済み増額率は7%"
+        fact_start = 477 - fact.index("7%")
+        text = ("前" * fact_start) + fact
+        text += "後" * (496 - len(text))
+        self.assertEqual(496, len(text))
+        self.assertEqual(477, text.index("7%"))
+
+        payload["query"] = "確定済み増額率を確認してください"
+        payload["evidence"][0]["text"] = text
+        payload["evidence"][0]["matched_excerpt"] = text
+        payload["evidence"][0]["source_ranges"] = [
+            {
+                "kind": "matched",
+                "anchor_excerpt_start": text.index("7%"),
+                "anchor_excerpt_end": text.index("7%") + 2,
+            }
+        ]
+
+        summary, _details = result_bundle.build_initial_summary(
+            payload,
+            result_set_id="late-rate",
+            expires_at=self.now + timedelta(hours=1),
+        )
+        excerpt = summary["evidence"][0]["excerpt"]
+        self.assertLessEqual(len(excerpt), 450)
+        self.assertIn("確定済み増額率は7%", excerpt)
+        self.assertTrue(excerpt.startswith("…"))
+        model_packet = packet.build_search_packet(
+            {
+                "status": "ok",
+                "database": "fizzbuzz-planet-rag",
+                "summary": summary,
+            },
+            result_token="lrt_0123456789abcdefghijklmnop",
+            inspectable_evidence_ids=["E1"],
+        )
+        visible_text = model_packet["evidence"][0]["text"]
+        self.assertLessEqual(len(visible_text), 450)
+        self.assertIn("確定済み増額率は7%", visible_text)
+        serialized = packet.serialize_packet(model_packet)
+        self.assertEqual(model_packet, json.loads(serialized.encode("utf-8")))
+
+    def test_unanchored_evidence_excerpt_keeps_bounded_head_and_tail(self) -> None:
+        payload = synthetic_payload()
+        text = "HEAD-MARKER-" + ("中" * 480) + "-TAIL-MARKER"
+        payload["query"] = "一致しない検索語"
+        payload["evidence"][0]["text"] = text
+        payload["evidence"][0]["matched_excerpt"] = text
+        payload["evidence"][0]["source_ranges"] = []
+
+        summary, _details = result_bundle.build_initial_summary(
+            payload,
+            result_set_id="head-tail",
+            expires_at=self.now + timedelta(hours=1),
+        )
+        excerpt = summary["evidence"][0]["excerpt"]
+        self.assertLessEqual(len(excerpt), 450)
+        self.assertTrue(excerpt.startswith("HEAD-MARKER-"))
+        self.assertTrue(excerpt.endswith("-TAIL-MARKER"))
+        self.assertIn("…", excerpt)
+
     def test_related_documents_build_a_labelled_provisional_answer(
         self,
     ) -> None:

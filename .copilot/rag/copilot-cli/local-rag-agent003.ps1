@@ -43,6 +43,35 @@ function Get-ProjectRoot {
     return $startPath
 }
 
+function Get-EligibleSavingsModel {
+    param(
+        [Parameter(Mandatory)][string]$CopilotPath,
+        [Parameter(Mandatory)][string[]]$EligibleModels
+    )
+    $helpLines = @(& $CopilotPath help config)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Copilot CLI help config failed while checking savings models"
+    }
+    $helpText = ($helpLines -join "`n").Normalize(
+        [System.Text.NormalizationForm]::FormC
+    ).ToLowerInvariant()
+    foreach ($eligibleModel in $EligibleModels) {
+        $normalizedModel = $eligibleModel.Trim().Normalize(
+            [System.Text.NormalizationForm]::FormC
+        ).ToLowerInvariant()
+        if ($normalizedModel -notmatch '^[a-z0-9][a-z0-9._/-]*$') {
+            throw "Invalid eligible savings model identifier"
+        }
+        $pattern = '(?<![A-Za-z0-9._/-])' +
+            [regex]::Escape($normalizedModel) +
+            '(?![A-Za-z0-9._/-])'
+        if ([regex]::IsMatch($helpText, $pattern)) {
+            return $normalizedModel
+        }
+    }
+    throw "検証済み節約モデルなし。標準モードを使用してください"
+}
+
 function Test-JsonObject {
     param([object]$Value)
     return $null -ne $Value -and
@@ -503,16 +532,9 @@ $TierMap = @{
     thorough = @{ Agent = "local-rag-agent003-thorough"; Model = "auto" }
 }
 $selection = $TierMap[$Tier]
+$EligibleSavingsModels = @("claude-haiku-4.5")
 $ToolList = "localragagent003-local_rag_search,localragagent003-local_rag_get_evidence"
 $AllowList = "localragagent003(local_rag_search),localragagent003(local_rag_get_evidence)"
-$FixedArguments = @(
-    "--agent=$($selection.Agent)",
-    "--model=$($selection.Model)",
-    "--additional-mcp-config=@$PinnedConfig",
-    "--available-tools=$ToolList",
-    "--allow-tool=$AllowList",
-    "--no-custom-instructions"
-)
 
 $commands = @(Get-Command "copilot" -CommandType Application -All -ErrorAction Stop)
 if ($commands.Count -lt 1) { throw "Copilot CLI executable was not found" }
@@ -525,7 +547,6 @@ Assert-NoProjectAgentOrMcpShadow `
     -ProjectRoot $projectRoot `
     -StartDirectory ([System.Environment]::CurrentDirectory) `
     -AgentId $selection.Agent
-
 $EnvironmentNames = @(
     "COPILOT_HOME", "COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES", "COPILOT_MCP_TOOL_CACHE",
     "PYTHONUTF8", "PYTHONIOENCODING"
@@ -549,6 +570,22 @@ try {
     $OutputEncoding = $utf8
     [Console]::OutputEncoding = $utf8
     [Console]::InputEncoding = $utf8
+    $EffectiveModel = if ($Tier -ceq "savings") {
+        Get-EligibleSavingsModel `
+            -CopilotPath $CopilotPath `
+            -EligibleModels $EligibleSavingsModels
+    }
+    else {
+        [string]$selection.Model
+    }
+    $FixedArguments = @(
+        "--agent=$($selection.Agent)",
+        "--model=$EffectiveModel",
+        "--additional-mcp-config=@$PinnedConfig",
+        "--available-tools=$ToolList",
+        "--allow-tool=$AllowList",
+        "--no-custom-instructions"
+    )
     & $CopilotPath @FixedArguments @CopilotArguments
     $ExitCode = $LASTEXITCODE
 }

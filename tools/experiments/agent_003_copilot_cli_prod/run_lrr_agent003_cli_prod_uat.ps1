@@ -354,7 +354,7 @@ function Read-CanonicalCases {
                 ($index -eq 3 -and (
                     -not $hasBareUrlCompatibility -or
                     $values[$index].allow_bare_source_urls -isnot [bool] -or
-                    -not [bool]$values[$index].allow_bare_source_urls
+                    [bool]$values[$index].allow_bare_source_urls
                 )) -or
                 ($index -ne 3 -and $hasBareUrlCompatibility) -or
                 -not $hasResponseEvidenceContract -or

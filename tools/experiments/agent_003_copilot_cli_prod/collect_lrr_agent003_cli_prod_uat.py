@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+EXPERIMENT_ROOT = Path(__file__).resolve().parent
+if str(EXPERIMENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXPERIMENT_ROOT))
+
+
 CASE_SCHEMA = "lrr-agent003-cli-prod-uat-case-v1"
 RUN_SCHEMA = "lrr-agent003-cli-prod-uat-run-v1"
 REPORT_SCHEMA = "lrr-agent003-cli-prod-uat-report-v1"
@@ -26,7 +31,7 @@ APPROVAL_OBSERVATION = "NO_OBSERVED_PROMPT"
 TIER_CONTRACTS = {
     "savings": ("local-rag-agent003-savings", "claude-haiku-4.5"),
     "standard": ("local-rag-agent003-standard", "auto"),
-    "thorough": ("local-rag-agent003-thorough", "gpt-5.3-codex"),
+    "thorough": ("local-rag-agent003-thorough", "auto"),
 }
 SEARCH_TOOL = "localragagent003-local_rag_search"
 EVIDENCE_TOOL = "localragagent003-local_rag_get_evidence"
@@ -187,11 +192,38 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
                 isinstance(minimum_urls, bool)
                 or not isinstance(minimum_urls, int)
                 or minimum_urls < 1
-                or allow_bare_urls is not (ordinal == 4)
+                or allow_bare_urls is not False
                 or value.get("require_all_response_urls_from_tool_evidence")
                 is not True
             ):
                 raise EvidenceError(f"{case_id}: source URL contract is invalid")
+            if ordinal == 4 and (
+                minimum_urls != 2
+                or value.get("expected_database") != "fizzbuzz-planet-rag"
+                or value.get("expected_routing_search_calls") != 1
+                or value.get("minimum_selected_database_search_calls") != 3
+                or value.get("maximum_total_tool_calls") != 7
+                or value.get("forbid_duplicate_selected_database_queries") is not True
+                or value.get("require_omitted_inspectable_evidence_follow_up") is not True
+                or value.get("omitted_evidence_relevance_terms")
+                != ["予算", "増額", "確定"]
+                or value.get("narrow_follow_up_query_terms")
+                != ["確定", "執行", "7%"]
+                or value.get("required_classification_sections")
+                != ["確定事項", "提案段階", "未確認"]
+                or value.get("expected_facts")
+                != {
+                    "requested_percent": 12,
+                    "confirmed_percent": 7,
+                    "issue_state": "open",
+                    "settlement_location": "衛星バズ",
+                    "contact_rule": "非接触（直接接触禁止）",
+                    "decision_topics": ["技術供与", "採掘"],
+                }
+            ):
+                raise EvidenceError(
+                    f"{case_id}: thorough final-review contract is invalid"
+                )
         elif (
             has_url_contract
             or "allow_bare_source_urls" in value
@@ -423,7 +455,22 @@ def _normalize_https_url(value: str) -> str | None:
     return None
 
 
+def _without_markdown_code(value: str) -> str:
+    without_fences = re.sub(
+        r"(?ms)^[ \t]*(?P<fence>`{3,}|~{3,})[^\r\n]*\r?\n"
+        r".*?^[ \t]*(?P=fence)[ \t]*(?:\r?\n|$)",
+        "\n",
+        value,
+    )
+    return re.sub(
+        r"(?s)(?<!`)``[^`]*?``(?!`)|(?<!`)`[^`]*?`(?!`)",
+        "",
+        without_fences,
+    )
+
+
 def _response_https_urls(response: str) -> set[str]:
+    response = _without_markdown_code(response)
     values: set[str] = set()
     for match in HTTPS_URL_RE.finditer(response):
         normalized = _normalize_https_url(match.group(0))
@@ -433,6 +480,7 @@ def _response_https_urls(response: str) -> set[str]:
 
 
 def _markdown_source_urls(response: str) -> set[str]:
+    response = _without_markdown_code(response)
     def escaped(position: int) -> bool:
         backslashes = 0
         position -= 1
@@ -989,10 +1037,56 @@ def evaluate_case(
         failures.append("search_call_count_out_of_range")
     if not case["minimum_evidence_calls"] <= evidence_count <= case["maximum_evidence_calls"]:
         failures.append("evidence_call_count_out_of_range")
+    thorough_tool: dict[str, Any] | None = None
+    if case["tier"] == "thorough":
+        import collect_lrr_agent003_cli_model_bakeoff as bakeoff
+
+        thorough_tool = bakeoff._event_tool_evidence(
+            events,
+            omitted_relevance_terms=tuple(
+                str(item)
+                for item in case.get("omitted_evidence_relevance_terms") or []
+            ),
+            narrow_follow_up_query_terms=tuple(
+                str(item)
+                for item in case.get("narrow_follow_up_query_terms") or []
+            ),
+        )
+        failures.extend(
+            f"thorough_tool_contract:{item}"
+            for item in thorough_tool["failures"]
+        )
+        if thorough_tool["routing_search_calls"] != case.get(
+            "expected_routing_search_calls"
+        ):
+            failures.append("thorough_routing_search_call_count_mismatch")
+        if thorough_tool["selected_database_search_calls"] < int(
+            case.get("minimum_selected_database_search_calls", 0)
+        ):
+            failures.append("thorough_selected_database_search_count_below_minimum")
+        if set(thorough_tool["selected_databases"]) != {
+            case.get("expected_database")
+        }:
+            failures.append("thorough_selected_database_mismatch")
+        if thorough_tool["duplicate_selected_database_queries"]:
+            failures.append("thorough_duplicate_selected_database_query")
+        if thorough_tool["total_tool_calls"] > int(
+            case.get("maximum_total_tool_calls", 0)
+        ):
+            failures.append("thorough_total_tool_call_cap_exceeded")
+        for call_id, satisfied in thorough_tool[
+            "omitted_inspectable_follow_up"
+        ].items():
+            if not satisfied:
+                failures.append(
+                    f"thorough_omitted_evidence_follow_up_missing:{call_id}"
+                )
 
     response = _assistant_response(events)
     if not response:
         failures.append("final_assistant_response_missing")
+    elif case["tier"] == "thorough":
+        failures.extend(bakeoff._thorough_answer_failures(response))
     required_fragment = case.get("required_response_fragment")
     minimum_result_bytes = case.get("minimum_tool_result_bytes")
     tail_window = case.get("tool_result_tail_window_bytes")
@@ -1384,7 +1478,7 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
     resolved = {
         "savings": "claude-haiku-4.5",
         "standard": "gpt-5-mini",
-        "thorough": "gpt-5.3-codex",
+        "thorough": "gpt-5.4",
     }
     synthetic_cli = raw_root / "_synthetic-cli" / "copilot.cmd"
     synthetic_version = raw_root / "_synthetic-cli" / "version.stdout.log"
@@ -1511,18 +1605,34 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
         synthetic_answer = "Synthetic answer."
         if isinstance(case.get("minimum_markdown_source_urls"), int):
             synthetic_url = f"https://example.invalid/evidence/{ordinal}"
+            synthetic_url_2 = f"https://example.invalid/evidence/{ordinal}-b"
             synthetic_content = (
                 "Local RAG synthetic status=ok; use structuredContent."
             )
             synthetic_structured = {
                 "status": "ok",
-                "evidence": [{"id": "E1", "url": synthetic_url}],
+                "inspectable_evidence_ids": [],
+                "evidence": [
+                    {"id": "E1", "text": "synthetic", "url": synthetic_url},
+                    {"id": "E2", "text": "synthetic", "url": synthetic_url_2},
+                ],
             }
-            synthetic_answer = (
-                f"Synthetic answer {synthetic_url}."
-                if case.get("allow_bare_source_urls") is True
-                else f"Synthetic answer [source [nested label]]({synthetic_url})."
-            )
+            if case["tier"] == "thorough":
+                synthetic_answer = (
+                    "## 確定事項\n"
+                    "執行確定の増額率は7%。衛星バズの集落では直接接触、"
+                    "技術供与、資源採掘は原則禁止。\n"
+                    "## 提案段階\n要求された12%増額案は討議中でIssueはopen。\n"
+                    "## 未確認\n正確な座標は未確認で判断情報が不足。\n"
+                    "資料間の直接関係は示されていません。要求12%と確定7%には食い違いがあります。\n"
+                    f"[source A]({synthetic_url}) [source B]({synthetic_url_2})"
+                )
+            else:
+                synthetic_answer = (
+                    f"Synthetic answer {synthetic_url}."
+                    if case.get("allow_bare_source_urls") is True
+                    else f"Synthetic answer [source [nested label]]({synthetic_url})."
+                )
         if case.get("launcher_scope") == "temporary_boundary_fixture":
             synthetic_content = "X" * 33000 + str(case["required_response_fragment"])
             synthetic_answer = (
@@ -1532,6 +1642,11 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
         tool_events: list[dict[str, Any]] = []
         for call_index in range(case["minimum_search_calls"]):
             search_id = f"search-{ordinal}-{call_index + 1}"
+            arguments: dict[str, Any] = {
+                "question": f"synthetic question {call_index + 1}"
+            }
+            if case["tier"] == "thorough" and call_index > 0:
+                arguments["database"] = "fizzbuzz-planet-rag"
             result_value: dict[str, Any] = {
                 "content": [{"type": "text", "text": synthetic_content}]
             }
@@ -1544,6 +1659,7 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                         "data": {
                             "toolCallId": search_id,
                             "toolName": SEARCH_TOOL,
+                            "arguments": arguments,
                         },
                     },
                     {
@@ -1661,6 +1777,12 @@ def self_test(cases_path: Path) -> int:
             raise AssertionError(
                 f"malformed or non-link Markdown was accepted: {malformed_link}"
             )
+    code_only_links = (
+        f"```markdown\n[hidden]({parser_url})\n```\n"
+        f"`[inline]({parser_url})`"
+    )
+    if _markdown_source_urls(code_only_links) or _response_https_urls(code_only_links):
+        raise AssertionError("Markdown code links were accepted as clickable evidence")
     with tempfile.TemporaryDirectory(prefix="lrr-agent003-cli-prod-collector-") as tmp:
         raw_root = Path(tmp) / "raw"
         _synthetic_case_files(raw_root, cases)
