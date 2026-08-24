@@ -182,15 +182,21 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
         has_url_contract = "minimum_markdown_source_urls" in value
         if ordinal in (3, 4):
             minimum_urls = value.get("minimum_markdown_source_urls")
+            allow_bare_urls = value.get("allow_bare_source_urls", False)
             if (
                 isinstance(minimum_urls, bool)
                 or not isinstance(minimum_urls, int)
                 or minimum_urls < 1
+                or allow_bare_urls is not (ordinal == 4)
                 or value.get("require_all_response_urls_from_tool_evidence")
                 is not True
             ):
                 raise EvidenceError(f"{case_id}: source URL contract is invalid")
-        elif has_url_contract or "require_all_response_urls_from_tool_evidence" in value:
+        elif (
+            has_url_contract
+            or "allow_bare_source_urls" in value
+            or "require_all_response_urls_from_tool_evidence" in value
+        ):
             raise EvidenceError(f"{case_id}: unexpected source URL contract")
         if scope == "temporary_boundary_fixture":
             minimum_bytes = value.get("minimum_tool_result_bytes")
@@ -1011,8 +1017,17 @@ def evaluate_case(
         )
     minimum_source_urls = case.get("minimum_markdown_source_urls")
     if isinstance(minimum_source_urls, int):
-        if len(markdown_urls) < minimum_source_urls:
-            failures.append("source_markdown_url_count_below_minimum")
+        accepted_source_urls = (
+            response_urls
+            if case.get("allow_bare_source_urls") is True
+            else markdown_urls
+        )
+        if len(accepted_source_urls) < minimum_source_urls:
+            failures.append(
+                "source_clickable_url_count_below_minimum"
+                if case.get("allow_bare_source_urls") is True
+                else "source_markdown_url_count_below_minimum"
+            )
         if not response_urls.issubset(evidence_urls):
             failures.append("response_url_not_from_tool_evidence")
 
@@ -1459,7 +1474,9 @@ def _synthetic_case_files(raw_root: Path, cases: list[dict[str, Any]]) -> None:
                 "evidence": [{"id": "E1", "url": synthetic_url}],
             }
             synthetic_answer = (
-                f"Synthetic answer [source [nested label]]({synthetic_url})."
+                f"Synthetic answer {synthetic_url}."
+                if case.get("allow_bare_source_urls") is True
+                else f"Synthetic answer [source [nested label]]({synthetic_url})."
             )
         if case.get("launcher_scope") == "temporary_boundary_fixture":
             synthetic_content = "X" * 33000 + str(case["required_response_fragment"])
@@ -1604,10 +1621,8 @@ def self_test(cases_path: Path) -> int:
             report["overall_status"] != PASS_WITH_RESIDUAL
             or report["approval_observation"] != APPROVAL_OBSERVATION
             or len(report["cli_identities"]) != 1
-            or any(
-                report["cases"][index]["markdown_source_url_count"] < 1
-                for index in (2, 3)
-            )
+            or report["cases"][2]["markdown_source_url_count"] < 1
+            or report["cases"][3]["response_source_url_count"] < 1
             or "https://example.invalid" in json.dumps(report)
         ):
             raise AssertionError(report)

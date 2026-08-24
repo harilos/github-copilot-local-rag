@@ -320,14 +320,27 @@ function Read-CanonicalCases {
     for ($index = 0; $index -lt $values.Count; $index++) {
         $hasUrlContract = $values[$index].PSObject.Properties.Name -contains
             "minimum_markdown_source_urls"
+        $hasBareUrlCompatibility = $values[$index].PSObject.Properties.Name -contains
+            "allow_bare_source_urls"
+        $hasResponseEvidenceContract = $values[$index].PSObject.Properties.Name -contains
+            "require_all_response_urls_from_tool_evidence"
         if ($index -in @(2, 3)) {
             if (-not $hasUrlContract -or
-                [int]$values[$index].minimum_markdown_source_urls -lt 1 -or
-                $values[$index].require_all_response_urls_from_tool_evidence -ne $true) {
+                $values[$index].minimum_markdown_source_urls -isnot [long] -or
+                [long]$values[$index].minimum_markdown_source_urls -lt 1 -or
+                ($index -eq 3 -and (
+                    -not $hasBareUrlCompatibility -or
+                    $values[$index].allow_bare_source_urls -isnot [bool] -or
+                    -not [bool]$values[$index].allow_bare_source_urls
+                )) -or
+                ($index -ne 3 -and $hasBareUrlCompatibility) -or
+                -not $hasResponseEvidenceContract -or
+                $values[$index].require_all_response_urls_from_tool_evidence -isnot [bool] -or
+                -not [bool]$values[$index].require_all_response_urls_from_tool_evidence) {
                 throw "The source URL provenance contract is not canonical at ordinal $($index + 1)."
             }
         }
-        elseif ($hasUrlContract) {
+        elseif ($hasUrlContract -or $hasBareUrlCompatibility -or $hasResponseEvidenceContract) {
             throw "Unexpected source URL provenance contract at ordinal $($index + 1)."
         }
     }
