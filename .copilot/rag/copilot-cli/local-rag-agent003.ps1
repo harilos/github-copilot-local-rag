@@ -500,7 +500,7 @@ for ($index = 0; $index -lt $ExpectedServerArgs.Count; $index++) {
 $TierMap = @{
     savings = @{ Agent = "local-rag-agent003-savings"; Model = "claude-haiku-4.5" }
     standard = @{ Agent = "local-rag-agent003-standard"; Model = "auto" }
-    thorough = @{ Agent = "local-rag-agent003-thorough"; Model = "gpt-5.3-codex" }
+    thorough = @{ Agent = "local-rag-agent003-thorough"; Model = "auto" }
 }
 $selection = $TierMap[$Tier]
 $ToolList = "localragagent003-local_rag_search,localragagent003-local_rag_get_evidence"

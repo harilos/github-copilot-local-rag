@@ -101,7 +101,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
             ),
             "local-rag-agent003-thorough.agent.md": (
                 "local-rag-agent003-thorough",
-                "gpt-5.3-codex",
+                "auto",
                 "seven total tool calls",
                 "groups of at most three",
             ),
@@ -138,6 +138,15 @@ class CopilotCliSetupContracts(unittest.TestCase):
             self.assertIn("strictly one at a time", text)
             self.assertIn("Wait for each tool result", text)
             self.assertIn("never issue tool calls in parallel", text)
+
+        thorough_text = (
+            TEMPLATE_ROOT / "local-rag-agent003-thorough.agent.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("at least three selected-database", thorough_text)
+        self.assertIn("the routing call does not count", thorough_text)
+        self.assertIn("never overrides the coverage checklist", thorough_text)
+        self.assertIn("another ellipsis", thorough_text)
+        self.assertIn("inspectable_evidence_ids", thorough_text)
 
     def test_install_pins_absolute_cli_config_and_preserves_foreign_jsonc(self) -> None:
         config = self.home / "mcp-config.json"
@@ -1124,7 +1133,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
         for tier, agent, model in (
             ("savings", "local-rag-agent003-savings", "claude-haiku-4.5"),
             ("standard", "local-rag-agent003-standard", "auto"),
-            ("thorough", "local-rag-agent003-thorough", "gpt-5.3-codex"),
+            ("thorough", "local-rag-agent003-thorough", "auto"),
         ):
             self.assertIn(tier, text)
             self.assertIn(agent, text)

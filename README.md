@@ -172,7 +172,7 @@ local-rag-copilot
 |---|---|---|
 | `savings` | 単純な事実を短く確認する | `claude-haiku-4.5` |
 | `standard` | 普段の質問へ標準的に回答する | `auto` |
-| `thorough` | 複数観点の比較や矛盾確認を行う | `gpt-5.3-codex` |
+| `thorough` | 複数観点の比較や矛盾確認を行う | `auto` |
 
 ```powershell
 local-rag-copilot -Tier savings
