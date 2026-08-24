@@ -103,6 +103,14 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (runtime / "Lib" / "site-packages" / "module.py").write_text(
         "VALUE = 1\n", encoding="utf-8"
     )
+    pip_root = runtime / "Lib" / "site-packages" / "pip"
+    (pip_root / "__init__.py").parent.mkdir(parents=True, exist_ok=True)
+    (pip_root / "__init__.py").write_text(
+        '__version__ = "24.3.1"\n', encoding="utf-8"
+    )
+    (runtime / "Lib" / "site-packages" / "pip-24.3.1.dist-info").mkdir()
+    for name, machine in package_builder.PIP_DISTLIB_LAUNCHERS.items():
+        _write_pe(pip_root / "_vendor" / "distlib" / name, machine)
 
     model.mkdir()
     (model / "model.onnx").write_bytes(b"model")
@@ -554,6 +562,78 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             )
             _write_pe(unknown, 0x014C)
             with self.assertRaisesRegex(ValueError, "not AMD64"):
+                build_package(request)
+
+    def test_keeps_pip_but_prunes_only_its_six_distlib_launchers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            pip_root = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+            )
+
+            result = build_package(request)
+
+            with zipfile.ZipFile(result.zip_path) as archive:
+                archived = set(archive.namelist())
+                self.assertTrue(any(name.endswith("/pip/__init__.py") for name in archived))
+                for name in package_builder.PIP_DISTLIB_LAUNCHERS:
+                    self.assertFalse(
+                        any(
+                            entry.endswith(f"/pip/_vendor/distlib/{name}")
+                            for entry in archived
+                        )
+                    )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            unknown = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+                / "_vendor"
+                / "distlib"
+                / "unknown.exe"
+            )
+            _write_pe(unknown, 0x014C)
+            with self.assertRaisesRegex(ValueError, "launcher resource set is not exact"):
+                build_package(request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            missing = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+                / "_vendor"
+                / "distlib"
+                / "t32.exe"
+            )
+            missing.unlink()
+            with self.assertRaisesRegex(ValueError, "launcher resource set is not exact"):
+                build_package(request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            mismatched = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+                / "_vendor"
+                / "distlib"
+                / "t64.exe"
+            )
+            _write_pe(mismatched, 0x014C)
+            with self.assertRaisesRegex(ValueError, "machine is invalid"):
                 build_package(request)
 
     def test_rejects_unknown_profile_and_database_name(self) -> None:

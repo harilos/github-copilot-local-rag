@@ -19,6 +19,14 @@ SOURCE_MANAGER_ROOT = (
     Path(__file__).resolve().parents[2] / ".copilot" / "rag" / "source_manager"
 )
 ZIP_COPY_BUFFER_SIZE = 1024 * 1024
+PIP_DISTLIB_LAUNCHERS = {
+    "t32.exe": 0x014C,
+    "t64-arm.exe": 0xAA64,
+    "t64.exe": 0x8664,
+    "w32.exe": 0x014C,
+    "w64-arm.exe": 0xAA64,
+    "w64.exe": 0x8664,
+}
 
 
 def _load_source_manager_module(name: str):
@@ -130,6 +138,7 @@ def build_package(request: BuildRequest) -> BuildResult:
                 raise ValueError(str(exc)) from exc
 
         _prune_foreign_arch_setuptools_launchers(runtime_target)
+        _prune_pip_distlib_launchers(runtime_target)
         _assert_amd64_runtime(runtime_target)
         _write_text(
             package_root / "install.cmd",
@@ -368,6 +377,61 @@ def _prune_foreign_arch_setuptools_launchers(runtime_root: Path) -> None:
                 raise ValueError(f"setuptools launcher resource is unsafe: {path}")
             if _pe_machine(path) != 0x8664:
                 path.unlink()
+
+
+def _prune_pip_distlib_launchers(runtime_root: Path) -> None:
+    """Remove only pip's six inert distlib launcher templates.
+
+    The portable runtime keeps pip so setup verification can run ``pip check``.
+    These exact executables are package data used only when pip creates new
+    entry points; Local RAG never installs packages after the artifact is built.
+    Keeping any of the x86 or ARM64 templates would also violate the x64-only
+    package contract, so the complete exact upstream set is omitted.
+    """
+    site_packages_roots = (
+        runtime_root / "Lib" / "site-packages",
+        runtime_root / "Scripts" / "Lib" / "site-packages",
+    )
+    installations: list[tuple[Path, Path]] = []
+    for site_packages in site_packages_roots:
+        pip_root = site_packages / "pip"
+        metadata = sorted(site_packages.glob("pip-*.dist-info"))
+        if pip_root.exists() or metadata:
+            if (
+                not pip_root.is_dir()
+                or pip_root.is_symlink()
+                or len(metadata) != 1
+                or not metadata[0].is_dir()
+                or metadata[0].is_symlink()
+            ):
+                raise ValueError("runtime pip package and metadata must be exact")
+            init = pip_root / "__init__.py"
+            if not init.is_file() or init.is_symlink():
+                raise ValueError("runtime pip package is incomplete")
+            installations.append((pip_root, metadata[0]))
+    if len(installations) != 1:
+        raise ValueError("runtime must contain exactly one pip installation")
+
+    launcher_root = installations[0][0] / "_vendor" / "distlib"
+    actual_launchers = {
+        path.name
+        for path in launcher_root.glob("*.exe")
+        if path.is_file() and not path.is_symlink()
+    }
+    if actual_launchers != set(PIP_DISTLIB_LAUNCHERS):
+        raise ValueError("pip distlib launcher resource set is not exact")
+    for name, expected_machine in PIP_DISTLIB_LAUNCHERS.items():
+        path = launcher_root / name
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"pip launcher resource is unsafe: {path}")
+        if _pe_machine(path) != expected_machine:
+            raise ValueError(f"pip launcher resource machine is invalid: {path}")
+    for name in PIP_DISTLIB_LAUNCHERS:
+        path = launcher_root / name
+        if path.exists():
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(f"pip launcher resource is unsafe: {path}")
+            path.unlink()
 
 
 def _pe_machine(path: Path) -> int:
