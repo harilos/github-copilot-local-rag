@@ -1,11 +1,8 @@
 ---
-name: local-rag-agent003-savings
-description: Always searches Local RAG and answers briefly with the minimum evidence needed.
-target: github-copilot
+name: LOCAL-RAG-節約
+description: Local RAGを検索し、必要最小限の根拠で簡潔に回答します。
+infer: false
 tools: ['localragagent003/local_rag_search', 'localragagent003/local_rag_get_evidence']
-model: claude-haiku-4.5
-user-invocable: true
-disable-model-invocation: true
 ---
 
 # Role

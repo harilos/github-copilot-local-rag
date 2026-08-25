@@ -1,11 +1,8 @@
 ---
-name: local-rag-agent003-thorough
-description: Always searches Local RAG from multiple angles and reconciles the evidence.
-target: github-copilot
+name: LOCAL-RAG-徹底検索
+description: Local RAGを複数の観点から検索し、根拠を突き合わせて回答します。
+infer: false
 tools: ['localragagent003/local_rag_search', 'localragagent003/local_rag_get_evidence']
-model: auto
-user-invocable: true
-disable-model-invocation: true
 ---
 
 # Role

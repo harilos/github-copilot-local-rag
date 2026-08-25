@@ -1,11 +1,8 @@
 ---
-name: local-rag-agent003-standard
-description: Always searches Local RAG and gives a balanced evidence-based answer.
-target: github-copilot
+name: LOCAL-RAG-標準
+description: Local RAGを検索し、根拠を確認してバランスよく回答します。
+infer: false
 tools: ['localragagent003/local_rag_search', 'localragagent003/local_rag_get_evidence']
-model: auto
-user-invocable: true
-disable-model-invocation: true
 ---
 
 # Role

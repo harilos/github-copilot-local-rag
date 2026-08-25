@@ -85,23 +85,26 @@ class CopilotCliSetupContracts(unittest.TestCase):
             setup._manifest_path(self.product)
         ]
 
-    def test_agent_templates_have_exact_cli_identity_tools_models_and_caps(self) -> None:
+    def test_agent_templates_have_exact_cli_identity_tools_and_caps(self) -> None:
         expected = {
             "local-rag-agent003-savings.agent.md": (
                 "local-rag-agent003-savings",
-                "claude-haiku-4.5",
+                "LOCAL-RAG-節約",
+                "Local RAGを検索し、必要最小限の根拠で簡潔に回答します。",
                 "at most two search calls",
                 "at most one Evidence-detail call",
             ),
             "local-rag-agent003-standard.agent.md": (
                 "local-rag-agent003-standard",
-                "auto",
+                "LOCAL-RAG-標準",
+                "Local RAGを検索し、根拠を確認してバランスよく回答します。",
                 "five total tool calls",
                 "up to three needed returned Evidence IDs",
             ),
             "local-rag-agent003-thorough.agent.md": (
                 "local-rag-agent003-thorough",
-                "auto",
+                "LOCAL-RAG-徹底検索",
+                "Local RAGを複数の観点から検索し、根拠を突き合わせて回答します。",
                 "seven total tool calls",
                 "groups of at most three",
             ),
@@ -110,17 +113,27 @@ class CopilotCliSetupContracts(unittest.TestCase):
             "localragagent003/local_rag_search",
             "localragagent003/local_rag_get_evidence",
         ]
-        for filename, (agent_id, model, call_cap, evidence_cap) in expected.items():
+        for filename, (
+            agent_id,
+            display_name,
+            description,
+            call_cap,
+            evidence_cap,
+        ) in expected.items():
             path = TEMPLATE_ROOT / filename
             header = self._frontmatter(path)
             text = path.read_text(encoding="utf-8")
             self.assertTrue(filename.isascii())
             self.assertTrue(agent_id.isascii())
-            self.assertEqual(agent_id, header["name"])
-            self.assertEqual("github-copilot", header["target"])
-            self.assertEqual(model, header["model"])
+            self.assertEqual(agent_id, filename.removesuffix(".agent.md"))
+            self.assertEqual(display_name, header["name"])
+            self.assertEqual(description, header["description"])
+            self.assertIs(False, header["infer"])
             self.assertEqual(exact_tools, header["tools"])
-            self.assertNotIn("agents", header)
+            self.assertEqual(
+                {"name", "description", "infer", "tools"}, set(header)
+            )
+            self.assertNotIn("model", header)
             self.assertIn(call_cap, text)
             self.assertIn(evidence_cap, text)
             self.assertIn("Never promote notices, related material", text)
@@ -264,7 +277,7 @@ class CopilotCliSetupContracts(unittest.TestCase):
         for path in self._owned_paths():
             self.assertFalse(path.exists(), path)
 
-    def test_round_trip_removes_config_created_by_setup(self) -> None:
+    def test_round_trip_removes_created_config_and_reinstalls(self) -> None:
         config = self.home / "mcp-config.json"
         self.assertFalse(config.exists())
         setup.install_or_repair(
@@ -280,6 +293,19 @@ class CopilotCliSetupContracts(unittest.TestCase):
             profile_path=self.profile,
         )
         self.assertFalse(config.exists())
+
+        result = setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        self.assertEqual("installed", result["status"])
+        for name in setup.AGENT_NAMES:
+            self.assertEqual(
+                (TEMPLATE_ROOT / name).read_bytes(),
+                (self.home / "agents" / name).read_bytes(),
+            )
 
     def test_same_name_foreign_collision_and_malformed_jsonc_are_noops(self) -> None:
         cases = (
