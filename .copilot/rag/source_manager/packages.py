@@ -103,6 +103,7 @@ _PORTABLE_SHAREPOINT_SUFFIX = "source_relative_suffix"
 _PRODUCT_TEST_DIRECTORIES = frozenset({"test", "tests"})
 _PRODUCT_ROOT_DIRECTORIES = frozenset(
     {
+        "copilot-cli",
         "config",
         "docs",
         "gen_db",
@@ -125,11 +126,6 @@ _PORTABLE_CONFIG_EXAMPLES = frozenset(
     }
 )
 _PROJECT_SKILLS = ("local-rag", "local-rag-setup")
-_PROJECT_AGENTS = (
-    "internal-doc-search.agent.md",
-    "agent003-readonly-local-rag.agent.md",
-    "internal-doc-deep-research.agent.md",
-)
 _DB_SEARCH_FILES = frozenset(
     {
         "DB_PROFILE.md",
@@ -1103,18 +1099,6 @@ def _product_entries(
             skill_root,
             f".copilot/skills/{skill_name}",
             include=_ordinary_payload_file,
-        )
-    agents_root = _real_directory(
-        copilot_home / "agents",
-        "agents_root",
-    )
-    for agent_name in _PROJECT_AGENTS:
-        _add_file(
-            entries,
-            agents_root / agent_name,
-            f".copilot/agents/{agent_name}",
-            required=True,
-            source_root=agents_root,
         )
     return _dedupe_entries(entries)
 

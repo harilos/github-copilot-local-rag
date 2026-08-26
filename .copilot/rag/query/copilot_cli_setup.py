@@ -25,6 +25,39 @@ AGENT_NAMES = (
     "local-rag-agent003-standard.agent.md",
     "local-rag-agent003-thorough.agent.md",
 )
+LEGACY_AGENT_HASHES = {
+    "internal-doc-search.agent.md": frozenset(
+        {
+            "93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8",
+            "486dddb48dd394c131932511a97a80938bee4a8eec02b26f17fb32931ede4fca",
+            "72a299323fcd9ae112fef3dd5ddc482815bb4290a5b5e033c876890928354262",
+            "babcd820d4d2b6970dda51e419807c1d9504f58c410a2057b2eff8ca08470142",
+            "129fab090776441bfbaae48b152f941a8f3c100fe63c1062d08ca948738e7098",
+            "5142023323d7e7c1e20666100b1cb02f2176a8044061716409f7ab7222eb9110",
+            "8633860ae1ed2c823658ff3544c2eaf2ef0852f9fb44fe4e519c3679dc48fa3d",
+            "be29b7c674ecb48da8b4aa243e1925ed0d03a9b4edfc32d35548c153aed430d9",
+        }
+    ),
+    "agent003-readonly-local-rag.agent.md": frozenset(
+        {
+            "e9c3591c7ae5a0b17ec9759c67f580eb080b02a8a8b834a3834d32779ea87836",
+            "98b092c5f1d0731d8b58f64440ea8d9983d475649bef7eb02fffff08b7bedceb",
+            "37da776945f38682d785a28fa50d1f3665d78b3035d37778bd2eeb6b88a4289f",
+        }
+    ),
+    "internal-doc-deep-research.agent.md": frozenset(
+        {
+            "5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39",
+            "bae16f42a6fdba678d8cf3ae0ab6facecbe97b3e8f5be8589db8e4c4312fc2a9",
+            "e9cce412e5cec4a14c6d62d657fced68df01ef0c1fda1edaa2912dbf26e4e146",
+            "5baec62979950f74c66264c8fbdd5a45fde5790ec1fc5be9b925d21c43ffe175",
+            "1479f17ba50170c9d248de540a8dc4f1f74407a55d6f17f6d8c69f521b86bdd3",
+            "2c71cd3f27e58d7bb51a686fde24f0bf0f82100dc7366b9470d950bc43f3b35c",
+            "4d209adc281064579d83bae9d830d15af5950c273dca718ebb38762691e4cc40",
+            "a441ecef3b450bc627948097b7087c4d4a9a0abaa732750e2766889feef5d886",
+        }
+    ),
+}
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "copilot-cli"
 COPILOT_ROOT = "copilot_home"
 INSTALL_ROOT = "install_root"
@@ -77,6 +110,46 @@ def _lexists(path: Path) -> bool:
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _normalized_utf8_sha256(content: bytes) -> str:
+    try:
+        text = content.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise OwnedArtifactCollisionError(
+            "legacy Local RAG Agent is not strict UTF-8"
+        ) from exc
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return _sha256(normalized.encode("utf-8"))
+
+
+def _legacy_agent_retirements(
+    copilot_home: Path, install_root: Path
+) -> tuple[_Snapshot, ...]:
+    roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for candidate in (copilot_home, install_root):
+        root = _absolute(candidate)
+        identity = os.path.normcase(str(root))
+        if identity not in seen_roots:
+            roots.append(root)
+            seen_roots.add(identity)
+    retirements: list[_Snapshot] = []
+    for root in roots:
+        for name, known_hashes in LEGACY_AGENT_HASHES.items():
+            path = root / "agents" / name
+            _assert_safe_file(path, boundary=root, allow_missing=True)
+            if not _lexists(path):
+                continue
+            content = path.read_bytes()
+            digest = _normalized_utf8_sha256(content)
+            if digest not in known_hashes:
+                raise OwnedArtifactCollisionError(
+                    "legacy Local RAG Agent is not an exact known product "
+                    f"revision: {path}"
+                )
+            retirements.append(_Snapshot(path, root, True, content))
+    return tuple(retirements)
 
 
 def _root_path(kind: str, copilot_home: Path, install_root: Path) -> Path:
@@ -748,6 +821,7 @@ def install_or_repair(
     profile = _absolute(profile_path)
     vscode = _absolute(vscode_mcp_config) if vscode_mcp_config is not None else None
     _validate_distinct_targets(home, root, profile, vscode)
+    legacy_agent_retirements = _legacy_agent_retirements(home, root)
     temporary = _validate_temporary_directory(root, allow_missing=True)
     temporary_missing = not temporary.is_dir()
     artifacts = _desired_artifacts(home, root)
@@ -807,6 +881,7 @@ def install_or_repair(
         existing_manifest is None
         or original_profile != profile_bytes
         or temporary_missing
+        or bool(legacy_agent_retirements)
     )
     if existing_manifest is not None:
         changed = changed or manifest_path.read_bytes() != desired_manifest_bytes
@@ -814,8 +889,14 @@ def install_or_repair(
             not path.is_file() or path.read_bytes() != content
             for path, content in artifacts.values()
         )
-    snapshots = _transaction_snapshots(home, root, profile, vscode)
+    snapshots = _transaction_snapshots(
+        home,
+        root,
+        profile,
+        vscode,
+    )
     created_temporary_directories: tuple[Path, ...] = ()
+    retired_legacy_agents: list[_Snapshot] = []
     try:
         home.mkdir(parents=True, exist_ok=True)
         if vscode is None:
@@ -830,6 +911,22 @@ def install_or_repair(
         _verify_configured_cli(home, root)
         if vscode is not None:
             _verify_configured_vscode(vscode)
+        for snapshot in legacy_agent_retirements:
+            path = snapshot.path
+            _assert_safe_file(
+                path, boundary=snapshot.boundary, allow_missing=False
+            )
+            if path.read_bytes() != snapshot.content:
+                raise OwnedArtifactCollisionError(
+                    "legacy Local RAG Agent changed during setup: "
+                    f"install_root:agents/{path.name}"
+                )
+            path.unlink()
+            if _lexists(path):
+                raise CopilotCliSetupError(
+                    f"legacy Local RAG Agent retirement failed: {path.name}"
+                )
+            retired_legacy_agents.append(snapshot)
         for key, (path, content) in sorted(artifacts.items()):
             _write_and_readback(
                 path, content, boundary=_root_path(key[0], home, root)
@@ -845,7 +942,7 @@ def install_or_repair(
     except BaseException as exc:
         try:
             _remove_created_temporary_directories(created_temporary_directories)
-            _restore(snapshots)
+            _restore(snapshots + tuple(retired_legacy_agents))
             _cleanup_empty_directories(home, root)
         except BaseException as rollback_exc:
             raise CopilotCliSetupError(
@@ -870,6 +967,9 @@ def install_or_repair(
         "manifest": str(manifest_path),
         "config": config_result,
         "artifacts": [f"{key[0]}:{key[1]}" for key in sorted(artifacts)],
+        "retired_legacy_agents": [
+            snapshot.path.name for snapshot in legacy_agent_retirements
+        ],
     }
 
 

@@ -540,12 +540,23 @@ class InstallerExclusionContractTests(unittest.TestCase):
             target = target_query.parents[1]
             self.assertTrue((target / "mcp-config.json").is_file())
             self.assertTrue((target / "copilot-cli" / "owned-manifest.json").is_file())
-            for filename in (
+            shared_agents = {
                 "local-rag-agent003-savings.agent.md",
                 "local-rag-agent003-standard.agent.md",
                 "local-rag-agent003-thorough.agent.md",
-            ):
+            }
+            self.assertEqual(
+                shared_agents,
+                {path.name for path in (target / "agents").glob("*.agent.md")},
+            )
+            for filename in shared_agents:
                 self.assertTrue((target / "agents" / filename).is_file())
+            for filename in (
+                "internal-doc-search.agent.md",
+                "agent003-readonly-local-rag.agent.md",
+                "internal-doc-deep-research.agent.md",
+            ):
+                self.assertFalse((target / "agents" / filename).exists())
             profile_path = root / "managed-success-profile.ps1"
             self.assertIn(
                 "# >>> Local RAG Agent003 CLI (owned) >>>",

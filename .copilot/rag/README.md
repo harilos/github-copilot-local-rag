@@ -49,8 +49,8 @@ Select one of these user-level Agents in VS Code Copilot Chat Agent mode:
 | Agent | Use it for | Model policy |
 |---|---|---|
 | `LOCAL-RAG-標準` | Ordinary questions; adjusts search depth to the question | Inherits the current VS Code selection, including Auto |
-| `LOCAL-RAG-節約` | Short checks of terms, identifiers, and simple facts | `GPT-5 mini (copilot)` |
-| `LOCAL-RAG-徹底検索` | Multi-angle comparisons and contradiction checks | `GPT-5.3-Codex (copilot)` |
+| `LOCAL-RAG-節約` | Short checks of terms, identifiers, and simple facts | Inherits the current VS Code selection, including Auto |
+| `LOCAL-RAG-徹底検索` | Multi-angle comparisons and contradiction checks | Inherits the current VS Code selection, including Auto |
 
 All three expose only `local_rag_search` and `local_rag_get_evidence`
 through `localragagent003/*`. They cannot use terminal, PowerShell, file,
@@ -59,10 +59,14 @@ selected, ask the question directly; no separate setup or RAG-routing prompt is
 required. If database routing is not unambiguous, repeat the question with the
 administrator-provided `<database>-rag` name.
 
+The same three definitions are shared by VS Code and GitHub Copilot CLI. The
+dedicated CLI launcher selects savings from its verified allowlist (currently
+`claude-haiku-4.5`) and explicitly selects `auto` for standard and thorough.
+
 ## Diagnostic Python lookup boundary
 
-This diagnostic Python CLI is separate from the GitHub Copilot CLI Agent
-profiles above. It has two public entry points. The custom Agents use the MCP
+This diagnostic Python CLI is separate from the shared custom Agents above. It
+has two public entry points. The custom Agents use the MCP
 tools above instead of invoking these scripts directly:
 
 ```text

@@ -345,6 +345,174 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertEqual(b"foreign", target.read_bytes())
         self.assertFalse((self.home / "mcp-config.json").exists())
 
+    def test_known_legacy_agents_retire_on_owned_update(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        agents = self.product / "agents"
+        agents.mkdir()
+        legacy_contents = {
+            name: f"legacy-{index}\r\n".encode("utf-8")
+            for index, name in enumerate(setup.LEGACY_AGENT_HASHES, start=1)
+        }
+        known_hashes = {
+            name: frozenset({setup._normalized_utf8_sha256(content)})
+            for name, content in legacy_contents.items()
+        }
+        for name, content in legacy_contents.items():
+            (agents / name).write_bytes(content)
+        unrelated = agents / "user-owned.agent.md"
+        unrelated.write_bytes(b"keep")
+
+        with mock.patch.object(setup, "LEGACY_AGENT_HASHES", known_hashes):
+            result = setup.install_or_repair(
+                "install",
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+            )
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual(
+            sorted(legacy_contents), sorted(result["retired_legacy_agents"])
+        )
+        for name in legacy_contents:
+            self.assertFalse((agents / name).exists())
+        self.assertEqual(b"keep", unrelated.read_bytes())
+        installed = self.home / "agents"
+        self.assertEqual(
+            set(setup.AGENT_NAMES),
+            {path.name for path in installed.glob("*.agent.md")},
+        )
+        self.assertEqual(
+            {"LOCAL-RAG-節約", "LOCAL-RAG-標準", "LOCAL-RAG-徹底検索"},
+            {self._frontmatter(installed / name)["name"] for name in setup.AGENT_NAMES},
+        )
+
+    def test_known_legacy_agent_retires_from_split_copilot_home(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        name = "internal-doc-search.agent.md"
+        content = b"known-home-legacy\r\n"
+        legacy = self.home / "agents" / name
+        legacy.write_bytes(content)
+        known_hashes = {
+            name: frozenset({setup._normalized_utf8_sha256(content)})
+        }
+
+        with mock.patch.object(setup, "LEGACY_AGENT_HASHES", known_hashes):
+            result = setup.install_or_repair(
+                "install",
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+            )
+
+        self.assertEqual([name], result["retired_legacy_agents"])
+        self.assertFalse(legacy.exists())
+        self.assertEqual(
+            set(setup.AGENT_NAMES),
+            {path.name for path in (self.home / "agents").glob("*.agent.md")},
+        )
+
+    def test_modified_legacy_agent_fails_closed_before_writes(self) -> None:
+        legacy = self.product / "agents" / "internal-doc-search.agent.md"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"user-modified")
+
+        with self.assertRaises(setup.OwnedArtifactCollisionError):
+            setup.install_or_repair(
+                "install",
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+            )
+
+        self.assertEqual(b"user-modified", legacy.read_bytes())
+        self.assertFalse((self.home / "mcp-config.json").exists())
+        self.assertFalse(self.profile.exists())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_legacy_retirement_rolls_back_with_artifact_failure(self) -> None:
+        name = "internal-doc-search.agent.md"
+        content = b"known-legacy\r\n"
+        legacy = self.product / "agents" / name
+        legacy.parent.mkdir()
+        legacy.write_bytes(content)
+        known_hashes = {
+            name: frozenset({setup._normalized_utf8_sha256(content)})
+        }
+        original_writer = setup._atomic_write_owned_bytes
+        failed = False
+
+        def fail_once(path: Path, payload: bytes, *, boundary: Path) -> None:
+            nonlocal failed
+            if path.name == "local-rag-agent003-standard.agent.md" and not failed:
+                failed = True
+                raise OSError("injected artifact failure")
+            original_writer(path, payload, boundary=boundary)
+
+        with mock.patch.object(setup, "LEGACY_AGENT_HASHES", known_hashes):
+            with mock.patch.object(
+                setup, "_atomic_write_owned_bytes", side_effect=fail_once
+            ):
+                with self.assertRaises(OSError):
+                    setup.install_or_repair(
+                        "install",
+                        self.home,
+                        install_root=self.product,
+                        profile_path=self.profile,
+                    )
+
+        self.assertTrue(failed)
+        self.assertEqual(content, legacy.read_bytes())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_legacy_agent_changed_during_setup_is_preserved(self) -> None:
+        name = "internal-doc-search.agent.md"
+        content = b"known-legacy\r\n"
+        changed = b"user-change-during-setup\n"
+        legacy = self.product / "agents" / name
+        legacy.parent.mkdir()
+        legacy.write_bytes(content)
+        known_hashes = {
+            name: frozenset({setup._normalized_utf8_sha256(content)})
+        }
+        original_verify = setup._verify_configured_cli
+
+        def mutate_after_config(copilot_home: Path, install_root: Path) -> None:
+            original_verify(copilot_home, install_root)
+            legacy.write_bytes(changed)
+
+        with mock.patch.object(setup, "LEGACY_AGENT_HASHES", known_hashes):
+            with mock.patch.object(
+                setup, "_verify_configured_cli", side_effect=mutate_after_config
+            ):
+                with self.assertRaisesRegex(
+                    setup.OwnedArtifactCollisionError, "changed during setup"
+                ):
+                    setup.install_or_repair(
+                        "install",
+                        self.home,
+                        install_root=self.product,
+                        profile_path=self.profile,
+                    )
+
+        self.assertEqual(changed, legacy.read_bytes())
+        self.assertFalse((self.home / "mcp-config.json").exists())
+        self.assertFalse(self.profile.exists())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
     def test_artifact_write_failure_rolls_back_config_and_files(self) -> None:
         config = self.home / "mcp-config.json"
         original = b'{"foreign":true}\n'

@@ -68,7 +68,7 @@ PowerShellから実行する場合は、展開先へ移動して次を実行し�
 ```
 
 配布版には固定Python、検索用package、ONNX model、選択されたDB、
-VS Code用の3つのAgent、CLI用の3つのAgent、hash検証付きlauncher、
+VS CodeとCopilot CLIで共用する3つのAgent、hash検証付きlauncher、
 pinned MCP設定が含まれています。インストール後にCopilotへ
 「初期設定をして」と依頼する必要はありません。
 
@@ -110,13 +110,16 @@ project-ragで、A2Lの目的と採用理由を根拠付きで教えて
 
 | Agent | 向いている質問 | 現在のmodel設定 |
 |---|---|---|
-| `LOCAL-RAG-標準` | 普段の質問。必要な量だけ検索して答えてほしい | VS CodeのAuto選択を継承 |
-| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認したい | GPT-5 mini (copilot) |
-| `LOCAL-RAG-徹底検索` | 複数観点の比較、矛盾確認、複雑な調査をしたい | GPT-5.3-Codex (copilot) |
+| `LOCAL-RAG-標準` | 普段の質問。必要な量だけ検索して答えてほしい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認したい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+| `LOCAL-RAG-徹底検索` | 複数観点の比較、矛盾確認、複雑な調査をしたい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
 
 迷った場合は`LOCAL-RAG-標準`を使ってください。`LOCAL-RAG-節約`は検索回数と
 根拠確認を最小限にし、`LOCAL-RAG-徹底検索`は同じDBを異なる観点から検索して
 Evidenceを突き合わせます。
+
+3定義はVS CodeとCopilot CLIで共用します。専用CLI launcherは節約で検証済み
+allowlist（現在は`claude-haiku-4.5`）、標準と徹底検索で`auto`を明示します。
 
 3 Agentが利用できるのは、Local RAGの次の2つのread-only toolだけです。
 
@@ -322,7 +325,7 @@ $python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
 完成したZIPを展開すると、利用者向けの`install.cmd`と`README-WINDOWS.md`が
 入っています。package作成時に固定Python、依存package、model、DB、manifest、
 checksumを検証します。利用者PCではPythonやnetworkを使いません。installerは
-3つのVS Code Agent、3つのCLI Agent、pinned MCP、専用launcherをtransaction内で
+VS CodeとCopilot CLIで共用する3つのAgent、pinned MCP、専用launcherをtransaction内で
 配置・更新し、CLIまたはMCP登録に失敗した場合はそれらを元へ戻します。
 
 ### 管理PC引っ越しpackageをコマンドで作る

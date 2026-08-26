@@ -20,10 +20,15 @@ from windows_package_builder import BuildRequest, build_package
 
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[1]
-AGENT_NAMES = (
+LEGACY_AGENT_NAMES = (
     "agent003-readonly-local-rag.agent.md",
     "internal-doc-deep-research.agent.md",
     "internal-doc-search.agent.md",
+)
+SHARED_AGENT_NAMES = (
+    "local-rag-agent003-savings.agent.md",
+    "local-rag-agent003-standard.agent.md",
+    "local-rag-agent003-thorough.agent.md",
 )
 
 
@@ -91,8 +96,6 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (payload / "rag" / "query" / "portable_runtime.py").write_text(
         "raise SystemExit\n", encoding="utf-8"
     )
-    shutil.copytree(REPOSITORY_ROOT / ".copilot" / "agents", payload / "agents")
-
     _write_pe(runtime / "Scripts" / "python.exe")
     _write_pe(runtime / "python313.dll")
     (runtime / "Scripts" / "python313._pth").write_text(
@@ -180,17 +183,13 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 names = set(archive.namelist())
                 prefix = "local-rag-windows-x64-1.2.3/"
                 self.assertIn(prefix + "install.cmd", names)
-                for agent_name in AGENT_NAMES:
-                    member = prefix + ".copilot/agents/" + agent_name
-                    self.assertIn(member, names)
-                    self.assertEqual(
-                        (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
-                        archive.read(member),
+                for agent_name in LEGACY_AGENT_NAMES:
+                    self.assertNotIn(
+                        prefix + ".copilot/agents/" + agent_name,
+                        names,
                     )
                 for filename in (
-                    "local-rag-agent003-savings.agent.md",
-                    "local-rag-agent003-standard.agent.md",
-                    "local-rag-agent003-thorough.agent.md",
+                    *SHARED_AGENT_NAMES,
                     "local-rag-agent003.ps1",
                 ):
                     member = prefix + ".copilot/rag/copilot-cli/" + filename
@@ -819,10 +818,6 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             REPOSITORY_ROOT / ".copilot" / "rag" / "copilot-cli",
             package / ".copilot" / "rag" / "copilot-cli",
         )
-        shutil.copytree(
-            REPOSITORY_ROOT / ".copilot" / "agents",
-            package / ".copilot" / "agents",
-        )
         model = (
             package
             / ".copilot"
@@ -878,7 +873,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             env=environment,
         )
 
-    def test_fresh_install_and_explicit_same_name_replacement(self) -> None:
+    def test_fresh_install_has_three_shared_agents_and_replaces_selected_db(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -902,26 +897,27 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
             )
             agents = profile / ".copilot" / "agents"
-            for agent_name in AGENT_NAMES:
+            self.assertEqual(
+                set(SHARED_AGENT_NAMES),
+                {path.name for path in agents.glob("*.agent.md")},
+            )
+            for agent_name in SHARED_AGENT_NAMES:
                 self.assertEqual(
-                    (REPOSITORY_ROOT / ".copilot" / "agents" / agent_name).read_bytes(),
+                    (
+                        REPOSITORY_ROOT
+                        / ".copilot"
+                        / "rag"
+                        / "copilot-cli"
+                        / agent_name
+                    ).read_bytes(),
                     (agents / agent_name).read_bytes(),
                 )
 
             (target / "dbs" / "selected-rag" / "catalog.sqlite").write_bytes(
                 b"old-db"
             )
-            user_agent = agents / "internal-doc-search.agent.md"
+            user_agent = agents / "user-owned.agent.md"
             user_agent.write_bytes(b"user-owned-agent\r\n")
-            package_deep_agent = (
-                package
-                / ".copilot"
-                / "agents"
-                / "internal-doc-deep-research.agent.md"
-            )
-            package_deep_agent.write_bytes(
-                package_deep_agent.read_bytes() + b"\n# product revision 2\n"
-            )
             unrelated = target / "dbs" / "unrelated-rag"
             unrelated.mkdir()
             (unrelated / "keep.txt").write_text("keep\n", encoding="utf-8")
@@ -945,11 +941,11 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(b"user-owned-agent\r\n", user_agent.read_bytes())
             self.assertEqual(
-                package_deep_agent.read_bytes(),
-                (agents / "internal-doc-deep-research.agent.md").read_bytes(),
+                set(SHARED_AGENT_NAMES) | {"user-owned.agent.md"},
+                {path.name for path in agents.glob("*.agent.md")},
             )
 
-    def test_agent_creation_rolls_back_with_failed_product_publish(self) -> None:
+    def test_shared_agents_are_not_created_after_failed_product_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -972,24 +968,14 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
             installed_agents = profile / ".copilot" / "agents"
             installed_agents.mkdir(parents=True)
-            product_search = (
-                REPOSITORY_ROOT
-                / ".copilot"
-                / "agents"
-                / "internal-doc-search.agent.md"
-            )
-            installed_search = installed_agents / product_search.name
-            installed_search.write_bytes(product_search.read_bytes())
             unrelated = installed_agents / "user.agent.md"
             unrelated.write_bytes(b"user-owned-agent")
 
             completed = self._run(package, profile)
 
             self.assertNotEqual(0, completed.returncode)
-            self.assertEqual(product_search.read_bytes(), installed_search.read_bytes())
-            self.assertFalse(
-                (installed_agents / "internal-doc-deep-research.agent.md").exists()
-            )
+            for name in SHARED_AGENT_NAMES:
+                self.assertFalse((installed_agents / name).exists())
             self.assertEqual(b"user-owned-agent", unrelated.read_bytes())
 
     def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
@@ -1152,11 +1138,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertTrue((cli_home / "mcp-config.json").is_file())
-            for filename in (
-                "local-rag-agent003-savings.agent.md",
-                "local-rag-agent003-standard.agent.md",
-                "local-rag-agent003-thorough.agent.md",
-            ):
+            for filename in SHARED_AGENT_NAMES:
                 self.assertTrue((cli_home / "agents" / filename).is_file())
                 self.assertFalse(
                     (profile / ".copilot" / "agents" / filename).exists()

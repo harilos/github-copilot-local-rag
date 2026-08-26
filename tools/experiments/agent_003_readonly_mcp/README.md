@@ -15,7 +15,9 @@ subagent tool.
   standard-library JSON-RPC over stdio.
 - Workspace configuration: `.vscode/mcp.json`, server name
   `localRagAgent003`.
-- Agent: `.github/agents/agent003-readonly-local-rag.agent.md`.
+- Agent used by this historical PoC: `.github/agents/agent003-readonly-local-rag.agent.md`
+  (retired). The current shipped Standard definition is
+  `.copilot/rag/copilot-cli/local-rag-agent003-standard.agent.md`.
 - Public Local RAG calls: installed `list_dbs.py` and `search.py` only.
 - No installer, package, existing product agent, database, fixture, or Agent-002
   artifact changes in this PoC.

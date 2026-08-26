@@ -61,14 +61,17 @@ Windows配布版と管理版は、`~/.copilot/agents`（Windowsでは
 
 | Agent | 用途 | model設定 |
 |---|---|---|
-| `LOCAL-RAG-標準` | 普段の質問。質問に応じて検索量を調整する | VS Codeの選択（Autoを含む）を継承 |
-| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認する | GPT-5 mini |
-| `LOCAL-RAG-徹底検索` | 複数観点の比較と矛盾確認を行う | GPT-5.3-Codex |
+| `LOCAL-RAG-標準` | 普段の質問。質問に応じて検索量を調整する | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認する | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+| `LOCAL-RAG-徹底検索` | 複数観点の比較と矛盾確認を行う | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
 
 3 Agentとも`local_rag_search`と`local_rag_get_evidence`だけを使うread-only
 Agentです。terminal、PowerShell、Workspace file、Web、Manager、別toolは使わず、
 DB、Source、設定、fileを変更しません。Agentを選んだ後は普通の文章で質問します。
 DBを一意に選べない場合は、管理者が案内した`<DB名>-rag`を質問へ付けます。
+
+この3定義はVS CodeとCopilot CLIで共用します。専用CLI launcherは節約で検証済み
+allowlist（現在は`claude-haiku-4.5`）、標準と徹底検索で`auto`を明示します。
 
 共通入力:
 
@@ -464,9 +467,9 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 管理者権限は不要です。実検索はpackage作成中には行わず、release／回帰test側で
 確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは固定user-level
 `localragagent003` MCP serverをportable Copilot設定と通常VS Code Default Profileの
-両方へ、3つのLOCAL-RAG Agentとともにtransaction内で登録します。
-GitHub Copilot CLI向けにはCLI設定rootへ3 Agentを登録し、install rootへ
-hash検証付きの`local-rag-copilot` launcherとpinned MCP設定を配置します。
+両schemaへtransaction内で登録します。共有する3つのLOCAL-RAG Agentは
+`~/.copilot/agents`へ1組だけ配置し、install rootへhash検証付きの
+`local-rag-copilot` launcherとpinned MCP設定を配置します。
 PowerShell 7から`local-rag-copilot -Tier savings|standard|thorough`で起動すると、
 作業folderにかかわらずread-only 2 toolだけがsession内で自動許可されます。
 通常の`copilot`、認証、session、永続permissionsは変更しません。

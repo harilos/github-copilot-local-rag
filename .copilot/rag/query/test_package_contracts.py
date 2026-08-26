@@ -47,6 +47,15 @@ class PackageContractTests(unittest.TestCase):
         )
         self.assertIn("install.sh", destinations)
         self.assertIn("install.ps1", destinations)
+        self.assertFalse(
+            any(destination.startswith(".copilot/agents/") for destination in destinations)
+        )
+        for filename in (
+            "local-rag-agent003-savings.agent.md",
+            "local-rag-agent003-standard.agent.md",
+            "local-rag-agent003-thorough.agent.md",
+        ):
+            self.assertIn(f".copilot/rag/copilot-cli/{filename}", destinations)
 
     def test_explicit_empty_database_selection_never_expands_to_all(self) -> None:
         dbs = self.root / "dbs"

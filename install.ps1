@@ -145,51 +145,6 @@ function Test-PathHasReparse {
     return $false
 }
 
-function Get-NormalizedUtf8Sha256 {
-    param([string]$Path)
-    try {
-        $StrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
-        $Text = [IO.File]::ReadAllText($Path, $StrictUtf8)
-    } catch { return "" }
-    $Bytes = [Text.Encoding]::UTF8.GetBytes(
-        $Text.Replace("`r`n", "`n").Replace("`r", "`n")
-    )
-    $Hasher = [Security.Cryptography.SHA256]::Create()
-    try {
-        return -join ($Hasher.ComputeHash($Bytes) | ForEach-Object {
-            $_.ToString("x2")
-        })
-    } finally { $Hasher.Dispose() }
-}
-
-function Test-KnownProductAgentRevision {
-    param([string]$Relative, [string]$Destination)
-    $Known = switch ($Relative.Replace("/", "\").ToLowerInvariant()) {
-        "agents\internal-doc-search.agent.md" { @(
-            "93c395b28ca84c3cd328fae8b3a9b5702b4089ef49703b7322527502a5520cf8",
-            "486dddb48dd394c131932511a97a80938bee4a8eec02b26f17fb32931ede4fca"
-        ) }
-        "agents\internal-doc-deep-research.agent.md" { @(
-            "5bc8ba97a9d51ebca3f441724cfdd392d258a1d6e551802220b6c01b7768ef39",
-            "bae16f42a6fdba678d8cf3ae0ab6facecbe97b3e8f5be8589db8e4c4312fc2a9"
-        ) }
-        "agents\agent003-readonly-local-rag.agent.md" { @(
-            "e9c3591c7ae5a0b17ec9759c67f580eb080b02a8a8b834a3834d32779ea87836"
-        ) }
-        default { @() }
-    }
-    return $Known -contains (Get-NormalizedUtf8Sha256 -Path $Destination)
-}
-
-function Test-ProductAgentRelativePath {
-    param([string]$Relative)
-    return @(
-        "agents\agent003-readonly-local-rag.agent.md",
-        "agents\internal-doc-deep-research.agent.md",
-        "agents\internal-doc-search.agent.md"
-    ) -icontains $Relative.Replace("/", "\")
-}
-
 function Backup-ProductFile {
     param([string]$Relative, [string]$Destination)
     if ($ProductBackedUp -icontains $Relative) { return }
@@ -332,11 +287,6 @@ Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
                 New-Item -ItemType Directory -Force -Path $Parent | Out-Null
             }
             if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-                if ((Test-ProductAgentRelativePath -Relative $Relative) -and
-                    -not (Test-KnownProductAgentRevision `
-                        -Relative $Relative -Destination $Destination)) {
-                    return
-                }
                 Backup-ProductFile -Relative $Relative -Destination $Destination
             } else {
                 $ProductCreatedFiles += $Destination

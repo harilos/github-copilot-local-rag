@@ -243,19 +243,15 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             )
             self.assertIn(".copilot/rag/list_dbs.py", names)
             self.assertIn(".copilot/rag/query/list_dbs.py", names)
-            self.assertIn(
-                ".copilot/agents/agent003-readonly-local-rag.agent.md",
-                names,
+            self.assertFalse(
+                any(name.startswith(".copilot/agents/") for name in names)
             )
-            self.assertIn(
-                ".copilot/agents/internal-doc-search.agent.md",
-                names,
-            )
-            self.assertIn(
-                ".copilot/agents/internal-doc-deep-research.agent.md",
-                names,
-            )
-            for filename in windows_distribution.COPILOT_CLI_TEMPLATES:
+            for filename in (
+                "local-rag-agent003-savings.agent.md",
+                "local-rag-agent003-standard.agent.md",
+                "local-rag-agent003-thorough.agent.md",
+                "local-rag-agent003.ps1",
+            ):
                 self.assertIn(
                     f".copilot/rag/copilot-cli/{filename}",
                     names,
