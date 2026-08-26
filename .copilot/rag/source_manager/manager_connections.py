@@ -9,20 +9,26 @@ from typing import Any
 
 from .machine_connections import (
     SHAREPOINT_ROOT_ENV,
+    check_confluence_credentials,
     check_gitlab_project,
     clear_sharepoint_root,
+    confluence_connection_id,
+    delete_confluence_connection,
     gitlab_project_location,
     gitlab_token_env,
     has_stored_gitlab_token,
     has_stored_redmine_api_key,
+    list_confluence_registrations,
     list_gitlab_registrations,
     list_redmine_registrations,
     redmine_api_key_env,
+    register_confluence_connection,
     register_gitlab_token,
     register_redmine_api_key,
     set_sharepoint_root,
     sharepoint_root_status,
 )
+from .networking import resolve_source_network_route
 from .redmine import generated_redmine_link, parse_redmine_project_url
 
 
@@ -74,7 +80,7 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
                     (
                         "3",
                         "Source接続設定"
-                        "（Redmine API・GitLab API・SharePoint）",
+                        "（Redmine API・GitLab API・SharePoint・Confluence）",
                     ),
                     ("4", "技術情報"),
                     ("0", "戻る"),
@@ -133,6 +139,14 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
                     gitlab_url=gitlab_url,
                 )
             )
+        if required == "confluence":
+            self._print_screen_header("Source接続設定")
+            self._show_source_connection_summary()
+            self._print_info(
+                "Confluence Sourceを登録するには、接続確認済みの"
+                "資格情報をこの端末へ登録する必要があります。"
+            )
+            return bool(self._register_confluence_connection_setting())
 
         while True:
             self._print_screen_header("Source接続設定")
@@ -147,6 +161,10 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
                     ("5", "GitLab access tokenを登録・更新する"),
                     ("6", "GitLab access tokenの登録状況を見る"),
                     ("7", "GitLabプロジェクトへの接続を確認する"),
+                    ("8", "Confluence接続を登録・更新する"),
+                    ("9", "Confluence接続の登録状況を見る"),
+                    ("10", "Confluence接続を削除する"),
+                    ("11", "Confluence接続をID指定で復旧する"),
                     ("0", "戻る"),
                 ),
             )
@@ -167,8 +185,16 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
                 self._show_gitlab_token_registrations()
             elif choice == "7":
                 self._check_gitlab_project_setting()
+            elif choice == "8":
+                self._register_confluence_connection_setting()
+            elif choice == "9":
+                self._show_confluence_registrations()
+            elif choice == "10":
+                self._delete_confluence_connection_setting()
+            elif choice == "11":
+                self._recover_confluence_connection_setting()
             else:
-                self._invalid_selection("0～7")
+                self._invalid_selection("0～11")
 
     def show_source_connection_summary(self: Any) -> None:
         status = sharepoint_root_status(self.rag_root)
@@ -190,8 +216,21 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
         self.output(
             f"GitLab access token: {gitlab_registered:,}件登録済み"
         )
+        try:
+            confluence_registrations = list_confluence_registrations(
+                self.rag_root
+            )
+        except Exception:
+            self.output("Confluence接続: 登録状況を確認できません")
+        else:
+            confluence_registered = sum(
+                1 for item in confluence_registrations if item.registered
+            )
+            self.output(
+                f"Confluence接続: {confluence_registered:,}件登録済み"
+            )
         self.output(
-            "APIキーとtokenの値は登録・更新だけ可能です。"
+            "APIキー、token、account emailの値は登録・更新だけ可能です。"
             "画面やログには表示しません。"
         )
 
@@ -403,6 +442,395 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
             self.output(f"{index}. {item.gitlab_url} — {state}")
         self.output("access tokenの値は表示しません。")
 
+    def print_confluence_connection_error(
+        self: Any,
+        exc: BaseException,
+    ) -> None:
+        """Render only a bounded classification, never exception details."""
+
+        detail = str(exc).casefold()
+        if "http 401" in detail:
+            message = (
+                "Confluence接続確認に失敗しました（HTTP 401）。"
+                "認証情報と資格情報方式を確認してください。"
+            )
+        elif "http 403" in detail:
+            message = (
+                "Confluence接続確認に失敗しました（HTTP 403）。"
+                "資格情報の閲覧権限を確認してください。"
+            )
+        elif "http 404" in detail:
+            message = (
+                "Confluence接続確認に失敗しました（HTTP 404）。"
+                "接続先またはAPI endpointが見つかりません。"
+            )
+        elif isinstance(exc, (ConnectionError, TimeoutError, OSError)) or any(
+            marker in detail
+            for marker in (
+                "network",
+                "timed out",
+                "timeout",
+                "urlerror",
+                "connection",
+            )
+        ):
+            message = (
+                "Confluenceとの通信に失敗しました。"
+                "ネットワーク設定と接続先URLを確認してください。"
+            )
+        else:
+            message = (
+                "Confluence接続確認に失敗しました。"
+                "Cloud／Data Center、資格情報方式、URLを確認してください。"
+            )
+        self._print_error(message)
+
+    def register_confluence_connection_setting(
+        self: Any,
+        *,
+        expected_connection_id: str | None = None,
+    ) -> bool:
+        try:
+            registrations = list_confluence_registrations(self.rag_root)
+        except Exception:
+            self._print_error(
+                "Confluence接続の登録状況を安全に読み取れません。"
+                "接続設定は変更されていません。"
+            )
+            return False
+
+        existing = None
+        if expected_connection_id is not None:
+            try:
+                expected_connection_id = confluence_connection_id(
+                    expected_connection_id
+                )
+            except Exception:
+                self._print_error(
+                    "復旧対象のConfluence connection IDが不正です。"
+                    "接続設定は変更されていません。"
+                )
+                return False
+            existing = next(
+                (
+                    item
+                    for item in registrations
+                    if item.connection_id == expected_connection_id
+                ),
+                None,
+            )
+            self._print_info(
+                "指定されたConfluence connection IDを、"
+                "接続先の同一性を確認して復旧します。"
+            )
+        elif registrations:
+            choices = [("__new__", "新しい接続を登録する")]
+            choices.extend(
+                (
+                    item.connection_id,
+                    (
+                        f"更新: {item.display_name} — "
+                        f"{item.deployment} — {item.base_url}"
+                    ),
+                )
+                for item in registrations
+            )
+            selected = self._select_value("登録方法", tuple(choices))
+            if selected is None:
+                self._print_info("Confluence接続は変更されていません。")
+                return False
+            if selected != "__new__":
+                existing = next(
+                    (
+                        item
+                        for item in registrations
+                        if item.connection_id == selected
+                    ),
+                    None,
+                )
+                if existing is None:
+                    self._print_error(
+                        "選択したConfluence接続を確認できません。"
+                        "接続設定は変更されていません。"
+                    )
+                    return False
+
+        deployment = self._select_value(
+            "Confluenceの種類",
+            (
+                ("cloud", "Confluence Cloud"),
+                ("data_center", "Confluence Data Center"),
+            ),
+            default=(existing.deployment if existing is not None else None),
+        )
+        if deployment is None:
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+        display_name = self._prompt_preserving_value(
+            "接続の表示名",
+            existing.display_name if existing is not None else "",
+            required=True,
+            description=(
+                "Source登録時に接続を区別するための名前です。"
+                "資格情報は含めないでください。"
+            ),
+        )
+        base_url = self._prompt_preserving_value(
+            "Confluence base URL",
+            existing.base_url if existing is not None else "",
+            required=True,
+            description=(
+                "Cloudは https://example.atlassian.net のtenant root、"
+                "Data CenterはConfluenceのroot URLを指定します。"
+            ),
+        )
+        if display_name is None or base_url is None:
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+
+        account_email: str | None = None
+        cloud_id: str | None = None
+        if deployment == "cloud":
+            current_kind = (
+                existing.token_kind
+                if existing is not None and existing.deployment == "cloud"
+                else None
+            )
+            token_kind = self._select_value(
+                "Confluence Cloudの資格情報方式",
+                (
+                    ("unscoped", "unscoped API token"),
+                    ("scoped", "scoped API token"),
+                ),
+                default=current_kind,
+            )
+            if token_kind is None:
+                self._print_info("Confluence接続は変更されていません。")
+                return False
+            self.output(
+                "Confluence Cloud account emailは非表示で入力し、"
+                "接続確認と暗号化保存にだけ使用します。"
+            )
+            try:
+                account_email = getpass.getpass(
+                    "Confluence Cloud account email【必須・非表示】: "
+                )
+            except (KeyboardInterrupt, EOFError):
+                self.output("")
+                self._print_info("Confluence接続は変更されていません。")
+                return False
+            account_email = account_email.strip()
+            if not account_email:
+                self._print_error(
+                    "Confluence Cloud account emailを入力してください。"
+                )
+                return False
+            if token_kind == "scoped":
+                current_cloud_id = (
+                    str(existing.cloud_id or "")
+                    if existing is not None
+                    and existing.deployment == "cloud"
+                    and existing.token_kind == "scoped"
+                    else ""
+                )
+                cloud_id_value = self._prompt_preserving_value(
+                    "Atlassian cloud ID",
+                    current_cloud_id,
+                    required=False,
+                    description=(
+                        "通常は空欄で自動検出します。"
+                        "自動検出できない場合だけUUIDを指定します。"
+                    ),
+                )
+                if cloud_id_value is None:
+                    self._print_info("Confluence接続は変更されていません。")
+                    return False
+                cloud_id = cloud_id_value or None
+        else:
+            token_kind = "pat"
+            self.output(
+                "資格情報方式: Confluence Data Center Personal Access Token"
+            )
+
+        self.output(
+            "資格情報は入力中も保存後も、この画面やログへ表示しません。"
+        )
+        try:
+            token = getpass.getpass(
+                "Confluence token／PAT【必須・非表示】: "
+            )
+        except (KeyboardInterrupt, EOFError):
+            self.output("")
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+        if not token.strip():
+            self._print_error("Confluence token／PATを入力してください。")
+            return False
+
+        try:
+            route = resolve_source_network_route(
+                self.rag_root,
+                environment=None,
+            )
+            confirmation = check_confluence_credentials(
+                deployment=deployment,
+                base_url=base_url,
+                token=token,
+                account_email=account_email,
+                token_kind=token_kind,
+                cloud_id=cloud_id,
+                http_get=route.http_get,
+            )
+        except Exception as exc:
+            self._print_confluence_connection_error(exc)
+            return False
+        finally:
+            token = ""
+
+        self._print_success(
+            "Confluenceへの接続確認に成功しました。資格情報を保存します。"
+        )
+        save_connection_id = (
+            existing.connection_id
+            if existing is not None
+            else expected_connection_id
+        )
+        try:
+            registration = register_confluence_connection(
+                self.rag_root,
+                display_name=display_name,
+                confirmation=confirmation,
+                expected_connection_id=save_connection_id,
+            )
+        except Exception:
+            self._print_error(
+                "接続確認済みのConfluence資格情報を保存できませんでした。"
+                "秘密値は表示されません。接続設定は変更されていません。"
+            )
+            return False
+        finally:
+            confirmation = None
+
+        if expected_connection_id is not None and existing is None:
+            action = "復旧しました"
+        else:
+            action = "更新しました" if existing is not None else "登録しました"
+        self._print_success(f"Confluence接続をこの端末へ{action}。")
+        self.output(f"接続名: {registration.display_name}")
+        self.output(f"種類: {registration.deployment}")
+        self.output(f"接続先: {registration.base_url}")
+        self.output(
+            "token、account email、利用者識別子は再表示できません。"
+        )
+        return True
+
+    def recover_confluence_connection_setting(self: Any) -> bool:
+        value = self._prompt_preserving_value(
+            "復旧するConfluence connection ID",
+            "",
+            required=True,
+            description=(
+                "既存Sourceが参照しているUUIDを指定します。"
+                "接続先の同一性が一致する場合だけ復旧します。"
+            ),
+        )
+        if value is None:
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+        try:
+            connection_id = confluence_connection_id(value)
+        except Exception:
+            self._print_error(
+                "Confluence connection IDはUUID形式で指定してください。"
+                "接続設定は変更されていません。"
+            )
+            return False
+        return bool(
+            self._register_confluence_connection_setting(
+                expected_connection_id=connection_id,
+            )
+        )
+
+    def show_confluence_registrations(self: Any) -> None:
+        self.output("\nConfluence接続の登録状況")
+        try:
+            registrations = list_confluence_registrations(self.rag_root)
+        except Exception:
+            self._print_error("Confluence接続の登録状況を確認できません。")
+            return
+        if not registrations:
+            self.output("登録はありません。")
+            return
+        for index, item in enumerate(registrations, start=1):
+            state = "登録済み" if item.registered else "再登録が必要"
+            kind = (
+                "Cloud / " + item.token_kind
+                if item.deployment == "cloud"
+                else "Data Center / PAT"
+            )
+            self.output(
+                f"{index}. {item.display_name} — {kind} — {state}"
+            )
+            self.output(f"   接続先: {item.base_url}")
+        self.output(
+            "token、account email、利用者識別子の値は表示しません。"
+        )
+
+    def delete_confluence_connection_setting(self: Any) -> bool:
+        try:
+            registrations = list_confluence_registrations(self.rag_root)
+        except Exception:
+            self._print_error("Confluence接続の登録状況を確認できません。")
+            return False
+        if not registrations:
+            self._print_info("削除できるConfluence接続はありません。")
+            return False
+        selected = self._select_value(
+            "削除するConfluence接続",
+            tuple(
+                (
+                    item.connection_id,
+                    (
+                        f"{item.display_name} — {item.deployment} — "
+                        f"{item.base_url}"
+                    ),
+                )
+                for item in registrations
+            ),
+        )
+        if selected is None:
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+        item = next(
+            (
+                registration
+                for registration in registrations
+                if registration.connection_id == selected
+            ),
+            None,
+        )
+        if item is None:
+            self._print_error("選択したConfluence接続を確認できません。")
+            return False
+        if not self._confirm(
+            f"Confluence接続「{item.display_name}」をこの端末から削除しますか？"
+        ):
+            self._print_info("Confluence接続は変更されていません。")
+            return False
+        try:
+            deleted = delete_confluence_connection(
+                self.rag_root,
+                item.connection_id,
+            )
+        except Exception:
+            self._print_error("Confluence接続を削除できませんでした。")
+            return False
+        if not deleted:
+            self._print_info("対象のConfluence接続は既にありません。")
+            return False
+        self._print_success("Confluence接続をこの端末から削除しました。")
+        return True
+
     def confirm_gitlab_project_connection(
         self: Any,
         *,
@@ -527,6 +955,16 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
                 )
             )
         )
+        try:
+            confluence_count = sum(
+                1
+                for item in list_confluence_registrations(self.rag_root)
+                if item.registered
+            )
+        except Exception:
+            self.output("Confluence registrations: unavailable")
+        else:
+            self.output(f"Confluence registrations: {confluence_count}")
 
     def prompt_new_sharepoint_source(self: Any) -> dict[str, Any] | None:
         if os.name != "nt":
@@ -791,6 +1229,17 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
     manager_class._show_redmine_api_key_registrations = show_redmine_api_key_registrations
     manager_class._register_gitlab_token_setting = register_gitlab_token_setting
     manager_class._show_gitlab_token_registrations = show_gitlab_token_registrations
+    manager_class._print_confluence_connection_error = print_confluence_connection_error
+    manager_class._register_confluence_connection_setting = (
+        register_confluence_connection_setting
+    )
+    manager_class._show_confluence_registrations = show_confluence_registrations
+    manager_class._recover_confluence_connection_setting = (
+        recover_confluence_connection_setting
+    )
+    manager_class._delete_confluence_connection_setting = (
+        delete_confluence_connection_setting
+    )
     manager_class._confirm_gitlab_project_connection = confirm_gitlab_project_connection
     manager_class._check_gitlab_project_setting = check_gitlab_project_setting
     manager_class._show_source_connection_status = show_source_connection_status

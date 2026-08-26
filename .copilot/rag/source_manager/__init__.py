@@ -153,6 +153,7 @@ from .github_content_registration import (
     install_github_content_registration_runtime,
 )
 from .gitlab_wiki_runtime import install_gitlab_wiki_runtime
+from .confluence_runtime import install_confluence_runtime
 from .manager_connections import install_manage_custom_hook
 from .provisional_source_merge import install_provisional_source_merge_runtime
 from .source_preflight import install_source_preflight_runtime
@@ -181,6 +182,7 @@ install_document_filter_count_runtime()
 install_document_filter_package_contract()
 install_copy_only_package_runtime()
 install_gitlab_wiki_runtime()
+install_confluence_runtime()
 install_gitlab_wiki_registration_runtime()
 install_github_content_registration_runtime()
 install_manage_custom_hook()
@@ -278,6 +280,7 @@ __all__ = [
     "install_git_source_runtime",
     "install_gitlab_issue_fixes",
     "install_gitlab_wiki_registration_runtime",
+    "install_confluence_runtime",
     "install_gitlab_wiki_runtime",
     "install_github_content_registration_runtime",
     "install_teams_source_runtime",

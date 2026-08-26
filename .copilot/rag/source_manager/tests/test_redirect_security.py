@@ -26,6 +26,8 @@ REQUEST_HEADERS = {
 }
 GITLAB_HEADERS = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
 REDMINE_HEADERS = {"X-Redmine-API-Key": REDMINE_API_KEY}
+CONFLUENCE_TOKEN = "confluence-token-must-not-follow"
+CONFLUENCE_HEADERS = {"Authorization": f"Bearer {CONFLUENCE_TOKEN}"}
 
 
 class _RedirectServer(ThreadingHTTPServer):
@@ -258,6 +260,50 @@ class RedirectCredentialSecurityTests(unittest.TestCase):
             target["x-redmine-api-key"],
         )
         self.assertNotIn("private-token", target)
+
+    def test_source_route_never_forwards_confluence_authorization(self) -> None:
+        built_openers: list[urllib.request.OpenerDirector] = []
+
+        def build_opener() -> urllib.request.OpenerDirector:
+            value = urllib.request.build_opener(
+                urllib.request.ProxyHandler({})
+            )
+            built_openers.append(value)
+            return value
+
+        resolution = SimpleNamespace(
+            environment={"ROUTE": "selected"},
+            build_url_opener=build_opener,
+        )
+        network = SimpleNamespace(
+            resolve_network_configuration=lambda **_kwargs: resolution,
+        )
+        with (
+            mock.patch.object(
+                networking_module,
+                "_network_module",
+                return_value=network,
+            ),
+            _running_redirect_server(302) as server,
+        ):
+            route = networking_module.resolve_source_network_route(
+                Path("/synthetic/rag"),
+                environment={},
+            )
+            status, body, headers = route.http_get(
+                server.redirect_url,
+                CONFLUENCE_HEADERS,
+                2,
+            )
+
+        self.assertEqual(302, status)
+        self.assertEqual(b"redirect-302", body)
+        self.assertEqual("/target", headers["Location"])
+        self.assertEqual(2, len(built_openers))
+        self.assert_initial_only(
+            server,
+            expected_headers=CONFLUENCE_HEADERS,
+        )
 
 
 if __name__ == "__main__":

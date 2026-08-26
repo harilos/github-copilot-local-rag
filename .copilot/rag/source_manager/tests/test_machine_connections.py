@@ -4,6 +4,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -11,24 +12,30 @@ from unittest import mock
 from source_manager.errors import SourceManagerError
 from source_manager.machine_connections import (
     SHAREPOINT_ROOT_ENV,
+    check_confluence_credentials,
     check_gitlab_project,
     clear_sharepoint_root,
+    confluence_connection_id,
     connection_config_path,
     connection_secret_path,
+    delete_confluence_connection,
     gitlab_project_location,
     gitlab_token_env,
+    list_confluence_registrations,
     list_gitlab_registrations,
     list_redmine_registrations,
     redmine_api_key_env,
+    register_confluence_connection,
     register_gitlab_token,
     register_redmine_api_key,
+    resolve_confluence_credentials,
     resolve_gitlab_token,
     resolve_redmine_api_key,
     set_sharepoint_root,
     sharepoint_root_status,
     source_runtime_environment,
 )
-from source_manager import manager_connections
+from source_manager import machine_connections, manager_connections
 
 
 RAG_ROOT = Path(__file__).resolve().parents[2]
@@ -598,6 +605,537 @@ class MachineConnectionStoreTests(unittest.TestCase):
                     "https://git.example.test",
                     project_url,
                 )
+
+    def test_confluence_cloud_registration_keeps_identity_and_secrets_private(
+        self,
+    ) -> None:
+        token = "CLOUD-TOKEN-MUST-STAY-PRIVATE"
+        email = "owner@example.test"
+        principal = "712020:cloud-account-id"
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def getter(url, headers, _timeout):
+            calls.append((url, dict(headers)))
+            return (
+                200,
+                json.dumps({"accountId": principal}).encode("utf-8"),
+                {},
+            )
+
+        confirmation = check_confluence_credentials(
+            deployment="cloud",
+            base_url="https://tenant.atlassian.net/",
+            account_email=email,
+            token=token,
+            token_kind="unscoped",
+            http_get=getter,
+        )
+        self.assertFalse(connection_config_path(self.rag_root).exists())
+        self.assertFalse(connection_secret_path(self.rag_root).exists())
+        registration = register_confluence_connection(
+            self.rag_root,
+            display_name="Finance wiki",
+            confirmation=confirmation,
+        )
+
+        parsed_id = uuid.UUID(registration.connection_id)
+        self.assertEqual(4, parsed_id.version)
+        self.assertEqual(
+            registration.connection_id,
+            confluence_connection_id(registration.connection_id),
+        )
+        self.assertEqual(
+            "https://tenant.atlassian.net/wiki/rest/api/user/current",
+            calls[0][0],
+        )
+        self.assertTrue(calls[0][1]["Authorization"].startswith("Basic "))
+
+        public_text = connection_config_path(self.rag_root).read_text(
+            encoding="utf-8"
+        )
+        secret_text = connection_secret_path(self.rag_root).read_text(
+            encoding="utf-8"
+        )
+        for private in (token, email, principal, confirmation.security_identity):
+            self.assertNotIn(private, public_text)
+            self.assertNotIn(private, secret_text)
+        public = json.loads(public_text)["confluence"][registration.connection_id]
+        self.assertEqual(
+            {
+                "api_root",
+                "base_url",
+                "cloud_id",
+                "deployment",
+                "display_name",
+                "token_kind",
+                "updated_at",
+            },
+            set(public),
+        )
+
+        listed = list_confluence_registrations(self.rag_root)
+        self.assertEqual((registration,), listed)
+        resolved = resolve_confluence_credentials(
+            self.rag_root,
+            registration.connection_id,
+        )
+        assert resolved is not None
+        self.assertEqual(email, resolved.account_email)
+        self.assertEqual(token, resolved.token)
+        self.assertEqual(principal, resolved.principal)
+        for private in (token, email, principal, confirmation.security_identity):
+            self.assertNotIn(private, repr(listed))
+            self.assertNotIn(private, repr(resolved))
+            self.assertNotIn(private, repr(confirmation))
+
+    def test_confluence_data_center_uses_bearer_and_stable_principal(
+        self,
+    ) -> None:
+        token = "DATA-CENTER-PAT"
+        principal = "4028a8085f0f7c6f015f0f7d6a1b0001"
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def getter(url, headers, _timeout):
+            calls.append((url, dict(headers)))
+            return (
+                200,
+                json.dumps(
+                    {"userKey": principal, "username": "renameable-name"}
+                ).encode("utf-8"),
+                {},
+            )
+
+        confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test/tools/confluence/",
+            token=token,
+            http_get=getter,
+        )
+        registered = register_confluence_connection(
+            self.rag_root,
+            display_name="Engineering Confluence",
+            confirmation=confirmation,
+        )
+
+        self.assertEqual(
+            "https://confluence.example.test/tools/confluence/rest/api/user/current",
+            calls[0][0],
+        )
+        self.assertEqual(f"Bearer {token}", calls[0][1]["Authorization"])
+        resolved = resolve_confluence_credentials(
+            self.rag_root,
+            registered.connection_id,
+        )
+        assert resolved is not None
+        self.assertEqual("data_center", resolved.deployment)
+        self.assertEqual(principal, resolved.principal)
+        self.assertEqual("", resolved.account_email)
+
+    def test_confluence_rotation_changes_display_and_secret_not_identity(
+        self,
+    ) -> None:
+        def confirmation(*, email: str, token: str, principal: str):
+            return check_confluence_credentials(
+                deployment="cloud",
+                base_url="https://tenant.atlassian.net",
+                account_email=email,
+                token=token,
+                token_kind="unscoped",
+                http_get=lambda _url, _headers, _timeout: (
+                    200,
+                    json.dumps({"accountId": principal}).encode("utf-8"),
+                    {},
+                ),
+            )
+
+        first = register_confluence_connection(
+            self.rag_root,
+            display_name="Old display",
+            confirmation=confirmation(
+                email="old@example.test",
+                token="OLD-TOKEN",
+                principal="stable-cloud-account",
+            ),
+        )
+        rotated = register_confluence_connection(
+            self.rag_root,
+            display_name="New display",
+            confirmation=confirmation(
+                email="renamed@example.test",
+                token="NEW-TOKEN",
+                principal="stable-cloud-account",
+            ),
+            expected_connection_id=first.connection_id,
+        )
+        self.assertEqual(first.connection_id, rotated.connection_id)
+        self.assertEqual("New display", rotated.display_name)
+        resolved = resolve_confluence_credentials(
+            self.rag_root,
+            first.connection_id,
+        )
+        assert resolved is not None
+        self.assertEqual("NEW-TOKEN", resolved.token)
+        self.assertEqual("renamed@example.test", resolved.account_email)
+
+        config_before = connection_config_path(self.rag_root).read_bytes()
+        secrets_before = connection_secret_path(self.rag_root).read_bytes()
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "security identity does not match",
+        ):
+            register_confluence_connection(
+                self.rag_root,
+                display_name="Attempted takeover",
+                confirmation=confirmation(
+                    email="other@example.test",
+                    token="TAKEOVER-TOKEN",
+                    principal="different-cloud-account",
+                ),
+                expected_connection_id=first.connection_id,
+            )
+        self.assertEqual(
+            config_before,
+            connection_config_path(self.rag_root).read_bytes(),
+        )
+        self.assertEqual(
+            secrets_before,
+            connection_secret_path(self.rag_root).read_bytes(),
+        )
+
+    def test_confluence_deleted_id_recovers_only_same_security_identity(
+        self,
+    ) -> None:
+        first_confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="ORIGINAL-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"stable-principal"}',
+                {},
+            ),
+        )
+        first = register_confluence_connection(
+            self.rag_root,
+            display_name="Original connection",
+            confirmation=first_confirmation,
+        )
+        self.assertTrue(
+            delete_confluence_connection(
+                self.rag_root,
+                first.connection_id,
+            )
+        )
+        secret_payload = json.loads(
+            connection_secret_path(self.rag_root).read_text(encoding="utf-8")
+        )
+        tombstone = secret_payload["confluence_tombstones"][
+            first.connection_id
+        ]
+        self.assertEqual(
+            {"security_identity", "updated_at"},
+            set(tombstone),
+        )
+        serialized = json.dumps(secret_payload)
+        self.assertNotIn("ORIGINAL-PAT", serialized)
+        self.assertNotIn("stable-principal", serialized)
+
+        wrong_confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="WRONG-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"different-principal"}',
+                {},
+            ),
+        )
+        config_before = connection_config_path(self.rag_root).read_bytes()
+        secrets_before = connection_secret_path(self.rag_root).read_bytes()
+        with self.assertRaisesRegex(
+            SourceManagerError,
+            "security identity does not match",
+        ):
+            register_confluence_connection(
+                self.rag_root,
+                display_name="Wrong recovery",
+                confirmation=wrong_confirmation,
+                expected_connection_id=first.connection_id,
+            )
+        self.assertEqual(
+            config_before,
+            connection_config_path(self.rag_root).read_bytes(),
+        )
+        self.assertEqual(
+            secrets_before,
+            connection_secret_path(self.rag_root).read_bytes(),
+        )
+
+        recovered_confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="RECOVERED-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"stable-principal"}',
+                {},
+            ),
+        )
+        recovered = register_confluence_connection(
+            self.rag_root,
+            display_name="Recovered connection",
+            confirmation=recovered_confirmation,
+            expected_connection_id=first.connection_id,
+        )
+        self.assertEqual(first.connection_id, recovered.connection_id)
+        resolved = resolve_confluence_credentials(
+            self.rag_root,
+            recovered.connection_id,
+        )
+        assert resolved is not None
+        self.assertEqual("RECOVERED-PAT", resolved.token)
+        secret_payload = json.loads(
+            connection_secret_path(self.rag_root).read_text(encoding="utf-8")
+        )
+        self.assertNotIn(
+            recovered.connection_id,
+            secret_payload["confluence_tombstones"],
+        )
+
+    def test_confluence_new_random_id_never_reuses_tombstone(self) -> None:
+        confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="FIRST-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"stable-principal"}',
+                {},
+            ),
+        )
+        first = register_confluence_connection(
+            self.rag_root,
+            display_name="First",
+            confirmation=confirmation,
+        )
+        self.assertTrue(
+            delete_confluence_connection(self.rag_root, first.connection_id)
+        )
+        replacement_id = uuid.uuid4()
+        with mock.patch.object(
+            machine_connections.uuid,
+            "uuid4",
+            side_effect=(uuid.UUID(first.connection_id), replacement_id),
+        ):
+            replacement = register_confluence_connection(
+                self.rag_root,
+                display_name="Replacement",
+                confirmation=confirmation,
+            )
+        self.assertEqual(str(replacement_id), replacement.connection_id)
+
+    def test_confluence_public_registry_rejects_unknown_or_secret_aliases(
+        self,
+    ) -> None:
+        confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="PRIVATE-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"stable-principal"}',
+                {},
+            ),
+        )
+        registered = register_confluence_connection(
+            self.rag_root,
+            display_name="Strict public entry",
+            confirmation=confirmation,
+        )
+        original = json.loads(
+            connection_config_path(self.rag_root).read_text(encoding="utf-8")
+        )
+        for field in (
+            "api_token",
+            "password",
+            "access_token",
+            "username",
+            "unknown_field",
+        ):
+            with self.subTest(field=field):
+                tampered = json.loads(json.dumps(original))
+                tampered["confluence"][registered.connection_id][field] = (
+                    "MUST-NOT-BE-ACCEPTED"
+                )
+                connection_config_path(self.rag_root).write_text(
+                    json.dumps(tampered),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    SourceManagerError,
+                    "public connection data is invalid",
+                ):
+                    list_confluence_registrations(self.rag_root)
+                with self.assertRaisesRegex(
+                    SourceManagerError,
+                    "public connection data is invalid",
+                ):
+                    resolve_confluence_credentials(
+                        self.rag_root,
+                        registered.connection_id,
+                    )
+        connection_config_path(self.rag_root).write_text(
+            json.dumps(original),
+            encoding="utf-8",
+        )
+
+    def test_confluence_registration_rolls_back_both_registry_files(
+        self,
+    ) -> None:
+        confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="ROLLBACK-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"rollback-principal"}',
+                {},
+            ),
+        )
+        with mock.patch.object(
+            machine_connections,
+            "_save_connections",
+            side_effect=OSError("simulated public config failure"),
+        ), self.assertRaisesRegex(OSError, "simulated public config failure"):
+            register_confluence_connection(
+                self.rag_root,
+                display_name="Must roll back",
+                confirmation=confirmation,
+            )
+        self.assertFalse(connection_config_path(self.rag_root).exists())
+        self.assertFalse(connection_secret_path(self.rag_root).exists())
+
+    def test_confluence_delete_is_atomic_and_removes_both_entries(self) -> None:
+        confirmation = check_confluence_credentials(
+            deployment="data_center",
+            base_url="https://confluence.example.test",
+            token="DELETE-PAT",
+            http_get=lambda _url, _headers, _timeout: (
+                200,
+                b'{"userKey":"delete-principal"}',
+                {},
+            ),
+        )
+        registered = register_confluence_connection(
+            self.rag_root,
+            display_name="Delete me",
+            confirmation=confirmation,
+        )
+        config_before = connection_config_path(self.rag_root).read_bytes()
+        secrets_before = connection_secret_path(self.rag_root).read_bytes()
+        with mock.patch.object(
+            machine_connections,
+            "_save_connections",
+            side_effect=OSError("simulated public delete failure"),
+        ), self.assertRaisesRegex(OSError, "simulated public delete failure"):
+            delete_confluence_connection(
+                self.rag_root,
+                registered.connection_id,
+            )
+        self.assertEqual(
+            config_before,
+            connection_config_path(self.rag_root).read_bytes(),
+        )
+        self.assertEqual(
+            secrets_before,
+            connection_secret_path(self.rag_root).read_bytes(),
+        )
+
+        self.assertTrue(
+            delete_confluence_connection(
+                self.rag_root,
+                registered.connection_id,
+            )
+        )
+        self.assertIsNone(
+            resolve_confluence_credentials(
+                self.rag_root,
+                registered.connection_id,
+            )
+        )
+        self.assertEqual((), list_confluence_registrations(self.rag_root))
+        self.assertFalse(
+            delete_confluence_connection(
+                self.rag_root,
+                registered.connection_id,
+            )
+        )
+
+    def test_confluence_scoped_token_discovers_or_manually_recovers_cloud_id(
+        self,
+    ) -> None:
+        discovered = "b85d6f92-20fb-4c40-91e2-9f78e4271150"
+        principal = "712020:scoped-cloud-account"
+        urls: list[str] = []
+
+        def getter(url, headers, _timeout):
+            urls.append(url)
+            if url.endswith("/_edge/tenant_info"):
+                self.assertNotIn("Authorization", headers)
+                return 200, json.dumps({"cloudId": discovered}).encode(), {}
+            self.assertTrue(headers["Authorization"].startswith("Basic "))
+            return 200, json.dumps({"accountId": principal}).encode(), {}
+
+        confirmation = check_confluence_credentials(
+            deployment="cloud",
+            base_url="https://tenant.atlassian.net",
+            account_email="owner@example.test",
+            token="SCOPED-TOKEN",
+            token_kind="scoped",
+            http_get=getter,
+        )
+        self.assertEqual(discovered, confirmation.cloud_id)
+        self.assertEqual(
+            "https://api.atlassian.com/ex/confluence/"
+            f"{discovered}/wiki/api/v2",
+            confirmation.api_root,
+        )
+        self.assertEqual(
+            [
+                "https://tenant.atlassian.net/_edge/tenant_info",
+                "https://api.atlassian.com/ex/confluence/"
+                f"{discovered}/wiki/rest/api/user/current",
+            ],
+            urls,
+        )
+
+        manual = "bb80d19d-7725-409e-9b0b-12fddccfebbf"
+
+        def unavailable(url, _headers, _timeout):
+            if url.endswith("/_edge/tenant_info"):
+                return 503, b"", {}
+            return 200, json.dumps({"accountId": principal}).encode(), {}
+
+        recovered = check_confluence_credentials(
+            deployment="cloud",
+            base_url="https://tenant.atlassian.net",
+            account_email="owner@example.test",
+            token="SCOPED-TOKEN",
+            token_kind="scoped",
+            cloud_id=manual,
+            http_get=unavailable,
+        )
+        self.assertEqual(manual, recovered.cloud_id)
+        with self.assertRaisesRegex(SourceManagerError, r"manual .*cloud ID"):
+            check_confluence_credentials(
+                deployment="cloud",
+                base_url="https://tenant.atlassian.net",
+                account_email="owner@example.test",
+                token="SCOPED-TOKEN",
+                token_kind="scoped",
+                cloud_id=manual,
+                http_get=getter,
+            )
 
 
 class ManagerMachineConnectionUiTests(unittest.TestCase):

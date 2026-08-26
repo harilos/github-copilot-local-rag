@@ -85,6 +85,15 @@ def is_gitlab_token_request(headers: Mapping[str, Any]) -> bool:
     )
 
 
+def is_redirect_sensitive_request(headers: Mapping[str, Any]) -> bool:
+    """Return whether an auth header must never survive a redirect."""
+
+    return any(
+        str(name).casefold() in {"authorization", "private-token"}
+        for name in headers
+    )
+
+
 @dataclass(frozen=True)
 class SourceNetworkRoute:
     environment: dict[str, str]
@@ -112,7 +121,7 @@ def resolve_source_network_route(
     effective_environment = dict(resolution.environment)
     command_timeout = source_command_timeout_seconds(effective_environment)
     opener = resolution.build_url_opener()
-    gitlab_opener: urllib.request.OpenerDirector | None = None
+    sensitive_opener: urllib.request.OpenerDirector | None = None
 
     def command_runner(
         arguments: list[str],
@@ -134,17 +143,17 @@ def resolve_source_network_route(
         headers: Mapping[str, str],
         timeout: float,
     ):
-        nonlocal gitlab_opener
+        nonlocal sensitive_opener
         request_opener = opener
-        if is_gitlab_token_request(headers):
-            if gitlab_opener is None:
+        if is_redirect_sensitive_request(headers):
+            if sensitive_opener is None:
                 isolated_opener = resolution.build_url_opener()
                 if isolated_opener is opener:
                     raise SourceManagerError(
-                        "GitLab HTTP request requires an isolated network opener"
+                        "credentialed HTTP request requires an isolated network opener"
                     )
-                gitlab_opener = reject_http_redirects(isolated_opener)
-            request_opener = gitlab_opener
+                sensitive_opener = reject_http_redirects(isolated_opener)
+            request_opener = sensitive_opener
         request = urllib.request.Request(
             url,
             headers=dict(headers),

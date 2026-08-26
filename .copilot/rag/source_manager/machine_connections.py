@@ -12,7 +12,8 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -44,6 +45,27 @@ _REDMINE_ENV_PREFIX = "LOCAL_RAG_REDMINE_API_KEY_"
 _SAFE_ENV = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _RUNTIME_PATCH_MARKER = "_local_rag_machine_connections_installed"
 _MAX_PROJECT_ID = 9_223_372_036_854_775_807
+_MAX_CONFLUENCE_IDENTITY_BYTES = 1024 * 1024
+_CONFLUENCE_CREDENTIAL_SCHEMA = "local-rag.confluence-credential.v1"
+_CONFLUENCE_SECURITY_IDENTITY_SCHEMA = (
+    "local-rag.confluence-security-identity.v1"
+)
+_CONFLUENCE_DEPLOYMENTS = frozenset({"cloud", "data_center"})
+_CONFLUENCE_CLOUD_TOKEN_KINDS = frozenset({"unscoped", "scoped"})
+_CONFLUENCE_PUBLIC_FIELDS = frozenset(
+    {
+        "display_name",
+        "deployment",
+        "base_url",
+        "token_kind",
+        "cloud_id",
+        "api_root",
+        "updated_at",
+    }
+)
+_CONFLUENCE_TOMBSTONE_FIELDS = frozenset(
+    {"security_identity", "updated_at"}
+)
 
 
 @dataclass(frozen=True)
@@ -107,7 +129,58 @@ class GitLabProjectCheck:
     name: str
 
 
+@dataclass(frozen=True)
+class ConfluenceRegistration:
+    connection_id: str
+    display_name: str
+    deployment: str
+    base_url: str
+    token_kind: str
+    cloud_id: str | None
+    api_root: str
+    registered: bool
+
+
+@dataclass(frozen=True)
+class ConfluenceCredentialConfirmation:
+    """One verified credential bundle that is safe to pass only in memory."""
+
+    deployment: str
+    base_url: str
+    token_kind: str
+    cloud_id: str | None
+    api_root: str
+    account_email: str = dataclass_field(repr=False)
+    token: str = dataclass_field(repr=False)
+    principal: str = dataclass_field(repr=False)
+    security_identity: str = dataclass_field(repr=False)
+
+
+@dataclass(frozen=True)
+class ResolvedConfluenceCredentials:
+    """Machine-local Confluence credentials with a deliberately safe repr."""
+
+    connection_id: str
+    deployment: str
+    base_url: str
+    token_kind: str
+    cloud_id: str | None
+    api_root: str
+    auth_type: str
+    account_email: str = dataclass_field(repr=False)
+    token: str = dataclass_field(repr=False)
+    principal: str = dataclass_field(repr=False)
+    security_identity: str = dataclass_field(repr=False)
+    email: str = dataclass_field(repr=False)
+    api_token: str = dataclass_field(repr=False)
+    password: str = dataclass_field(repr=False)
+
+
 GitLabHttpGet = Callable[
+    [str, Mapping[str, str], float],
+    tuple[int, bytes, Mapping[str, str]],
+]
+ConfluenceHttpGet = Callable[
     [str, Mapping[str, str], float],
     tuple[int, bytes, Mapping[str, str]],
 ]
@@ -160,6 +233,19 @@ def gitlab_project_location(
     )
 
 
+def confluence_connection_id(value: Any) -> str:
+    """Return the canonical form of one random Confluence connection UUID."""
+
+    text = str(value or "").strip()
+    try:
+        parsed = uuid.UUID(text)
+    except (ValueError, AttributeError) as exc:
+        raise SourceManagerError("Confluence connection ID is invalid") from exc
+    if parsed.version != 4:
+        raise SourceManagerError("Confluence connection ID is invalid")
+    return str(parsed)
+
+
 def sharepoint_root_status(
     rag_root: str | Path,
     *,
@@ -203,6 +289,233 @@ def clear_sharepoint_root(rag_root: str | Path) -> None:
     config.pop("sharepoint_root", None)
     config["updated_at"] = _now()
     _save_connections(rag_root, config)
+
+
+def check_confluence_credentials(
+    *,
+    deployment: Any,
+    base_url: Any,
+    token: Any,
+    token_kind: Any = None,
+    cloud_id: Any = None,
+    account_email: Any = None,
+    http_get: ConfluenceHttpGet | None = None,
+) -> ConfluenceCredentialConfirmation:
+    """Verify one Cloud or Data Center identity without persisting secrets."""
+
+    kind = _normalize_confluence_deployment(deployment)
+    root = _canonical_confluence_root(kind, base_url)
+    secret = _validate_secret(token, label="Confluence credential")
+    email = _normalize_confluence_email(account_email, deployment=kind)
+    flavor = _normalize_confluence_token_kind(token_kind, deployment=kind)
+    getter = http_get or _default_http_get
+    resolved_cloud_id: str | None = None
+    if kind == "cloud":
+        if flavor == "scoped":
+            manual_cloud_id = _normalize_confluence_cloud_id(
+                cloud_id,
+                required=False,
+            )
+            discovered_cloud_id = _discover_confluence_cloud_id(getter, root)
+            if discovered_cloud_id is not None:
+                if (
+                    manual_cloud_id is not None
+                    and manual_cloud_id != discovered_cloud_id
+                ):
+                    raise SourceManagerError(
+                        "manual Confluence cloud ID does not match tenant info"
+                    )
+                resolved_cloud_id = discovered_cloud_id
+            elif manual_cloud_id is not None:
+                resolved_cloud_id = manual_cloud_id
+            else:
+                raise SourceManagerError(
+                    "Confluence cloud ID could not be discovered; "
+                    "manual cloud ID is required"
+                )
+            api_root = (
+                "https://api.atlassian.com/ex/confluence/"
+                f"{resolved_cloud_id}/wiki/api/v2"
+            )
+            endpoint = api_root.removesuffix("/api/v2") + "/rest/api/user/current"
+            basic_material = f"{email}:{secret}"
+            authorization = "Basic " + base64.b64encode(
+                basic_material.encode("utf-8")
+            ).decode("ascii")
+        else:
+            if cloud_id not in (None, ""):
+                raise SourceManagerError(
+                    "Confluence cloud ID is only valid for scoped tokens"
+                )
+            api_root = f"{root}/wiki/api/v2"
+            endpoint = f"{root}/wiki/rest/api/user/current"
+            basic_material = f"{email}:{secret}"
+            authorization = "Basic " + base64.b64encode(
+                basic_material.encode("utf-8")
+            ).decode("ascii")
+    else:
+        if cloud_id not in (None, ""):
+            raise SourceManagerError(
+                "Confluence cloud ID is only valid for Cloud"
+            )
+        api_root = f"{root}/rest/api"
+        endpoint = f"{root}/rest/api/user/current"
+        basic_material = ""
+        authorization = f"Bearer {secret}"
+    headers = {
+        "Authorization": authorization,
+        "Accept": "application/json",
+    }
+    try:
+        response = getter(endpoint, headers, 10.0)
+        status = int(response[0])
+        body = bytes(response[1])
+        if status != 200:
+            raise SourceManagerError(
+                "Confluence credential check failed "
+                f"(HTTP {status})"
+            )
+        if len(body) > _MAX_CONFLUENCE_IDENTITY_BYTES:
+            raise SourceManagerError(
+                "Confluence credential check returned an oversized response"
+            )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise SourceManagerError(
+                "Confluence credential check returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise SourceManagerError(
+                "Confluence credential check returned an invalid user"
+            )
+        if kind == "cloud":
+            principal = _normalize_confluence_principal(
+                payload.get("accountId"),
+                label="Confluence Cloud accountId",
+            )
+        else:
+            principal = _normalize_confluence_principal(
+                payload.get("userKey") or payload.get("accountId"),
+                label="Confluence Data Center stable principal",
+            )
+        security_identity = _confluence_security_identity(
+            deployment=kind,
+            base_url=root,
+            token_kind=flavor,
+            cloud_id=resolved_cloud_id,
+            api_root=api_root,
+            principal=principal,
+        )
+        return ConfluenceCredentialConfirmation(
+            deployment=kind,
+            base_url=root,
+            token_kind=flavor,
+            cloud_id=resolved_cloud_id,
+            api_root=api_root,
+            account_email=email,
+            token=secret,
+            principal=principal,
+            security_identity=security_identity,
+        )
+    finally:
+        secret = ""
+        basic_material = ""
+        authorization = ""
+        headers["Authorization"] = ""
+
+
+def register_confluence_connection(
+    rag_root: str | Path,
+    *,
+    display_name: Any,
+    confirmation: ConfluenceCredentialConfirmation,
+    expected_connection_id: Any = None,
+) -> ConfluenceRegistration:
+    """Atomically create, recover, or rotate one verified connection."""
+
+    verified = _validated_confluence_confirmation(confirmation)
+    name = _normalize_confluence_display_name(display_name)
+    config = _load_connections(rag_root)
+    secrets = _load_secrets(rag_root)
+    public_entries = dict(config.get("confluence") or {})
+    secret_entries = dict(secrets.get("confluence") or {})
+    tombstones = _validated_confluence_tombstones(secrets)
+    for raw_id, raw in public_entries.items():
+        confluence_connection_id(raw_id)
+        _validate_confluence_public_entry_fields(raw)
+    if set(public_entries) & set(tombstones):
+        raise SourceManagerError("Confluence connection registry is invalid")
+
+    if expected_connection_id is None:
+        connection_id = str(uuid.uuid4())
+        while (
+            connection_id in public_entries
+            or connection_id in secret_entries
+            or connection_id in tombstones
+        ):
+            connection_id = str(uuid.uuid4())
+    else:
+        connection_id = confluence_connection_id(expected_connection_id)
+        public_present = connection_id in public_entries
+        secret_present = connection_id in secret_entries
+        if public_present != secret_present:
+            raise SourceManagerError(
+                "Confluence connection registration is incomplete"
+            )
+        if public_present:
+            existing = _resolve_confluence_from_payloads(
+                rag_root,
+                connection_id,
+                public_entries[connection_id],
+                secret_entries[connection_id],
+            )
+            if existing.security_identity != verified.security_identity:
+                raise SourceManagerError(
+                    "Confluence security identity does not match"
+                )
+        else:
+            tombstone = tombstones.get(connection_id)
+            if (
+                tombstone is not None
+                and tombstone["security_identity"]
+                != verified.security_identity
+            ):
+                raise SourceManagerError(
+                    "Confluence security identity does not match"
+                )
+
+    updated_at = _now()
+    public_entries[connection_id] = {
+        "display_name": name,
+        "deployment": verified.deployment,
+        "base_url": verified.base_url,
+        "token_kind": verified.token_kind,
+        "cloud_id": verified.cloud_id,
+        "api_root": verified.api_root,
+        "updated_at": updated_at,
+    }
+    secret_entries[connection_id] = {
+        "ciphertext": _encrypt_confluence_credentials(rag_root, verified),
+        "updated_at": updated_at,
+    }
+    config["confluence"] = public_entries
+    config["updated_at"] = updated_at
+    secrets["confluence"] = secret_entries
+    tombstones.pop(connection_id, None)
+    secrets["confluence_tombstones"] = tombstones
+    secrets["updated_at"] = updated_at
+    _save_connection_pair(rag_root, config=config, secrets=secrets)
+    return ConfluenceRegistration(
+        connection_id=connection_id,
+        display_name=name,
+        deployment=verified.deployment,
+        base_url=verified.base_url,
+        token_kind=verified.token_kind,
+        cloud_id=verified.cloud_id,
+        api_root=verified.api_root,
+        registered=True,
+    )
 
 
 def register_redmine_api_key(
@@ -310,6 +623,22 @@ def has_stored_gitlab_token(
     )
 
 
+def has_stored_confluence_credentials(
+    rag_root: str | Path,
+    connection_id: Any,
+) -> bool:
+    identity = confluence_connection_id(connection_id)
+    config = _load_connections(rag_root)
+    configured = (config.get("confluence") or {}).get(identity)
+    secrets = _load_secrets(rag_root)
+    entry = (secrets.get("confluence") or {}).get(identity)
+    return (
+        isinstance(configured, Mapping)
+        and isinstance(entry, Mapping)
+        and bool(entry.get("ciphertext"))
+    )
+
+
 def list_redmine_registrations(
     rag_root: str | Path,
 ) -> tuple[RedmineRegistration, ...]:
@@ -370,6 +699,142 @@ def list_gitlab_registrations(
             )
         )
     return tuple(values)
+
+
+def list_confluence_registrations(
+    rag_root: str | Path,
+) -> tuple[ConfluenceRegistration, ...]:
+    config = _load_connections(rag_root)
+    secrets = _load_secrets(rag_root)
+    public_entries = config.get("confluence") or {}
+    secret_entries = secrets.get("confluence") or {}
+    if not isinstance(public_entries, Mapping) or not isinstance(
+        secret_entries, Mapping
+    ):
+        raise SourceManagerError("Confluence connection registry is invalid")
+    tombstones = _validated_confluence_tombstones(secrets)
+    if set(public_entries) & set(tombstones):
+        raise SourceManagerError("Confluence connection registry is invalid")
+    values: list[ConfluenceRegistration] = []
+    for raw_id, raw in sorted(
+        public_entries.items(),
+        key=lambda item: str(
+            (item[1] or {}).get("display_name")
+            if isinstance(item[1], Mapping)
+            else ""
+        ).casefold(),
+    ):
+        if not isinstance(raw, Mapping):
+            raise SourceManagerError("Confluence connection registry is invalid")
+        _validate_confluence_public_entry_fields(raw)
+        identity = confluence_connection_id(raw_id)
+        name = _normalize_confluence_display_name(raw.get("display_name"))
+        deployment = _normalize_confluence_deployment(raw.get("deployment"))
+        base_url = _canonical_confluence_root(
+            deployment,
+            raw.get("base_url"),
+        )
+        token_kind = _normalize_confluence_token_kind(
+            raw.get("token_kind"),
+            deployment=deployment,
+        )
+        cloud_id = _normalize_confluence_cloud_id(
+            raw.get("cloud_id"),
+            required=deployment == "cloud" and token_kind == "scoped",
+        )
+        api_root = _confluence_api_root(
+            deployment=deployment,
+            base_url=base_url,
+            token_kind=token_kind,
+            cloud_id=cloud_id,
+        )
+        if raw.get("api_root") != api_root:
+            raise SourceManagerError("Confluence connection registry is invalid")
+        secret = secret_entries.get(identity)
+        values.append(
+            ConfluenceRegistration(
+                connection_id=identity,
+                display_name=name,
+                deployment=deployment,
+                base_url=base_url,
+                token_kind=token_kind,
+                cloud_id=cloud_id,
+                api_root=api_root,
+                registered=isinstance(secret, Mapping)
+                and bool(secret.get("ciphertext")),
+            )
+        )
+    return tuple(values)
+
+
+def resolve_confluence_credentials(
+    rag_root: str | Path,
+    connection_id: Any,
+) -> ResolvedConfluenceCredentials | None:
+    identity = confluence_connection_id(connection_id)
+    config = _load_connections(rag_root)
+    secrets = _load_secrets(rag_root)
+    public_entry = (config.get("confluence") or {}).get(identity)
+    secret_entry = (secrets.get("confluence") or {}).get(identity)
+    if public_entry is None and secret_entry is None:
+        return None
+    if not isinstance(public_entry, Mapping) or not isinstance(
+        secret_entry, Mapping
+    ):
+        raise SourceManagerError(
+            "Confluence connection registration is incomplete"
+        )
+    tombstones = _validated_confluence_tombstones(secrets)
+    if identity in tombstones:
+        raise SourceManagerError("Confluence connection registry is invalid")
+    return _resolve_confluence_from_payloads(
+        rag_root,
+        identity,
+        public_entry,
+        secret_entry,
+    )
+
+
+def delete_confluence_connection(
+    rag_root: str | Path,
+    connection_id: Any,
+) -> bool:
+    identity = confluence_connection_id(connection_id)
+    config = _load_connections(rag_root)
+    secrets = _load_secrets(rag_root)
+    public_entries = dict(config.get("confluence") or {})
+    secret_entries = dict(secrets.get("confluence") or {})
+    tombstones = _validated_confluence_tombstones(secrets)
+    public_present = identity in public_entries
+    secret_present = identity in secret_entries
+    if not public_present and not secret_present:
+        return False
+    if public_present != secret_present:
+        raise SourceManagerError(
+            "Confluence connection registration is incomplete"
+        )
+    if identity in tombstones:
+        raise SourceManagerError("Confluence connection registry is invalid")
+    existing = _resolve_confluence_from_payloads(
+        rag_root,
+        identity,
+        public_entries[identity],
+        secret_entries[identity],
+    )
+    public_entries.pop(identity, None)
+    secret_entries.pop(identity, None)
+    updated_at = _now()
+    tombstones[identity] = {
+        "security_identity": existing.security_identity,
+        "updated_at": updated_at,
+    }
+    config["confluence"] = public_entries
+    config["updated_at"] = updated_at
+    secrets["confluence"] = secret_entries
+    secrets["confluence_tombstones"] = tombstones
+    secrets["updated_at"] = updated_at
+    _save_connection_pair(rag_root, config=config, secrets=secrets)
+    return True
 
 
 def resolve_redmine_api_key(
@@ -664,11 +1129,470 @@ def install_machine_connection_runtime() -> None:
         setattr(package, "update_source", update_source)
 
 
+def _normalize_confluence_deployment(value: Any) -> str:
+    deployment = str(value or "").strip().lower()
+    if deployment not in _CONFLUENCE_DEPLOYMENTS:
+        raise SourceManagerError(
+            "Confluence deployment must be cloud or data_center"
+        )
+    return deployment
+
+
+def _normalize_confluence_token_kind(
+    value: Any,
+    *,
+    deployment: str,
+) -> str:
+    if deployment == "data_center":
+        normalized = str(value or "pat").strip().lower()
+        if normalized != "pat":
+            raise SourceManagerError(
+                "Confluence Data Center credential kind must be pat"
+            )
+        return normalized
+    normalized = str(value or "").strip().lower()
+    if normalized not in _CONFLUENCE_CLOUD_TOKEN_KINDS:
+        raise SourceManagerError(
+            "Confluence Cloud token kind must be unscoped or scoped"
+        )
+    return normalized
+
+
+def _canonical_confluence_root(deployment: str, value: Any) -> str:
+    root = _canonical_web_root(value, field="Confluence base URL")
+    if deployment == "cloud":
+        split = urllib.parse.urlsplit(root)
+        path = split.path.rstrip("/")
+        if path.casefold() == "/wiki":
+            path = ""
+        if path:
+            raise SourceManagerError(
+                "Confluence Cloud base URL must be the tenant root"
+            )
+        return urllib.parse.urlunsplit(
+            (split.scheme, split.netloc, "", "", "")
+        )
+    return root
+
+
+def _normalize_confluence_email(value: Any, *, deployment: str) -> str:
+    email = str(value or "").strip()
+    if deployment == "data_center":
+        if email:
+            raise SourceManagerError(
+                "Confluence account email is only valid for Cloud"
+            )
+        return ""
+    if (
+        not email
+        or len(email) > 320
+        or any(ord(character) < 0x20 for character in email)
+    ):
+        raise SourceManagerError("Confluence Cloud account email is invalid")
+    return email
+
+
+def _normalize_confluence_principal(value: Any, *, label: str) -> str:
+    principal = str(value or "").strip()
+    if (
+        not principal
+        or len(principal) > 1024
+        or any(ord(character) < 0x20 for character in principal)
+    ):
+        raise SourceManagerError(f"{label} is missing or invalid")
+    return principal
+
+
+def _normalize_confluence_display_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if (
+        not name
+        or len(name) > 200
+        or any(ord(character) < 0x20 for character in name)
+    ):
+        raise SourceManagerError("Confluence connection display name is invalid")
+    return name
+
+
+def _validate_confluence_public_entry_fields(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != _CONFLUENCE_PUBLIC_FIELDS:
+        raise SourceManagerError("Confluence public connection data is invalid")
+
+
+def _validated_confluence_tombstones(
+    secrets: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    raw_tombstones = secrets.get("confluence_tombstones") or {}
+    if not isinstance(raw_tombstones, Mapping):
+        raise SourceManagerError("Confluence connection tombstones are invalid")
+    values: dict[str, dict[str, str]] = {}
+    for raw_id, raw in raw_tombstones.items():
+        identity = confluence_connection_id(raw_id)
+        if identity != str(raw_id) or identity in values:
+            raise SourceManagerError(
+                "Confluence connection tombstones are invalid"
+            )
+        if not isinstance(raw, Mapping) or set(raw) != _CONFLUENCE_TOMBSTONE_FIELDS:
+            raise SourceManagerError(
+                "Confluence connection tombstones are invalid"
+            )
+        security_identity = str(raw.get("security_identity") or "")
+        updated_at = str(raw.get("updated_at") or "").strip()
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", security_identity)
+            or not updated_at
+            or any(ord(character) < 0x20 for character in updated_at)
+        ):
+            raise SourceManagerError(
+                "Confluence connection tombstones are invalid"
+            )
+        values[identity] = {
+            "security_identity": security_identity,
+            "updated_at": updated_at,
+        }
+    return values
+
+
+def _normalize_confluence_cloud_id(
+    value: Any,
+    *,
+    required: bool,
+) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        if required:
+            raise SourceManagerError("Confluence cloud ID is missing")
+        return None
+    try:
+        return str(uuid.UUID(text))
+    except (ValueError, AttributeError) as exc:
+        raise SourceManagerError("Confluence cloud ID is invalid") from exc
+
+
+def _discover_confluence_cloud_id(
+    getter: ConfluenceHttpGet,
+    base_url: str,
+) -> str | None:
+    try:
+        response = getter(
+            f"{base_url}/_edge/tenant_info",
+            {"Accept": "application/json"},
+            10.0,
+        )
+        if int(response[0]) != 200:
+            return None
+        body = bytes(response[1])
+        if len(body) > _MAX_CONFLUENCE_IDENTITY_BYTES:
+            return None
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, Mapping):
+            return None
+        return _normalize_confluence_cloud_id(
+            payload.get("cloudId"),
+            required=True,
+        )
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+        urllib.error.URLError,
+    ):
+        return None
+
+
+def _confluence_api_root(
+    *,
+    deployment: str,
+    base_url: str,
+    token_kind: str,
+    cloud_id: str | None,
+) -> str:
+    if deployment == "data_center":
+        if token_kind != "pat" or cloud_id is not None:
+            raise SourceManagerError("Confluence connection registry is invalid")
+        return f"{base_url}/rest/api"
+    if token_kind == "unscoped":
+        if cloud_id is not None:
+            raise SourceManagerError("Confluence connection registry is invalid")
+        return f"{base_url}/wiki/api/v2"
+    identity = _normalize_confluence_cloud_id(cloud_id, required=True)
+    return (
+        "https://api.atlassian.com/ex/confluence/"
+        f"{identity}/wiki/api/v2"
+    )
+
+
+def _confluence_security_identity(
+    *,
+    deployment: str,
+    base_url: str,
+    token_kind: str,
+    cloud_id: str | None,
+    api_root: str,
+    principal: str,
+) -> str:
+    body = "\0".join(
+        (
+            _CONFLUENCE_SECURITY_IDENTITY_SCHEMA,
+            deployment,
+            base_url,
+            token_kind,
+            cloud_id or "",
+            api_root,
+            principal,
+        )
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _validated_confluence_confirmation(
+    value: Any,
+) -> ConfluenceCredentialConfirmation:
+    if not isinstance(value, ConfluenceCredentialConfirmation):
+        raise SourceManagerError(
+            "Confluence credentials must be confirmed before registration"
+        )
+    deployment = _normalize_confluence_deployment(value.deployment)
+    base_url = _canonical_confluence_root(deployment, value.base_url)
+    token_kind = _normalize_confluence_token_kind(
+        value.token_kind,
+        deployment=deployment,
+    )
+    cloud_id = _normalize_confluence_cloud_id(
+        value.cloud_id,
+        required=deployment == "cloud" and token_kind == "scoped",
+    )
+    api_root = _confluence_api_root(
+        deployment=deployment,
+        base_url=base_url,
+        token_kind=token_kind,
+        cloud_id=cloud_id,
+    )
+    if value.api_root != api_root:
+        raise SourceManagerError("Confluence confirmed API root is invalid")
+    email = _normalize_confluence_email(
+        value.account_email,
+        deployment=deployment,
+    )
+    token = _validate_secret(value.token, label="Confluence credential")
+    principal = _normalize_confluence_principal(
+        value.principal,
+        label="Confluence stable principal",
+    )
+    identity = _confluence_security_identity(
+        deployment=deployment,
+        base_url=base_url,
+        token_kind=token_kind,
+        cloud_id=cloud_id,
+        api_root=api_root,
+        principal=principal,
+    )
+    if value.security_identity != identity:
+        raise SourceManagerError(
+            "Confluence confirmed security identity is invalid"
+        )
+    return ConfluenceCredentialConfirmation(
+        deployment=deployment,
+        base_url=base_url,
+        token_kind=token_kind,
+        cloud_id=cloud_id,
+        api_root=api_root,
+        account_email=email,
+        token=token,
+        principal=principal,
+        security_identity=identity,
+    )
+
+
+def _encrypt_confluence_credentials(
+    rag_root: str | Path,
+    value: ConfluenceCredentialConfirmation,
+) -> str:
+    payload = {
+        "schema_version": _CONFLUENCE_CREDENTIAL_SCHEMA,
+        "deployment": value.deployment,
+        "base_url": value.base_url,
+        "token_kind": value.token_kind,
+        "cloud_id": value.cloud_id,
+        "api_root": value.api_root,
+        "account_email": value.account_email,
+        "token": value.token,
+        "principal": value.principal,
+        "security_identity": value.security_identity,
+    }
+    return _encrypt_secret(
+        rag_root,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _resolve_confluence_from_payloads(
+    rag_root: str | Path,
+    connection_id: str,
+    public_entry: Any,
+    secret_entry: Any,
+) -> ResolvedConfluenceCredentials:
+    if not isinstance(public_entry, Mapping) or not isinstance(
+        secret_entry, Mapping
+    ):
+        raise SourceManagerError(
+            "Confluence connection registration is incomplete"
+        )
+    _validate_confluence_public_entry_fields(public_entry)
+    ciphertext = str(secret_entry.get("ciphertext") or "").strip()
+    if not ciphertext:
+        raise SourceManagerError(
+            "Confluence connection registration is incomplete"
+        )
+    try:
+        payload = json.loads(
+            _decrypt_secret(
+                rag_root,
+                ciphertext,
+                label="Confluence credentials",
+            )
+        )
+    except json.JSONDecodeError as exc:
+        raise SourceManagerError(
+            "stored Confluence credentials are invalid"
+        ) from exc
+    if not isinstance(payload, Mapping) or payload.get(
+        "schema_version"
+    ) != _CONFLUENCE_CREDENTIAL_SCHEMA:
+        raise SourceManagerError("stored Confluence credentials are invalid")
+    confirmation = _validated_confluence_confirmation(
+        ConfluenceCredentialConfirmation(
+            deployment=payload.get("deployment"),
+            base_url=payload.get("base_url"),
+            token_kind=payload.get("token_kind"),
+            cloud_id=payload.get("cloud_id"),
+            api_root=payload.get("api_root"),
+            account_email=payload.get("account_email"),
+            token=payload.get("token"),
+            principal=payload.get("principal"),
+            security_identity=payload.get("security_identity"),
+        )
+    )
+    deployment = _normalize_confluence_deployment(public_entry.get("deployment"))
+    base_url = _canonical_confluence_root(
+        deployment,
+        public_entry.get("base_url"),
+    )
+    token_kind = _normalize_confluence_token_kind(
+        public_entry.get("token_kind"),
+        deployment=deployment,
+    )
+    cloud_id = _normalize_confluence_cloud_id(
+        public_entry.get("cloud_id"),
+        required=deployment == "cloud" and token_kind == "scoped",
+    )
+    api_root = _confluence_api_root(
+        deployment=deployment,
+        base_url=base_url,
+        token_kind=token_kind,
+        cloud_id=cloud_id,
+    )
+    if public_entry.get("api_root") != api_root or any(
+        (
+            confirmation.deployment != deployment,
+            confirmation.base_url != base_url,
+            confirmation.token_kind != token_kind,
+            confirmation.cloud_id != cloud_id,
+            confirmation.api_root != api_root,
+        )
+    ):
+        raise SourceManagerError("Confluence connection identity is inconsistent")
+    return ResolvedConfluenceCredentials(
+        connection_id=connection_id,
+        deployment=deployment,
+        base_url=base_url,
+        token_kind=token_kind,
+        cloud_id=cloud_id,
+        api_root=api_root,
+        auth_type="basic" if deployment == "cloud" else "bearer",
+        account_email=confirmation.account_email,
+        token=confirmation.token,
+        principal=confirmation.principal,
+        security_identity=confirmation.security_identity,
+        email=confirmation.account_email if deployment == "cloud" else "",
+        api_token=confirmation.token if deployment == "cloud" else "",
+        password=confirmation.token if deployment == "data_center" else "",
+    )
+
+
+def _save_connection_pair(
+    rag_root: str | Path,
+    *,
+    config: Mapping[str, Any],
+    secrets: Mapping[str, Any],
+) -> None:
+    config_path = connection_config_path(rag_root)
+    secret_path = connection_secret_path(rag_root)
+    config_snapshot = _connection_file_snapshot(config_path)
+    secret_snapshot = _connection_file_snapshot(secret_path)
+    try:
+        _save_secrets(rag_root, secrets)
+        _save_connections(rag_root, config)
+    except Exception:
+        try:
+            _restore_connection_file(secret_path, secret_snapshot)
+            _restore_connection_file(config_path, config_snapshot)
+        except Exception as rollback_error:
+            raise SourceManagerError(
+                "machine Source connection transaction rollback failed"
+            ) from rollback_error
+        raise
+
+
+def _connection_file_snapshot(path: Path) -> bytes | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise SourceManagerError(
+            f"machine Source connection settings are invalid: {path.name}"
+        )
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise SourceManagerError(
+            f"machine Source connection settings are invalid: {path.name}"
+        ) from exc
+
+
+def _restore_connection_file(path: Path, snapshot: bytes | None) -> None:
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.rollback.",
+        dir=str(path.parent),
+    )
+    try:
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(snapshot)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
 def _default_connections() -> dict[str, Any]:
     return {
         "schema_version": CONNECTION_SCHEMA_VERSION,
         "redmine": {},
         "gitlab": {},
+        "confluence": {},
     }
 
 
@@ -677,6 +1601,8 @@ def _default_secrets() -> dict[str, Any]:
         "schema_version": SECRET_SCHEMA_VERSION,
         "redmine": {},
         "gitlab": {},
+        "confluence": {},
+        "confluence_tombstones": {},
     }
 
 
@@ -701,6 +1627,7 @@ def _save_connections(rag_root: str | Path, value: Mapping[str, Any]) -> None:
     payload["schema_version"] = CONNECTION_SCHEMA_VERSION
     payload.setdefault("redmine", {})
     payload.setdefault("gitlab", {})
+    payload.setdefault("confluence", {})
     _atomic_json(connection_config_path(rag_root), payload)
 
 
@@ -709,6 +1636,8 @@ def _save_secrets(rag_root: str | Path, value: Mapping[str, Any]) -> None:
     payload["schema_version"] = SECRET_SCHEMA_VERSION
     payload.setdefault("redmine", {})
     payload.setdefault("gitlab", {})
+    payload.setdefault("confluence", {})
+    payload.setdefault("confluence_tombstones", {})
     _atomic_json(connection_secret_path(rag_root), payload)
 
 
