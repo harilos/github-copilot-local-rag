@@ -1,4 +1,1 @@
 *.jsonl -text
-tools/experiments/agent_003_copilot_cli_prod/data/r3-historical-harness/** text eol=lf
-tools/experiments/agent_003_copilot_cli_prod/data/r5-prefix-historical-harness/** text eol=lf
-tools/experiments/agent_003_copilot_cli_prod/data/r6-thorough-failure-historical-harness/** text eol=lf

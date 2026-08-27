@@ -121,13 +121,8 @@ class Python313DependencyContracts(unittest.TestCase):
         self.assertEqual("2.0.0", requirements["optimum"])
 
     def test_active_ci_installer_and_lock_entry_points_use_python313(self) -> None:
-        workflow = (REPOSITORY_ROOT / ".github/workflows/source-link-e2e.yml").read_text(
-            encoding="utf-8"
-        )
         installer = (REPOSITORY_ROOT / "install.ps1").read_text(encoding="utf-8")
         setup = (RAG_ROOT / "query/setup.py").read_text(encoding="utf-8")
-        self.assertIn('python-version: "3.13"', workflow)
-        self.assertNotRegex(workflow, r'python-version:\s*"3\.(?:10|11|12)"')
         self.assertIn("(3, 13) <= sys.version_info[:2] < (3, 14)", setup)
         self.assertIn("requirements-windows-admin.lock", setup)
         self.assertIn("sys.implementation.name == 'cpython'", installer)

@@ -1,9 +1,0 @@
-{"id": "AC_EXACT_001", "db": "ac-rag", "type": "exact", "question": "A2Wに関する情報を教えて"}
-{"id": "AC_SEM_001", "db": "ac-rag", "type": "semantic", "question": "冷房需要が増える背景を資料から説明して"}
-{"id": "AC_BROAD_001", "db": "ac-rag", "type": "broad", "question": "空調市場で効率化と冷媒転換が重要な理由を複数資料からまとめて"}
-{"id": "INC_EXACT_001", "db": "incident-rag", "type": "exact", "question": "ntsb_aviation_report_67438 の事故情報を教えて"}
-{"id": "INC_SEM_001", "db": "incident-rag", "type": "semantic", "question": "離陸後にエンジン故障が起きた事故の原因に関する根拠を探して"}
-{"id": "INC_BROAD_001", "db": "incident-rag", "type": "broad", "question": "landing gear collapse に関する事故の傾向を資料から拾って"}
-{"id": "RFC_EXACT_001", "db": "rfc-full-20k-rag", "type": "exact", "question": "RFC10026 の内容を教えて"}
-{"id": "RFC_SEM_001", "db": "rfc-full-20k-rag", "type": "semantic", "question": "DNSSEC Delegation Signer automation は何を自動化する仕様か"}
-{"id": "RFC_BROAD_001", "db": "rfc-full-20k-rag", "type": "broad", "question": "QUIC transport protocol の congestion control に関する根拠を探して"}

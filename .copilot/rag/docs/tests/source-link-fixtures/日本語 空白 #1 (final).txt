@@ -1,3 +1,0 @@
-LOCAL_RAG_SOURCE_LINK_FIXTURE_V1
-
-This synthetic document verifies UTF-8 and reserved-character URL encoding.
