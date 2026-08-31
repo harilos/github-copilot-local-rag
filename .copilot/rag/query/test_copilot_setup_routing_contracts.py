@@ -40,49 +40,47 @@ class CopilotSetupRoutingContracts(unittest.TestCase):
             self.assertIn("RAG_ROOT = Path(__file__).resolve().parent", text)
             self.assertIn("sys.path.insert(0, str(RAG_ROOT))", text)
 
-    def test_lookup_skill_routes_setup_required_to_setup_skill(self) -> None:
+    def test_lookup_skill_owns_bounded_setup_required_handling(self) -> None:
         text = (COPILOT_ROOT / "skills" / "local-rag" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("`local-rag-setup` Skill", text)
+        self.assertIn("## Setup handling", text)
+        self.assertIn("run the same runner once with `setup`", text)
+        self.assertIn("setup_complete=true", text)
         self.assertNotIn("Please run setup from Local RAG Manager", text)
-        self.assertNotIn("Do not run setup from Copilot", text)
+        self.assertFalse(
+            (
+                COPILOT_ROOT
+                / "skills"
+                / "local-rag-setup"
+                / "SKILL.md"
+            ).exists()
+        )
 
-    def test_shared_instructions_allow_copilot_setup(self) -> None:
-        text = (
-            COPILOT_ROOT / "instructions" / "rag.instructions.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("run the public `~/.copilot/rag/setup.py`", text)
-        self.assertIn("Do not redirect", text)
-        self.assertNotIn("Do not attempt setup from Copilot", text)
-
-    def test_routing_frontmatter_is_global_but_activation_remains_explicit(self) -> None:
-        text = (
-            COPILOT_ROOT / "instructions" / "rag.instructions.md"
-        ).read_text(encoding="utf-8")
+    def test_skill_frontmatter_is_manual_and_user_invocable(self) -> None:
+        text = (COPILOT_ROOT / "skills" / "local-rag" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
         header = self._frontmatter(text)
-        normalized = " ".join(text.split())
-        self.assertEqual("Local RAG Routing", header["name"])
-        self.assertEqual("**", header["applyTo"])
-        self.assertIn("explicitly asks", text)
-        self.assertIn("Do not activate lookup merely", normalized)
+        self.assertEqual("local-rag", header["name"])
+        self.assertEqual("true", header["user-invocable"])
+        self.assertEqual("true", header["disable-model-invocation"])
+        self.assertIn("explicitly invokes `/local-rag`", text)
+        self.assertFalse(
+            (COPILOT_ROOT / "instructions" / "rag.instructions.md").exists()
+        )
 
-    def test_router_and_skill_forbid_preflight_private_reads(self) -> None:
-        router = (
-            COPILOT_ROOT / "instructions" / "rag.instructions.md"
-        ).read_text(encoding="utf-8")
+    def test_skill_forbids_preflight_private_reads(self) -> None:
         skill = (
             COPILOT_ROOT / "skills" / "local-rag" / "SKILL.md"
         ).read_text(encoding="utf-8")
-        for text in (router, skill):
-            self.assertIn("Before ordinary lookup, do not Read", text)
-            self.assertIn("public command fails", text.casefold())
-            self.assertIn("private", text.casefold())
-        normalized_router = " ".join(router.split())
-        self.assertIn("PowerShell syntax in PowerShell", normalized_router)
-        self.assertIn("Git Bash syntax in Git Bash", normalized_router)
+        normalized = " ".join(skill.split())
+        self.assertIn("Do not inspect, list, probe, or analyze", normalized)
+        self.assertIn("runner fails", normalized)
+        self.assertIn("private", skill.casefold())
+        self.assertIn("use only the example for the current terminal shell", normalized)
 
-    def test_skill_has_list_and_search_examples_for_both_windows_shells(self) -> None:
+    def test_skill_has_isolated_runner_examples_for_each_shell(self) -> None:
         text = (
             COPILOT_ROOT / "skills" / "local-rag" / "SKILL.md"
         ).read_text(encoding="utf-8")
@@ -90,22 +88,24 @@ class CopilotSetupRoutingContracts(unittest.TestCase):
             "### Windows Git Bash", 1
         )[0]
         git_bash = text.split("### Windows Git Bash", 1)[1].split(
-            "## Per-search result handling", 1
+            "### macOS/Linux", 1
         )[0]
         for section in (powershell, git_bash):
-            self.assertIn("list_dbs.py", section)
-            self.assertIn("search.py", section)
-        self.assertIn("Do not put", git_bash)
+            self.assertIn("skill_runner.py", section)
+            self.assertIn(" list", section)
+            self.assertIn(" search", section)
+            self.assertIn(" detail", section)
+            self.assertIn(" -I -B ", section)
+        self.assertIn("single quote", text)
+        self.assertIn("shell history", text)
 
-    def test_setup_skill_uses_public_entry_point(self) -> None:
-        text = (
-            COPILOT_ROOT / "skills" / "local-rag-setup" / "SKILL.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("fixed, verified Python runtime", text)
-        self.assertIn(".venv\\Scripts\\python.exe", text)
-        self.assertIn("packaged setup is offline", text.casefold())
+    def test_missing_runtime_setup_uses_only_the_public_entry_point(self) -> None:
+        text = (COPILOT_ROOT / "skills" / "local-rag" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tell the human to rerun the Local RAG installer", text)
         self.assertIn("~/.copilot/rag/setup.py", text)
-        self.assertIn("Do not invoke `query/setup.py` directly", text)
+        self.assertIn("Do not inspect private setup modules", text)
 
 
 if __name__ == "__main__":

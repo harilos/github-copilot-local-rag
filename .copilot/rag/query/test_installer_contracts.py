@@ -74,6 +74,11 @@ class InstallerExclusionContractTests(unittest.TestCase):
             "./rag/config/manage-custom.json",
             "./rag/config/windows-test-connection.local.json",
             "./rag/query/run",
+            "./rag/query/agent003_answer_packet.py",
+            "./rag/query/mcp_server.py",
+            "./rag/copilot-cli",
+            "./instructions/rag.instructions.md",
+            "./skills/local-rag-setup",
             "*/.venv",
             "*/__pycache__",
             "*.pyc",
@@ -87,6 +92,11 @@ class InstallerExclusionContractTests(unittest.TestCase):
             r"rag\config\manage-custom.json",
             r"rag\config\windows-test-connection.local.json",
             r"rag\query\run",
+            r"rag\query\agent003_answer_packet.py",
+            r"rag\query\mcp_server.py",
+            r"rag\copilot-cli",
+            r"instructions\rag.instructions.md",
+            r"skills\local-rag-setup",
             '".venv"',
             '"__pycache__"',
             '".pyc"',
@@ -136,6 +146,10 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 "source_metadata_migration.py"
             ),
             "skills/local-rag-admin/SKILL.md",
+            "rag/query/agent003_answer_packet.py",
+            "rag/query/mcp_server.py",
+            "instructions/rag.instructions.md",
+            "skills/local-rag-setup/SKILL.md",
         ):
             self.assertIn(retired, shell)
             self.assertIn(retired.replace("/", "\\"), powershell)
@@ -231,6 +245,16 @@ class InstallerExclusionContractTests(unittest.TestCase):
                     / "source_metadata_migration.py"
                 ),
                 target / "skills" / "local-rag-admin" / "SKILL.md",
+                target / "rag" / "query" / "agent003_answer_packet.py",
+                target / "rag" / "query" / "mcp_server.py",
+                target / "instructions" / "rag.instructions.md",
+                target / "skills" / "local-rag-setup" / "SKILL.md",
+                (
+                    target
+                    / "rag"
+                    / "copilot-cli"
+                    / "local-rag-agent003-standard.agent.md"
+                ),
             )
             for retired in retired_files:
                 retired.parent.mkdir(parents=True, exist_ok=True)
@@ -333,6 +357,10 @@ class InstallerExclusionContractTests(unittest.TestCase):
             self.assertFalse(
                 (target / "skills" / "local-rag-admin").exists()
             )
+            self.assertFalse(
+                (target / "skills" / "local-rag-setup").exists()
+            )
+            self.assertFalse((target / "rag" / "copilot-cli").exists())
 
     @unittest.skipIf(
         os.name == "nt",
@@ -538,45 +566,21 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 [], list(target_query.glob(".rag-deps-installed.*.pre-update.*"))
             )
             target = target_query.parents[1]
-            self.assertTrue((target / "mcp-config.json").is_file())
-            self.assertTrue((target / "copilot-cli" / "owned-manifest.json").is_file())
-            shared_agents = {
-                "local-rag-agent003-savings.agent.md",
-                "local-rag-agent003-standard.agent.md",
-                "local-rag-agent003-thorough.agent.md",
-            }
-            self.assertEqual(
-                shared_agents,
-                {path.name for path in (target / "agents").glob("*.agent.md")},
+            self.assertFalse((target / "mcp-config.json").exists())
+            self.assertFalse(
+                (target / "copilot-cli" / "owned-manifest.json").exists()
             )
-            for filename in shared_agents:
-                self.assertTrue((target / "agents" / filename).is_file())
-            for filename in (
-                "internal-doc-search.agent.md",
-                "agent003-readonly-local-rag.agent.md",
-                "internal-doc-deep-research.agent.md",
-            ):
-                self.assertFalse((target / "agents" / filename).exists())
+            self.assertFalse((target / "agents").exists())
             profile_path = root / "managed-success-profile.ps1"
-            self.assertIn(
-                "# >>> Local RAG Agent003 CLI (owned) >>>",
-                profile_path.read_text(encoding="utf-8"),
-            )
+            self.assertFalse(profile_path.exists())
             for summary in (
-                "Copilot CLI MCP: configured",
-                "Copilot CLI agents: installed",
-                "Copilot CLI launcher-scoped read-only approval: enabled",
+                "Local RAG slash Skill: READY",
+                "Legacy Agent003 integration: absent",
             ):
                 self.assertIn(summary, completed.stdout)
-            self.assertRegex(
-                completed.stdout,
-                r"(?m)^Copilot CLI executable: (detected|not_detected)\r?$",
-            )
             for label in (
-                "Copilot CLI MCP:",
-                "Copilot CLI agents:",
-                "Copilot CLI launcher-scoped read-only approval:",
-                "Copilot CLI executable:",
+                "Local RAG slash Skill:",
+                "Legacy Agent003 integration:",
             ):
                 self.assertEqual(1, completed.stdout.count(label))
 
@@ -586,7 +590,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 runtime=True,
                 cli_collision=True,
             )
-            self.assertNotEqual(0, collision.returncode)
+            self.assertEqual(0, collision.returncode, collision.stderr)
             collision_target = collision_query.parents[1]
             self.assertEqual(
                 b'{"mcpServers":{"localragagent003":{"type":"http",'
@@ -594,21 +598,19 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 (collision_target / "mcp-config.json").read_bytes(),
             )
             self.assertEqual(
-                "OLD\n",
+                "NEW\n",
                 (collision_query / "product.py").read_text(encoding="utf-8"),
             )
             self.assertFalse((collision_target / "agents").exists())
             self.assertFalse((collision_target / "copilot-cli").exists())
             self.assertFalse((root / "cli-collision-profile.ps1").exists())
             self.assertIn(
-                "Copilot CLI MCP: blocked_collision",
+                "Legacy Agent003 integration: absent",
                 collision.stdout,
             )
             for label in (
-                "Copilot CLI MCP:",
-                "Copilot CLI agents:",
-                "Copilot CLI launcher-scoped read-only approval:",
-                "Copilot CLI executable:",
+                "Local RAG slash Skill:",
+                "Legacy Agent003 integration:",
             ):
                 self.assertEqual(1, collision.stdout.count(label))
 

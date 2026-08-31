@@ -19,55 +19,40 @@ The separate official Windows x64 distribution ZIP embeds its fixed Python,
 locked dependencies, and ONNX model. After extracting the ZIP, the recipient
 runs its top-level `install.cmd`. Packaged installation is offline, never falls
 back to system Python, and needs no setup request after installation succeeds.
-It installs three user-level `LOCAL-RAG` custom Agents and registers their
-fixed read-only MCP server for the normal VS Code Default Profile. Restart VS Code after
-installation or update. These Agents do not use `runInTerminal`, `readFile`,
-Workspace files, or Web, and the installer does not change approval settings.
+It installs the personal `/local-rag` Skill under `~/.copilot/skills`, shared
+by VS Code and GitHub Copilot CLI. Restart VS Code after installation or
+update. The installer does not register MCP, install custom Agents, modify a
+PowerShell profile, or change approval settings. When updating an older
+Agent003 installation, it removes only exact product-owned legacy artifacts.
 
-For GitHub Copilot CLI in PowerShell 7, run `local-rag-copilot` (standard), or
-add `-Tier savings|standard|thorough`. The dedicated launcher preserves the
-current working directory, pins the owned Agent and MCP definition, and grants
-session-scoped permission only to `local_rag_search` and
-`local_rag_get_evidence`. It does not replace normal `copilot`, change
-authentication or existing sessions, write persistent global permissions, or
-change VS Code approval settings.
+## `/local-rag` Skill
 
-The receiving user's `~/.copilot/copilot-instructions.md` must contain:
-
-<!-- markdownlint-disable MD013 -->
+Use the Skill explicitly in VS Code Copilot Chat Agent mode or in a normal
+Copilot CLI session:
 
 ```text
-For requests to use RAG, local documents, internal or company information, or information installed in or provided to Copilot, read ~/.copilot/instructions/rag.instructions.md.
+/local-rag <question>
+/local-rag mode=savings <question>
+/local-rag mode=thorough <question>
 ```
 
-<!-- markdownlint-enable MD013 -->
+`standard` is the default. Savings makes one retrieval search. Standard makes
+one search for a direct question and at most four distinct searches for a
+broad question. Thorough makes three to four distinct searches and reviews
+coverage before answering. All modes inherit the currently selected model.
 
-## VS Code custom Agents
+The Skill is manual-only and invokes the fixed `skill_runner.py` through the
+host terminal. The runner can only list databases, search one database, read
+cached detail, or run the public setup operation after `setup_required`.
+Lookup operations are read-only. The Skill does not pre-approve shell or
+terminal use, so honor the host approval prompt.
 
-Select one of these user-level Agents in VS Code Copilot Chat Agent mode:
-
-| Agent | Use it for | Model policy |
-|---|---|---|
-| `LOCAL-RAG-標準` | Ordinary questions; adjusts search depth to the question | Inherits the current VS Code selection, including Auto |
-| `LOCAL-RAG-節約` | Short checks of terms, identifiers, and simple facts | Inherits the current VS Code selection, including Auto |
-| `LOCAL-RAG-徹底検索` | Multi-angle comparisons and contradiction checks | Inherits the current VS Code selection, including Auto |
-
-All three expose only `local_rag_search` and `local_rag_get_evidence`
-through `localragagent003/*`. They cannot use terminal, PowerShell, file,
-Workspace, Web, subagents, Manager, or write operations. Once an Agent is
-selected, ask the question directly; no separate setup or RAG-routing prompt is
-required. If database routing is not unambiguous, repeat the question with the
+If database routing is not unambiguous, repeat the invocation with the
 administrator-provided `<database>-rag` name.
 
-The same three definitions are shared by VS Code and GitHub Copilot CLI. The
-dedicated CLI launcher selects savings from its verified allowlist (currently
-`claude-haiku-4.5`) and explicitly selects `auto` for standard and thorough.
+## Public Python lookup boundary
 
-## Diagnostic Python lookup boundary
-
-This diagnostic Python CLI is separate from the shared custom Agents above. It
-has two public entry points. The custom Agents use the MCP
-tools above instead of invoking these scripts directly:
+The Skill runner delegates to these existing public entry points:
 
 ```text
 ~/.copilot/rag/list_dbs.py
@@ -277,8 +262,6 @@ interpreters.
 
 ```text
 ~/.copilot/
-  instructions/
-    rag.instructions.md
   skills/
     local-rag/
       SKILL.md
@@ -286,7 +269,9 @@ interpreters.
     list_dbs.py
     search.py
     manage.py
-    query/                  # internal runtime
+    query/
+      skill_runner.py       # fixed Skill command boundary
+      ...                   # internal runtime
     gen_db/                 # internal ingestion/index implementation
     source_manager/         # acquisition and package primitives
     config/
@@ -296,7 +281,7 @@ interpreters.
     docs/
 ```
 
-The lower runtime and ingestion scripts are implementation details. The three
-custom Agents use only the two read-only MCP tools. The two root public entry
-points are for direct diagnostic CLI lookup, not the Agent execution path.
-Human changes go through Local RAG Manager.
+The lower runtime and ingestion scripts are implementation details. The
+`/local-rag` Skill uses `skill_runner.py`, which delegates only to the root
+public lookup and setup entry points. Human changes go through Local RAG
+Manager.

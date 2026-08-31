@@ -307,6 +307,148 @@ class CopilotCliSetupContracts(unittest.TestCase):
                 (self.home / "agents" / name).read_bytes(),
             )
 
+    def test_retire_is_absent_and_does_not_claim_legacy_named_state(self) -> None:
+        config = self.home / "mcp-config.json"
+        config.write_bytes(
+            b'{"mcpServers":{"localragagent003":'
+            b'{"type":"http","url":"https://foreign.invalid"}}}\n'
+        )
+        vscode = self.root / "Code" / "User" / "mcp.json"
+        vscode.parent.mkdir(parents=True)
+        vscode.write_bytes(
+            b'{"servers":{"localragagent003":'
+            b'{"type":"http","url":"https://foreign.invalid"}}}\n'
+        )
+        agent = self.home / "agents" / setup.AGENT_NAMES[0]
+        agent.parent.mkdir()
+        agent.write_bytes(b"foreign-agent")
+        launcher = self.product / setup.BUNDLE_NAME / setup.LAUNCHER_NAME
+        launcher.parent.mkdir(parents=True)
+        launcher.write_bytes(b"foreign-launcher")
+        self.profile.parent.mkdir(parents=True)
+        self.profile.write_bytes(b"# foreign profile\n")
+        before = {
+            path: path.read_bytes()
+            for path in (config, vscode, agent, launcher, self.profile)
+        }
+
+        first = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+            vscode_mcp_config=vscode,
+        )
+        second = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+            vscode_mcp_config=vscode,
+        )
+
+        self.assertEqual("absent", first["status"])
+        self.assertEqual("absent", second["status"])
+        for path, content in before.items():
+            self.assertEqual(content, path.read_bytes())
+        self.assertFalse(setup._manifest_path(self.product).exists())
+
+    def test_retire_cli_action_reports_absent_as_json(self) -> None:
+        with mock.patch("builtins.print") as printer:
+            exit_code = setup.main(
+                [
+                    "retire",
+                    "--copilot-home",
+                    str(self.home),
+                    "--install-root",
+                    str(self.product),
+                    "--profile-path",
+                    str(self.profile),
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        payload = json.loads(printer.call_args.args[0])
+        self.assertEqual("absent", payload["status"])
+        self.assertFalse(self.profile.exists())
+
+    def test_retire_removes_exact_owned_install_then_becomes_absent(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+
+        retired = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        absent = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+
+        self.assertEqual("retired", retired["status"])
+        self.assertEqual("absent", absent["status"])
+        self.assertFalse((self.home / "mcp-config.json").exists())
+        self.assertFalse(self.profile.exists())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_retire_tampered_owned_install_fails_closed(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        config = self.home / "mcp-config.json"
+        agent = self.home / "agents" / setup.AGENT_NAMES[0]
+        agent.write_bytes(agent.read_bytes() + b"\nforeign change\n")
+        before = {
+            path: path.read_bytes()
+            for path in (*self._owned_paths(), config, self.profile)
+        }
+
+        with self.assertRaises(setup.OwnedArtifactCollisionError):
+            setup.retire(
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+            )
+
+        for path, content in before.items():
+            self.assertEqual(content, path.read_bytes())
+
+    def test_retire_failure_rolls_back_config_profile_and_artifacts(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        config = self.home / "mcp-config.json"
+        before = {
+            path: path.read_bytes()
+            for path in (*self._owned_paths(), config, self.profile)
+        }
+
+        with mock.patch.object(
+            setup,
+            "_remove_profile_block",
+            side_effect=OSError("injected retirement failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "injected retirement failure"):
+                setup.retire(
+                    self.home,
+                    install_root=self.product,
+                    profile_path=self.profile,
+                )
+
+        for path, content in before.items():
+            self.assertEqual(content, path.read_bytes())
+
     def test_same_name_foreign_collision_and_malformed_jsonc_are_noops(self) -> None:
         cases = (
             '{"mcpServers":{"localragagent003":{"type":"http","url":"https://foreign.invalid"}}}\n',
@@ -859,12 +1001,13 @@ class CopilotCliSetupContracts(unittest.TestCase):
         self.assertIn(setup.mcp_config.SERVER_NAME, vscode_doc["servers"])
         self.assertEqual(7, vscode_doc["keep"])
 
-        setup.uninstall(
+        result = setup.retire(
             self.home,
             install_root=self.product,
             profile_path=self.profile,
             vscode_mcp_config=vscode,
         )
+        self.assertEqual("retired", result["status"])
         cli_doc, _ = setup.mcp_config._JsoncLexer(
             cli.read_text(encoding="utf-8")
         ).document()

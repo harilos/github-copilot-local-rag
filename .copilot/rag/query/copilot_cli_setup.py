@@ -1056,11 +1056,51 @@ def uninstall(
     }
 
 
+def retire(
+    copilot_home: Path,
+    *,
+    install_root: Path | None = None,
+    profile_path: Path,
+    vscode_mcp_config: Path | None = None,
+) -> dict[str, object]:
+    """Remove a manifest-owned Agent003 integration, if one is installed.
+
+    Retirement is intentionally manifest-gated.  A fresh installation must not
+    infer ownership from filenames or edit MCP configuration, Agent files, or a
+    PowerShell profile left by another owner.
+    """
+    home = _absolute(copilot_home)
+    root = _absolute(install_root or home)
+    manifest_path = _manifest_path(root)
+    _assert_safe_file(manifest_path, boundary=root, allow_missing=True)
+    if not _lexists(manifest_path):
+        return {
+            "status": "absent",
+            "copilot_home": str(home),
+            "install_root": str(root),
+            "manifest": str(manifest_path),
+        }
+
+    result = uninstall(
+        home,
+        install_root=root,
+        profile_path=profile_path,
+        vscode_mcp_config=vscode_mcp_config,
+    )
+    result["status"] = "retired"
+    result["manifest"] = str(manifest_path)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Install, repair, or uninstall Agent003 Copilot CLI files."
+        description=(
+            "Install, repair, uninstall, or retire Agent003 Copilot CLI files."
+        )
     )
-    parser.add_argument("action", choices=("install", "repair", "uninstall"))
+    parser.add_argument(
+        "action", choices=("install", "repair", "uninstall", "retire")
+    )
     parser.add_argument("--copilot-home", type=Path)
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--profile-path", type=Path, required=True)
@@ -1068,7 +1108,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     copilot_home = args.copilot_home or default_copilot_home()
     try:
-        if args.action == "uninstall":
+        if args.action == "retire":
+            result = retire(
+                copilot_home,
+                install_root=args.install_root,
+                profile_path=args.profile_path,
+                vscode_mcp_config=args.vscode_mcp_config,
+            )
+        elif args.action == "uninstall":
             result = uninstall(
                 copilot_home,
                 install_root=args.install_root,

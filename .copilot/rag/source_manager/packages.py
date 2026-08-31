@@ -125,7 +125,13 @@ _PORTABLE_CONFIG_EXAMPLES = frozenset(
         "network.example.json",
     }
 )
-_PROJECT_SKILLS = ("local-rag", "local-rag-setup")
+_PROJECT_SKILLS = ("local-rag",)
+_LEGACY_MCP_RUNTIME_FILES = frozenset(
+    {
+        "agent003_answer_packet.py",
+        "mcp_server.py",
+    }
+)
 _DB_SEARCH_FILES = frozenset(
     {
         "DB_PROFILE.md",
@@ -1036,6 +1042,7 @@ def _product_entries(
         "query/result_detail.py",
         "query/search.py",
         "query/setup.py",
+        "query/skill_runner.py",
         "gen_db/software_rag_tool/pyproject.toml",
         "gen_db/software_rag_tool/scripts/query.py",
         "gen_db/software_rag_tool/software_rag_tool/__init__.py",
@@ -1070,17 +1077,6 @@ def _product_entries(
             rag_root=rag_root,
             admin=admin,
         ),
-    )
-    instructions_root = _real_directory(
-        copilot_home / "instructions",
-        "instructions_root",
-    )
-    _add_file(
-        entries,
-        instructions_root / "rag.instructions.md",
-        ".copilot/instructions/rag.instructions.md",
-        required=True,
-        source_root=instructions_root,
     )
     for skill_name in _PROJECT_SKILLS:
         skill_root = _real_directory(
@@ -2053,6 +2049,8 @@ def _product_payload_directory(
         allowed_roots.add("source_manager")
     if lowered[0] not in allowed_roots:
         return False
+    if not admin and lowered[0] == "copilot-cli":
+        return False
     if any(part in _PRODUCT_TEST_DIRECTORIES for part in lowered):
         return False
     if any(part in {".git", ".github"} for part in lowered):
@@ -2098,6 +2096,12 @@ def _product_payload_file(
             path.suffix.casefold() in {".md", ".py"}
             or name == "version"
         )
+    if (
+        not admin
+        and lowered[0] == "query"
+        and name in _LEGACY_MCP_RUNTIME_FILES
+    ):
+        return False
     if not admin:
         if (
             len(lowered) == 2

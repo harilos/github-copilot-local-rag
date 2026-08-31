@@ -16,10 +16,8 @@ $ProductBackupRoot = Join-Path $QueryRoot (".source-product-backup-" + $Transact
 $ProductBackedUp = @()
 $ProductCreatedFiles = @()
 $ProductCreatedDirectories = @()
-$CopilotCliMCPStatus = "not_reached"
-$CopilotCliAgentsStatus = "not_reached"
-$CopilotCliApprovalStatus = "not_reached"
-$CopilotCliExecutableStatus = "not_detected"
+$SlashSkillStatus = "not_reached"
+$LegacyAgent003Status = "not_reached"
 
 function Resolve-BootstrapPython {
     param([string]$Requested)
@@ -242,6 +240,27 @@ function Test-InstallPayloadExcluded {
     ) {
         return $true
     }
+    if (
+        ($Normalized -ieq "rag\copilot-cli") -or
+        $Normalized.StartsWith(
+            "rag\copilot-cli\",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
+    if (
+        ($Normalized -ieq "rag\query\agent003_answer_packet.py") -or
+        ($Normalized -ieq "rag\query\mcp_server.py") -or
+        ($Normalized -ieq "instructions\rag.instructions.md") -or
+        ($Normalized -ieq "skills\local-rag-setup") -or
+        $Normalized.StartsWith(
+            "skills\local-rag-setup\",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $true
+    }
     $Parts = @($Normalized -split "\\")
     if (
         ($Parts.Length -ge 2) -and
@@ -308,22 +327,49 @@ $RetiredFiles = @(
     "rag\query\portable_runtime.py",
     "rag\query\portable_db_install.py",
     "rag\query\portable_db_smoke.py",
+    "rag\query\agent003_answer_packet.py",
+    "rag\query\mcp_server.py",
     "rag\query\vscode_settings.py",
+    "rag\copilot-cli\local-rag-agent003-savings.agent.md",
+    "rag\copilot-cli\local-rag-agent003-standard.agent.md",
+    "rag\copilot-cli\local-rag-agent003-thorough.agent.md",
+    "rag\copilot-cli\local-rag-agent003.ps1",
+    "instructions\rag.instructions.md",
+    "skills\local-rag-setup\SKILL.md",
     "skills\local-rag-admin\SKILL.md"
 )
 foreach ($RelativePath in $RetiredFiles) {
     $RetiredPath = Join-Path $Target $RelativePath
     if (Test-Path -LiteralPath $RetiredPath -PathType Leaf) {
+        if (Test-PathHasReparse -Path $RetiredPath -Boundary $Target) {
+            throw ("retired product path contains a reparse point: " + $RelativePath)
+        }
         Backup-ProductFile -Relative $RelativePath -Destination $RetiredPath
         [System.IO.File]::Delete($RetiredPath)
     }
 }
-$RetiredAdminSkill = Join-Path $Target "skills\local-rag-admin"
-if (
-    (Test-Path -LiteralPath $RetiredAdminSkill -PathType Container) -and
-    -not (Get-ChildItem -LiteralPath $RetiredAdminSkill -Force)
-) {
-    [System.IO.Directory]::Delete($RetiredAdminSkill)
+foreach ($RetiredDirectoryRelative in @(
+    "rag\copilot-cli",
+    "instructions",
+    "skills\local-rag-setup",
+    "skills\local-rag-admin"
+)) {
+    $RetiredDirectory = Join-Path $Target $RetiredDirectoryRelative
+    if (
+        (Test-Path -LiteralPath $RetiredDirectory -PathType Container) -and
+        (Test-PathHasReparse -Path $RetiredDirectory -Boundary $Target)
+    ) {
+        throw (
+            "retired product directory contains a reparse point: " +
+            $RetiredDirectoryRelative
+        )
+    }
+    if (
+        (Test-Path -LiteralPath $RetiredDirectory -PathType Container) -and
+        -not (Get-ChildItem -LiteralPath $RetiredDirectory -Force)
+    ) {
+        [System.IO.Directory]::Delete($RetiredDirectory)
+    }
 }
 
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
@@ -367,7 +413,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 $DatabaseListStatus = "READY"
 
-$InstallStage = "copilot_cli_setup"
+$InstallStage = "slash_skill"
+$SlashSkillPath = Join-Path $Target "skills\local-rag\SKILL.md"
+if (-not (Test-Path -LiteralPath $SlashSkillPath -PathType Leaf)) {
+    throw "Local RAG slash Skill is missing from the installed payload."
+}
+$SlashSkillStatus = "READY"
+
+$InstallStage = "retire_agent003"
 if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
     if (-not [System.IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
         throw "COPILOT_HOME must be an absolute path."
@@ -401,17 +454,8 @@ if (-not [string]::IsNullOrWhiteSpace($env:LOCAL_RAG_COPILOT_PROFILE_PATH)) {
         Join-Path $env:USERPROFILE "Documents\PowerShell\profile.ps1"
     ))
 }
-if ($null -ne (Get-Command "copilot" -CommandType Application `
-    -ErrorAction SilentlyContinue)) {
-    $CopilotCliExecutableStatus = "detected"
-} else {
-    Write-Warning (
-        "GitHub Copilot CLI was not detected. Local RAG CLI files will " +
-        "still be installed."
-    )
-}
 $CopilotCliArguments = @(
-    "install",
+    "retire",
     "--copilot-home", $CopilotCliHome,
     "--install-root", $Target,
     "--profile-path", $CopilotProfilePath
@@ -423,40 +467,23 @@ $CopilotCliExitCode = $LASTEXITCODE
 try {
     $CopilotCliPayload = $CopilotCliOutput | ConvertFrom-Json
 } catch {
-    throw "Copilot CLI setup returned invalid status output."
+    throw "Legacy Agent003 retirement returned invalid status output."
 }
 if ($CopilotCliExitCode -ne 0) {
     $CopilotCliError = [string]$CopilotCliPayload.error
     if ($CopilotCliError -match (
         "(?i)(collision|already owned|unowned artifact)"
     )) {
-        $CopilotCliMCPStatus = "blocked_collision"
+        $LegacyAgent003Status = "blocked_collision"
     }
-    throw ("Copilot CLI setup failed: " + $CopilotCliError)
+    throw ("Legacy Agent003 retirement failed: " + $CopilotCliError)
 }
-if (@("installed", "updated", "already_installed") -inotcontains (
+if (@("retired", "absent") -inotcontains (
     [string]$CopilotCliPayload.status
 )) {
-    throw "Copilot CLI setup returned an invalid success status."
+    throw "Legacy Agent003 retirement returned an invalid success status."
 }
-$CopilotCliConfigStatus = [string]$CopilotCliPayload.config.status
-if ($CopilotCliConfigStatus -ieq "configured_on_disk") {
-    $CopilotCliMCPStatus = "configured"
-} elseif ($CopilotCliConfigStatus -ieq "already_configured") {
-    $CopilotCliMCPStatus = "already_configured"
-} else {
-    throw "Copilot CLI setup returned an invalid MCP status."
-}
-if ([string]$CopilotCliPayload.status -ieq "updated") {
-    $CopilotCliAgentsStatus = "updated"
-} else {
-    $CopilotCliAgentsStatus = "installed"
-}
-if ([string]$CopilotCliPayload.status -ieq "already_installed") {
-    $CopilotCliApprovalStatus = "already_enabled"
-} else {
-    $CopilotCliApprovalStatus = "enabled"
-}
+$LegacyAgent003Status = [string]$CopilotCliPayload.status
 
 $InstallStage = "complete"
 Write-Host "Installed Copilot Local RAG files to: $Target"
@@ -467,13 +494,8 @@ Write-Host ""
 Write-Host "=== Local RAG install: SUCCESS ===" -ForegroundColor Green
 Write-Host "Runtime: $RuntimeStatus"
 Write-Host "Databases: $DatabaseListStatus"
-Write-Host "Copilot CLI MCP: $CopilotCliMCPStatus"
-Write-Host "Copilot CLI agents: $CopilotCliAgentsStatus"
-Write-Host (
-    "Copilot CLI launcher-scoped read-only approval: " +
-    $CopilotCliApprovalStatus
-)
-Write-Host "Copilot CLI executable: $CopilotCliExecutableStatus"
+Write-Host "Local RAG slash Skill: $SlashSkillStatus"
+Write-Host "Legacy Agent003 integration: $LegacyAgent003Status"
 if (Test-Path -LiteralPath $ProductBackupRoot) {
     try {
         Remove-Item -LiteralPath $ProductBackupRoot -Recurse -Force `
@@ -503,12 +525,7 @@ if (Test-Path -LiteralPath $ProductBackupRoot) {
     Write-Host "Failed stage: $InstallStage"
     Write-Host "Runtime: $RuntimeStatus"
     Write-Host "Databases: $DatabaseListStatus"
-    Write-Host "Copilot CLI MCP: $CopilotCliMCPStatus"
-    Write-Host "Copilot CLI agents: $CopilotCliAgentsStatus"
-    Write-Host (
-        "Copilot CLI launcher-scoped read-only approval: " +
-        $CopilotCliApprovalStatus
-    )
-    Write-Host "Copilot CLI executable: $CopilotCliExecutableStatus"
+    Write-Host "Local RAG slash Skill: $SlashSkillStatus"
+    Write-Host "Legacy Agent003 integration: $LegacyAgent003Status"
     throw
 }

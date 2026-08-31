@@ -852,13 +852,14 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
         vscode = (payload.get("integrations") or {}).get("vscode")
         if vscode is not None:
             print(
-                "VS Code: use one of the installed LOCAL-RAG Agents. "
-                "The read-only localragagent003 MCP server supplies inline "
-                "evidence without file or terminal tools."
+                "VS Code: invoke the installed personal Skill with "
+                "'/local-rag <question>'. It uses the fixed Local RAG "
+                "command runner; lookup operations are read-only and do not "
+                "require MCP."
             )
             print(
-                "VS Code tool approvals and unrelated user settings are not "
-                "changed by Local RAG setup."
+                "Local RAG setup does not install custom Agents, pre-approve "
+                "terminal tools, or change unrelated user settings."
             )
 
         return

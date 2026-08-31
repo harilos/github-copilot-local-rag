@@ -246,16 +246,27 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             self.assertFalse(
                 any(name.startswith(".copilot/agents/") for name in names)
             )
-            for filename in (
-                "local-rag-agent003-savings.agent.md",
-                "local-rag-agent003-standard.agent.md",
-                "local-rag-agent003-thorough.agent.md",
-                "local-rag-agent003.ps1",
-            ):
-                self.assertIn(
-                    f".copilot/rag/copilot-cli/{filename}",
-                    names,
+            self.assertIn(".copilot/skills/local-rag/SKILL.md", names)
+            self.assertNotIn(
+                ".copilot/skills/local-rag-setup/SKILL.md",
+                names,
+            )
+            self.assertFalse(
+                any(name.startswith(".copilot/instructions/") for name in names)
+            )
+            self.assertFalse(
+                any(
+                    name.startswith(".copilot/rag/copilot-cli/")
+                    for name in names
                 )
+            )
+            self.assertNotIn(".copilot/rag/query/mcp_server.py", names)
+            self.assertNotIn(
+                ".copilot/rag/query/agent003_answer_packet.py",
+                names,
+            )
+            self.assertIn(".copilot/rag/query/copilot_cli_setup.py", names)
+            self.assertIn(".copilot/rag/query/mcp_config.py", names)
             with zipfile.ZipFile(output) as archive:
                 install_cmd = archive.read("install.cmd").decode("utf-8")
             self.assertNotIn(
@@ -292,9 +303,18 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             template = windows_distribution.INSTALL_TEMPLATE.read_text(
                 encoding="utf-8"
             )
-            self.assertIn('$InstallStage = "copilot_cli_setup"', template)
+            self.assertIn('$InstallStage = "slash_skill"', template)
+            self.assertIn('$InstallStage = "retire_agent003"', template)
+            self.assertIn('"retire",', template)
             self.assertEqual(1, template.count("copilot_cli_setup.py"))
             self.assertIn('"rag\\query\\vscode_settings.py"', template)
+            self.assertIn('"rag\\query\\agent003_answer_packet.py"', template)
+            self.assertIn('"rag\\query\\mcp_server.py"', template)
+            self.assertIn(
+                '"rag\\copilot-cli\\local-rag-agent003.ps1"', template
+            )
+            self.assertIn('"instructions\\rag.instructions.md"', template)
+            self.assertIn('"skills\\local-rag-setup\\SKILL.md"', template)
             self.assertNotIn(
                 'Join-Path $TargetQuery "vscode_settings.py"', template
             )
@@ -347,17 +367,21 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             "portable-install-{0}-{1}.log",
             '$env:LOCALAPPDATA',
             '$env:TEMP',
-            '$InstallStage = "copilot_cli_setup"',
+            '$InstallStage = "slash_skill"',
+            '$InstallStage = "retire_agent003"',
+            'Join-Path $Target "skills\\local-rag\\SKILL.md"',
             'Join-Path $env:APPDATA "Code\\User\\mcp.json"',
+            '"retire",',
             '"--vscode-mcp-config", $VSCodeMcpTarget',
+            "if ($null -ne $VSCodeMcpTarget)",
             'Join-Path $TargetQuery "copilot_cli_setup.py"',
-            '"Copilot CLI MCP: "',
-            '"Copilot CLI agents: "',
-            "Copilot CLI launcher-scoped read-only approval:",
-            '"Copilot CLI executable: "',
+            '"Local RAG slash Skill: "',
+            '"Legacy Agent003 integration: "',
+            "Use /local-rag in GitHub Copilot Chat",
+            "did not enable MCP or change VS Code approval settings",
         ):
             self.assertIn(fragment, template)
-        settings_index = template.index('$InstallStage = "copilot_cli_setup"')
+        settings_index = template.index('$InstallStage = "retire_agent003"')
         self.assertLess(
             template.index(
                 "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
@@ -371,6 +395,14 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         self.assertNotIn("list_dbs.py", template)
         self.assertNotIn("Read-Host", template)
         self.assertNotIn("Pause", template)
+        self.assertNotIn("Copilot CLI MCP:", template)
+        self.assertNotIn("Copilot CLI agents:", template)
+        self.assertNotIn("launcher-scoped read-only approval", template)
+        self.assertNotIn("Select one of the three LOCAL-RAG Agents", template)
+        self.assertNotIn("APPDATA is required", template)
+        self.assertNotIn(
+            '"install",\n        "--copilot-home"', template
+        )
 
         source_installer = (RAG_ROOT.parents[1] / "install.ps1").read_text(
             encoding="utf-8"
@@ -378,11 +410,11 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         for fragment in (
             "Runtime:",
             "Databases:",
-            "Copilot CLI MCP:",
-            "Copilot CLI agents:",
-            "Copilot CLI launcher-scoped read-only approval:",
-            "Copilot CLI executable:",
-            '$InstallStage = "copilot_cli_setup"',
+            "Local RAG slash Skill:",
+            "Legacy Agent003 integration:",
+            '$InstallStage = "slash_skill"',
+            '$InstallStage = "retire_agent003"',
+            '"retire",',
             'Join-Path $Target "rag\\query\\copilot_cli_setup.py"',
         ):
             self.assertIn(fragment, source_installer)
@@ -392,8 +424,14 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             source_installer,
         )
         self.assertNotIn("--vscode-mcp-config", source_installer)
+        self.assertNotIn("Copilot CLI MCP:", source_installer)
+        self.assertNotIn("Copilot CLI agents:", source_installer)
+        self.assertNotIn("launcher-scoped read-only approval", source_installer)
+        self.assertNotIn(
+            '"install",\n    "--copilot-home"', source_installer
+        )
 
-    def test_readmes_describe_thin_mcp_and_unchanged_approval_boundary(self) -> None:
+    def test_readmes_describe_slash_skill_and_approval_boundary(self) -> None:
         repository = RAG_ROOT.parents[1]
         documents = (
             (repository / "README.md").read_text(encoding="utf-8"),
@@ -408,7 +446,10 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
         combined = "\n".join(documents)
         self.assertNotIn("chat.tools.global.autoApprove", combined)
         self.assertNotIn("全tool／terminal command", combined)
-        self.assertIn("localragagent003", combined)
+        self.assertNotIn("localragagent003", combined)
+        self.assertIn("/local-rag", combined)
+        self.assertIn("slash", combined.casefold())
+        self.assertIn("does not register an MCP server", combined)
         self.assertIn("does not change VS Code approval settings", combined)
         self.assertIn("-NoPause", combined)
         self.assertIn("portable-install-<timestamp>-<pid>.log", combined)

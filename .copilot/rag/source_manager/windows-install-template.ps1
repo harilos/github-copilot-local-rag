@@ -40,10 +40,8 @@ $ModelPublished = $false
 $InstallStage = "validate_package"
 $RuntimeStatus = "NOT_READY"
 $DatabaseStatus = "NOT_CHECKED"
-$CopilotCliMCPStatus = "not_reached"
-$CopilotCliAgentsStatus = "not_reached"
-$CopilotCliApprovalStatus = "not_reached"
-$CopilotCliExecutableStatus = "not_detected"
+$SlashSkillStatus = "not_reached"
+$LegacyAgent003Status = "not_reached"
 $InstallLogPath = ""
 $InstallTranscriptStarted = $false
 
@@ -129,13 +127,8 @@ function Write-InstallSummary {
     Write-Host (($Utf8.GetString([Convert]::FromBase64String(
         "44OH44O844K/44OZ44O844K5OiA="
     ))) + $DatabaseStatus)
-    Write-Host ("Copilot CLI MCP: " + $CopilotCliMCPStatus)
-    Write-Host ("Copilot CLI agents: " + $CopilotCliAgentsStatus)
-    Write-Host (
-        "Copilot CLI launcher-scoped read-only approval: " +
-        $CopilotCliApprovalStatus
-    )
-    Write-Host ("Copilot CLI executable: " + $CopilotCliExecutableStatus)
+    Write-Host ("Local RAG slash Skill: " + $SlashSkillStatus)
+    Write-Host ("Legacy Agent003 integration: " + $LegacyAgent003Status)
     if (-not $Succeeded -and -not [string]::IsNullOrWhiteSpace($Reason)) {
         Write-Host (($Utf8.GetString([Convert]::FromBase64String(
             "55CG55SxOiA="
@@ -448,12 +441,37 @@ try {
         "rag\query\portable_runtime.py",
         "rag\query\portable_db_install.py",
         "rag\query\portable_db_smoke.py",
-        "rag\query\vscode_settings.py"
+        "rag\query\vscode_settings.py",
+        "rag\query\agent003_answer_packet.py",
+        "rag\query\mcp_server.py",
+        "rag\copilot-cli\local-rag-agent003-savings.agent.md",
+        "rag\copilot-cli\local-rag-agent003-standard.agent.md",
+        "rag\copilot-cli\local-rag-agent003-thorough.agent.md",
+        "rag\copilot-cli\local-rag-agent003.ps1",
+        "instructions\rag.instructions.md",
+        "skills\local-rag-setup\SKILL.md"
     )) {
         $Retired = Join-Path $Target $Relative
         if (Test-Path -LiteralPath $Retired -PathType Leaf) {
+            Assert-NoReparsePath -Path $Retired
             Backup-ProductFile -Relative $Relative -Destination $Retired
             [System.IO.File]::Delete($Retired)
+        }
+    }
+    foreach ($RetiredDirectoryRelative in @(
+        "rag\copilot-cli",
+        "instructions",
+        "skills\local-rag-setup"
+    )) {
+        $RetiredDirectory = Join-Path $Target $RetiredDirectoryRelative
+        if (Test-Path -LiteralPath $RetiredDirectory -PathType Container) {
+            Assert-NoReparsePath -Path $RetiredDirectory
+        }
+        if (
+            (Test-Path -LiteralPath $RetiredDirectory -PathType Container) -and
+            -not (Get-ChildItem -LiteralPath $RetiredDirectory -Force)
+        ) {
+            [System.IO.Directory]::Delete($RetiredDirectory)
         }
     }
 
@@ -492,14 +510,21 @@ try {
     $RuntimePublished = $true
     $RuntimeStatus = "READY"
 
-    $InstallStage = "copilot_cli_setup"
-    if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
-        throw "APPDATA is required to configure the normal VS Code Default Profile."
+    $InstallStage = "slash_skill"
+    $SlashSkillPath = Join-Path $Target "skills\local-rag\SKILL.md"
+    if (-not (Test-Path -LiteralPath $SlashSkillPath -PathType Leaf)) {
+        throw "Local RAG slash Skill is missing from the installed payload."
     }
-    $VSCodeMcpTarget = [System.IO.Path]::GetFullPath((
-        Join-Path $env:APPDATA "Code\User\mcp.json"
-    ))
-    Assert-NoReparsePath -Path $VSCodeMcpTarget
+    $SlashSkillStatus = "READY"
+
+    $InstallStage = "retire_agent003"
+    $VSCodeMcpTarget = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $VSCodeMcpTarget = [System.IO.Path]::GetFullPath((
+            Join-Path $env:APPDATA "Code\User\mcp.json"
+        ))
+        Assert-NoReparsePath -Path $VSCodeMcpTarget
+    }
     if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
         if (-not [System.IO.Path]::IsPathRooted($env:COPILOT_HOME)) {
             throw "COPILOT_HOME must be an absolute path."
@@ -535,22 +560,17 @@ try {
             Join-Path $env:USERPROFILE "Documents\PowerShell\profile.ps1"
         ))
     }
-    if ($null -ne (Get-Command "copilot" -CommandType Application `
-        -ErrorAction SilentlyContinue)) {
-        $CopilotCliExecutableStatus = "detected"
-    } else {
-        Write-Warning (
-            "GitHub Copilot CLI was not detected. Local RAG CLI files will " +
-            "still be installed."
-        )
-    }
     $CopilotCliArguments = @(
-        "install",
+        "retire",
         "--copilot-home", $CopilotCliHome,
         "--install-root", $Target,
-        "--profile-path", $CopilotProfilePath,
-        "--vscode-mcp-config", $VSCodeMcpTarget
+        "--profile-path", $CopilotProfilePath
     )
+    if ($null -ne $VSCodeMcpTarget) {
+        $CopilotCliArguments += @(
+            "--vscode-mcp-config", $VSCodeMcpTarget
+        )
+    }
     $CopilotCliText = (& (Join-Path $TargetRuntime "Scripts\python.exe") -B (
         Join-Path $TargetQuery "copilot_cli_setup.py"
     ) @CopilotCliArguments | Out-String)
@@ -558,40 +578,23 @@ try {
     try {
         $CopilotCliResult = $CopilotCliText | ConvertFrom-Json
     } catch {
-        throw "Copilot CLI setup returned invalid JSON."
+        throw "Legacy Agent003 retirement returned invalid JSON."
     }
     if ($CopilotCliExitCode -ne 0) {
         $CopilotCliError = [string]$CopilotCliResult.error
         if ($CopilotCliError -match (
             "(?i)(collision|already owned|unowned artifact)"
         )) {
-            $CopilotCliMCPStatus = "blocked_collision"
+            $LegacyAgent003Status = "blocked_collision"
         }
-        throw ("Copilot CLI setup failed: " + $CopilotCliError)
+        throw ("Legacy Agent003 retirement failed: " + $CopilotCliError)
     }
-    if (@("installed", "updated", "already_installed") -inotcontains (
+    if (@("retired", "absent") -inotcontains (
         [string]$CopilotCliResult.status
     )) {
-        throw "Copilot CLI setup returned an invalid success status."
+        throw "Legacy Agent003 retirement returned an invalid success status."
     }
-    $CopilotCliConfigStatus = [string]$CopilotCliResult.config.status
-    if ($CopilotCliConfigStatus -ieq "configured_on_disk") {
-        $CopilotCliMCPStatus = "configured"
-    } elseif ($CopilotCliConfigStatus -ieq "already_configured") {
-        $CopilotCliMCPStatus = "already_configured"
-    } else {
-        throw "Copilot CLI setup returned an invalid MCP status."
-    }
-    if ([string]$CopilotCliResult.status -ieq "updated") {
-        $CopilotCliAgentsStatus = "updated"
-    } else {
-        $CopilotCliAgentsStatus = "installed"
-    }
-    if ([string]$CopilotCliResult.status -ieq "already_installed") {
-        $CopilotCliApprovalStatus = "already_enabled"
-    } else {
-        $CopilotCliApprovalStatus = "enabled"
-    }
+    $LegacyAgent003Status = [string]$CopilotCliResult.status
 } catch {
     foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
         $Current = Join-Path $TargetDbs $Name
@@ -674,8 +677,8 @@ foreach ($Path in @(
 }
 
 Write-Host ("Installed Local RAG Windows portable runtime to: " + $Target)
-Write-Host "Select one of the three LOCAL-RAG Agents in VS Code Agent mode."
-Write-Host "The installer did not change VS Code approval settings."
+Write-Host "Use /local-rag in GitHub Copilot Chat to search Local RAG."
+Write-Host "The installer did not enable MCP or change VS Code approval settings."
 $InstallStage = "completed"
 Write-InstallSummary -Succeeded $true
 Stop-InstallTranscript

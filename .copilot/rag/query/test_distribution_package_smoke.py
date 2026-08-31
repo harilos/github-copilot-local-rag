@@ -54,6 +54,7 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             "install.sh",
             ".copilot/rag/setup.py",
             ".copilot/rag/query/reference_contract.py",
+            ".copilot/rag/query/skill_runner.py",
             (
                 ".copilot/rag/gen_db/software_rag_tool/"
                 "software_rag_tool/chunking.py"
@@ -76,9 +77,26 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             ),
             ".copilot/rag/docs/local-rag-manager-guide-ja.md",
             ".copilot/skills/local-rag/SKILL.md",
-            ".copilot/skills/local-rag-setup/SKILL.md",
         }
         self.assertTrue(required.issubset(paths))
+        self.assertNotIn(
+            ".copilot/skills/local-rag-setup/SKILL.md",
+            paths,
+        )
+        self.assertFalse(
+            any(path.startswith(".copilot/instructions/") for path in paths)
+        )
+        self.assertFalse(
+            any(path.startswith(".copilot/agents/") for path in paths)
+        )
+        self.assertFalse(
+            any(path.startswith(".copilot/rag/copilot-cli/") for path in paths)
+        )
+        self.assertNotIn(".copilot/rag/query/mcp_server.py", paths)
+        self.assertNotIn(
+            ".copilot/rag/query/agent003_answer_packet.py",
+            paths,
+        )
         self.assertNotIn("bootstrap.py", paths)
         self.assertNotIn(".copilot/rag/manage.py", paths)
         self.assertNotIn(".copilot/rag/source_manager/packages.py", paths)
@@ -211,8 +229,12 @@ class DistributionPackageSmokeTests(unittest.TestCase):
         )
         self.assertTrue((installed / "rag/setup.py").is_file())
         self.assertTrue(
-            (installed / "instructions/rag.instructions.md").is_file()
+            (installed / "skills/local-rag/SKILL.md").is_file()
         )
+        self.assertFalse(
+            (installed / "skills/local-rag-setup/SKILL.md").exists()
+        )
+        self.assertFalse((installed / "instructions").exists())
         self.assertFalse((installed / "manifest.json").exists())
         self.assertEqual(
             '{"machine_local":"preserve"}\n',
@@ -242,6 +264,11 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             ".copilot/rag/manage.py",
             ".copilot/rag/source_manager/packages.py",
             ".copilot/rag/gen_db/add_data.py",
+            ".copilot/rag/query/mcp_server.py",
+            (
+                ".copilot/rag/copilot-cli/"
+                "local-rag-agent003-standard.agent.md"
+            ),
             (
                 ".copilot/rag/gen_db/software_rag_tool/"
                 "software_rag_tool/incremental.py"

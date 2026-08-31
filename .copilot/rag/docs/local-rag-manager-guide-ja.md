@@ -54,24 +54,28 @@ Windows Git Bash:
   "$HOME/.copilot/rag/manage.py"
 ```
 
-### Copilotで使う3つのAgent
+### Copilotで使う`/local-rag` Skill
 
-Windows配布版と管理版は、`~/.copilot/agents`（Windowsでは
-`%USERPROFILE%\.copilot\agents`）へ次の3つのuser-level Agentを配置します。
+Windows配布版と管理版は、`~/.copilot/skills/local-rag`（Windowsでは
+`%USERPROFILE%\.copilot\skills\local-rag`）へ個人Skillを配置します。VS Codeの
+Copilot ChatをAgent modeにし、`/`メニューから次のように実行します。
 
-| Agent | 用途 | model設定 |
-|---|---|---|
-| `LOCAL-RAG-標準` | 普段の質問。質問に応じて検索量を調整する | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
-| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認する | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
-| `LOCAL-RAG-徹底検索` | 複数観点の比較と矛盾確認を行う | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+```text
+/local-rag <質問>
+/local-rag mode=savings <質問>
+/local-rag mode=thorough <質問>
+```
 
-3 Agentとも`local_rag_search`と`local_rag_get_evidence`だけを使うread-only
-Agentです。terminal、PowerShell、Workspace file、Web、Manager、別toolは使わず、
-DB、Source、設定、fileを変更しません。Agentを選んだ後は普通の文章で質問します。
-DBを一意に選べない場合は、管理者が案内した`<DB名>-rag`を質問へ付けます。
+省略時は`standard`です。`savings`は検索1回、`standard`は質問に応じて1〜4回、
+`thorough`は異なる観点で3〜4回検索し、回答前に不足をレビューします。現在選択中の
+model（Autoを含む）を継承します。
 
-この3定義はVS CodeとCopilot CLIで共用します。専用CLI launcherは節約で検証済み
-allowlist（現在は`claude-haiku-4.5`）、標準と徹底検索で`auto`を明示します。
+Skillは固定runnerを通じて公開CLIだけを使い、通常検索ではDB、Source、設定を
+変更しません。`setup_required`時だけ公開setupを実行できます。MCPやカスタムAgentは
+使いません。DBを一意に選べない場合は、
+管理者が案内した`<DB名>-rag`を質問へ付けます。terminal/shellは包括承認しないため、
+hostの実行確認が表示された場合は内容を確認します。同じSkillをCopilot CLIからも
+`/local-rag`で利用できます。
 
 共通入力:
 
@@ -465,17 +469,12 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 作成時だけ管理者PCのPythonとnetworkを使います。受取側はZIPを展開して
 `install.cmd`を実行します。利用者PCのPython、pip、network、PATH変更、
 管理者権限は不要です。実検索はpackage作成中には行わず、release／回帰test側で
-確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは固定user-level
-`localragagent003` MCP serverをportable Copilot設定と通常VS Code Default Profileの
-両schemaへtransaction内で登録します。共有する3つのLOCAL-RAG Agentは
-`~/.copilot/agents`へ1組だけ配置し、install rootへhash検証付きの
-`local-rag-copilot` launcherとpinned MCP設定を配置します。
-PowerShell 7から`local-rag-copilot -Tier savings|standard|thorough`で起動すると、
-作業folderにかかわらずread-only 2 toolだけがsession内で自動許可されます。
-通常の`copilot`、認証、session、永続permissionsは変更しません。
-VS Codeのapproval settingsは変更しません。Managerとinstallerは最終結果を
-`SUCCESS`または`FAILED`で表示し、MCP登録が失敗した場合はruntime、選択DB、
-製品Agent、両MCP configを元へ戻します。
+確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは個人Skill
+`~/.copilot/skills/local-rag/SKILL.md`をtransaction内で配置し、MCP設定、
+カスタムAgent、PowerShell profile、VS Code approval settingsを新規作成・変更しません。
+旧版の製品所有Agent003統合がある場合だけ、manifestとhashを検証してAgent、MCP
+entry、launcher、profile blockを撤去します。利用者所有の設定やfileは保持します。
+Managerとinstallerは最終結果を`SUCCESS`または`FAILED`で表示します。
 
 ### 管理PC引っ越しpackage
 

@@ -62,6 +62,8 @@ FORBIDDEN_NAMES = frozenset(
         ".rag-deps-installed",
         "network.json",
         "manage-custom.json",
+        "mcp-config.json",
+        "mcp.json",
         "sensitive-terms.local",
         "source-connections.json",
         "source-connections.secrets.json",
@@ -276,6 +278,23 @@ def _copy_payload(source: Path, target: Path) -> None:
 
 def _payload_excluded(relative: Path, is_dir: bool) -> bool:
     parts = tuple(part.casefold() for part in relative.parts)
+    if parts[:1] in {
+        ("agents",),
+        ("copilot-cli",),
+        ("instructions",),
+        ("prompts",),
+    }:
+        return True
+    if parts[:2] in {
+        ("rag", "copilot-cli"),
+        ("skills", "local-rag-setup"),
+    }:
+        return True
+    if parts in {
+        ("rag", "query", "agent003_answer_packet.py"),
+        ("rag", "query", "mcp_server.py"),
+    }:
+        return True
     if any(part in FORBIDDEN_PARTS for part in parts):
         return True
     if "__pycache__" in parts or ".venv" in parts:
@@ -597,16 +616,14 @@ The package contains only the databases selected by the builder. Existing
 unrelated databases are preserved. Replacing a same-name database requires
 `install.cmd -ReplaceExistingDatabases`.
 
-In VS Code Copilot Chat, select one of the three installed LOCAL-RAG Agents.
-They expose only the two read-only Local RAG MCP tools. The installer registers
-the fixed user-level `localragagent003` MCP server in both the portable Copilot
-configuration and the normal VS Code Default Profile.
-In PowerShell 7, run `local-rag-copilot` for the standard CLI profile, or add
-`-Tier savings|standard|thorough`. That launcher pins the owned MCP definition
-and auto-approves only those two read-only tools in any working directory.
-It does not replace the normal `copilot` command or write persistent global
-permissions.
-The installer does not change VS Code approval settings.
+In GitHub Copilot Chat or Copilot CLI, run `/local-rag <question>`. The installed
+personal Skill uses Local RAG's fixed runner command boundary; lookup operations
+are read-only. The default installation does not register an MCP server, install
+custom Agents, or create a dedicated Copilot CLI launcher.
+
+Local RAG does not change VS Code approval settings. The built-in agent and
+terminal command remain subject to the host's normal user and organization
+approval policies.
 Copilot acceptance is never run by the installer or product tests.
 """
 

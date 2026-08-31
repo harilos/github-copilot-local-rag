@@ -25,11 +25,6 @@ LEGACY_AGENT_NAMES = (
     "internal-doc-deep-research.agent.md",
     "internal-doc-search.agent.md",
 )
-SHARED_AGENT_NAMES = (
-    "local-rag-agent003-savings.agent.md",
-    "local-rag-agent003-standard.agent.md",
-    "local-rag-agent003-thorough.agent.md",
-)
 
 
 def _decoded_banner(launcher: str) -> str:
@@ -60,7 +55,12 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     (payload / "rag" / "query" / "search.py").write_text(
         "print('search')\n", encoding="utf-8"
     )
+    shutil.copy2(
+        REPOSITORY_ROOT / ".copilot" / "rag" / "query" / "skill_runner.py",
+        payload / "rag" / "query" / "skill_runner.py",
+    )
     for filename in (
+        "agent003_answer_packet.py",
         "mcp_config.py",
         "mcp_server.py",
         "copilot_cli_setup.py",
@@ -72,6 +72,29 @@ def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
     shutil.copytree(
         REPOSITORY_ROOT / ".copilot" / "rag" / "copilot-cli",
         payload / "rag" / "copilot-cli",
+    )
+    shutil.copytree(
+        REPOSITORY_ROOT / ".copilot" / "skills" / "local-rag",
+        payload / "skills" / "local-rag",
+    )
+    (payload / "skills" / "local-rag-setup").mkdir()
+    (payload / "skills" / "local-rag-setup" / "SKILL.md").write_text(
+        "legacy setup skill\n", encoding="utf-8"
+    )
+    (payload / "instructions").mkdir()
+    (payload / "instructions" / "rag.instructions.md").write_text(
+        "legacy global instructions\n", encoding="utf-8"
+    )
+    (payload / "prompts").mkdir()
+    (payload / "prompts" / "local-rag.prompt.md").write_text(
+        "legacy prompt\n", encoding="utf-8"
+    )
+    (payload / "agents").mkdir()
+    (payload / "agents" / "legacy.agent.md").write_text(
+        "legacy\n", encoding="utf-8"
+    )
+    (payload / "mcp-config.json").write_text(
+        '{"mcpServers":{"foreign":{}}}\n', encoding="utf-8"
     )
     (payload / "rag" / "VERSION").write_text("1.2.3\n", encoding="utf-8")
     (payload / "rag" / "config").mkdir()
@@ -188,22 +211,49 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                         prefix + ".copilot/agents/" + agent_name,
                         names,
                     )
-                for filename in (
-                    *SHARED_AGENT_NAMES,
-                    "local-rag-agent003.ps1",
-                ):
-                    member = prefix + ".copilot/rag/copilot-cli/" + filename
-                    self.assertIn(member, names)
-                    self.assertEqual(
-                        (
-                            REPOSITORY_ROOT
-                            / ".copilot"
-                            / "rag"
-                            / "copilot-cli"
-                            / filename
-                        ).read_bytes(),
-                        archive.read(member),
+                self.assertFalse(
+                    any(
+                        name.startswith(prefix + ".copilot/agents/")
+                        or name.startswith(prefix + ".copilot/rag/copilot-cli/")
+                        for name in names
                     )
+                )
+                skill_member = prefix + ".copilot/skills/local-rag/SKILL.md"
+                self.assertIn(skill_member, names)
+                self.assertEqual(
+                    (
+                        REPOSITORY_ROOT
+                        / ".copilot"
+                        / "skills"
+                        / "local-rag"
+                        / "SKILL.md"
+                    ).read_bytes(),
+                    archive.read(skill_member),
+                )
+                self.assertNotIn(
+                    prefix + ".copilot/skills/local-rag-setup/SKILL.md",
+                    names,
+                )
+                self.assertFalse(
+                    any(
+                        name.startswith(prefix + ".copilot/instructions/")
+                        or name.startswith(prefix + ".copilot/prompts/")
+                        for name in names
+                    )
+                )
+                self.assertNotIn(prefix + ".copilot/mcp-config.json", names)
+                self.assertNotIn(
+                    prefix + ".copilot/rag/query/mcp_server.py",
+                    names,
+                )
+                self.assertNotIn(
+                    prefix + ".copilot/rag/query/agent003_answer_packet.py",
+                    names,
+                )
+                self.assertIn(
+                    prefix + ".copilot/rag/query/skill_runner.py",
+                    names,
+                )
                 launcher_bytes = archive.read(prefix + "install.cmd")
                 self.assertIn(b"\r\n", launcher_bytes)
                 self.assertNotIn(b"\n", launcher_bytes.replace(b"\r\n", b""))
@@ -305,10 +355,14 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer.index("$PayloadRoot ="),
                 )
                 self.assertGreater(
-                    installer.index('$InstallStage = "copilot_cli_setup"'),
+                    installer.index('$InstallStage = "slash_skill"'),
                     installer.index(
                         "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
                     ),
+                )
+                self.assertGreater(
+                    installer.index('$InstallStage = "retire_agent003"'),
+                    installer.index('$InstallStage = "slash_skill"'),
                 )
                 self.assertIn(
                     'Join-Path $env:APPDATA "Code\\User\\mcp.json"',
@@ -318,16 +372,31 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     '"--vscode-mcp-config", $VSCodeMcpTarget', installer
                 )
                 self.assertEqual(1, installer.count("copilot_cli_setup.py"))
+                self.assertIn('        "retire",', installer)
+                self.assertNotIn('        "install",', installer)
                 self.assertNotIn(
                     'Join-Path $TargetQuery "mcp_config.py"', installer
                 )
+                for retired_legacy_runtime in (
+                    '"rag\\query\\agent003_answer_packet.py"',
+                    '"rag\\query\\mcp_server.py"',
+                ):
+                    self.assertIn(retired_legacy_runtime, installer)
                 readme = archive.read(prefix + "README-WINDOWS.md").decode(
                     "utf-8"
                 )
                 normalized_readme = " ".join(readme.split())
-                self.assertIn("localragagent003", readme)
+                self.assertIn("/local-rag <question>", readme)
+                self.assertIn("personal Skill", readme)
+                self.assertNotIn("localragagent003", readme)
+                self.assertNotIn("three installed LOCAL-RAG Agents", readme)
+                self.assertIn("does not register an MCP server", normalized_readme)
                 self.assertIn(
                     "does not change VS Code approval settings",
+                    normalized_readme,
+                )
+                self.assertIn(
+                    "normal user and organization approval policies",
                     normalized_readme,
                 )
                 self.assertNotIn("global auto-approve", readme)
@@ -801,9 +870,12 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
         (query / "product.txt").parent.mkdir(parents=True, exist_ok=True)
         (query / "product.txt").write_text(product_content, encoding="utf-8")
+        shutil.copy2(
+            REPOSITORY_ROOT / ".copilot" / "rag" / "query" / "skill_runner.py",
+            query / "skill_runner.py",
+        )
         for filename in (
             "mcp_config.py",
-            "mcp_server.py",
             "copilot_cli_setup.py",
         ):
             shutil.copy2(
@@ -815,8 +887,8 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 query / filename,
             )
         shutil.copytree(
-            REPOSITORY_ROOT / ".copilot" / "rag" / "copilot-cli",
-            package / ".copilot" / "rag" / "copilot-cli",
+            REPOSITORY_ROOT / ".copilot" / "skills" / "local-rag",
+            package / ".copilot" / "skills" / "local-rag",
         )
         model = (
             package
@@ -873,7 +945,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             env=environment,
         )
 
-    def test_fresh_install_has_three_shared_agents_and_replaces_selected_db(self) -> None:
+    def test_fresh_install_has_one_slash_skill_and_replaces_selected_db(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -896,26 +968,41 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 b"new-db",
                 (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
             )
-            agents = profile / ".copilot" / "agents"
+            skill = profile / ".copilot" / "skills" / "local-rag" / "SKILL.md"
             self.assertEqual(
-                set(SHARED_AGENT_NAMES),
-                {path.name for path in agents.glob("*.agent.md")},
+                (
+                    REPOSITORY_ROOT
+                    / ".copilot"
+                    / "skills"
+                    / "local-rag"
+                    / "SKILL.md"
+                ).read_bytes(),
+                skill.read_bytes(),
             )
-            for agent_name in SHARED_AGENT_NAMES:
-                self.assertEqual(
-                    (
-                        REPOSITORY_ROOT
-                        / ".copilot"
-                        / "rag"
-                        / "copilot-cli"
-                        / agent_name
-                    ).read_bytes(),
-                    (agents / agent_name).read_bytes(),
-                )
+            agents = profile / ".copilot" / "agents"
+            self.assertEqual(set(), {path.name for path in agents.glob("*.agent.md")})
+            self.assertFalse((profile / ".copilot" / "mcp-config.json").exists())
+            self.assertFalse(
+                (
+                    profile
+                    / "AppData"
+                    / "Roaming"
+                    / "Code"
+                    / "User"
+                    / "mcp.json"
+                ).exists()
+            )
+            self.assertFalse(
+                (profile / "Documents" / "PowerShell" / "profile.ps1").exists()
+            )
+            self.assertFalse((profile / ".copilot" / "copilot-cli").exists())
+            self.assertIn("Local RAG slash Skill: READY", completed.stdout)
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
 
             (target / "dbs" / "selected-rag" / "catalog.sqlite").write_bytes(
                 b"old-db"
             )
+            agents.mkdir(parents=True, exist_ok=True)
             user_agent = agents / "user-owned.agent.md"
             user_agent.write_bytes(b"user-owned-agent\r\n")
             unrelated = target / "dbs" / "unrelated-rag"
@@ -941,11 +1028,11 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(b"user-owned-agent\r\n", user_agent.read_bytes())
             self.assertEqual(
-                set(SHARED_AGENT_NAMES) | {"user-owned.agent.md"},
+                {"user-owned.agent.md"},
                 {path.name for path in agents.glob("*.agent.md")},
             )
 
-    def test_shared_agents_are_not_created_after_failed_product_publish(self) -> None:
+    def test_slash_skill_is_not_created_after_failed_product_publish(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -974,8 +1061,9 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             completed = self._run(package, profile)
 
             self.assertNotEqual(0, completed.returncode)
-            for name in SHARED_AGENT_NAMES:
-                self.assertFalse((installed_agents / name).exists())
+            self.assertFalse(
+                (profile / ".copilot" / "skills" / "local-rag" / "SKILL.md").exists()
+            )
             self.assertEqual(b"user-owned-agent", unrelated.read_bytes())
 
     def test_non_amd64_binary_is_rejected_before_target_changes(self) -> None:
@@ -1027,12 +1115,12 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 [], list(settings.parent.glob("*.local-rag-backup-*"))
             )
             self.assertNotIn("VS Code 承認設定", completed.stdout)
-            config = (profile / ".copilot" / "mcp-config.json").read_text(
-                encoding="utf-8-sig"
+            self.assertFalse(
+                (profile / ".copilot" / "mcp-config.json").exists()
             )
-            self.assertIn('"localragagent003"', config)
+            self.assertIn("Local RAG slash Skill: READY", completed.stdout)
 
-    def test_fresh_install_registers_mcp_and_preserves_jsonc_fields(self) -> None:
+    def test_fresh_install_leaves_existing_mcp_jsonc_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -1061,35 +1149,22 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             completed = self._run(package, profile)
             self.assertEqual(0, completed.returncode, completed.stderr)
             rendered = config.read_bytes()
-            self.assertTrue(rendered.startswith(b"\xef\xbb\xbf"))
-            self.assertIn(b"// keep\r\n", rendered)
-            self.assertIn(b'"foreign"', rendered)
-            self.assertIn(b'"inputs"', rendered)
-            self.assertIn(b'"localragagent003"', rendered)
             vscode_rendered = vscode_config.read_bytes()
-            self.assertIn(b"// keep vscode\r\n", vscode_rendered)
-            self.assertIn(b'"inputs"', vscode_rendered)
-            self.assertIn(b'"localragagent003"', vscode_rendered)
-            self.assertIn("Copilot CLI MCP: configured", completed.stdout)
-            self.assertIn("Copilot CLI agents: installed", completed.stdout)
-            self.assertIn(
-                "Copilot CLI launcher-scoped read-only approval: enabled",
-                completed.stdout,
+            self.assertEqual(original, rendered)
+            self.assertEqual(
+                b'{\r\n  // keep vscode\r\n  "inputs": [],\r\n}\r\n',
+                vscode_rendered,
             )
+            self.assertIn("Local RAG slash Skill: READY", completed.stdout)
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
 
             second = self._run(package, profile, "-ReplaceExistingDatabases")
             self.assertEqual(0, second.returncode, second.stderr)
             self.assertEqual(rendered, config.read_bytes())
             self.assertEqual(vscode_rendered, vscode_config.read_bytes())
-            self.assertIn(
-                "Copilot CLI MCP: already_configured", second.stdout
-            )
-            self.assertIn(
-                "Copilot CLI launcher-scoped read-only approval: already_enabled",
-                second.stdout,
-            )
+            self.assertIn("Legacy Agent003 integration: absent", second.stdout)
 
-    def test_missing_copilot_cli_warns_without_failing_install(self) -> None:
+    def test_fresh_install_does_not_require_copilot_cli_executable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -1111,15 +1186,12 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertIn(
-                "GitHub Copilot CLI was not detected", completed.stdout
-            )
-            self.assertIn(
-                "Copilot CLI executable: not_detected", completed.stdout
-            )
-            self.assertIn("Copilot CLI MCP: configured", completed.stdout)
+            self.assertNotIn("GitHub Copilot CLI was not detected", completed.stdout)
+            self.assertNotIn("Copilot CLI executable:", completed.stdout)
+            self.assertIn("Local RAG slash Skill: READY", completed.stdout)
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
 
-    def test_explicit_copilot_home_and_profile_path_are_respected(self) -> None:
+    def test_fresh_install_does_not_touch_explicit_cli_home_or_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -1137,26 +1209,12 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertTrue((cli_home / "mcp-config.json").is_file())
-            for filename in SHARED_AGENT_NAMES:
-                self.assertTrue((cli_home / "agents" / filename).is_file())
-                self.assertFalse(
-                    (profile / ".copilot" / "agents" / filename).exists()
-                )
-            self.assertTrue(
-                (
-                    profile
-                    / ".copilot"
-                    / "copilot-cli"
-                    / "owned-manifest.json"
-                ).is_file()
-            )
-            self.assertIn(
-                "# >>> Local RAG Agent003 CLI (owned) >>>",
-                cli_profile.read_text(encoding="utf-8"),
-            )
+            self.assertFalse(cli_home.exists())
+            self.assertFalse(cli_profile.exists())
+            self.assertFalse((profile / ".copilot" / "agents").exists())
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
 
-    def test_foreign_mcp_name_collision_rolls_back_every_published_file(self) -> None:
+    def test_unowned_cli_mcp_collision_is_ignored_on_fresh_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -1187,25 +1245,22 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 profile,
                 "-ReplaceExistingDatabases",
             )
-            self.assertNotEqual(0, completed.returncode)
-            self.assertTrue((runtime / "old.txt").exists())
-            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
-            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertFalse((runtime / "old.txt").exists())
+            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                "old-product\n",
+                "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
             self.assertEqual(original_config, config.read_bytes())
-            self.assertIn("Copilot CLI setup failed", completed.stdout)
-            self.assertIn(
-                "Copilot CLI MCP: blocked_collision", completed.stdout
-            )
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
             self.assertFalse(
                 (profile / "Documents" / "PowerShell" / "profile.ps1").exists()
             )
             self.assertFalse((profile / ".copilot" / "copilot-cli").exists())
 
-    def test_vscode_mcp_collision_rolls_back_every_published_file(self) -> None:
+    def test_unowned_vscode_mcp_collision_is_ignored_on_fresh_install(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"
@@ -1247,20 +1302,17 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 "-ReplaceExistingDatabases",
             )
 
-            self.assertNotEqual(0, completed.returncode)
-            self.assertTrue((runtime / "old.txt").exists())
-            self.assertEqual(b"old-model", (model / "model.onnx").read_bytes())
-            self.assertEqual(b"old-db", (database / "catalog.sqlite").read_bytes())
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertFalse((runtime / "old.txt").exists())
+            self.assertEqual(b"new-model", (model / "model.onnx").read_bytes())
+            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
             self.assertEqual(
-                "old-product\n",
+                "new\n",
                 (target / "query" / "product.txt").read_text(encoding="utf-8"),
             )
             self.assertEqual(portable_original, portable_config.read_bytes())
             self.assertEqual(vscode_original, vscode_config.read_bytes())
-            self.assertIn("Copilot CLI setup failed", completed.stdout)
-            self.assertIn(
-                "Copilot CLI MCP: blocked_collision", completed.stdout
-            )
+            self.assertIn("Legacy Agent003 integration: absent", completed.stdout)
             self.assertFalse(
                 (profile / "Documents" / "PowerShell" / "profile.ps1").exists()
             )

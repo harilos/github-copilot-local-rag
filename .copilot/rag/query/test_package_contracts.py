@@ -35,6 +35,8 @@ class PackageContractTests(unittest.TestCase):
         filtered = _without_bootstrap(entries)
         self.assertEqual(1, len(filtered))
         self.assertEqual(".copilot/rag/search.py", filtered[0].destination)
+
+    def test_default_distribution_contains_one_personal_skill(self) -> None:
         copilot_home = Path(__file__).resolve().parents[2]
         generated, _databases = packages._distribution_entries(
             copilot_home,
@@ -50,12 +52,31 @@ class PackageContractTests(unittest.TestCase):
         self.assertFalse(
             any(destination.startswith(".copilot/agents/") for destination in destinations)
         )
-        for filename in (
-            "local-rag-agent003-savings.agent.md",
-            "local-rag-agent003-standard.agent.md",
-            "local-rag-agent003-thorough.agent.md",
+        self.assertIn(".copilot/skills/local-rag/SKILL.md", destinations)
+        self.assertNotIn(
+            ".copilot/skills/local-rag-setup/SKILL.md",
+            destinations,
+        )
+        self.assertFalse(
+            any(
+                destination.startswith(".copilot/instructions/")
+                for destination in destinations
+            )
+        )
+        self.assertFalse(
+            any(
+                destination.startswith(".copilot/rag/copilot-cli/")
+                for destination in destinations
+            )
+        )
+        for legacy_runtime in (
+            "agent003_answer_packet.py",
+            "mcp_server.py",
         ):
-            self.assertIn(f".copilot/rag/copilot-cli/{filename}", destinations)
+            self.assertNotIn(
+                f".copilot/rag/query/{legacy_runtime}",
+                destinations,
+            )
 
     def test_explicit_empty_database_selection_never_expands_to_all(self) -> None:
         dbs = self.root / "dbs"

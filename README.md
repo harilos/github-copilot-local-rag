@@ -5,17 +5,17 @@
 > GitHub Release: 未公開
 
 ローカル文書や社内資料を、VS CodeのGitHub Copilotから自然な日本語で
-検索するためのRAGパックです。利用者は専用Agentを選んで質問するだけで、
+検索するためのRAGパックです。利用者は`/local-rag`に続けて質問するだけで、
 検索コマンドや検索方式を覚える必要はありません。
 
 文書の抽出、索引作成、検索はPC内で行います。Copilotへ渡るのはDB全文ではなく、
 質問に応じて選ばれた抜粋、出典、検索メタデータです。検索処理は元資料のURLを
 自動で開きませんが、最終回答の生成にはGitHub Copilotへの接続が必要です。
 
-現在、正式に案内している一般利用経路は、管理者が作成したWindows x64配布版、
-VS Codeの3つの`LOCAL-RAG` Agent、およびPowerShell 7から起動する
-GitHub Copilot CLIの3段階profileです。GitHub上のtag／Releaseから配布物を
-公開する段階にはまだ進んでいません。
+現在、正式に案内している一般利用経路は、管理者が作成したWindows x64配布版と、
+VS CodeまたはGitHub Copilot CLIの個人Skill `/local-rag`です。カスタムAgentや
+MCP serverは通常利用に使いません。GitHub上のtag／Releaseから配布物を公開する
+段階にはまだ進んでいません。
 
 ## まず選ぶ：2つの利用形態
 
@@ -26,14 +26,14 @@ GitHub Copilot CLIの3段階profileです。GitHub上のtag／Releaseから配�
 |---|---|---|
 | 主な利用者 | 社内資料を検索する人 | DBと取得元を管理する人 |
 | 入手方法 | 管理者からWindows x64 offline ZIPを受け取る | このリポジトリをcloneする |
-| 検索 | 3つの`LOCAL-RAG` Agentを使う | 同じ検索機能を利用できる |
+| 検索 | `/local-rag` Skillを使う | 同じ`/local-rag` Skillを利用できる |
 | DBの作成・更新 | できない | できる |
 | Sourceの追加・再開 | できない | できる |
 | 配布ZIPの作成 | できない | できる |
 | 利用者PCのPython | 不要 | CPython 3.13.xが必要 |
 
 配布版のDBは、管理版で作成した時点のsnapshotです。元資料が更新された場合は、
-管理者がDBを更新して新しい配布ZIPを作ります。通常の検索AgentがDBやSourceを
+管理者がDBを更新して新しい配布ZIPを作ります。通常の検索SkillがDBやSourceを
 変更することはありません。
 
 資料を検索するだけなら、次の「配布版」から読んでください。DBを作成・更新する
@@ -51,7 +51,7 @@ GitHub Copilot CLIの3段階profileです。GitHub上のtag／Releaseから配�
 - ZIPを展開できる空き容量
 
 インストール時にsystem Python、pip、PATH変更、管理者権限、network接続は
-不要です。Agentで質問するときは、通常どおりGitHub Copilotへ接続できる必要が
+不要です。Skillで質問するときは、通常どおりGitHub Copilotへ接続できる必要が
 あります。
 
 ### 初回インストール
@@ -67,15 +67,15 @@ PowerShellから実行する場合は、展開先へ移動して次を実行し�
 .\install.cmd
 ```
 
-配布版には固定Python、検索用package、ONNX model、選択されたDB、
-VS CodeとCopilot CLIで共用する3つのAgent、hash検証付きlauncher、
-pinned MCP設定が含まれています。インストール後にCopilotへ
-「初期設定をして」と依頼する必要はありません。
+配布版には固定Python、検索用package、ONNX model、選択されたDB、個人Skill
+`/local-rag`が含まれています。インストール後にCopilotへ「初期設定をして」と
+依頼する必要はありません。
 
-installerはLocal RAGを`%USERPROFILE%\.copilot`へ配置し、read-only MCPを
-Copilot CLIの設定rootと通常のVS Code Default Profileへ別々のschemaで登録します。
-既存の無関係なCopilot設定、別名のDB、system Python、VS Codeのapproval設定は
-変更しません。
+installerはLocal RAGを`%USERPROFILE%\.copilot`へ配置します。VS Codeや
+Copilot CLIのMCP設定、カスタムAgent、PowerShell profile、VS Codeのapproval設定は
+作成・変更しません。旧版から更新する場合だけ、旧installerの所有manifestを検証し、
+製品が配置したAgent003/MCP/launcherを安全に撤去します。無関係なCopilot設定、
+別名のDB、system Pythonは変更しません。
 Copilotによる実地受入はinstallerや製品testでは実行しません。
 
 ### 同じDBを新しい配布版へ更新する
@@ -90,57 +90,55 @@ Copilotによる実地受入はinstallerや製品testでは実行しません。
 この指定で置き換わるのは、配布ZIPに含まれる同名DBだけです。別名のDBは保持されます。
 自動試験などで終了待ちを省く場合は`-NoPause`も指定できます。
 
-## 配布版：3つのAgentで検索する
+## 配布版：`/local-rag`で検索する
 
 ### 最初の質問
 
 1. VS CodeでCopilot Chatを開きます。
 2. ChatをAgentモードにします。
-3. Agent選択欄から、まず`LOCAL-RAG-標準`を選びます。
-4. 普通の文章で知りたいことを質問します。
+3. 入力欄で`/local-rag`を選び、その後ろへ普通の文章で質問を書きます。
+4. 既定の`standard`でよければ、そのまま送信します。
 
-専用Agentを選んだ時点でLocal RAGの使用は必須になるため、毎回「RAGを使って」と
-付ける必要はありません。
+`/local-rag`は手動起動専用です。通常の質問から勝手にLocal RAGを検索しません。
 
 ```text
-project-ragで、A2Lの目的と採用理由を根拠付きで教えて
+/local-rag project-ragで、A2Lの目的と採用理由を根拠付きで教えて
 ```
 
-### Agentの選び方
+### 検索modeの選び方
 
-| Agent | 向いている質問 | 現在のmodel設定 |
+| mode | 向いている質問 | 検索方針 |
 |---|---|---|
-| `LOCAL-RAG-標準` | 普段の質問。必要な量だけ検索して答えてほしい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
-| `LOCAL-RAG-節約` | 用語、識別子、単純な事実を短く確認したい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
-| `LOCAL-RAG-徹底検索` | 複数観点の比較、矛盾確認、複雑な調査をしたい | VS Codeで現在選択中のmodel（Autoを含む）を継承 |
+| `standard`（既定） | 普段の質問 | 単純質問は1回、広い質問は必要な範囲で最大4回検索 |
+| `savings` | 用語、識別子、単純な事実を短く確認したい | 1回だけ検索し、簡潔に回答 |
+| `thorough` | 複数観点の比較、矛盾確認、複雑な調査をしたい | 最低3回、最大4回を異なる観点で検索し、最後に不足をレビュー |
 
-迷った場合は`LOCAL-RAG-標準`を使ってください。`LOCAL-RAG-節約`は検索回数と
-根拠確認を最小限にし、`LOCAL-RAG-徹底検索`は同じDBを異なる観点から検索して
-Evidenceを突き合わせます。
+modeを省略すると`standard`です。modeは次のように質問へ付けます。
 
-3定義はVS CodeとCopilot CLIで共用します。専用CLI launcherは節約で検証済み
-allowlist（現在は`claude-haiku-4.5`）、標準と徹底検索で`auto`を明示します。
+```text
+/local-rag mode=savings project-ragで、A2Lとは何か教えて
+/local-rag mode=thorough project-ragで、方式Aと方式Bを比較して
+```
 
-3 Agentが利用できるのは、Local RAGの次の2つのread-only toolだけです。
-
-- `local_rag_search`
-- `local_rag_get_evidence`
-
-terminal、PowerShell、Workspace file、Web、別のtoolは使いません。DB、Source、
-設定、fileの作成・変更・削除も行いません。徹底検索も公開Webへ迂回せず、
-配布されたLocal RAGのEvidenceだけで回答します。
+どのmodeも、VS Codeで現在選択中のmodel（Autoを含む）を継承します。検索中は
+固定runnerがローカルの公開CLIだけを呼びます。通常検索ではDB、Source、設定を
+作成・変更・削除しません。`setup_required`時だけ公開setupを1回実行できます。
+shell/terminalは包括的に自動承認しないため、hostの
+実行確認が表示された場合は内容を確認してください。質問はcommand previewや
+shell historyへ表示される可能性があるため、そこへ残せない機密値は質問に含めないで
+ください。
 
 ### 質問の例
 
 | やりたいこと | 質問例 |
 |---|---|
-| 用語を確認する | `project-ragで、A2Lとは何か根拠付きで教えて` |
-| 採用理由を調べる | `project-ragで、方式Aを採用した理由と制約を整理して` |
-| 方式を比較する | `project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
-| 関連資料を広く探す | `project-ragで、この障害に関係する仕様・実装・運用資料を観点別に調べて` |
-| 根拠を詳しく読む | `さっきの[E2]の前後を詳しく確認して` |
+| 用語を確認する | `/local-rag mode=savings project-ragで、A2Lとは何か根拠付きで教えて` |
+| 採用理由を調べる | `/local-rag project-ragで、方式Aを採用した理由と制約を整理して` |
+| 方式を比較する | `/local-rag mode=thorough project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
+| 関連資料を広く探す | `/local-rag mode=thorough project-ragで、この障害に関係する仕様・実装・運用資料を観点別に調べて` |
+| 根拠を詳しく読む | `/local-rag さっきの[E2]の前後を詳しく確認して` |
 
-DB名を省略した場合、AgentはDBの説明と質問が明確に一致するときだけ自動で
+DB名を省略した場合、SkillはDBの説明と質問が明確に一致するときだけ自動で
 選びます。選べない場合は推測で検索しません。配布元から案内された
 `<DB名>-rag`を質問に付けて、もう一度実行してください。
 
@@ -150,7 +148,7 @@ DB名を省略した場合、AgentはDBの説明と質問が明確に一致す�
 
 ### 回答と出典の見方
 
-Agentは、根拠のある主張へEvidence IDを付け、回答末尾の`## References`へ
+Skillは、根拠のある主張へEvidence IDを付け、回答末尾の`## References`へ
 出典をまとめます。
 
 - `[E…]`: 質問へ直接答える根拠
@@ -163,47 +161,28 @@ GitHub、SVN、Redmine、SharePointなどの資料を開けます。
 
 ### GitHub Copilot CLIから使う
 
-PowerShell 7から標準profileを起動します。
+通常の`copilot`を現在の作業folderで起動し、VS Codeと同じ
+`/local-rag` Skillを呼びます。
 
-```powershell
-local-rag-copilot
+```text
+/local-rag project-ragで、A2Lの目的を教えて
+/local-rag mode=savings project-ragで、A2Lとは何か教えて
+/local-rag mode=thorough project-ragで、方式Aと方式Bを比較して
 ```
 
-三段階は`-Tier`で選べます。
-
-| `-Tier` | 用途 | model |
-|---|---|---|
-| `savings` | 単純な事実を短く確認する | eligible allowlistとlive一覧の一致（初期値は`claude-haiku-4.5`のみ） |
-| `standard` | 普段の質問へ標準的に回答する | `auto` |
-| `thorough` | 複数観点の比較や矛盾確認を行う | `auto` |
-
-```powershell
-local-rag-copilot -Tier savings
-local-rag-copilot -Tier standard
-local-rag-copilot -Tier thorough
-```
-
-`savings`は、同条件のfresh sessionを3回すべて合格したeligible
-allowlistと、実行時の`copilot help config`掲載モデルを正規化して厳密に
-照合します。現在のeligibleは`claude-haiku-4.5`だけです。一致するモデルが
-なければ「検証済み節約モデルなし。標準モードを使用してください」と停止し、
-既知不合格モデルや`auto`へ節約モードのままfallbackしません。
-
-専用launcherは現在の作業folderを維持し、検証済みのAgentとpinned
-`localragagent003` MCPを使用します。session内で自動許可するのは
-`local_rag_search`と`local_rag_get_evidence`だけです。通常の`copilot`
-command、認証、既存session、永続permissions、VS Codeのapproval設定は
-変更しません。
+旧`local-rag-copilot` launcher、専用profile、pinned MCPは廃止しました。
+現在選択中のCopilot CLI modelをそのまま使います。Skillが現在のsessionで見えない
+場合は`/skills reload`を実行し、`/skills info local-rag`で配置場所を確認してください。
 
 ### 困ったとき
 
 | 状況 | 対応 |
 |---|---|
-| Agent選択欄に`LOCAL-RAG`がない | VS Codeを完全に終了して再起動する。直らなければinstallerの最終結果を確認する |
+| `/`メニューに`/local-rag`がない | VS Codeを完全に終了して再起動し、`Chat: Open Customizations`のSkillsで`local-rag`を確認する |
 | 同名DBがあるためinstallできない | 更新版であることを確認し、`-ReplaceExistingDatabases`を付けて再実行する |
 | installが`FAILED`になった | 画面に表示されたlogを管理者へ渡す |
 | 質問に合うDBを選べない | 配布元から案内されたDB名を質問へ明記する |
-| 根拠が不足している | 条件や比較軸を追加するか、`LOCAL-RAG-徹底検索`で質問し直す |
+| 根拠が不足している | 条件や比較軸を追加するか、`mode=thorough`で質問し直す |
 
 installerは毎回、`%LOCALAPPDATA%\LocalRAG\logs`へ
 `portable-install-<timestamp>-<pid>.log`を1つ作り、成功時も失敗時も画面に
@@ -272,10 +251,11 @@ bash ./install.sh
 
 source installerは、端末固有のnetwork設定とSource接続設定を保持します。
 Windowsの`install.ps1`は、cloneに含まれる同名DBで既存DBを上書きしません。
-Copilot CLI側は`COPILOT_HOME`、未設定時は`%USERPROFILE%\.copilot`の
-`mcp-config.json`へ`mcpServers` schemaでmergeし、VS Code側はDefault Profileの
-`mcp.json`へ`servers` schemaでmergeします。同名の利用者所有設定とは衝突として
-停止し、無関係なserver、comment、BOM、改行は保持します。
+`/local-rag` Skillは`%USERPROFILE%\.copilot\skills\local-rag`へ配置され、
+VS CodeとCopilot CLIから共用されます。新規installではMCP設定、カスタムAgent、
+PowerShell profileを変更しません。旧版の製品所有Agent003統合がある場合だけ、
+manifestとhashを検証して撤去し、無関係なserver、Agent、profile本文、comment、
+BOM、改行を保持します。
 
 ## 管理版：Managerを使う
 
@@ -324,9 +304,9 @@ $python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
 
 完成したZIPを展開すると、利用者向けの`install.cmd`と`README-WINDOWS.md`が
 入っています。package作成時に固定Python、依存package、model、DB、manifest、
-checksumを検証します。利用者PCではPythonやnetworkを使いません。installerは
-VS CodeとCopilot CLIで共用する3つのAgent、pinned MCP、専用launcherをtransaction内で
-配置・更新し、CLIまたはMCP登録に失敗した場合はそれらを元へ戻します。
+checksumを検証します。利用者PCではsystem Pythonやnetworkを使いません。installerは
+VS CodeとCopilot CLIで共用する`/local-rag` Skillをtransaction内で配置・更新します。
+旧製品Agent003統合がある場合は所有権確認付きで撤去します。
 
 ### 管理PC引っ越しpackageをコマンドで作る
 
@@ -356,17 +336,20 @@ macOS／Linux:
 ```
 
 この直接CLIはDB一覧と検索結果を確認する診断用です。利用者向けの最終回答は
-作文しません。通常の利用者は3つのAgentを使ってください。
+作文しません。通常の利用者は`/local-rag`を使ってください。
 
 ## データの扱い
 
 - 配布ZIPには検索対象の資料、抜粋、内部URLが含まれる場合があります。元資料と同じ機密区分で扱ってください。
 - credential、端末固有の接続設定、実行中の一時fileは配布ZIPへ含めません。
 - Local RAGの検索はPC内で完結しますが、選ばれたEvidenceは回答生成のためGitHub Copilotへ渡ります。
-- 検索Agentはread-onlyです。DBやSourceの変更は、管理者がManagerから明示的に行います。
+- 検索Skillはread-onlyです。DBやSourceの変更は、管理者がManagerから明示的に行います。
 
-検索の内部構造、MCP、結果contract、Source Metadata、package検証については
-[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を参照してください。
+検索の内部構造、結果contract、Source Metadata、package検証については
+[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を、
+Skill移行と旧Agent/MCP撤去については
+[`/local-rag` Skill移行 詳細設計](.copilot/rag/docs/local-rag-slash-skill-design-ja.md)を
+参照してください。
 
 ## License
 

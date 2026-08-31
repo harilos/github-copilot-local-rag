@@ -50,6 +50,13 @@ move_marker "$LEGACY_MARKER" legacy
     --exclude='./rag/config/.source-connections.*' \
     --exclude='./rag/query/run' \
     --exclude='./rag/query/run/*' \
+    --exclude='./rag/query/agent003_answer_packet.py' \
+    --exclude='./rag/query/mcp_server.py' \
+    --exclude='./rag/copilot-cli' \
+    --exclude='./rag/copilot-cli/*' \
+    --exclude='./instructions/rag.instructions.md' \
+    --exclude='./skills/local-rag-setup' \
+    --exclude='./skills/local-rag-setup/*' \
     --exclude='./rag/query/.rag-deps-installed' \
     --exclude='./rag/query/.rag-deps-installed.*' \
     --exclude='*/.venv' \
@@ -79,8 +86,23 @@ rm -f -- \
   "$TARGET_DIR/rag/query/portable_runtime.py" \
   "$TARGET_DIR/rag/query/portable_db_install.py" \
   "$TARGET_DIR/rag/query/portable_db_smoke.py" \
+  "$TARGET_DIR/rag/query/agent003_answer_packet.py" \
+  "$TARGET_DIR/rag/query/mcp_server.py" \
+  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-savings.agent.md" \
+  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-standard.agent.md" \
+  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-thorough.agent.md" \
+  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003.ps1" \
+  "$TARGET_DIR/instructions/rag.instructions.md" \
+  "$TARGET_DIR/skills/local-rag-setup/SKILL.md" \
   "$TARGET_DIR/skills/local-rag-admin/SKILL.md"
-rmdir -- "$TARGET_DIR/skills/local-rag-admin" 2>/dev/null || true
+for retired_directory in \
+  "$TARGET_DIR/rag/copilot-cli" \
+  "$TARGET_DIR/instructions" \
+  "$TARGET_DIR/skills/local-rag-setup" \
+  "$TARGET_DIR/skills/local-rag-admin"
+do
+  rmdir -- "$retired_directory" 2>/dev/null || true
+done
 
 if [ -x "$RUNTIME_PYTHON" ]; then
   if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
@@ -100,5 +122,6 @@ rm -f -- "$LEGACY_RESCUE" || true
 LEGACY_RESCUE=""
 
 echo "Installed Copilot Local RAG files to: $TARGET_DIR"
+echo "Use /local-rag in GitHub Copilot Chat to search Local RAG."
 echo "Existing copilot-instructions.md was not overwritten by this repository."
 echo "Existing machine-local network and Source connection settings were preserved."

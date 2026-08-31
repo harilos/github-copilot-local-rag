@@ -529,14 +529,14 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback. If Windows "
         "PowerShell cannot start, the cmd launcher itself prints Japanese "
         "failure guidance and writes the same class of run log.\n\n"
-        "The package registers the fixed user-level `localragagent003` MCP "
-        "server in both the portable Copilot configuration and the normal "
-        "VS Code Default Profile. PowerShell 7 users can run "
-        "`local-rag-copilot` and select savings, standard, or thorough; that "
-        "launcher pins the owned MCP definition and auto-approves only the "
-        "two read-only Local RAG tools in any working directory. It does not "
-        "replace the normal `copilot` command or write persistent global "
-        "permissions. It does not change VS Code approval settings. Copilot "
+        "After installation, run `/local-rag <question>` in GitHub Copilot "
+        "Chat or Copilot CLI. The installed personal Skill uses Local RAG's "
+        "fixed public command boundary; lookup operations are read-only. "
+        "The default installation does "
+        "not register an MCP server, install custom Agents, or create a "
+        "dedicated Copilot CLI launcher. It does not change VS Code approval "
+        "settings. The built-in agent and terminal command remain subject to "
+        "the host's normal user and organization approval policies. Copilot "
         "acceptance is not run by the installer or product tests.\n",
         encoding="utf-8",
     )

@@ -391,25 +391,22 @@ class InstallerAndRoutingContractTests(unittest.TestCase):
         self.assertIn("rag/config/network.json", shell)
         self.assertIn(r"rag\config\network.json", powershell)
 
-    def test_copilot_source_based_activation_and_negative_guard(self) -> None:
-        router = (
-            REPO_ROOT / ".copilot" / "instructions" / "rag.instructions.md"
-        ).read_text(encoding="utf-8")
+    def test_copilot_slash_skill_is_manual_only(self) -> None:
         skill = (
             REPO_ROOT / ".copilot" / "skills" / "local-rag" / "SKILL.md"
         ).read_text(encoding="utf-8")
-        router = " ".join(router.split())
-        skill = " ".join(skill.split())
-        for phrase in (
-            "RAG",
-            "local documents",
-            "internal or company information",
-            "information installed in or provided to Copilot",
-        ):
-            self.assertIn(phrase, router)
-            self.assertIn(phrase, skill)
-        self.assertIn("Do not activate lookup merely because", router)
-        self.assertIn("Do not activate lookup merely because", skill)
+        normalized = " ".join(skill.split())
+        self.assertIn("user-invocable: true", skill)
+        self.assertIn("disable-model-invocation: true", skill)
+        self.assertIn("explicitly invokes `/local-rag`", normalized)
+        self.assertFalse(
+            (
+                REPO_ROOT
+                / ".copilot"
+                / "instructions"
+                / "rag.instructions.md"
+            ).exists()
+        )
 
 
 if __name__ == "__main__":
