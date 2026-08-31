@@ -36,38 +36,39 @@ frame "1. 導入" as Install {
   rectangle "<b>手動コピーの場合</b>\n既存の$HOME/.copilotを削除せず\n.copilotの中身だけをマージ" as Manual #F1F3F5
 
   frame "$HOME/.copilot/ へマージコピー" as CopilotHome {
-    artifact "<b>copilot-instructions.md</b>\n既存ファイルへ参照を1行追加\n（インストーラーは上書きしない）" as UserInstructions #F1F3F5
-    artifact "<b>instructions/</b>\nrag.instructions.md\n日本語の依頼とCLIを結ぶ" as Instructions #DDEBFF
+    artifact "<b>skills/local-rag/</b>\nSKILL.md\n/local-ragを手動起動" as SlashSkill #DDEBFF
+    artifact "<b>rag/query/</b>\nskill_runner.py\n公開検索だけを固定実行" as Runner #F1F3F5
     folder "<b>rag/</b>\nREADME・query・gen_db\nDB・model・docs" as RagHome #FFF4DE
-    UserInstructions -[hidden]right- Instructions
-    Instructions -[hidden]right- RagHome
+    SlashSkill -[hidden]right- Runner
+    Runner -[hidden]right- RagHome
   }
 
   Distribution --> Installer : 隠し.copilotも含む
-  Installer ..> UserInstructions : 参照行は利用者が追加
-  Installer --> Instructions
+  Installer --> SlashSkill
+  Installer --> Runner
   Installer --> RagHome
   Installer -[hidden]right- Manual
-  Manual ..> Instructions
+  Manual ..> SlashSkill
+  Manual ..> Runner
   Manual ..> RagHome
 }
 
 actor "利用者" as User
-rectangle "<b>Copilot / Codex Agent</b>\nrag.instructions.mdを読み\n内部CLIを実行する" as Agent #E8F1FF
+rectangle "<b>Copilot組み込みAgent mode</b>\n/local-rag Skillを読み\n承認後に固定runnerを実行" as Agent #E8F1FF
 
-UserInstructions --> Agent : RAG指示の場所
-Instructions --> Agent : 操作ルール
+SlashSkill --> Agent : 操作ルール
+Runner --> Agent : 固定command境界
 RagHome --> Agent : README・実行ファイル
-User --> Agent : 日本語で依頼
+User --> Agent : /local-ragで依頼
 
 frame "2. 利用者が言うこと" as Commands {
-  rectangle "<b>「RAGの初期設定をして」</b>\nquery/setup.py\n→ venv・依存・ONNXモデル準備\n→ list_dbs.pyで確認" as Setup #E7F6EF
+  rectangle "<b>インストーラーを実行</b>\nquery/setup.py\n→ venv・依存・ONNXモデル準備\n→ list_dbs.pyで確認" as Setup #E7F6EF
 
-  rectangle "<b>「project-ragで〈質問〉を調べて」</b>\n必要時だけlist_dbs.py\n→ search.py --db ... --include-db-hint\n→ 本文・出典を使って回答" as Search #DDEBFF
+  rectangle "<b>「/local-rag project-ragで〈質問〉」</b>\n必要時だけDB一覧を確認\n→ skill_runner.py search\n→ 本文・出典を使って回答" as Search #DDEBFF
 
-  rectangle "<b>「docsからproject-ragを作って」</b>\nタイトル・source-idも伝える\ngen_db/create_db.py → build_db.py --resume\n→ status.pyで完了確認" as Build #FFF4DE
+  rectangle "<b>Local RAG Manager</b>\nDB・Sourceの作成、更新、再開\n進捗と完了状態を画面で確認" as Build #FFF4DE
 
-  rectangle "<b>「RAGの使い方とDB一覧を教えて」</b>\nREADME・list_dbs.py\nstatus.py・各コマンドの--help\nモデルはロードしない" as Help #F1F3F5
+  rectangle "<b>ヘルプとDB一覧</b>\nREADME・Local RAG Manager\n必要時だけlist操作\n検索前にモデルはロードしない" as Help #F1F3F5
 
   Setup -[hidden]right- Search
   Setup -[hidden]down- Build
@@ -84,7 +85,7 @@ legend bottom
   <b>利用者が選ばなくてよいもの</b>
   Vector / BM25 / Exact / RRFなどの検索戦略
   ----
-  <b>Agentが確認する場合</b>
+  <b>確認が必要な場合</b>
   DBを一意に選べない場合
   既存DBへ上書きする可能性がある場合
 endlegend

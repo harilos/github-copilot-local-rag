@@ -33,7 +33,7 @@ rectangle "<b>1. 安全に停止</b>\nDB構築・追加・再構築を終了\nra
 Source --> Freeze
 
 frame "2. 配布用アーカイブへ入れるもの" as Bundle {
-  folder "<b>必須の入口</b>\n.copilot/instructions/rag.instructions.md\ninstall.sh / install.ps1\nREADME.md / LICENSE" as Entry #DDEBFF
+  folder "<b>必須の入口</b>\n.copilot/skills/local-rag/SKILL.md\ninstall.sh / install.ps1\nREADME.md / LICENSE" as Entry #DDEBFF
 
   folder "<b>RAG本体</b>\n.copilot/rag/query/\n.copilot/rag/gen_db/\n.copilot/rag/docs/" as Runtime #E8F1FF
 
@@ -72,11 +72,11 @@ GitWarning ..> Archive
 frame "3. 受け取った側" as Receiver {
   rectangle "<b>展開してインストール</b>\ninstall.sh または install.ps1\n→ $HOME/.copilot/へマージ" as Install #E8F1FF
 
-  rectangle "<b>「RAGの初期設定をして」</b>\n受取側OS用のvenv・native依存を作成\n同梱モデルとDBのversion・hashを確認" as Setup #E7F6EF
+  rectangle "<b>インストーラーで初期設定</b>\n受取側OS用のvenv・native依存を作成\n同梱モデルとDBのversion・hashを確認" as Setup #E7F6EF
 
   rectangle "<b>動作確認</b>\nlist_dbs.pyで想定DBを確認\nno-daemon検索 → daemon検索\n件数・JSON・出典を確認" as Verify #DDEBFF
 
-  rectangle "<b>利用開始</b>\n「project-ragで〈質問〉を調べて」\n「docsからproject-ragを作って」" as Use #E7F6EF
+  rectangle "<b>利用開始</b>\n「/local-rag project-ragで〈質問〉」\nDB作成・更新はLocal RAG Manager" as Use #E7F6EF
 
   Install --> Setup
   Setup --> Verify

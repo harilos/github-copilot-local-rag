@@ -396,6 +396,108 @@ class CopilotCliSetupContracts(unittest.TestCase):
         for path in self._owned_paths():
             self.assertFalse(path.exists(), path)
 
+    def test_portable_retire_of_source_install_ignores_unowned_vscode_target(self) -> None:
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+        vscode = self.root / "Code" / "User" / "mcp.json"
+        vscode.parent.mkdir(parents=True)
+        foreign = (
+            b'{"servers":{"localragagent003":'
+            b'{"type":"http","url":"https://foreign.invalid"}}}\n'
+        )
+        vscode.write_bytes(foreign)
+
+        result = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+            vscode_mcp_config=vscode,
+        )
+
+        self.assertEqual("retired", result["status"])
+        self.assertIsNone(result["vscode_mcp_config"])
+        self.assertEqual(foreign, vscode.read_bytes())
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_source_retire_of_portable_install_uses_manifest_vscode_target(self) -> None:
+        vscode = self.root / "Code" / "User" / "mcp.json"
+        vscode.parent.mkdir(parents=True)
+        original = (
+            b'{"servers":{"foreign":{"type":"stdio","command":"x"}},'
+            b'"keep":true}\n'
+        )
+        vscode.write_bytes(original)
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+            vscode_mcp_config=vscode,
+        )
+
+        result = setup.retire(
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+        )
+
+        self.assertEqual("retired", result["status"])
+        self.assertEqual(str(vscode), result["vscode_mcp_config"])
+        vscode_document, _ = setup.mcp_config._JsoncLexer(
+            vscode.read_text(encoding="utf-8")
+        ).document()
+        self.assertEqual(
+            {"foreign": {"type": "stdio", "command": "x"}},
+            vscode_document["servers"],
+        )
+        self.assertIs(True, vscode_document["keep"])
+        for path in self._owned_paths():
+            self.assertFalse(path.exists(), path)
+
+    def test_retire_rejects_caller_substitution_for_manifest_vscode_target(self) -> None:
+        owned_vscode = self.root / "Code" / "User" / "mcp.json"
+        owned_vscode.parent.mkdir(parents=True)
+        setup.install_or_repair(
+            "install",
+            self.home,
+            install_root=self.product,
+            profile_path=self.profile,
+            vscode_mcp_config=owned_vscode,
+        )
+        substitute = self.root / "Other" / "mcp.json"
+        substitute.parent.mkdir(parents=True)
+        foreign = b'{"servers":{"foreign":{"type":"stdio","command":"x"}}}\n'
+        substitute.write_bytes(foreign)
+        before = {
+            path: path.read_bytes()
+            for path in (
+                *self._owned_paths(),
+                self.home / "mcp-config.json",
+                self.profile,
+                owned_vscode,
+                substitute,
+            )
+        }
+
+        with self.assertRaisesRegex(
+            setup.OwnedArtifactCollisionError,
+            "owned manifest VS Code target mismatch",
+        ):
+            setup.retire(
+                self.home,
+                install_root=self.product,
+                profile_path=self.profile,
+                vscode_mcp_config=substitute,
+            )
+
+        for path, content in before.items():
+            self.assertEqual(content, path.read_bytes())
+
     def test_retire_tampered_owned_install_fails_closed(self) -> None:
         setup.install_or_repair(
             "install",

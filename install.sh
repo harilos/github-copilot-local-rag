@@ -10,7 +10,81 @@ if [ ! -d "$PAYLOAD_DIR" ]; then
   exit 1
 fi
 
+if [ -L "$TARGET_DIR" ]; then
+  echo "Refusing symlinked Local RAG install target: $TARGET_DIR" >&2
+  exit 1
+fi
 mkdir -p "$TARGET_DIR"
+
+RETIRED_FILES='rag/export_migration.sh
+rag/migration_archive.py
+rag/gen_db/migrate_source_metadata.py
+rag/gen_db/software_rag_tool/software_rag_tool/source_metadata_migration.py
+rag/query/.packaged-runtime.json
+rag/query/.rag-deps-installed
+rag/query/portable_runtime.py
+rag/query/portable_db_install.py
+rag/query/portable_db_smoke.py
+rag/query/agent003_answer_packet.py
+rag/query/mcp_server.py
+rag/copilot-cli/local-rag-agent003-savings.agent.md
+rag/copilot-cli/local-rag-agent003-standard.agent.md
+rag/copilot-cli/local-rag-agent003-thorough.agent.md
+rag/copilot-cli/local-rag-agent003.ps1
+instructions/rag.instructions.md
+skills/local-rag-setup/SKILL.md
+skills/local-rag-admin/SKILL.md'
+RETIRED_DIRECTORIES='rag/copilot-cli
+instructions
+skills/local-rag-setup
+skills/local-rag-admin'
+
+assert_target_path_parents_not_symlinks() {
+  relative_path="$1"
+  case "$relative_path" in
+    /*) echo "Refusing unsafe retired path outside the Local RAG target: $relative_path" >&2; return 1 ;;
+  esac
+  case "/$relative_path/" in
+    *"//"*|*"/./"*|*"/../"*) echo "Refusing unsafe retired path: $relative_path" >&2; return 1 ;;
+  esac
+
+  parent_path=${relative_path%/*}
+  if [ "$parent_path" = "$relative_path" ]; then parent_path=""; fi
+  current_path="$TARGET_DIR"
+  while [ -n "$parent_path" ]; do
+    case "$parent_path" in
+      */*) component=${parent_path%%/*}; parent_path=${parent_path#*/} ;;
+      *) component=$parent_path; parent_path="" ;;
+    esac
+    current_path="$current_path/$component"
+    if [ -L "$current_path" ]; then
+      echo "Refusing retired-file cleanup through symlink parent: $current_path" >&2
+      return 1
+    fi
+  done
+}
+
+preflight_retired_cleanup() {
+  for relative_path in $RETIRED_FILES $RETIRED_DIRECTORIES; do
+    assert_target_path_parents_not_symlinks "$relative_path"
+  done
+}
+
+remove_retired_files() {
+  for relative_path in $RETIRED_FILES; do
+    # Recheck immediately before each removal in case the copied payload
+    # introduced a path that did not exist during the initial preflight.
+    assert_target_path_parents_not_symlinks "$relative_path"
+    rm -f -- "$TARGET_DIR/$relative_path"
+  done
+}
+
+remove_retired_directories() {
+  for relative_path in $RETIRED_DIRECTORIES; do
+    assert_target_path_parents_not_symlinks "$relative_path"
+    rmdir -- "$TARGET_DIR/$relative_path" 2>/dev/null || true
+  done
+}
 
 QUERY_ROOT="$TARGET_DIR/rag/query"
 RUNTIME_PYTHON="$QUERY_ROOT/.venv/bin/python"
@@ -30,10 +104,14 @@ close_markers() {
   trap - EXIT
   if [ "$status" -ne 0 ]; then
     if [ -n "$LEGACY_RESCUE" ] && [ -f "$LEGACY_RESCUE" ] && [ ! -f "$LEGACY_BACKUP" ]; then mv "$LEGACY_RESCUE" "$LEGACY_BACKUP" || true; fi
-    rm -f -- "$LEGACY_MARKER" || true
+    if assert_target_path_parents_not_symlinks "rag/query/.venv/.rag-deps-installed"; then
+      rm -f -- "$LEGACY_MARKER" || true
+    fi
   fi
   exit "$status"
 }
+preflight_retired_cleanup
+assert_target_path_parents_not_symlinks "rag/query/.venv/.rag-deps-installed"
 trap close_markers EXIT
 move_marker "$LEGACY_MARKER" legacy
 
@@ -76,33 +154,8 @@ move_marker "$LEGACY_MARKER" legacy
 # Remove only retired files that older overlay installs may have left behind.
 # Keep this explicit allowlist narrow; the installer must not prune unrelated
 # user files or database contents.
-rm -f -- \
-  "$TARGET_DIR/rag/export_migration.sh" \
-  "$TARGET_DIR/rag/migration_archive.py" \
-  "$TARGET_DIR/rag/gen_db/migrate_source_metadata.py" \
-  "$TARGET_DIR/rag/gen_db/software_rag_tool/software_rag_tool/source_metadata_migration.py" \
-  "$TARGET_DIR/rag/query/.packaged-runtime.json" \
-  "$TARGET_DIR/rag/query/.rag-deps-installed" \
-  "$TARGET_DIR/rag/query/portable_runtime.py" \
-  "$TARGET_DIR/rag/query/portable_db_install.py" \
-  "$TARGET_DIR/rag/query/portable_db_smoke.py" \
-  "$TARGET_DIR/rag/query/agent003_answer_packet.py" \
-  "$TARGET_DIR/rag/query/mcp_server.py" \
-  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-savings.agent.md" \
-  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-standard.agent.md" \
-  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003-thorough.agent.md" \
-  "$TARGET_DIR/rag/copilot-cli/local-rag-agent003.ps1" \
-  "$TARGET_DIR/instructions/rag.instructions.md" \
-  "$TARGET_DIR/skills/local-rag-setup/SKILL.md" \
-  "$TARGET_DIR/skills/local-rag-admin/SKILL.md"
-for retired_directory in \
-  "$TARGET_DIR/rag/copilot-cli" \
-  "$TARGET_DIR/instructions" \
-  "$TARGET_DIR/skills/local-rag-setup" \
-  "$TARGET_DIR/skills/local-rag-admin"
-do
-  rmdir -- "$retired_directory" 2>/dev/null || true
-done
+remove_retired_files
+remove_retired_directories
 
 if [ -x "$RUNTIME_PYTHON" ]; then
   if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \

@@ -366,6 +366,130 @@ class InstallerExclusionContractTests(unittest.TestCase):
         os.name == "nt",
         "POSIX installer execution is not applicable on Windows",
     )
+    def test_posix_retired_cleanup_refuses_symlink_parents(self) -> None:
+        cases = (
+            (
+                Path("instructions"),
+                Path("rag.instructions.md"),
+            ),
+            (
+                Path("skills") / "local-rag-setup",
+                Path("SKILL.md"),
+            ),
+            (
+                Path("skills"),
+                Path("local-rag-setup") / "SKILL.md",
+            ),
+            (
+                Path("rag") / "copilot-cli",
+                Path("local-rag-agent003-standard.agent.md"),
+            ),
+            (
+                Path("rag"),
+                Path("query") / "mcp_server.py",
+            ),
+        )
+        for link_relative, sentinel_relative in cases:
+            with self.subTest(link=str(link_relative)):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = root / "source"
+                    source_query = source / ".copilot" / "rag" / "query"
+                    target = root / "target"
+                    external = root / "external"
+                    source_query.mkdir(parents=True)
+                    target.mkdir()
+                    external.mkdir()
+                    shutil.copy2(INSTALL_SH, source / "install.sh")
+                    (source_query / "product.py").write_text(
+                        "NEW\n",
+                        encoding="utf-8",
+                    )
+
+                    link = target / link_relative
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(external, target_is_directory=True)
+                    sentinel = external / sentinel_relative
+                    sentinel.parent.mkdir(parents=True, exist_ok=True)
+                    sentinel.write_text(
+                        "must survive\n",
+                        encoding="utf-8",
+                    )
+
+                    completed = subprocess.run(
+                        ["sh", str(source / "install.sh")],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        env={
+                            **os.environ,
+                            "COPILOT_HOME": str(target),
+                            "HOME": str(root / "home"),
+                        },
+                        timeout=30,
+                        check=False,
+                    )
+
+                    self.assertNotEqual(0, completed.returncode)
+                    self.assertIn("symlink parent", completed.stderr)
+                    self.assertEqual(
+                        "must survive\n",
+                        sentinel.read_text(encoding="utf-8"),
+                    )
+                    self.assertTrue(link.is_symlink())
+                    self.assertFalse(
+                        (target / "rag" / "query" / "product.py").exists()
+                    )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX installer execution is not applicable on Windows",
+    )
+    def test_posix_install_refuses_symlinked_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source_query = source / ".copilot" / "rag" / "query"
+            external = root / "external"
+            target = root / "target"
+            source_query.mkdir(parents=True)
+            external.mkdir()
+            shutil.copy2(INSTALL_SH, source / "install.sh")
+            (source_query / "product.py").write_text(
+                "NEW\n",
+                encoding="utf-8",
+            )
+            sentinel = external / "sentinel.txt"
+            sentinel.write_text("must survive\n", encoding="utf-8")
+            target.symlink_to(external, target_is_directory=True)
+
+            completed = subprocess.run(
+                ["sh", str(source / "install.sh")],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={
+                    **os.environ,
+                    "COPILOT_HOME": str(target),
+                    "HOME": str(root / "home"),
+                },
+                timeout=30,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("symlinked Local RAG install target", completed.stderr)
+            self.assertEqual("must survive\n", sentinel.read_text(encoding="utf-8"))
+            self.assertFalse((external / "rag" / "query" / "product.py").exists())
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX installer execution is not applicable on Windows",
+    )
     def test_posix_install_fails_closed_when_runtime_refresh_fails(
         self,
     ) -> None:

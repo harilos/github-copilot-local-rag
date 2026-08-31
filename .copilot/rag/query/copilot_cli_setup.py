@@ -542,11 +542,39 @@ def _manifest_bytes(document: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
+def _manifest_vscode_target(value: object) -> Path | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"path", "existed_before_install"}
+        or not isinstance(value["path"], str)
+        or not value["path"]
+        or type(value["existed_before_install"]) is not bool
+    ):
+        raise OwnedArtifactCollisionError(
+            "owned manifest VS Code target mismatch"
+        )
+    recorded = Path(value["path"])
+    if not recorded.is_absolute():
+        raise OwnedArtifactCollisionError(
+            "owned manifest VS Code target mismatch"
+        )
+    normalized = _absolute(recorded)
+    if os.path.normcase(str(recorded)) != os.path.normcase(str(normalized)):
+        raise OwnedArtifactCollisionError(
+            "owned manifest VS Code target mismatch"
+        )
+    return normalized
+
+
 def _load_manifest(
     copilot_home: Path,
     install_root: Path,
     profile_path: Path,
     vscode_mcp_config: Path | None,
+    *,
+    resolve_recorded_vscode_target: bool = False,
 ) -> dict[str, object]:
     home = _absolute(copilot_home)
     root = _absolute(install_root)
@@ -596,18 +624,33 @@ def _load_manifest(
         or len(profile["block_sha256"]) != 64
     ):
         raise OwnedArtifactCollisionError("owned manifest profile identity mismatch")
-    vscode = parsed["vscode_mcp_config"]
-    if vscode_mcp_config is None:
-        if vscode is not None:
-            raise OwnedArtifactCollisionError("owned manifest VS Code target mismatch")
-    elif (
-        not isinstance(vscode, dict)
-        or set(vscode) != {"path", "existed_before_install"}
-        or os.path.normcase(str(vscode["path"]))
-        != os.path.normcase(str(_absolute(vscode_mcp_config)))
-        or type(vscode["existed_before_install"]) is not bool
+    recorded_vscode = _manifest_vscode_target(parsed["vscode_mcp_config"])
+    requested_vscode = (
+        _absolute(vscode_mcp_config) if vscode_mcp_config is not None else None
+    )
+    if resolve_recorded_vscode_target:
+        # Retirement follows the manifest-owned target.  A portable installer
+        # may supply its default path while retiring a source install that never
+        # configured VS Code; that extra path must be ignored.  Conversely, a
+        # supplied path may not replace a target actually recorded as owned.
+        if (
+            recorded_vscode is not None
+            and requested_vscode is not None
+            and os.path.normcase(str(recorded_vscode))
+            != os.path.normcase(str(requested_vscode))
+        ):
+            raise OwnedArtifactCollisionError(
+                "owned manifest VS Code target mismatch"
+            )
+    elif (recorded_vscode is None) != (requested_vscode is None) or (
+        recorded_vscode is not None
+        and requested_vscode is not None
+        and os.path.normcase(str(recorded_vscode))
+        != os.path.normcase(str(requested_vscode))
     ):
-        raise OwnedArtifactCollisionError("owned manifest VS Code target mismatch")
+        raise OwnedArtifactCollisionError(
+            "owned manifest VS Code target mismatch"
+        )
     entries = parsed["artifacts"]
     expected_paths = set(_artifact_paths(home, root))
     if not isinstance(entries, list) or len(entries) != len(expected_paths):
@@ -1081,11 +1124,22 @@ def retire(
             "manifest": str(manifest_path),
         }
 
+    requested_vscode = (
+        _absolute(vscode_mcp_config) if vscode_mcp_config is not None else None
+    )
+    manifest = _load_manifest(
+        home,
+        root,
+        _absolute(profile_path),
+        requested_vscode,
+        resolve_recorded_vscode_target=True,
+    )
+    recorded_vscode = _manifest_vscode_target(manifest["vscode_mcp_config"])
     result = uninstall(
         home,
         install_root=root,
         profile_path=profile_path,
-        vscode_mcp_config=vscode_mcp_config,
+        vscode_mcp_config=recorded_vscode,
     )
     result["status"] = "retired"
     result["manifest"] = str(manifest_path)

@@ -206,10 +206,14 @@ Profile設定は不要である。
 
 manifestがなければ`absent`として何も変更しない。同名の手動設定を推測で削除しない。
 所有artifactが改変されていた場合はfail closedとし、部分削除をrollbackする。
+source版とportable版を跨ぐ更新では、manifestにVS Code targetがなければportable側の
+既定target引数を無視し、manifestにtargetがあればその記録値だけを検証・撤去対象にする。
+呼出側から別targetへ差し替えることはできない。
 
 overlay installで消えない旧`rag.instructions.md`と`local-rag-setup` Skillは、
 installerの明示的retired-file allowlistでのみ削除する。任意の利用者fileをdirectory単位で
-pruneしない。
+pruneしない。POSIX installerはtarget自体と各retired pathの親にsymlinkがあれば、
+コピーや削除を始める前にfail closedとする。
 
 ## 10. policyとsecurity
 
