@@ -148,7 +148,7 @@ def build_error_packet(schema: str, code: str) -> dict[str, Any]:
     safe_code, _, _ = sanitize_visible_text(code)
     notice = safe_code or "local_rag_error"
     message = (
-        "The Local RAG response exceeded the 1 MiB MCP payload limit."
+        "The Local RAG response exceeded the configured payload limit."
         if notice == "response_too_large"
         else "Local RAG could not return usable evidence."
     )

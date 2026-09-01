@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import queue
@@ -13,12 +12,13 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
+
+QUERY_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(QUERY_ROOT))
 
 from agent003_answer_packet import (
     DETAIL_SCHEMA_VERSION,
@@ -32,6 +32,13 @@ from agent003_answer_packet import (
     packet_output_schema,
 )
 from result_bundle import load_expanded_result, load_initial_summary
+from result_gateway import (
+    GatewayError,
+    ResultBinding,
+    create_result_binding,
+    parse_search_pointer,
+    revalidate_result_binding,
+)
 
 SERVER_NAME, SERVER_VERSION = "local-rag-agent003", "1.0.0"
 SEARCH_TOOL, EVIDENCE_TOOL = "local_rag_search", "local_rag_get_evidence"
@@ -41,11 +48,10 @@ SUPPORTED_PROTOCOLS = {
 }
 MAX_MESSAGE_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 4 * 1024 * 1024
-MAX_BUNDLE_FILE_BYTES = 2 * 1024 * 1024
 MAX_STATE_BYTES, MAX_QUESTION_CHARS = 64 * 1024, 16_000
 LIST_TIMEOUT_SECONDS, SEARCH_TIMEOUT_SECONDS = 30.0, 180.0
 SEARCH_RUNTIME_TIMEOUT_SECONDS = 170.0
-EOF_JOIN_SECONDS, TOKEN_TTL_SECONDS, TOKEN_REGISTRY_SIZE = 2.0, 15 * 60, 32
+EOF_JOIN_SECONDS, TOKEN_REGISTRY_SIZE = 2.0, 32
 MAX_OUTSTANDING_TOOL_CALLS = 8
 _DATABASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*-rag$")
 _TOKEN_RE = re.compile(r"^lrt_[A-Za-z0-9_-]{20,92}$")
@@ -97,24 +103,6 @@ def _read_object(path: Path, maximum: int, code: str) -> dict[str, Any]:
     return _strict_object(raw, code)
 
 
-def _digest(path: Path) -> tuple[str, int]:
-    try:
-        before = path.lstat()
-        if not _regular(path) or not 2 <= before.st_size <= MAX_BUNDLE_FILE_BYTES:
-            raise RuntimeErrorCode("invalid_result_bundle")
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            while block := stream.read(64 * 1024):
-                digest.update(block)
-        after = path.lstat()
-        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-        if identity(before) != identity(after) or not _regular(path):
-            raise RuntimeErrorCode("invalid_result_bundle")
-    except OSError as exc:
-        raise RuntimeErrorCode("result_bundle_unavailable") from exc
-    return digest.hexdigest(), before.st_size
-
-
 @dataclass(frozen=True)
 class RuntimePaths:
     rag_root: Path
@@ -138,24 +126,19 @@ class RuntimePaths:
 
 
 @dataclass(frozen=True)
-class ResultBinding:
-    result_set_id: str
-    database: str
-    evidence_ids: tuple[str, ...]
-    expires_monotonic: float
+class McpResultBinding:
+    gateway: ResultBinding
     daemon_identity: tuple[int, str, str, str]
-    manifest_integrity: tuple[str, int]
-    summary_integrity: tuple[str, int]
-    bundle_size: int
+    expires_monotonic: float
 
 
 class TokenRegistry:
     def __init__(self, *, maximum: int = TOKEN_REGISTRY_SIZE) -> None:
         self.maximum = min(TOKEN_REGISTRY_SIZE, max(1, int(maximum)))
-        self._entries: OrderedDict[str, ResultBinding] = OrderedDict()
+        self._entries: OrderedDict[str, McpResultBinding] = OrderedDict()
         self._lock = threading.Lock()
 
-    def add(self, binding: ResultBinding) -> str:
+    def add(self, binding: McpResultBinding) -> str:
         with self._lock:
             self._prune()
             token = "lrt_" + secrets.token_urlsafe(24)
@@ -166,7 +149,7 @@ class TokenRegistry:
                 self._entries.popitem(last=False)
             return token
 
-    def get(self, token: str) -> ResultBinding | None:
+    def get(self, token: str) -> McpResultBinding | None:
         if not _TOKEN_RE.fullmatch(token):
             return None
         with self._lock:
@@ -181,9 +164,8 @@ class TokenRegistry:
             self._entries.pop(token, None)
 
     def _prune(self) -> None:
-        now = time.monotonic()
         for token, value in list(self._entries.items()):
-            if value.expires_monotonic <= now:
+            if value.expires_monotonic <= time.monotonic():
                 self._entries.pop(token, None)
 
 
@@ -321,29 +303,51 @@ class LocalRagTools:
                 "--format", "json", question]
         pointer = self._run_public(argv, SEARCH_TIMEOUT_SECONDS, request_id,
                                    cancelled, "invalid_search_pointer")
-        result_id, pointer_size = self._pointer(pointer)
+        try:
+            result_id, pointer_size = parse_search_pointer(pointer)
+        except GatewayError as exc:
+            raise RuntimeErrorCode(exc.code) from exc
         summary, expiry = load_initial_summary(
             result_id, database, spool_root=self.paths.spool_root)
         if summary is None or expiry is None:
             raise RuntimeErrorCode("invalid_result_bundle")
-        binding = self._binding(result_id, database, summary, expiry, pointer_size)
-        token = self.registry.add(binding) if binding.evidence_ids else ""
+        try:
+            gateway = create_result_binding(
+                result_id, database, summary, expiry, pointer_size,
+                spool_root=self.paths.spool_root,
+            )
+        except GatewayError as exc:
+            raise RuntimeErrorCode(exc.code) from exc
+        binding = McpResultBinding(
+            gateway,
+            self._daemon_identity(),
+            time.monotonic() + max(0.0, gateway.expires_at.timestamp() - time.time()),
+        )
+        token = self.registry.add(binding) if gateway.evidence_ids else ""
         return build_search_packet(summary, result_token=token,
-                                   inspectable_evidence_ids=binding.evidence_ids)
+                                   inspectable_evidence_ids=gateway.evidence_ids)
 
     def _evidence_detail(self, token: str,
                          evidence_ids: tuple[str, ...]) -> dict[str, Any]:
         binding = self.registry.get(token)
-        if binding is None or any(item not in binding.evidence_ids for item in evidence_ids):
+        if binding is None or any(
+            item not in binding.gateway.evidence_ids for item in evidence_ids
+        ):
             return build_stale_evidence_detail()
         try:
-            self._revalidate(binding)
+            if self._daemon_identity() != binding.daemon_identity:
+                raise RuntimeErrorCode("stale_result")
+            revalidate_result_binding(
+                binding.gateway, spool_root=self.paths.spool_root
+            )
             expanded, _ = load_expanded_result(
-                binding.result_set_id, evidence_ids, detail_level="standard",
+                binding.gateway.result_set_id, evidence_ids, detail_level="standard",
                 spool_root=self.paths.spool_root)
             if expanded.get("status") != "ok":
                 raise RuntimeErrorCode("stale_result")
-        except (RuntimeErrorCode, OSError, ValueError, json.JSONDecodeError):
+            expanded = dict(expanded)
+            expanded["selected_db"] = binding.gateway.selected_db
+        except (GatewayError, RuntimeErrorCode, OSError, ValueError, json.JSONDecodeError):
             self.registry.discard(token)
             return build_stale_evidence_detail()
         return build_evidence_detail(expanded, result_token=token,
@@ -385,22 +389,6 @@ class LocalRagTools:
             raise RuntimeErrorCode("public_command_output_too_large")
         return _strict_object(stdout, invalid_code)
 
-    @staticmethod
-    def _pointer(value: dict[str, Any]) -> tuple[str, int]:
-        result_id, size = value.get("result_set_id"), value.get("bytes")
-        if (value.get("status") != "written" or
-                value.get("schema_version") != "rag-result-pointer-v1" or
-                not isinstance(result_id, str) or not isinstance(size, int) or
-                isinstance(size, bool) or size < 2):
-            raise RuntimeErrorCode("invalid_search_pointer")
-        try:
-            canonical = str(uuid.UUID(result_id))
-        except ValueError as exc:
-            raise RuntimeErrorCode("invalid_search_pointer") from exc
-        if canonical != result_id:
-            raise RuntimeErrorCode("invalid_search_pointer")
-        return result_id, size
-
     def _daemon_identity(self) -> tuple[int, str, str, str]:
         state = _read_object(self.paths.daemon_state, MAX_STATE_BYTES,
                              "shared_daemon_unavailable")
@@ -413,40 +401,6 @@ class LocalRagTools:
                 transport not in {"tcp", "file", "unix"}):
             raise RuntimeErrorCode("shared_daemon_unavailable")
         return pid, generation, fingerprint, transport
-
-    def _binding(self, result_id: str, database: str, summary: dict[str, Any],
-                 expiry: datetime, pointer_size: int) -> ResultBinding:
-        folder = self.paths.spool_root / result_id
-        manifest, summary_hash = _digest(folder / "manifest.json"), _digest(folder / "summary.json")
-        meta = _read_object(folder / "meta.json", MAX_BUNDLE_FILE_BYTES,
-                            "invalid_result_bundle")
-        bundle_size = meta.get("bundle_bytes")
-        if (summary_hash[1] != pointer_size or meta.get("result_set_id") != result_id or
-                meta.get("selected_db") != database or not isinstance(bundle_size, int) or
-                isinstance(bundle_size, bool) or bundle_size <= 0):
-            raise RuntimeErrorCode("invalid_result_bundle")
-        follow_up = summary.get("follow_up")
-        available = follow_up.get("available_item_ids") if isinstance(follow_up, dict) else []
-        ids = tuple(item for item in available
-                    if isinstance(item, str) and _EVIDENCE_ID_RE.fullmatch(item))
-        remaining = (expiry.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
-        if remaining <= 0:
-            raise RuntimeErrorCode("stale_result")
-        return ResultBinding(result_id, database, ids,
-                             time.monotonic() + min(TOKEN_TTL_SECONDS, remaining),
-                             self._daemon_identity(), manifest, summary_hash, bundle_size)
-
-    def _revalidate(self, binding: ResultBinding) -> None:
-        folder = self.paths.spool_root / binding.result_set_id
-        meta = _read_object(folder / "meta.json", MAX_BUNDLE_FILE_BYTES, "stale_result")
-        if (self._daemon_identity() != binding.daemon_identity or
-                _digest(folder / "manifest.json") != binding.manifest_integrity or
-                _digest(folder / "summary.json") != binding.summary_integrity or
-                meta.get("result_set_id") != binding.result_set_id or
-                meta.get("selected_db") != binding.database or
-                meta.get("bundle_bytes") != binding.bundle_size):
-            raise RuntimeErrorCode("stale_result")
-
 
 class McpServer:
     def __init__(self, tools: LocalRagTools) -> None:

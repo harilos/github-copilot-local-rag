@@ -236,6 +236,30 @@ function Remove-Tree {
     }
 }
 
+function Move-PublishedRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    for ($Attempt = 1; $Attempt -le 4; $Attempt++) {
+        Assert-NoReparsePath -Path $Source
+        Assert-NoReparsePath -Path $Destination
+        if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+            throw "staged runtime is missing before publish"
+        }
+        if (Test-Path -LiteralPath $Destination) {
+            throw "runtime destination unexpectedly exists before publish"
+        }
+        try {
+            [System.IO.Directory]::Move($Source, $Destination)
+            return
+        } catch [System.UnauthorizedAccessException], [System.IO.IOException] {
+            if ($Attempt -eq 4) { throw }
+            Start-Sleep -Milliseconds (100 * $Attempt)
+        }
+    }
+}
+
 function Assert-Amd64PeFile {
     param([string]$Path)
     $Stream = $null
@@ -442,7 +466,6 @@ try {
         "rag\query\portable_db_install.py",
         "rag\query\portable_db_smoke.py",
         "rag\query\vscode_settings.py",
-        "rag\query\agent003_answer_packet.py",
         "rag\query\mcp_server.py",
         "rag\copilot-cli\local-rag-agent003-savings.agent.md",
         "rag\copilot-cli\local-rag-agent003-standard.agent.md",
@@ -506,7 +529,7 @@ try {
     $DatabaseStatus = "READY"
 
     $InstallStage = "publish_runtime"
-    [System.IO.Directory]::Move($StageRuntime, $TargetRuntime)
+    Move-PublishedRuntime -Source $StageRuntime -Destination $TargetRuntime
     $RuntimePublished = $true
     $RuntimeStatus = "READY"
 

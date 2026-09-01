@@ -69,14 +69,17 @@ class PackageContractTests(unittest.TestCase):
                 for destination in destinations
             )
         )
-        for legacy_runtime in (
+        for skill_runtime in (
             "agent003_answer_packet.py",
-            "mcp_server.py",
+            "result_bundle.py",
+            "result_gateway.py",
+            "skill_runner.py",
         ):
-            self.assertNotIn(
-                f".copilot/rag/query/{legacy_runtime}",
+            self.assertIn(
+                f".copilot/rag/query/{skill_runtime}",
                 destinations,
             )
+        self.assertNotIn(".copilot/rag/query/mcp_server.py", destinations)
 
     def test_explicit_empty_database_selection_never_expands_to_all(self) -> None:
         dbs = self.root / "dbs"

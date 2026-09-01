@@ -250,7 +250,6 @@ function Test-InstallPayloadExcluded {
         return $true
     }
     if (
-        ($Normalized -ieq "rag\query\agent003_answer_packet.py") -or
         ($Normalized -ieq "rag\query\mcp_server.py") -or
         ($Normalized -ieq "instructions\rag.instructions.md") -or
         ($Normalized -ieq "skills\local-rag-setup") -or
@@ -327,7 +326,6 @@ $RetiredFiles = @(
     "rag\query\portable_runtime.py",
     "rag\query\portable_db_install.py",
     "rag\query\portable_db_smoke.py",
-    "rag\query\agent003_answer_packet.py",
     "rag\query\mcp_server.py",
     "rag\query\vscode_settings.py",
     "rag\copilot-cli\local-rag-agent003-savings.agent.md",

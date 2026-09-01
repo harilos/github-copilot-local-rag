@@ -126,12 +126,7 @@ _PORTABLE_CONFIG_EXAMPLES = frozenset(
     }
 )
 _PROJECT_SKILLS = ("local-rag",)
-_LEGACY_MCP_RUNTIME_FILES = frozenset(
-    {
-        "agent003_answer_packet.py",
-        "mcp_server.py",
-    }
-)
+_LEGACY_MCP_RUNTIME_FILES = frozenset({"mcp_server.py"})
 _DB_SEARCH_FILES = frozenset(
     {
         "DB_PROFILE.md",
@@ -1038,7 +1033,10 @@ def _product_entries(
         "search.py",
         "setup.py",
         "query/list_dbs.py",
+        "query/agent003_answer_packet.py",
         "query/reference_contract.py",
+        "query/result_bundle.py",
+        "query/result_gateway.py",
         "query/result_detail.py",
         "query/search.py",
         "query/setup.py",

@@ -25,7 +25,6 @@ rag/query/.rag-deps-installed
 rag/query/portable_runtime.py
 rag/query/portable_db_install.py
 rag/query/portable_db_smoke.py
-rag/query/agent003_answer_packet.py
 rag/query/mcp_server.py
 rag/copilot-cli/local-rag-agent003-savings.agent.md
 rag/copilot-cli/local-rag-agent003-standard.agent.md
@@ -128,7 +127,6 @@ move_marker "$LEGACY_MARKER" legacy
     --exclude='./rag/config/.source-connections.*' \
     --exclude='./rag/query/run' \
     --exclude='./rag/query/run/*' \
-    --exclude='./rag/query/agent003_answer_packet.py' \
     --exclude='./rag/query/mcp_server.py' \
     --exclude='./rag/copilot-cli' \
     --exclude='./rag/copilot-cli/*' \

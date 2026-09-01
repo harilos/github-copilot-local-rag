@@ -74,7 +74,6 @@ class InstallerExclusionContractTests(unittest.TestCase):
             "./rag/config/manage-custom.json",
             "./rag/config/windows-test-connection.local.json",
             "./rag/query/run",
-            "./rag/query/agent003_answer_packet.py",
             "./rag/query/mcp_server.py",
             "./rag/copilot-cli",
             "./instructions/rag.instructions.md",
@@ -92,7 +91,6 @@ class InstallerExclusionContractTests(unittest.TestCase):
             r"rag\config\manage-custom.json",
             r"rag\config\windows-test-connection.local.json",
             r"rag\query\run",
-            r"rag\query\agent003_answer_packet.py",
             r"rag\query\mcp_server.py",
             r"rag\copilot-cli",
             r"instructions\rag.instructions.md",
@@ -146,7 +144,6 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 "source_metadata_migration.py"
             ),
             "skills/local-rag-admin/SKILL.md",
-            "rag/query/agent003_answer_packet.py",
             "rag/query/mcp_server.py",
             "instructions/rag.instructions.md",
             "skills/local-rag-setup/SKILL.md",
@@ -245,7 +242,6 @@ class InstallerExclusionContractTests(unittest.TestCase):
                     / "source_metadata_migration.py"
                 ),
                 target / "skills" / "local-rag-admin" / "SKILL.md",
-                target / "rag" / "query" / "agent003_answer_packet.py",
                 target / "rag" / "query" / "mcp_server.py",
                 target / "instructions" / "rag.instructions.md",
                 target / "skills" / "local-rag-setup" / "SKILL.md",
@@ -609,6 +605,9 @@ class InstallerExclusionContractTests(unittest.TestCase):
             )
             (query / "product.py").write_text("NEW\n", encoding="utf-8")
             rag = source / ".copilot" / "rag"
+            skill = source / ".copilot" / "skills" / "local-rag" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("---\nname: local-rag\n---\n", encoding="utf-8")
             (rag / "list_dbs.py").write_text(
                 "raise SystemExit(0)\n", encoding="utf-8"
             )

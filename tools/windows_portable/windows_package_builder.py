@@ -290,10 +290,7 @@ def _payload_excluded(relative: Path, is_dir: bool) -> bool:
         ("skills", "local-rag-setup"),
     }:
         return True
-    if parts in {
-        ("rag", "query", "agent003_answer_packet.py"),
-        ("rag", "query", "mcp_server.py"),
-    }:
+    if parts == ("rag", "query", "mcp_server.py"):
         return True
     if any(part in FORBIDDEN_PARTS for part in parts):
         return True
@@ -407,7 +404,10 @@ def _prune_pip_distlib_launchers(runtime_root: Path) -> None:
     These exact executables are package data used only when pip creates new
     entry points; Local RAG never installs packages after the artifact is built.
     Keeping any of the x86 or ARM64 templates would also violate the x64-only
-    package contract, so the complete exact upstream set is omitted.
+    package contract, so the complete exact upstream set is omitted. A runtime
+    extracted from an earlier verified portable package has already omitted
+    the complete set; that exact empty state is also accepted. Partial or
+    unknown launcher sets remain invalid.
     """
     site_packages_roots = (
         runtime_root / "Lib" / "site-packages",
@@ -439,8 +439,10 @@ def _prune_pip_distlib_launchers(runtime_root: Path) -> None:
         for path in launcher_root.glob("*.exe")
         if path.is_file() and not path.is_symlink()
     }
-    if actual_launchers != set(PIP_DISTLIB_LAUNCHERS):
+    if actual_launchers not in (set(), set(PIP_DISTLIB_LAUNCHERS)):
         raise ValueError("pip distlib launcher resource set is not exact")
+    if not actual_launchers:
+        return
     for name, expected_machine in PIP_DISTLIB_LAUNCHERS.items():
         path = launcher_root / name
         if not path.is_file() or path.is_symlink():

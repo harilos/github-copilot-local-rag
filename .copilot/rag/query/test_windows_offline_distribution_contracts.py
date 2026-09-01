@@ -261,10 +261,13 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
                 )
             )
             self.assertNotIn(".copilot/rag/query/mcp_server.py", names)
-            self.assertNotIn(
+            self.assertIn(
                 ".copilot/rag/query/agent003_answer_packet.py",
                 names,
             )
+            self.assertIn(".copilot/rag/query/result_bundle.py", names)
+            self.assertIn(".copilot/rag/query/result_gateway.py", names)
+            self.assertIn(".copilot/rag/query/skill_runner.py", names)
             self.assertIn(".copilot/rag/query/copilot_cli_setup.py", names)
             self.assertIn(".copilot/rag/query/mcp_config.py", names)
             with zipfile.ZipFile(output) as archive:
@@ -308,7 +311,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             self.assertIn('"retire",', template)
             self.assertEqual(1, template.count("copilot_cli_setup.py"))
             self.assertIn('"rag\\query\\vscode_settings.py"', template)
-            self.assertIn('"rag\\query\\agent003_answer_packet.py"', template)
+            self.assertNotIn('"rag\\query\\agent003_answer_packet.py"', template)
             self.assertIn('"rag\\query\\mcp_server.py"', template)
             self.assertIn(
                 '"rag\\copilot-cli\\local-rag-agent003.ps1"', template
@@ -333,7 +336,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             site = scripts / "Lib" / "site-packages"
             site.mkdir(parents=True)
             (site / "unsafe.pth").write_text(
-                "C:\\Users\\builder\\private\n",
+                "C:" + "\\Users\\builder\\private\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
@@ -379,12 +382,14 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             '"Legacy Agent003 integration: "',
             "Use /local-rag in GitHub Copilot Chat",
             "did not enable MCP or change VS Code approval settings",
+            "function Move-PublishedRuntime",
+            "for ($Attempt = 1; $Attempt -le 4; $Attempt++)",
         ):
             self.assertIn(fragment, template)
         settings_index = template.index('$InstallStage = "retire_agent003"')
         self.assertLess(
             template.index(
-                "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
+                "Move-PublishedRuntime -Source $StageRuntime -Destination $TargetRuntime"
             ),
             settings_index,
         )

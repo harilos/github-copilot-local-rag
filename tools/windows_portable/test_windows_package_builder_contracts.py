@@ -246,7 +246,7 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     prefix + ".copilot/rag/query/mcp_server.py",
                     names,
                 )
-                self.assertNotIn(
+                self.assertIn(
                     prefix + ".copilot/rag/query/agent003_answer_packet.py",
                     names,
                 )
@@ -348,6 +348,21 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertIn("Assert-Amd64PortableRuntime", installer)
                 self.assertIn("-ReplaceExistingDatabases", installer)
                 self.assertIn("[System.IO.Directory]::Move", installer)
+                self.assertIn("function Move-PublishedRuntime", installer)
+                self.assertIn(
+                    "for ($Attempt = 1; $Attempt -le 4; $Attempt++)",
+                    installer,
+                )
+                self.assertIn("Assert-NoReparsePath -Path $Source", installer)
+                self.assertIn("Assert-NoReparsePath -Path $Destination", installer)
+                self.assertIn(
+                    "[System.IO.Directory]::Move($Source, $Destination)",
+                    installer,
+                )
+                self.assertIn(
+                    "catch [System.UnauthorizedAccessException], [System.IO.IOException]",
+                    installer,
+                )
                 self.assertLess(
                     installer.index(
                         "[System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)"
@@ -357,7 +372,7 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertGreater(
                     installer.index('$InstallStage = "slash_skill"'),
                     installer.index(
-                        "[System.IO.Directory]::Move($StageRuntime, $TargetRuntime)"
+                        "Move-PublishedRuntime -Source $StageRuntime -Destination $TargetRuntime"
                     ),
                 )
                 self.assertGreater(
@@ -377,11 +392,10 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertNotIn(
                     'Join-Path $TargetQuery "mcp_config.py"', installer
                 )
-                for retired_legacy_runtime in (
-                    '"rag\\query\\agent003_answer_packet.py"',
-                    '"rag\\query\\mcp_server.py"',
-                ):
-                    self.assertIn(retired_legacy_runtime, installer)
+                self.assertIn('"rag\\query\\mcp_server.py"', installer)
+                self.assertNotIn(
+                    '"rag\\query\\agent003_answer_packet.py"', installer
+                )
                 readme = archive.read(prefix + "README-WINDOWS.md").decode(
                     "utf-8"
                 )
@@ -703,6 +717,22 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             _write_pe(mismatched, 0x014C)
             with self.assertRaisesRegex(ValueError, "machine is invalid"):
                 build_package(request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = _request(root, no_database=True)
+            distlib = (
+                request.runtime_root
+                / "Lib"
+                / "site-packages"
+                / "pip"
+                / "_vendor"
+                / "distlib"
+            )
+            for name in package_builder.PIP_DISTLIB_LAUNCHERS:
+                (distlib / name).unlink()
+            result = build_package(request)
+            self.assertTrue(result.zip_path.is_file())
 
     def test_rejects_unknown_profile_and_database_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

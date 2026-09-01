@@ -14,6 +14,14 @@ from source_manager.diagnostics import exception_diagnostic
 from source_manager.subprocess_stream import RESULT_FRAME
 
 
+def _synthetic_sharepoint_root() -> Path:
+    return Path("C:" + "\\Users") / "Person Name" / "SharePoint" / "Shared Documents"
+
+
+def _synthetic_runtime_root() -> Path:
+    return Path("C:" + "\\Users") / "Runtime User" / "Local RAG"
+
+
 def _framed(value: dict) -> str:
     return RESULT_FRAME + json.dumps(value, ensure_ascii=False)
 
@@ -87,7 +95,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                 "local_source_key": "src_sharepoint-0123456789ab",
                 "source_type": "sharepoint",
             },
-            work=Path(r"C:\Users\Person Name\SharePoint\Shared Documents"),
+            work=_synthetic_sharepoint_root(),
             python_executable=Path("python.exe"),
             rag_root=Path("rag"),
             command_runner=command,
@@ -97,7 +105,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         self.assertIn("--privacy-safe-root", observed)
 
     def test_all_files_unreadable_is_failure_without_absolute_process_data(self) -> None:
-        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        absolute = _synthetic_sharepoint_root()
 
         def command(arguments: list[str]) -> SimpleNamespace:
             source_id = arguments[arguments.index("--source-id") + 1]
@@ -204,8 +212,8 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
     def test_absolute_error_detail_path_is_rejected(self) -> None:
         source_id = "src_sharepoint-0123456789ab"
         unsafe = _summary(source_id)
-        unsafe["error_details"][0]["path"] = (
-            r"C:\Users\Person Name\SharePoint\locked.docx"
+        unsafe["error_details"][0]["path"] = str(
+            _synthetic_sharepoint_root().parent / "locked.docx"
         )
         completed = SimpleNamespace(
             returncode=0,
@@ -227,8 +235,8 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
             )
 
     def test_nonzero_sharepoint_process_redacts_root_in_every_field(self) -> None:
-        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
-        runtime = Path(r"C:\Users\Runtime User\Local RAG")
+        absolute = _synthetic_sharepoint_root()
+        runtime = _synthetic_runtime_root()
         completed = SimpleNamespace(
             returncode=1,
             stdout=f"cannot read {absolute / 'locked.docx'}",
@@ -271,8 +279,8 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         self.assertIn("Traceback suppressed", serialized)
 
     def test_sharepoint_process_invocation_failures_hide_all_arguments(self) -> None:
-        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
-        runtime = Path(r"C:\Users\Runtime User\Local RAG")
+        absolute = _synthetic_sharepoint_root()
+        runtime = _synthetic_runtime_root()
 
         def launch_error(arguments: list[str]) -> SimpleNamespace:
             error = OSError(2, "launch failed", str(absolute))
@@ -315,7 +323,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
                 self.assertTrue(captured.exception.__suppress_context__)
 
     def test_validation_oserror_hides_suppressed_exception_context(self) -> None:
-        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        absolute = _synthetic_sharepoint_root()
         inner = OSError(5, "access denied", str(absolute))
         inner.winerror = 5
         with (
@@ -396,7 +404,7 @@ class SharePointPartialAddRunnerTests(unittest.TestCase):
         command.assert_not_called()
 
     def test_streaming_progress_redacts_external_root_before_callback(self) -> None:
-        absolute = Path(r"C:\Users\Person Name\SharePoint\Shared Documents")
+        absolute = _synthetic_sharepoint_root()
         observed: list[dict] = []
 
         def run(arguments, *, progress_callback, cwd, env):

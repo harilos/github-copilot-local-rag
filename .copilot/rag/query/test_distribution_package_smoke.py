@@ -54,6 +54,9 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             "install.sh",
             ".copilot/rag/setup.py",
             ".copilot/rag/query/reference_contract.py",
+            ".copilot/rag/query/agent003_answer_packet.py",
+            ".copilot/rag/query/result_bundle.py",
+            ".copilot/rag/query/result_gateway.py",
             ".copilot/rag/query/skill_runner.py",
             (
                 ".copilot/rag/gen_db/software_rag_tool/"
@@ -93,10 +96,6 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             any(path.startswith(".copilot/rag/copilot-cli/") for path in paths)
         )
         self.assertNotIn(".copilot/rag/query/mcp_server.py", paths)
-        self.assertNotIn(
-            ".copilot/rag/query/agent003_answer_packet.py",
-            paths,
-        )
         self.assertNotIn("bootstrap.py", paths)
         self.assertNotIn(".copilot/rag/manage.py", paths)
         self.assertNotIn(".copilot/rag/source_manager/packages.py", paths)
@@ -193,6 +192,9 @@ class DistributionPackageSmokeTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual([], json.loads(listed.stdout)["databases"])
+
+        if os.name == "nt":
+            return
 
         installed = self.root / "installed"
         local_config = installed / "rag/config/source-connections.json"

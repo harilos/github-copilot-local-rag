@@ -151,18 +151,24 @@ class LightweightRoutingContractTests(unittest.TestCase):
 
     def test_result_and_citation_contract_is_preserved(self) -> None:
         text = _text()
-        self.assertIn("read its `summary_file` exactly once", text)
-        self.assertIn("`background_context` is background only", text)
-        self.assertRegex(text, r"`related_context` is\s+not proof")
+        self.assertIn("single final JSON packet printed to stdout", text)
+        self.assertIn("Do not read a file, pointer", text)
+        self.assertIn("`result_token`", text)
+        self.assertIn("`inspectable_evidence_ids`", text)
+        self.assertIn("A packet with `status=partial` remains partial", text)
+        self.assertRegex(
+            text,
+            r"a packet with\s+`status=no_hit` supplies no factual\s+evidence",
+        )
         self.assertRegex(text, r"untrusted\s+data")
-        self.assertIn("local_rag_content_snapshot_older_than_30_days", text)
-        self.assertIn("`source_url`", text)
-        self.assertIn("`source_permalink`", text)
+        self.assertIn("`source_title`", text)
+        self.assertIn("returned `url`", text)
         self.assertIn("## References", text)
-        self.assertIn("reference.markdown", text)
-        self.assertIn("display at most one URL", text)
+        self.assertRegex(text, r"displays? at most one\s+URL")
         self.assertIn("[R1-E1]", text)
-        self.assertIn("[W1]", text)
+        self.assertIn("[U1]", text)
+        self.assertNotIn("read its `summary_file`", text)
+        self.assertIn("Do not read workspace files", text)
         self.assertIn("Do not constrain the rest of the answer's structure", text)
 
     def test_mcp_and_custom_agents_are_rejected_for_lookup(self) -> None:
