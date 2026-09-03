@@ -132,7 +132,7 @@ class LightweightRoutingContractTests(unittest.TestCase):
             text,
         )
         self.assertGreaterEqual(text.count("skill_runner.py"), 10)
-        self.assertGreaterEqual(text.count(" -I -B "), 9)
+        self.assertGreaterEqual(text.count(" -I -X utf8 -B "), 9)
         self.assertRegex(text, r"Do not use\s+`cmd\.exe /c`")
         self.assertIn("PATH-based Python", text)
         self.assertIn("Do not combine a runner", text)

@@ -198,7 +198,7 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
 
 def _search_command(args: argparse.Namespace) -> list[str]:
     command = [
-        sys.executable, "-I", "-B", str(RAG_ROOT / "search.py"),
+        sys.executable, "-I", "-X", "utf8", "-B", str(RAG_ROOT / "search.py"),
         "--db", args.db, "--include-db-hint", "--compact-json",
         "--timeout", str(SEARCH_RUNTIME_TIMEOUT_SECONDS),
         "--result-delivery", "file", "--format", "json", "--stdin",
@@ -211,11 +211,17 @@ def _search_command(args: argparse.Namespace) -> list[str]:
 
 
 def _list_command() -> list[str]:
-    return [sys.executable, "-I", "-B", str(RAG_ROOT / "list_dbs.py"), "--format", "json"]
+    return [
+        sys.executable, "-I", "-X", "utf8", "-B",
+        str(RAG_ROOT / "list_dbs.py"), "--format", "json",
+    ]
 
 
 def _setup_command() -> list[str]:
-    return [sys.executable, "-I", "-B", str(RAG_ROOT / "setup.py"), "--format", "json"]
+    return [
+        sys.executable, "-I", "-X", "utf8", "-B",
+        str(RAG_ROOT / "setup.py"), "--format", "json",
+    ]
 
 
 def _child_environment() -> dict[str, str]:
@@ -329,13 +335,17 @@ def _bounded_reader(stream: Any, output: bytearray, overflow: threading.Event) -
 
 
 def _validate_fixed_command(command: list[str]) -> None:
-    if len(command) < 4 or command[0] != sys.executable or command[1:3] != ["-I", "-B"]:
+    if (
+        len(command) < 6
+        or command[0] != sys.executable
+        or command[1:5] != ["-I", "-X", "utf8", "-B"]
+    ):
         raise RunnerError("invalid_public_command")
     try:
         executable = Path(sys.executable).resolve(strict=True)
     except OSError as exc:
         raise RunnerError("runtime_python_unavailable") from exc
-    script = Path(command[3])
+    script = Path(command[5])
     allowed = {RAG_ROOT / "list_dbs.py", RAG_ROOT / "search.py", RAG_ROOT / "setup.py"}
     if not executable.is_file() or script not in allowed or not _safe_regular(script):
         raise RunnerError("public_entry_point_unavailable")
@@ -561,6 +571,19 @@ def _compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+def _write_stdout_utf8(output: str) -> None:
+    encoded = (output + "\n").encode("utf-8", errors="strict")
+    binary = getattr(sys.stdout, "buffer", None)
+    if binary is None:
+        # In-process callers such as unit tests can replace stdout with a text
+        # stream. Production always takes the binary path above.
+        sys.stdout.write(encoded.decode("utf-8", errors="strict"))
+        sys.stdout.flush()
+        return
+    binary.write(encoded)
+    binary.flush()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -591,8 +614,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(output.encode("utf-8")) > MAX_ERROR_PACKET_BYTES:
             output = '{"schema_version":"local-rag-error-v1","status":"error","payload_complete":true,"error_code":"runner_error"}'
         exit_code = 1
-    sys.stdout.write(output + "\n")
-    sys.stdout.flush()
+    _write_stdout_utf8(output)
     return exit_code
 
 

@@ -134,43 +134,43 @@ invocation with a pipeline or JSON-processing command.
 ### Windows PowerShell
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" list
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -X utf8 -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" list
 ```
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" search --db <selected-db> --question '<PowerShell-single-quoted-question>'
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -X utf8 -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" search --db <selected-db> --question '<PowerShell-single-quoted-question>'
 ```
 
 ```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
+& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -I -X utf8 -B "$env:USERPROFILE\.copilot\rag\query\skill_runner.py" detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
 ```
 
 ### Windows Git Bash
 
 ```bash
-"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -B "$HOME/.copilot/rag/query/skill_runner.py" list
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -X utf8 -B "$HOME/.copilot/rag/query/skill_runner.py" list
 ```
 
 ```bash
-"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -B "$HOME/.copilot/rag/query/skill_runner.py" search --db <selected-db> --question '<Bash-single-quoted-question>'
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -X utf8 -B "$HOME/.copilot/rag/query/skill_runner.py" search --db <selected-db> --question '<Bash-single-quoted-question>'
 ```
 
 ```bash
-"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -B "$HOME/.copilot/rag/query/skill_runner.py" detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
+"$HOME/.copilot/rag/query/.venv/Scripts/python.exe" -I -X utf8 -B "$HOME/.copilot/rag/query/skill_runner.py" detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
 ```
 
 ### macOS/Linux
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python -I -B ~/.copilot/rag/query/skill_runner.py list
+~/.copilot/rag/query/.venv/bin/python -I -X utf8 -B ~/.copilot/rag/query/skill_runner.py list
 ```
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python -I -B ~/.copilot/rag/query/skill_runner.py search --db <selected-db> --question '<Bash-single-quoted-question>'
+~/.copilot/rag/query/.venv/bin/python -I -X utf8 -B ~/.copilot/rag/query/skill_runner.py search --db <selected-db> --question '<Bash-single-quoted-question>'
 ```
 
 ```bash
-~/.copilot/rag/query/.venv/bin/python -I -B ~/.copilot/rag/query/skill_runner.py detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
+~/.copilot/rag/query/.venv/bin/python -I -X utf8 -B ~/.copilot/rag/query/skill_runner.py detail --result-token <opaque-lrt-token> --item-id <E1> --detail-level expanded
 ```
 
 Append structured hint options to `search` only when the rules above require

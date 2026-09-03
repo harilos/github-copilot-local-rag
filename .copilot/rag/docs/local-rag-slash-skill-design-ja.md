@@ -134,7 +134,7 @@ runnerは次を保証する。
 
 - `subprocess`へargument listを渡し、`shell=False`で実行する。
 - child processはPATH上のPythonではなく`sys.executable`で起動する。
-- Skillとchild processのPythonは`-I -B`で起動し、`PYTHONPATH`、
+- Skillとchild processのPythonは`-I -X utf8 -B`で起動し、`PYTHONPATH`、
   `PYTHONHOME`、user site、`sitecustomize`によるimport差し替えを無効にする。
 - childへ渡す`RAG_DBS_ROOT`は、runner自身から見た`rag/dbs`へ上書きする。
 - 起動先はrunnerから見た固定相対pathの公開scriptだけにする。

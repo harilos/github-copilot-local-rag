@@ -95,7 +95,7 @@ class CopilotSetupRoutingContracts(unittest.TestCase):
             self.assertIn(" list", section)
             self.assertIn(" search", section)
             self.assertIn(" detail", section)
-            self.assertIn(" -I -B ", section)
+            self.assertIn(" -I -X utf8 -B ", section)
         self.assertIn("single quote", text)
         self.assertIn("shell history", text)
 

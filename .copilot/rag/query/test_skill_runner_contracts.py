@@ -78,7 +78,10 @@ class SkillRunnerContractTests(unittest.TestCase):
             "--answer-goal", "comparison", "--entity", "A2L",
         ]))
         command = skill_runner._search_command(args)
-        self.assertEqual([sys.executable, "-I", "-B", str(RAG_ROOT / "search.py")], command[:4])
+        self.assertEqual(
+            [sys.executable, "-I", "-X", "utf8", "-B", str(RAG_ROOT / "search.py")],
+            command[:6],
+        )
         self.assertIn("--result-delivery", command)
         self.assertIn("file", command)
         self.assertIn("--stdin", command)
@@ -238,6 +241,39 @@ class SkillRunnerContractTests(unittest.TestCase):
                                 input_bytes=None, timeout=5, invalid_code="invalid_test_output",
                             )
                     self.assertEqual(expected, raised.exception.code)
+
+    def test_windows_cp932_stdout_pipe_emits_one_utf8_packet(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runner-stdout-") as temporary:
+            helper = Path(temporary) / "helper.py"
+            marker = "—😀𠮷"
+            helper.write_text(
+                "import sys\n"
+                f"sys.path.insert(0, {str(QUERY_ROOT)!r})\n"
+                "import skill_runner\n"
+                "sys.stdout.reconfigure(encoding='cp932', errors='strict')\n"
+                f"marker = {marker!r}\n"
+                "skill_runner._run_list = lambda: {"
+                "'schema_version':'local-rag-catalog-v1','status':'ok',"
+                "'payload_complete':True,'databases':[{'name':'probe-rag',"
+                "'title':marker,'query_hint':marker,'content_summary':marker,'sources':[]}]}\n"
+                "raise SystemExit(skill_runner.main(['list']))\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", "-X", "utf8", "-B", str(helper)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(b"", completed.stderr)
+        decoded = completed.stdout.decode("utf-8", errors="strict")
+        self.assertEqual(1, len(decoded.splitlines()))
+        packet = json.loads(decoded)
+        self.assertEqual(marker, packet["databases"][0]["title"])
+        self.assertEqual(marker, packet["databases"][0]["query_hint"])
+        self.assertEqual(marker, packet["databases"][0]["content_summary"])
 
     def test_timeout_kills_the_child_process_tree(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runner-tree-") as temporary:
