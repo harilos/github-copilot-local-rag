@@ -73,9 +73,10 @@ model（Autoを含む）を継承します。
 Skillは固定runnerを通じて公開CLIだけを使い、通常検索ではDB、Source、設定を
 変更しません。`setup_required`時だけ公開setupを実行できます。MCPやカスタムAgentは
 使いません。DBを一意に選べない場合は、
-管理者が案内した`<DB名>-rag`を質問へ付けます。terminal/shellは包括承認しないため、
-hostの実行確認が表示された場合は内容を確認します。同じSkillをCopilot CLIからも
-`/local-rag`で利用できます。
+管理者が案内した`<DB名>-rag`を質問へ付けます。製品はterminal/shellのグローバル
+自動承認を設定せず、利用者が既に設定した承認方式も変更しません。hostの実行確認が
+表示された場合は内容を確認します。Copilot CLIでは対話モードで同じSkillを使います。
+CLIの確認済み制約と再読込方法は[README](../../../README.md)を参照してください。
 
 共通入力:
 
@@ -212,6 +213,7 @@ Source追加画面では次から選びます。
 8. 手元の資料を一度だけ取り込むOther
 9. GitHub Issues
 10. GitHub Wiki
+11. Confluence
 
 Sourceの安定IDは索引と更新stateを結びます。後から変更しません。新しいSourceは
 登録だけでは検索対象にならず、取得・索引登録が成功した後にSource inventoryへ
@@ -307,6 +309,23 @@ GitLab本体URL、project URL、Source名を入力します。GitLab Issueと同
 machine-local access tokenを使い、Wiki全ページを取得します。更新時は全ページを
 比較して削除済みページも反映し、中断した処理は保存済み位置から再開できます。
 初回取込後に別projectへ切り替える場合は、新しいSourceとして追加します。
+
+### Confluence
+
+Confluence CloudまたはData Centerの接続を端末へ登録し、Source追加の
+`11. Confluence`から登録済み接続とspaceのURLまたはkeyを選びます。接続が未登録なら
+Source接続設定へ進みます。CloudではemailとAPI token、Data CenterではPersonal
+Access Tokenを使い、接続確認後にmachine-local設定へ保存します。秘密値をDBや
+配布packageへ含めません。
+
+取得範囲はspace全体、または指定ページ自身とその配下です。ページ本文をMarkdownへ
+変換し、5件ずつ検索へ反映します。途中停止後は`更新・再開する`から続けられます。
+添付ファイルは「取得しない」（既定）か「metadataだけ取得する」を選び、添付本文は
+取り込みません。元ページへの検索結果リンクは取得結果から設定します。
+
+登録した資格情報で閲覧できるページだけが対象です。取得・照合がすべて成功した場合に
+限り、今回の一覧から消えた既存ページを反映します。取得途中の失敗だけで既存ページを
+削除しません。接続・space・取得範囲を変える場合は、新しいSourceとして追加してください。
 
 ### SharePoint
 
@@ -476,6 +495,22 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 entry、launcher、profile blockを撤去します。利用者所有の設定やfileは保持します。
 Managerとinstallerは最終結果を`SUCCESS`または`FAILED`で表示します。
 
+#### Windows配布版をコマンドで作る
+
+Windows x64の管理者PCで、検索へ反映済みのDBを指定します。出力ZIPと同じpathが
+既にある場合は上書きしません。`--db`を繰り返すと複数DBを含められ、省略すると全DBが
+対象です。下記の`project-rag`は配布するDB名へ置き換えてください。
+
+```powershell
+$ragPython = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $ragPython -B "$env:USERPROFILE\.copilot\rag\make_distribution_package.py" --output "C:\LocalRAG\local-rag-distribution.zip" --db project-rag
+```
+
+完成ZIPには利用者向けの`install.cmd`と`README-WINDOWS.md`が入ります。作成時に
+固定Python、依存package、model、DB、manifest、checksumを検証します。配布先では
+ZIPをすべて展開し、同梱READMEに従ってinstallします。同名DBを更新する場合は、
+更新対象であることを確認したうえで`install.cmd -ReplaceExistingDatabases`を使います。
+
 ### 管理PC引っ越しpackage
 
 - resumable folder
@@ -485,6 +520,16 @@ Managerとinstallerは最終結果を`SUCCESS`または`FAILED`で表示しま�
 
 受取側はManagerの`配布・管理PCの引っ越し`から
 `パッケージを取り込む・検証する`を選びます。
+
+Windows PowerShellから作る場合:
+
+```powershell
+$ragPython = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $ragPython -B "$env:USERPROFILE\.copilot\rag\make_admin_transfer_package.py" --output "C:\LocalRAG\admin-transfer"
+```
+
+Source設定と再開情報は含まれますが、credentialと端末固有設定は含めません。
+移行先では必要な接続設定を登録し直してください。
 
 package作成はdaemonやDB全体へglobal lockを取りません。copy元を2回確認し、
 途中変更を検出したら失敗として終了します。出力はrelative pathだけのmanifestと
@@ -513,6 +558,33 @@ DB root、platform、SharePoint設定元、Redmine API keyとGitLab tokenの登�
 
 setup completeとlookup readyは別です。runtimeが正常でも健康なDBがなければ
 lookup readyはfalseです。
+
+### 管理者向けの直接CLI診断
+
+DB一覧と検索エンジンの出力を切り分けて確認する場合だけ、次を使います。
+`project-rag`と質問は確認対象へ置き換えてください。直接CLIは利用者向けの最終回答を
+作文しません。
+
+Windows PowerShell:
+
+```powershell
+$ragPython = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
+& $ragPython -B "$env:USERPROFILE\.copilot\rag\list_dbs.py" --format text
+& $ragPython -B "$env:USERPROFILE\.copilot\rag\search.py" --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
+```
+
+macOS／Linux:
+
+```bash
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/list_dbs.py --format text
+~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/search.py --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
+```
+
+これは人間の管理者が端末で行う診断です。通常のCopilot検索は`/local-rag`の
+bounded runnerを使い、検証済みの最終JSON packetだけを受け取ります。直接CLIの
+生出力をモデルへ渡したり、モデルに内部pointerやローカルfileを読ませたりする
+代替手順にはしないでください。診断出力やlogを共有するときは、ローカルpathや
+資料の内容が含まれていないか確認してください。
 
 ## 11. 安全な削除
 

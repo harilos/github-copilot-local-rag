@@ -1,357 +1,230 @@
 # GitHub Copilot Local RAG
 
-> 開発版: `1.0.1`
+> 開発版: `1.0.1` / GitHub Release: 未公開
 >
-> GitHub Release: 未公開
+> このREADMEは[PR #19](https://github.com/harilos/github-copilot-local-rag/pull/19)の
+> 個人Skill移行候補を説明しています（2026-09-04時点、main未統合）。
 
-ローカル文書や社内資料を、VS CodeのGitHub Copilotから自然な日本語で
-検索するためのRAGパックです。利用者は`/local-rag`に続けて質問するだけで、
-検索コマンドや検索方式を覚える必要はありません。
+ローカル文書や社内資料を、GitHub Copilotへ`/local-rag`に続けて質問して検索する
+ためのパックです。専用のカスタムAgent、MCP server、専用launcherは使いません。
 
-文書の抽出、索引作成、検索はPC内で行います。Copilotへ渡るのはDB全文ではなく、
-質問に応じて選ばれた抜粋、出典、検索メタデータです。検索処理は元資料のURLを
-自動で開きませんが、最終回答の生成にはGitHub Copilotへの接続が必要です。
+文書の抽出・索引作成・検索はPC内で行います。回答生成のため、質問に応じた抜粋・
+出典・検索メタデータがGitHub Copilotへ渡ります。DB全文を送信したり、検索処理が
+元資料のURLを自動で開いたりすることはありません。
 
-現在、正式に案内している一般利用経路は、管理者が作成したWindows x64配布版と、
-VS CodeまたはGitHub Copilot CLIの個人Skill `/local-rag`です。カスタムAgentや
-MCP serverは通常利用に使いません。GitHub上のtag／Releaseから配布物を公開する
-段階にはまだ進んでいません。
+Linux／Windowsの関連自動試験と実ユーザー環境でのrunner検索を確認済みです。
+ただし、Copilot上の操作感・承認表示・回答の見え方は人力感応試験待ちです。
+CLIの確認済み制約は[Copilot CLIで使う](#copilot-cliで使う)を参照してください。
+自動試験の合格を、最終的な利用承認やRelease公開の完了とは扱っていません。
 
-## まず選ぶ：2つの利用形態
+## すぐ使う
 
-このリポジトリには、別々の検索エンジンがあるのではなく、用途に応じた2つの
-導入形態があります。
-
-| | 配布版（利用者向け） | 管理版（管理者向けソース版） |
-|---|---|---|
-| 主な利用者 | 社内資料を検索する人 | DBと取得元を管理する人 |
-| 入手方法 | 管理者からWindows x64 offline ZIPを受け取る | このリポジトリをcloneする |
-| 検索 | `/local-rag` Skillを使う | 同じ`/local-rag` Skillを利用できる |
-| DBの作成・更新 | できない | できる |
-| Sourceの追加・再開 | できない | できる |
-| 配布ZIPの作成 | できない | できる |
-| 利用者PCのPython | 不要 | CPython 3.13.xが必要 |
-
-配布版のDBは、管理版で作成した時点のsnapshotです。元資料が更新された場合は、
-管理者がDBを更新して新しい配布ZIPを作ります。通常の検索SkillがDBやSourceを
-変更することはありません。
-
-資料を検索するだけなら、次の「配布版」から読んでください。DBを作成・更新する
-場合は、後半の「管理版」へ進んでください。
-
-## 配布版：インストールする
+資料を検索する人は、管理者から受け取ったWindows x64配布ZIPを使います。
+DBを作成・更新する人は、後半の[管理者向け](#管理者向け)へ進んでください。
+配布版は検索専用で、ManagerやDB作成・更新機能は含みません。
 
 ### 必要なもの
 
-- Windows 10以降（x64）
-- 次のいずれかのCopilot利用環境
-  - VS CodeとGitHub Copilot Chat
-  - PowerShell 7とGitHub Copilot CLI
-- 管理者から受け取った配布ZIP
-- ZIPを展開できる空き容量
+- Windows 10以降（x64）とZIPを展開する空き容量
+- サインイン済みのVS Code＋GitHub Copilot Chat、またはPowerShell 7＋GitHub Copilot CLI
+- 管理者から受け取った配布ZIPと、検索に使うDB名
 
-インストール時にsystem Python、pip、PATH変更、管理者権限、network接続は
-不要です。Skillで質問するときは、通常どおりGitHub Copilotへ接続できる必要が
-あります。
+配布版には固定Python、依存package、ONNX model、選択されたDB、個人Skillが
+含まれます。インストールにはsystem Python、pip、PATH変更、管理者権限、network
+接続は不要です。Copilotで回答を生成するときはGitHub Copilotへの接続が必要です。
 
-### 初回インストール
+### インストールして最初の質問を送る
 
-1. 配布ZIPを通常のフォルダへすべて展開します。ZIP内から直接実行しないでください。
-2. 展開したフォルダ直下の`install.cmd`をダブルクリックします。
-3. 最後に`Local RAG インストール結果: 成功 (SUCCESS)`と表示されたことを確認します。
-4. VS Codeを完全に終了し、もう一度起動します。
+1. ZIPを通常のローカルフォルダへ**すべて展開**します。ZIP内から直接実行しません。
+2. 展開先の`install.cmd`をダブルクリックします。
+3. `Local RAG インストール結果: 成功 (SUCCESS)`を確認します。
+4. VS Codeを完全に終了して再起動し、Copilot ChatをAgentモードにします。
+5. 入力欄の`/`メニューから`/local-rag`を選び、その後ろへ質問を書きます。
 
-PowerShellから実行する場合は、展開先へ移動して次を実行します。
+次の`project-rag`は例です。配布元から案内されたDB名と、実際の資料に合う質問へ
+置き換えてください。
 
-```powershell
-.\install.cmd
+```text
+/local-rag project-ragで、このシステムの目的と採用理由を根拠付きで教えて
 ```
 
-配布版には固定Python、検索用package、ONNX model、選択されたDB、個人Skill
-`/local-rag`が含まれています。インストール後にCopilotへ「初期設定をして」と
-依頼する必要はありません。
+インストール先は`%USERPROFILE%\.copilot`です。Copilotへ初期設定を依頼する必要は
+ありません。`/local-rag`は手動起動専用なので、通常の質問から勝手に検索しません。
+PowerShellからインストールする場合は、展開先で`.\install.cmd`を実行します。
 
-installerはLocal RAGを`%USERPROFILE%\.copilot`へ配置します。VS Codeや
-Copilot CLIのMCP設定、カスタムAgent、PowerShell profile、VS Codeのapproval設定は
-作成・変更しません。旧版から更新する場合だけ、旧installerの所有manifestを検証し、
-製品が配置したAgent003/MCP/launcherを安全に撤去します。無関係なCopilot設定、
-別名のDB、system Pythonは変更しません。
-Copilotによる実地受入はinstallerや製品testでは実行しません。
+## 検索モードと根拠
 
-### 同じDBを新しい配布版へ更新する
+### モードを選ぶ
 
-同名DBは、誤った上書きを防ぐため初期状態では置き換えません。管理者から同じDBの
-更新版を受け取った場合だけ、次を実行します。
+| mode | 向いている質問 | 検索方針 |
+|---|---|---|
+| `standard`（既定） | 普段の質問 | 単純な質問は1回、広い質問は必要に応じ最大4回 |
+| `savings` | 用語・識別子・単純な事実 | 1回だけ検索し、簡潔に回答 |
+| `thorough` | 比較・矛盾確認・複数資料の調査 | 異なる観点で3〜4回検索し、回答前に不足を確認 |
+
+```text
+/local-rag mode=savings project-ragで、用語Aの意味を教えて
+/local-rag mode=thorough project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して
+```
+
+どのモードも、VS CodeまたはCopilot CLIで現在選択中のモデル（Autoを含む）を
+継承します。モードは検索方針の違いであり、モデルの切替や料金の保証ではありません。
+
+DB名を省略すると一覧を1回確認し、説明と質問から明確に1つへ絞れる場合だけ
+検索します。選べなければ利用者へ選択を求め、推測で検索しません。
+1回の呼出しでは1つのDBを使います。質問には目的・期間・条件・比較軸を含めると、
+意図に合った資料を探しやすくなります。内部の検索方式を指定する必要はありません。
+
+### 回答と出典を見る
+
+根拠のある主張にはEvidence IDが付き、出典は回答末尾の`## References`にまとまります。
+
+- `[E…]`: 質問へ直接答える根拠
+- `[B…]`: 背景情報
+- `[D…]`: 関連資料候補。直接根拠とは限りません
+
+複数回検索したときは`[R1-E1]`、`[R2-D1]`のように検索順も付きます。
+Referencesでは、DBに元資料URLがあればクリックできるリンク、なければ資料名が
+表示されます。URLやローカルpathを利用者が組み立てる必要はありません。
+
+`partial`は根拠不足が残る状態、`no_hit`は直接根拠が見つからない状態です。
+関連資料だけで確定した回答と受け取らず、不足や留保も確認してください。
+抜粋だけでは足りない場合は、Skillが利用可能な範囲でキャッシュされた詳細を
+取得します。詳細には有効期限があり、期限切れなら必要な質問を改めて送ってください。
+
+### 承認画面について
+
+**グローバル自動許可は製品が追加・有効化しません。既存の利用者設定を自動解除する
+わけでもありません。** 実行確認の有無はVS Code／Copilot CLIと組織の承認設定に従います。
+このSkillを使うために包括的なterminal許可や組織MCPポリシーの変更は必要ありません。
+
+通常検索は、固定のvenv Pythonと`skill_runner.py`を通じたread-only操作です。
+確認が表示されたら、インストール先の`.copilot/rag/query/skill_runner.py`を実行する
+コマンドであることと引数を確認してください。質問はcommand previewやshell履歴へ
+表示される可能性があるので、そこへ残せない秘密値は含めないでください。
+`setup_required`時だけrunner経由でsetupを1回試します。失敗した場合に利用者が
+内部ファイルを探したり、別の低水準コマンドへ迂回したりする必要はありません。
+
+## Copilot CLIで使う
+
+通常の`copilot`を作業フォルダで起動し、**対話画面**へ同じ形式で入力します。
+
+```text
+/local-rag project-ragで、このシステムの目的を根拠付きで教えて
+```
+
+既存sessionでSkillが見えなければ、対話画面で次を順に実行します。
+
+```text
+/skills reload
+/skills info local-rag
+```
+
+2026-09-02〜03のCopilot CLI **1.0.80**での確認では、非対話`copilot -p`に渡した
+`/local-rag`はSkillとして展開されず、runnerも呼ばれませんでした。対話モードでは
+Skill展開とrunner呼出しを確認していますが、実地試験には試験環境由来の残差があり、
+最終的な操作確認は未完了です。ここでは対話モードを案内し、他のCLIバージョンでも
+`-p`が非対応と断定しません。
+
+旧`local-rag-copilot` launcher、専用profile、専用MCPは使用しません。
+
+## 更新と困ったとき
+
+### 配布版を更新する
+
+配布DBは作成時点のsnapshotです。元資料を更新した場合は、管理者から新しい配布版を
+受け取ります。同名DBは既定で置き換えません。置換してよい更新版と確認できた場合に
+限り、新しいZIPの展開先で次を実行します。
 
 ```powershell
 .\install.cmd -ReplaceExistingDatabases
 ```
 
-この指定で置き換わるのは、配布ZIPに含まれる同名DBだけです。別名のDBは保持されます。
-自動試験などで終了待ちを省く場合は`-NoPause`も指定できます。
+置き換わるのはZIPに含まれる同名DBだけで、別名DBは保持します。
+自動実行で終了待ちを省く場合は`-NoPause`を追加できます。
 
-## 配布版：`/local-rag`で検索する
+新規installはMCP設定・カスタムAgent・PowerShell profile・VS Code承認設定を
+作成しません。旧版からの更新時だけ、所有manifestとhashを確認し、製品が配置した
+旧Agent003／MCP／launcherを撤去します。無関係な設定・Agent・profile本文は保持し、
+所有物と確認できない場合は勝手に削除しません。
+Copilotによる実地受入はinstallerや製品testでは実行しません。
 
-### 最初の質問
-
-1. VS CodeでCopilot Chatを開きます。
-2. ChatをAgentモードにします。
-3. 入力欄で`/local-rag`を選び、その後ろへ普通の文章で質問を書きます。
-4. 既定の`standard`でよければ、そのまま送信します。
-
-`/local-rag`は手動起動専用です。通常の質問から勝手にLocal RAGを検索しません。
-
-```text
-/local-rag project-ragで、A2Lの目的と採用理由を根拠付きで教えて
-```
-
-### 検索modeの選び方
-
-| mode | 向いている質問 | 検索方針 |
-|---|---|---|
-| `standard`（既定） | 普段の質問 | 単純質問は1回、広い質問は必要な範囲で最大4回検索 |
-| `savings` | 用語、識別子、単純な事実を短く確認したい | 1回だけ検索し、簡潔に回答 |
-| `thorough` | 複数観点の比較、矛盾確認、複雑な調査をしたい | 最低3回、最大4回を異なる観点で検索し、最後に不足をレビュー |
-
-modeを省略すると`standard`です。modeは次のように質問へ付けます。
-
-```text
-/local-rag mode=savings project-ragで、A2Lとは何か教えて
-/local-rag mode=thorough project-ragで、方式Aと方式Bを比較して
-```
-
-どのmodeも、VS Codeで現在選択中のmodel（Autoを含む）を継承します。検索中は
-固定runnerがローカルの公開CLIだけを呼びます。通常検索ではDB、Source、設定を
-作成・変更・削除しません。`setup_required`時だけ公開setupを1回実行できます。
-shell/terminalは包括的に自動承認しないため、hostの
-実行確認が表示された場合は内容を確認してください。質問はcommand previewや
-shell historyへ表示される可能性があるため、そこへ残せない機密値は質問に含めないで
-ください。
-
-### 質問の例
-
-| やりたいこと | 質問例 |
-|---|---|
-| 用語を確認する | `/local-rag mode=savings project-ragで、A2Lとは何か根拠付きで教えて` |
-| 採用理由を調べる | `/local-rag project-ragで、方式Aを採用した理由と制約を整理して` |
-| 方式を比較する | `/local-rag mode=thorough project-ragで、方式Aと方式Bを設計・運用・障害対応の観点で比較して` |
-| 関連資料を広く探す | `/local-rag mode=thorough project-ragで、この障害に関係する仕様・実装・運用資料を観点別に調べて` |
-| 根拠を詳しく読む | `/local-rag さっきの[E2]の前後を詳しく確認して` |
-
-DB名を省略した場合、SkillはDBの説明と質問が明確に一致するときだけ自動で
-選びます。選べない場合は推測で検索しません。配布元から案内された
-`<DB名>-rag`を質問に付けて、もう一度実行してください。
-
-キーワードだけを並べるより、目的、期間、条件、比較軸を含めて質問するほうが
-意図に合った結果になります。ベクトル検索、全文検索、完全一致検索などの
-内部方式を利用者が指定する必要はありません。
-
-### 回答と出典の見方
-
-Skillは、根拠のある主張へEvidence IDを付け、回答末尾の`## References`へ
-出典をまとめます。
-
-- `[E…]`: 質問へ直接答える根拠
-- `[B…]`: 理解を補う背景情報
-- `[D…]`: 関連文書の候補。直接根拠とは限らない
-
-複数回検索した場合は`[R1-E1]`、`[R2-D1]`のように、何回目の検索結果かも
-表示します。元資料の安全なリンクがDBへ設定されていれば、Referencesから
-GitHub、SVN、Redmine、SharePointなどの資料を開けます。
-
-### GitHub Copilot CLIから使う
-
-通常の`copilot`を現在の作業folderで起動し、VS Codeと同じ
-`/local-rag` Skillを呼びます。
-
-```text
-/local-rag project-ragで、A2Lの目的を教えて
-/local-rag mode=savings project-ragで、A2Lとは何か教えて
-/local-rag mode=thorough project-ragで、方式Aと方式Bを比較して
-```
-
-旧`local-rag-copilot` launcher、専用profile、pinned MCPは廃止しました。
-現在選択中のCopilot CLI modelをそのまま使います。Skillが現在のsessionで見えない
-場合は`/skills reload`を実行し、`/skills info local-rag`で配置場所を確認してください。
-
-### 困ったとき
+### よくある問題
 
 | 状況 | 対応 |
 |---|---|
-| `/`メニューに`/local-rag`がない | VS Codeを完全に終了して再起動し、`Chat: Open Customizations`のSkillsで`local-rag`を確認する |
-| 同名DBがあるためinstallできない | 更新版であることを確認し、`-ReplaceExistingDatabases`を付けて再実行する |
-| installが`FAILED`になった | 画面に表示されたlogを管理者へ渡す |
-| 質問に合うDBを選べない | 配布元から案内されたDB名を質問へ明記する |
-| 根拠が不足している | 条件や比較軸を追加するか、`mode=thorough`で質問し直す |
+| VS Codeの`/`メニューに出ない | 完全終了して再起動し、`Chat: Open Customizations`のSkillsで`local-rag`を確認 |
+| CLIに出ない | `/skills reload` → `/skills info local-rag` |
+| 同名DBがありinstallできない | 更新版と確認したうえで`-ReplaceExistingDatabases`を指定 |
+| DBを選べない | 管理者から案内されたDB名を質問へ明記 |
+| 根拠が不足する | 条件や比較軸を追加するか、`mode=thorough`で質問 |
+| runtimeがない・setupが失敗する | インストール結果を確認し、同じinstallerでの修復を管理者へ相談 |
+| installが`FAILED`になる | 画面に表示されたログを管理者へ渡す |
 
-installerは毎回、`%LOCALAPPDATA%\LocalRAG\logs`へ
-`portable-install-<timestamp>-<pid>.log`を1つ作り、成功時も失敗時も画面に
-absolute pathを表示します。
+配布版installerのログは通常`%LOCALAPPDATA%\LocalRAG\logs`の
+`portable-install-<timestamp>-<pid>.log`です。保存できない場合はTEMPへ切り替わるため、
+成功・失敗どちらでも画面に表示されるログの絶対パスを確認してください。
+`.copilot`全体の手動削除は、他の設定・Skill・DBも失うので行わないでください。
 
-## 管理版：インストールする
+## 管理者向け
 
-管理版は、DBとSourceの作成・更新、処理の再開、診断、配布版の作成を行う端末へ
-source cloneから導入します。日常の管理操作は対話式のLocal RAG Managerを使います。
+管理版はDB・Sourceの作成／更新、診断、配布版の作成を行うsource版です。
+同じ`/local-rag` Skillを利用でき、管理操作はLocal RAG Managerから行います。
 
-### 必要なもの
+### 管理版の導入
 
-- Windows x64、macOS、またはLinux
-- CPython 3.13.x（`>=3.13,<3.14`）
-- Git
-- 初期設定時に依存packageとmodelを取得できるnetwork
-- DB、取得資料、model、索引用のdisk容量
-- 旧`.doc`／`.ppt`を取り込む場合だけLibreOffice
+必要なのはGit、CPython 3.13.x（`>=3.13,<3.14`）、初期設定時の依存package・model
+取得用networkと空き容量です。Windows x64、macOS、Linuxで利用できます。
+旧`.doc`／`.ppt`の取込みには別途LibreOfficeが必要です。
+Windows配布ZIPの作成とSharePoint／TeamsのSource追加・更新はWindows限定です。
 
-Windows利用者向けoffline ZIPの作成はWindows上で行います。SharePoint／Teamsの
-Source追加・更新もWindowsだけです。
+このREADMEのSkill版はmain未統合のため、**候補ブランチを明示してclone**します。
+以下は新しいclone向けです。既存の作業ツリーへ無理に適用しないでください。
 
-### Windows PowerShell
+Windows PowerShell:
 
 ```powershell
-git clone https://github.com/harilos/github-copilot-local-rag.git
+git clone --branch feat/copilot-local-rag-skill --single-branch https://github.com/harilos/github-copilot-local-rag.git
 Set-Location .\github-copilot-local-rag
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-PATH外のCPython 3.13.xを使う場合は、最後のコマンドを次に置き換えます。
+PATH外のCPythonを使う場合は、最後のコマンドへ
+`-BootstrapPython "C:\path\to\python.exe"`を追加します。
+Windowsのruntimeは`%USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe`です。
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -BootstrapPython "C:\path\to\python.exe"
-```
-
-更新時はrepositoryで次を実行します。
-
-```powershell
-git pull --ff-only
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-Windowsのruntime Pythonは次の固定pathに作られます。
-
-```text
-%USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe
-```
-
-### macOS／Linux
+macOS／Linux:
 
 ```bash
-git clone https://github.com/harilos/github-copilot-local-rag.git
+git clone --branch feat/copilot-local-rag-skill --single-branch https://github.com/harilos/github-copilot-local-rag.git
 cd github-copilot-local-rag
 bash ./install.sh
 python3.13 -B ~/.copilot/rag/setup.py --format human
 ```
 
-更新時はrepositoryで次を実行します。
+同じ候補ブランチのcleanなcloneを更新するときは、`git pull --ff-only`後に上記の
+installを再実行します。macOS／Linuxでruntime作成済みなら、setupには
+`~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/setup.py --format human`を使います。
+Windowsのsource installerは既存DBを上書きしません。端末固有のnetwork／Source
+接続設定を保持し、旧製品統合の撤去には配布版と同じ所有権確認を行います。
 
-```bash
-git pull --ff-only
-bash ./install.sh
-~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/setup.py --format human
-```
+### ManagerとSource
 
-source installerは、端末固有のnetwork設定とSource接続設定を保持します。
-Windowsの`install.ps1`は、cloneに含まれる同名DBで既存DBを上書きしません。
-`/local-rag` Skillは`%USERPROFILE%\.copilot\skills\local-rag`へ配置され、
-VS CodeとCopilot CLIから共用されます。新規installではMCP設定、カスタムAgent、
-PowerShell profileを変更しません。旧版の製品所有Agent003統合がある場合だけ、
-manifestとhashを検証して撤去し、無関係なserver、Agent、profile本文、comment、
-BOM、改行を保持します。
+SourceにはGit、SVN、Redmine、SharePoint／Teams、GitLab Issue／Wiki、
+GitHub Issues／Wiki、Confluence、手元のfile／folderを扱う実装があります。
+対応条件、Managerの起動・メニュー、DB更新・再開、配布と管理PC移行、診断コマンドは
+[Local RAG Manager 日本語操作ガイド](.copilot/rag/docs/local-rag-manager-guide-ja.md)へ
+まとめています。通常の`/local-rag`へ管理を依頼しても、Managerを自動起動したり
+DB・Sourceを変更したりはしません。
 
-## 管理版：Managerを使う
+## データと詳細資料
 
-### 起動する
-
-Windows PowerShell:
-
-```powershell
-& "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe" -B "$env:USERPROFILE\.copilot\rag\manage.py"
-```
-
-macOS／Linux:
-
-```bash
-~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/manage.py
-```
-
-Managerでは次の操作を行えます。
-
-| やりたいこと | Managerの入口 |
-|---|---|
-| DBを作る | `1. 新しいDBを作る` |
-| DBごとのSourceを追加・更新・再開する | `2. DBを選んで管理する` |
-| 全DBのSourceをまとめて更新する | `3. 全DBの全Sourceを更新・再開` |
-| 配布版や管理PC引っ越しpackageを扱う | `4. 配布・管理PCの引っ越し` |
-| 端末設定と検索動作を確認する | `5. この端末の設定・動作確認` |
-| 検索daemonを終了する | `6. 検索daemonを終了` |
-
-Sourceは、Git repository（GitHub・GitLab・Azure DevOps・その他のGit）、SVN、
-Redmine、SharePoint、Teams、
-GitLab Issue／Wiki、GitHub Issues／Wiki、手元のfile／folderなどの取得元を管理する
-単位です。入力項目、更新、再開、除外、
-配布、管理PCの移行は
-[Local RAG Manager 日本語操作ガイド](.copilot/rag/docs/local-rag-manager-guide-ja.md)
-を参照してください。
-
-### Windows配布版をコマンドで作る
-
-出力ZIPと同じpathが既に存在する場合は上書きしません。`--db`を繰り返すと複数DBを
-含められ、省略すると全DBが対象になります。
-
-```powershell
-$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
-& $python -B "$env:USERPROFILE\.copilot\rag\make_distribution_package.py" --output "C:\LocalRAG\local-rag-distribution.zip" --db project-rag
-```
-
-完成したZIPを展開すると、利用者向けの`install.cmd`と`README-WINDOWS.md`が
-入っています。package作成時に固定Python、依存package、model、DB、manifest、
-checksumを検証します。利用者PCではsystem Pythonやnetworkを使いません。installerは
-VS CodeとCopilot CLIで共用する`/local-rag` Skillをtransaction内で配置・更新します。
-旧製品Agent003統合がある場合は所有権確認付きで撤去します。
-
-### 管理PC引っ越しpackageをコマンドで作る
-
-```powershell
-$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
-& $python -B "$env:USERPROFILE\.copilot\rag\make_admin_transfer_package.py" --output "C:\LocalRAG\admin-transfer"
-```
-
-管理PC引っ越しpackageにはDBだけでなく、Source設定と再開情報も含まれます。
-credentialと端末固有設定は含めません。
-
-### コマンドで動作確認する
-
-Windows PowerShell:
-
-```powershell
-$python = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
-& $python -B "$env:USERPROFILE\.copilot\rag\list_dbs.py" --format text
-& $python -B "$env:USERPROFILE\.copilot\rag\search.py" --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
-```
-
-macOS／Linux:
-
-```bash
-~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/list_dbs.py --format text
-~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/search.py --db project-rag --include-db-hint --result-delivery stdout --format prompt "A2Lの目的と採用理由を教えて"
-```
-
-この直接CLIはDB一覧と検索結果を確認する診断用です。利用者向けの最終回答は
-作文しません。通常の利用者は`/local-rag`を使ってください。
-
-## データの扱い
-
-- 配布ZIPには検索対象の資料、抜粋、内部URLが含まれる場合があります。元資料と同じ機密区分で扱ってください。
+- 配布ZIPは資料・抜粋・内部URLを含むため、元資料と同じ機密区分で扱ってください。
 - credential、端末固有の接続設定、実行中の一時fileは配布ZIPへ含めません。
-- Local RAGの検索はPC内で完結しますが、選ばれたEvidenceは回答生成のためGitHub Copilotへ渡ります。
-- 検索Skillはread-onlyです。DBやSourceの変更は、管理者がManagerから明示的に行います。
-
-検索の内部構造、結果contract、Source Metadata、package検証については
-[Local RAG system design](.copilot/rag/docs/local-rag-system-design.md)を、
-Skill移行と旧Agent/MCP撤去については
-[`/local-rag` Skill移行 詳細設計](.copilot/rag/docs/local-rag-slash-skill-design-ja.md)を
-参照してください。
+- 検索はPC内ですが、選ばれたEvidenceはGitHub Copilotへ渡ります。
+- 技術仕様は[system design](.copilot/rag/docs/local-rag-system-design.md)と
+  [`/local-rag` Skill移行設計](.copilot/rag/docs/local-rag-slash-skill-design-ja.md)を参照してください。
 
 ## License
 
-repositoryの[LICENSE](LICENSE)と、同梱する各dependency／modelのlicenseを確認して
-利用してください。
+[LICENSE](LICENSE)と、同梱dependency／modelのlicenseを確認して利用してください。
