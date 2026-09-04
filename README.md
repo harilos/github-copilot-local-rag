@@ -94,9 +94,50 @@ Referencesでは、DBに元資料URLがあればクリックできるリンク�
 
 ### 承認画面について
 
-**グローバル自動許可は製品が追加・有効化しません。既存の利用者設定を自動解除する
-わけでもありません。** 実行確認の有無はVS Code／Copilot CLIと組織の承認設定に従います。
+**既定では承認設定を変更しません。既存の許可も自動解除しません。**
+実行確認の有無はVS Code／Copilot CLIと組織の承認設定に従います。
 このSkillを使うために包括的なterminal許可や組織MCPポリシーの変更は必要ありません。
+
+Windowsのソース版・配布ZIP版installerでは、次のオプションを明示指定できます。
+両方とも既定はOFFで、同時指定時は適用しません。
+
+| オプション | 設定する範囲 |
+| --- | --- |
+| 指定なし | 既存設定を維持。実行確認はhostと既存規則に従う |
+| `-ConfigureVSCodeRunnerApproval` | 固定venv Python＋`-I -X utf8 -B`＋固定`skill_runner.py`＋`list/search/detail/setup`の限定規則 |
+| `-ConfigureVSCodeAutoApprove` | **危険・非推奨**。全workspaceのファイル操作・terminal・MCP等を含む全体の自動承認 |
+
+```powershell
+# 個別ランナー許可（ソース版 / ZIP版のどちらか）
+.\install.ps1 -ConfigureVSCodeRunnerApproval
+.\install.cmd -ConfigureVSCodeRunnerApproval
+
+# 危険・非推奨：組織の許可を得た場合だけ
+.\install.ps1 -ConfigureVSCodeAutoApprove
+.\install.cmd -ConfigureVSCodeAutoApprove
+```
+
+個別規則は`chat.tools.terminal.autoApprove`、全体許可は
+`chat.tools.global.autoApprove`を、通常版VS Codeの
+`%APPDATA%\Code\User\settings.json`に設定します。
+名前付きprofile、Insiders、Remote環境、Copilot CLIの`copilot -i`には適用しません。
+個別規則はWindows PowerShellの固定絶対path形式と、既定install先の場合のみ
+Skill記載の`$env:USERPROFILE`形式に対応します。環境変数の差替えを防ぐ仕組みではありません。
+単一引用符の質問（内部の引用符は二重化）を使い、連結・パイプ・リダイレクト・
+追加のPowerShell呼出しは対象外です。別形式は手動承認に戻ります。
+
+**組織で許可されていない場合は有効にしないでください。** 組織ポリシーが禁止すれば
+設定しても機能しません。installerは検出した禁止、既存のterminal許可無効、
+不正な設定JSONを上書きせず、適用できない場合は警告します。
+ポリシー未検出は組織の承認証明ではありません。VS Codeの初回確認は省略しません。
+設定保存の成功は、実際の自動承認の成功を意味しません。
+個別規則もbest-effortであり、OSの権限や安全な隔離を与える仕組みではありません。
+runnerの固定DB root・child command・引数検証は維持します。
+他の既存許可やhostの既定規則も残るため、git push等が必ず確認されるとは保証しません。
+既存のglobal許可が有効なら個別モードは適用せず警告します。
+解除する場合はVS Code設定から追加した規則を削除し、global設定はfalseへ戻してください。
+詳細は[VS Code承認仕様](https://code.visualstudio.com/docs/agents/run/approvals)と
+[組織ポリシー](https://code.visualstudio.com/docs/enterprise/policies)を参照してください。
 
 通常検索は、固定のvenv Pythonと`skill_runner.py`を通じたread-only操作です。
 確認が表示されたら、インストール先の`.copilot/rag/query/skill_runner.py`を実行する
@@ -143,7 +184,7 @@ Skill展開とrunner呼出しを確認していますが、実地試験には試
 置き換わるのはZIPに含まれる同名DBだけで、別名DBは保持します。
 自動実行で終了待ちを省く場合は`-NoPause`を追加できます。
 
-新規installはMCP設定・カスタムAgent・PowerShell profile・VS Code承認設定を
+新規installはMCP設定・カスタムAgent・PowerShell profile・既定でのVS Code承認設定を
 作成しません。旧版からの更新時だけ、所有manifestとhashを確認し、製品が配置した
 旧Agent003／MCP／launcherを撤去します。無関係な設定・Agent・profile本文は保持し、
 所有物と確認できない場合は勝手に削除しません。

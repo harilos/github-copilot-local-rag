@@ -1,7 +1,8 @@
 param(
     [string]$Target = (Join-Path $HOME ".copilot"),
     [string]$BootstrapPython = "",
-    [switch]$ConfigureVSCodeAutoApprove
+    [switch]$ConfigureVSCodeAutoApprove,
+    [switch]$ConfigureVSCodeRunnerApproval
 )
 
 $ErrorActionPreference = "Stop"
@@ -482,6 +483,27 @@ if (@("retired", "absent") -inotcontains (
     throw "Legacy Agent003 retirement returned an invalid success status."
 }
 $LegacyAgent003Status = [string]$CopilotCliPayload.status
+
+if ($ConfigureVSCodeAutoApprove -or $ConfigureVSCodeRunnerApproval) {
+    if ($ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval) {
+        Write-Warning "Approval options conflict; no approval settings changed."
+    } else {
+        $ApprovalMode = "runner"
+        if ($ConfigureVSCodeAutoApprove) { $ApprovalMode = "global" }
+        try {
+            & $RuntimePython -X utf8 -B (
+                Join-Path $Target "rag\query\vscode_approval_settings.py"
+            ) --install-root $Target --mode $ApprovalMode
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Optional VS Code approval configuration NOT APPLIED."
+            }
+        } catch {
+            Write-Warning "Optional VS Code approval configuration NOT APPLIED."
+        }
+    }
+} else {
+    Write-Host "VS Code approval settings unchanged (default off)."
+}
 
 $InstallStage = "complete"
 Write-Host "Installed Copilot Local RAG files to: $Target"

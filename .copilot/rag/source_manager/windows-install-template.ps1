@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$ConfigureVSCodeAutoApprove,
+    [switch]$ConfigureVSCodeRunnerApproval,
     [switch]$SkipVSCodeAutoApprove,
     [switch]$RetryVSCodeApprovals,
     [switch]$ReplaceExistingDatabases,
@@ -699,9 +700,32 @@ foreach ($Path in @(
     }
 }
 
+if ($ConfigureVSCodeAutoApprove -or $ConfigureVSCodeRunnerApproval) {
+    if ($ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval) {
+        Write-Warning "Approval options conflict; no approval settings changed."
+    } elseif ($SkipVSCodeAutoApprove) {
+        Write-Warning "SkipVSCodeAutoApprove selected; no approval settings changed."
+    } else {
+        $ApprovalMode = "runner"
+        if ($ConfigureVSCodeAutoApprove) { $ApprovalMode = "global" }
+        try {
+            & (Join-Path $TargetRuntime "Scripts\python.exe") -X utf8 -B (
+                Join-Path $Target "rag\query\vscode_approval_settings.py"
+            ) --install-root $Target --mode $ApprovalMode
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Optional VS Code approval configuration NOT APPLIED."
+            }
+        } catch {
+            Write-Warning "Optional VS Code approval configuration NOT APPLIED."
+        }
+    }
+} else {
+    Write-Host "VS Code approval settings unchanged (default off)."
+}
+
 Write-Host ("Installed Local RAG Windows portable runtime to: " + $Target)
 Write-Host "Use /local-rag in GitHub Copilot Chat to search Local RAG."
-Write-Host "The installer did not enable MCP or change VS Code approval settings."
+Write-Host "The installer did not enable MCP. Approval options are reported separately."
 $InstallStage = "completed"
 Write-InstallSummary -Succeeded $true
 Stop-InstallTranscript

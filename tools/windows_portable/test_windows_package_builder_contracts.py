@@ -1116,7 +1116,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 completed.stdout,
             )
 
-    def test_legacy_approval_flags_are_noops_and_settings_stay_identical(self) -> None:
+    def test_explicit_skip_preserves_settings_despite_global_flag(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             profile = root / "profile"

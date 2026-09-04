@@ -473,18 +473,34 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         + windows_banner.install_cmd_banner()
         + 'set "local_rag_no_pause=0"\r\n'
         'set "local_rag_replace="\r\n'
+        'set "local_rag_global="\r\n'
+        'set "local_rag_runner="\r\n'
+        'set "local_rag_skip="\r\n'
         'set "local_rag_argument_error="\r\n'
         ":local_rag_parse\r\n"
         'if "%~1"=="" goto local_rag_run\r\n'
         'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\r\n'
-        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\r\n'
-        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_ignore\r\n'
+        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_global\r\n'
+        'if /I "%~1"=="-ConfigureVSCodeRunnerApproval" goto local_rag_runner\r\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_skip\r\n'
         'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_ignore\r\n'
         'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\r\n'
         'set "local_rag_argument_error=-LauncherArgumentError"\r\n'
         "shift\r\n"
         "goto local_rag_parse\r\n"
         ":local_rag_ignore\r\n"
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_global\r\n"
+        'set "local_rag_global=-ConfigureVSCodeAutoApprove"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_runner\r\n"
+        'set "local_rag_runner=-ConfigureVSCodeRunnerApproval"\r\n'
+        "shift\r\n"
+        "goto local_rag_parse\r\n"
+        ":local_rag_skip\r\n"
+        'set "local_rag_skip=-SkipVSCodeAutoApprove"\r\n'
         "shift\r\n"
         "goto local_rag_parse\r\n"
         ":local_rag_mark_no_pause\r\n"
@@ -501,6 +517,7 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
         '"%~dp0internal\\install.ps1" '
         "%local_rag_replace% "
+        "%local_rag_global% %local_rag_runner% %local_rag_skip% "
         "%local_rag_argument_error%\r\n"
         'set "local_rag_rc=%ERRORLEVEL%"\r\n'
         'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\r\n'
@@ -537,7 +554,14 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "dedicated Copilot CLI launcher. It does not change VS Code approval "
         "settings. The built-in agent and terminal command remain subject to "
         "the host's normal user and organization approval policies. Copilot "
-        "acceptance is not run by the installer or product tests.\n",
+        "acceptance is not run by the installer or product tests.\n"
+        "Optional: install.cmd -ConfigureVSCodeRunnerApproval adds a best-effort "
+        "fixed PowerShell runner rule, not a security boundary. Alternatively, "
+        "install.cmd -ConfigureVSCodeAutoApprove enables GLOBAL approval for ALL "
+        "tools: DANGEROUS / NOT RECOMMENDED. Both default OFF; do not combine. "
+        "Organization permission is required; policies and native consent still "
+        "apply. Written settings do not prove effective approval. Only normal "
+        "VS Code default user settings are targeted, not profiles or Copilot CLI.\n",
         encoding="utf-8",
     )
     return [

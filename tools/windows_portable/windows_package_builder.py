@@ -550,18 +550,34 @@ def _install_cmd() -> str:
         + _WINDOWS_BANNER_MODULE.install_cmd_banner(newline="\n")
         + 'set "local_rag_no_pause=0"\n'
         'set "local_rag_replace="\n'
+        'set "local_rag_global="\n'
+        'set "local_rag_runner="\n'
+        'set "local_rag_skip="\n'
         'set "local_rag_argument_error="\n'
         ":local_rag_parse\n"
         'if "%~1"=="" goto local_rag_run\n'
         'if /I "%~1"=="-NoPause" goto local_rag_mark_no_pause\n'
-        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_ignore\n'
-        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_ignore\n'
+        'if /I "%~1"=="-ConfigureVSCodeAutoApprove" goto local_rag_global\n'
+        'if /I "%~1"=="-ConfigureVSCodeRunnerApproval" goto local_rag_runner\n'
+        'if /I "%~1"=="-SkipVSCodeAutoApprove" goto local_rag_skip\n'
         'if /I "%~1"=="-RetryVSCodeApprovals" goto local_rag_ignore\n'
         'if /I "%~1"=="-ReplaceExistingDatabases" goto local_rag_mark_replace\n'
         'set "local_rag_argument_error=-LauncherArgumentError"\n'
         "shift\n"
         "goto local_rag_parse\n"
         ":local_rag_ignore\n"
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_global\n"
+        'set "local_rag_global=-ConfigureVSCodeAutoApprove"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_runner\n"
+        'set "local_rag_runner=-ConfigureVSCodeRunnerApproval"\n'
+        "shift\n"
+        "goto local_rag_parse\n"
+        ":local_rag_skip\n"
+        'set "local_rag_skip=-SkipVSCodeAutoApprove"\n'
         "shift\n"
         "goto local_rag_parse\n"
         ":local_rag_mark_no_pause\n"
@@ -578,6 +594,7 @@ def _install_cmd() -> str:
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
         "\"%~dp0internal\\install.ps1\" "
         "%local_rag_replace% "
+        "%local_rag_global% %local_rag_runner% %local_rag_skip% "
         "%local_rag_argument_error%\n"
         "set \"local_rag_rc=%ERRORLEVEL%\"\n"
         'if not "%local_rag_rc%"=="0" if not "%local_rag_rc%"=="1" goto local_rag_powershell_unavailable\n'
@@ -623,9 +640,16 @@ personal Skill uses Local RAG's fixed runner command boundary; lookup operations
 are read-only. The default installation does not register an MCP server, install
 custom Agents, or create a dedicated Copilot CLI launcher.
 
-Local RAG does not change VS Code approval settings. The built-in agent and
+By default Local RAG does not change VS Code approval settings. The built-in agent and
 terminal command remain subject to the host's normal user and organization
 approval policies.
+Optional: install.cmd -ConfigureVSCodeRunnerApproval adds a best-effort fixed
+PowerShell runner rule (not a security boundary). Alternatively,
+install.cmd -ConfigureVSCodeAutoApprove enables GLOBAL approval for ALL tools:
+DANGEROUS / NOT RECOMMENDED. Both options default OFF; do not combine them.
+Organization permission is required; policy restrictions and native consent
+still apply. Written settings do not prove effective approval. Targets only
+normal VS Code default user settings, not named profiles or Copilot CLI.
 Copilot acceptance is never run by the installer or product tests.
 """
 

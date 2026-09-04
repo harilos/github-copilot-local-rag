@@ -381,7 +381,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             '"Local RAG slash Skill: "',
             '"Legacy Agent003 integration: "',
             "Use /local-rag in GitHub Copilot Chat",
-            "did not enable MCP or change VS Code approval settings",
+            "did not enable MCP. Approval options are reported separately.",
             "function Move-PublishedRuntime",
             "for ($Attempt = 1; $Attempt -le 4; $Attempt++)",
         ):
@@ -449,7 +449,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             Path(windows_distribution.__file__).read_text(encoding="utf-8"),
         )
         combined = "\n".join(documents)
-        self.assertNotIn("chat.tools.global.autoApprove", combined)
+        self.assertIn("chat.tools.global.autoApprove", combined)
         self.assertNotIn("全tool／terminal command", combined)
         self.assertNotIn("localragagent003", combined)
         self.assertIn("/local-rag", combined)
