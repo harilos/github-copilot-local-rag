@@ -2,8 +2,8 @@
 
 > 開発版: `1.0.1` / GitHub Release: 未公開
 >
-> このREADMEは[PR #19](https://github.com/harilos/github-copilot-local-rag/pull/19)の
-> 個人Skill移行候補を説明しています（2026-09-04時点、main未統合）。
+> このREADMEは、[PR #19](https://github.com/harilos/github-copilot-local-rag/pull/19)の
+> 個人Skill移行を取り込んだmainの開発版を説明しています（2026-09-04時点）。
 
 ローカル文書や社内資料を、GitHub Copilotへ`/local-rag`に続けて質問して検索する
 ためのパックです。専用のカスタムAgent、MCP server、専用launcherは使いません。
@@ -178,13 +178,13 @@ Copilotによる実地受入はinstallerや製品testでは実行しません。
 旧`.doc`／`.ppt`の取込みには別途LibreOfficeが必要です。
 Windows配布ZIPの作成とSharePoint／TeamsのSource追加・更新はWindows限定です。
 
-このREADMEのSkill版はmain未統合のため、**候補ブランチを明示してclone**します。
-以下は新しいclone向けです。既存の作業ツリーへ無理に適用しないでください。
+**mainを明示してclone**します。以下は新しいclone向けです。
+既存の作業ツリーへ無理に適用しないでください。
 
 Windows PowerShell:
 
 ```powershell
-git clone --branch feat/copilot-local-rag-skill --single-branch https://github.com/harilos/github-copilot-local-rag.git
+git clone --branch main --single-branch https://github.com/harilos/github-copilot-local-rag.git
 Set-Location .\github-copilot-local-rag
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
@@ -196,13 +196,13 @@ Windowsのruntimeは`%USERPROFILE%\.copilot\rag\query\.venv\Scripts\python.exe`�
 macOS／Linux:
 
 ```bash
-git clone --branch feat/copilot-local-rag-skill --single-branch https://github.com/harilos/github-copilot-local-rag.git
+git clone --branch main --single-branch https://github.com/harilos/github-copilot-local-rag.git
 cd github-copilot-local-rag
 bash ./install.sh
 python3.13 -B ~/.copilot/rag/setup.py --format human
 ```
 
-同じ候補ブランチのcleanなcloneを更新するときは、`git pull --ff-only`後に上記の
+mainのcleanなcloneを更新するときは、`git pull --ff-only`後に上記の
 installを再実行します。macOS／Linuxでruntime作成済みなら、setupには
 `~/.copilot/rag/query/.venv/bin/python -B ~/.copilot/rag/setup.py --format human`を使います。
 Windowsのsource installerは既存DBを上書きしません。端末固有のnetwork／Source
