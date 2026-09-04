@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import connect_readonly
+from .read_io import read_text_with_windows_retry
 from .source_paths import (
     SourcePathError,
     canonical_stored_path,
@@ -819,7 +820,7 @@ def _load_json(
     diagnostic_code: str,
 ) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_with_windows_retry(path, encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):

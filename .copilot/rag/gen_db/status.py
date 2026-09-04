@@ -20,6 +20,7 @@ from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
 from software_rag_tool.catalog import counts as catalog_counts
+from software_rag_tool.read_io import read_text_with_windows_retry
 
 
 def main() -> None:
@@ -155,7 +156,7 @@ def _load_json(path: Path, default: Any | None = None) -> Any:
         default = {}
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    return json.loads(read_text_with_windows_retry(path, encoding="utf-8", errors="replace"))
 
 
 def _tail_jsonl(path: Path, count: int) -> list[dict[str, Any]]:
