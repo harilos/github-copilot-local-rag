@@ -73,16 +73,20 @@ model（Autoを含む）を継承します。
 Skillは固定runnerを通じて公開CLIだけを使い、通常検索ではDB、Source、設定を
 変更しません。`setup_required`時だけ公開setupを実行できます。MCPやカスタムAgentは
 使いません。DBを一意に選べない場合は、
-管理者が案内した`<DB名>-rag`を質問へ付けます。既定では製品はterminal/shellの
-自動承認を設定せず、利用者が既に設定した承認方式も変更しません。hostの実行確認が
+管理者が案内した`<DB名>-rag`を質問へ付けます。Windowsインストール時は
+個別ランナー許可が初期選択です。Enterで確定するか、「設定しない」で既存設定を維持します。hostの実行確認が
 表示された場合は内容を確認します。Copilot CLIでは対話モードで同じSkillを使います。
 CLIの確認済み制約と再読込方法は[README](../../../README.md)を参照してください。
 
 Windowsのソース版・配布ZIP版とも、`-ConfigureVSCodeRunnerApproval`で個別runner規則を
 任意登録できます。`-ConfigureVSCodeAutoApprove`は全toolの自動承認を設定する
-**危険・非推奨オプション**です。両方とも既定OFF、同時指定は適用しません。
+**危険・非推奨オプション**で、初期選択にはしません。同時指定は適用しません。
+`-SkipVSCodeAutoApprove`は選択画面を省略して既存設定を維持します。
+対話入力がない自動実行でも、明示オプションがなければ設定を維持します。
 組織の許可が必要で、ポリシーによって動作しない場合があります。初回確認は回避しません。
 対象は通常VS Codeの既定ユーザー設定のみで、Copilot CLIには効きません。
+CLIの全許可はCLI自身の`--allow-all-tools`／`--allow-all`等による別機能で、
+インストーラーのVS Code global設定には連動しません。CLIの全許可も危険・非推奨です。
 個別規則もbest-effortの確認省略であり、安全な隔離や新しいOS権限ではありません。
 具体的なコマンド・対象形式・解除方法はREADMEの「承認画面について」を参照してください。
 
@@ -499,7 +503,7 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは個人Skill
 `~/.copilot/skills/local-rag/SKILL.md`をtransaction内で配置し、MCP設定、
 カスタムAgent、PowerShell profileを新規作成・変更しません。VS Code approval settingsも
-既定では変更せず、上記の明示オプションを指定した場合のみ設定します。
+選択画面（初期選択は個別ランナー許可）または上記の明示オプションに従って設定します。
 旧版の製品所有Agent003統合がある場合だけ、manifestとhashを検証してAgent、MCP
 entry、launcher、profile blockを撤去します。利用者所有の設定やfileは保持します。
 Managerとinstallerは最終結果を`SUCCESS`または`FAILED`で表示します。

@@ -2,7 +2,8 @@ param(
     [string]$Target = (Join-Path $HOME ".copilot"),
     [string]$BootstrapPython = "",
     [switch]$ConfigureVSCodeAutoApprove,
-    [switch]$ConfigureVSCodeRunnerApproval
+    [switch]$ConfigureVSCodeRunnerApproval,
+    [switch]$SkipVSCodeAutoApprove
 )
 
 $ErrorActionPreference = "Stop"
@@ -484,25 +485,24 @@ if (@("retired", "absent") -inotcontains (
 }
 $LegacyAgent003Status = [string]$CopilotCliPayload.status
 
-if ($ConfigureVSCodeAutoApprove -or $ConfigureVSCodeRunnerApproval) {
-    if ($ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval) {
-        Write-Warning "Approval options conflict; no approval settings changed."
-    } else {
-        $ApprovalMode = "runner"
-        if ($ConfigureVSCodeAutoApprove) { $ApprovalMode = "global" }
-        try {
-            & $RuntimePython -X utf8 -B (
-                Join-Path $Target "rag\query\vscode_approval_settings.py"
-            ) --install-root $Target --mode $ApprovalMode
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Optional VS Code approval configuration NOT APPLIED."
-            }
-        } catch {
+if ($ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval) {
+    Write-Warning "Approval options conflict; no approval settings changed."
+} elseif ($SkipVSCodeAutoApprove) {
+    Write-Host "SkipVSCodeAutoApprove selected; no approval settings changed."
+} else {
+    $ApprovalMode = "choose"
+    if ($ConfigureVSCodeAutoApprove) { $ApprovalMode = "global" }
+    elseif ($ConfigureVSCodeRunnerApproval) { $ApprovalMode = "runner" }
+    try {
+        & $RuntimePython -X utf8 -B (
+            Join-Path $Target "rag\query\vscode_approval_settings.py"
+        ) --install-root $Target --mode $ApprovalMode
+        if ($LASTEXITCODE -ne 0) {
             Write-Warning "Optional VS Code approval configuration NOT APPLIED."
         }
+    } catch {
+        Write-Warning "Optional VS Code approval configuration NOT APPLIED."
     }
-} else {
-    Write-Host "VS Code approval settings unchanged (default off)."
 }
 
 $InstallStage = "complete"

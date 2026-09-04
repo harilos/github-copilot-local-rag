@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,60 @@ from mcp_config import _JsoncLexer
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_interactive_default_is_runner_and_other_choices_are_explicit(self):
+        for response, expected in (('', 'runner'), ('1', 'runner'), (' 1 ', 'runner'),
+                                   ('2', None), ('3', 'global'), ('garbage', None)):
+            with self.subTest(response=response), mock('sys.stdin.isatty', return_value=True), \
+                    mock('builtins.input', return_value=response), mock('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(approval.choose_mode(), expected)
+
+    def test_no_input_never_means_consent(self):
+        with mock('sys.stdin.isatty', return_value=False), mock('builtins.input') as read, \
+                mock('sys.stdout', new_callable=io.StringIO):
+            self.assertIsNone(approval.choose_mode())
+            read.assert_not_called()
+        for error in (EOFError, OSError):
+            with mock('sys.stdin.isatty', return_value=True), mock('builtins.input', side_effect=error), \
+                    mock('sys.stdout', new_callable=io.StringIO):
+                self.assertIsNone(approval.choose_mode())
+
+    def test_choose_skip_does_not_access_policy_or_settings(self):
+        with mock.object(sys, 'argv', ['approval', '--mode', 'choose', '--install-root', '.']), \
+                mock('sys.stdin.isatty', return_value=False), mock.object(approval, 'policy_allows') as policy, \
+                mock.object(approval, 'configure') as configure, mock('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(approval.main(), 0)
+            policy.assert_not_called()
+            configure.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows settings main')
+    def test_choose_default_configures_only_runner(self):
+        with mock.object(sys, 'argv', ['approval', '--mode', 'choose', '--install-root', '.']), \
+                mock('sys.stdin.isatty', return_value=True), mock('builtins.input', return_value=''), \
+                mock.dict(os.environ, {'APPDATA': 'C:/Synthetic/AppData'}), \
+                mock.object(approval, 'policy_allows', return_value=True) as policy, \
+                mock.object(approval, 'configure', return_value='unchanged') as configure, \
+                mock('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(approval.main(), 0)
+            policy.assert_called_once_with('runner')
+            self.assertEqual(configure.call_args.args[-1], 'runner')
+
+    def test_approval_scope_is_explained_before_selection(self):
+        with mock('sys.stdin.isatty', return_value=False), mock('sys.stdout', new_callable=io.StringIO) as output:
+            approval.choose_mode()
+        for phrase in ('[default]', 'VS Code only', 'NOT Copilot CLI', 'DANGER / NOT RECOMMENDED',
+                       'does NOT affect standalone Copilot CLI'):
+            self.assertIn(phrase, output.getvalue())
+
+    def test_pipe_cannot_implicitly_select_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {**os.environ, 'APPDATA': directory}
+            result = subprocess.run([sys.executable, '-X', 'utf8', '-B', str(Path(approval.__file__)),
+                '--mode', 'choose', '--install-root', directory], input='\n', capture_output=True,
+                encoding='utf-8', env=env, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('No interactive input', result.stdout)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_jsonc_bom_comments_crlf_preserved_and_idempotent(self):
         text = '\ufeff{\r\n  // keep\r\n  "editor.fontSize": 17,\r\n}\r\n'
         result = approval.patch(text, Path('C:/Example/.copilot'), 'runner')
@@ -155,10 +210,12 @@ class ApprovalTests(unittest.TestCase):
         mirror = (repository / '.copilot/rag/source_manager/windows-install-template.ps1').read_text(encoding='utf-8')
         self.assertEqual(portable, mirror)
         for text in (source, portable):
-            self.assertIn('if ($ConfigureVSCodeAutoApprove -or $ConfigureVSCodeRunnerApproval)', text)
+            self.assertIn('[switch]$SkipVSCodeAutoApprove', text)
             self.assertIn('$ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval', text)
             self.assertIn('vscode_approval_settings.py', text)
-            self.assertIn('settings unchanged (default off)', text)
+            self.assertIn('$ApprovalMode = "choose"', text)
+            self.assertIn('if ($ConfigureVSCodeRunnerApproval)', text)
+            self.assertIn('if ($ConfigureVSCodeAutoApprove)', text)
         for path in ('tools/windows_portable/windows_package_builder.py',
                      '.copilot/rag/source_manager/windows_distribution.py'):
             generator = (repository / path).read_text(encoding='utf-8')

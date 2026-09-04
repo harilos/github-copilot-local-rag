@@ -551,17 +551,25 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "fixed public command boundary; lookup operations are read-only. "
         "The default installation does "
         "not register an MCP server, install custom Agents, or create a "
-        "dedicated Copilot CLI launcher. It does not change VS Code approval "
-        "settings. The built-in agent and terminal command remain subject to "
+        "dedicated Copilot CLI launcher. Approval selection defaults to Individual "
+        "runner approval; press Enter to select it. Choose Leave unchanged or use "
+        "-SkipVSCodeAutoApprove to preserve settings without a prompt. Without "
+        "interactive input or an explicit option, settings are unchanged. "
+        "The built-in agent and terminal command remain subject to "
         "the host's normal user and organization approval policies. Copilot "
-        "acceptance is not run by the installer or product tests.\n"
+        "acceptance is not run by the installer or product tests. For unattended "
+        "installation, combine -NoPause with -SkipVSCodeAutoApprove or an explicit "
+        "approval option to avoid the approval chooser.\n"
         "Optional: install.cmd -ConfigureVSCodeRunnerApproval adds a best-effort "
         "fixed PowerShell runner rule, not a security boundary. Alternatively, "
         "install.cmd -ConfigureVSCodeAutoApprove enables GLOBAL approval for ALL "
-        "tools: DANGEROUS / NOT RECOMMENDED. Both default OFF; do not combine. "
+        "tools: DANGEROUS / NOT RECOMMENDED, never the default choice; do not combine. "
         "Organization permission is required; policies and native consent still "
         "apply. Written settings do not prove effective approval. Only normal "
-        "VS Code default user settings are targeted, not profiles or Copilot CLI.\n",
+        "VS Code default user settings are targeted, not profiles or Copilot CLI. "
+        "Individual runner approval is VS Code only. This GLOBAL setting is also "
+        "VS Code only; Copilot CLI global approval requires separate CLI permission "
+        "options (also dangerous).\n",
         encoding="utf-8",
     )
     return [

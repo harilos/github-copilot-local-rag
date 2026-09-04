@@ -77,7 +77,8 @@ class WindowsCloneBootstrapContracts(unittest.TestCase):
             'Join-Path $Target "rag\\query\\mcp_config.py"',
             self.installer,
         )
-        self.assertIn("if ($ConfigureVSCodeAutoApprove -or $ConfigureVSCodeRunnerApproval)", self.installer)
+        self.assertIn('$ApprovalMode = "choose"', self.installer)
+        self.assertIn('[switch]$SkipVSCodeAutoApprove', self.installer)
         self.assertNotIn(
             '"install",\n    "--copilot-home"', self.installer
         )

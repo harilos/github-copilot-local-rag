@@ -629,7 +629,9 @@ failure guidance and writes an actual run log before returning a nonzero code.
 
 PowerShell writes exactly one log per run under
 `%LOCALAPPDATA%\\LocalRAG\\logs` (falling back to TEMP), prints a Japanese result
-summary, and shows the absolute log path. PowerShell never waits for input.
+summary, and shows the absolute log path. There is no final PowerShell pause.
+The approval chooser can still prompt: for unattended installation, combine
+`-NoPause` with `-SkipVSCodeAutoApprove` or an explicit approval option.
 
 The package contains only the databases selected by the builder. Existing
 unrelated databases are preserved. Replacing a same-name database requires
@@ -640,16 +642,20 @@ personal Skill uses Local RAG's fixed runner command boundary; lookup operations
 are read-only. The default installation does not register an MCP server, install
 custom Agents, or create a dedicated Copilot CLI launcher.
 
-By default Local RAG does not change VS Code approval settings. The built-in agent and
+The approval selection defaults to Individual runner approval; press Enter to select it.
+Choose Leave unchanged or use -SkipVSCodeAutoApprove to preserve settings without a prompt.
+Without interactive input or an explicit option, settings are unchanged. The built-in agent and
 terminal command remain subject to the host's normal user and organization
 approval policies.
 Optional: install.cmd -ConfigureVSCodeRunnerApproval adds a best-effort fixed
 PowerShell runner rule (not a security boundary). Alternatively,
 install.cmd -ConfigureVSCodeAutoApprove enables GLOBAL approval for ALL tools:
-DANGEROUS / NOT RECOMMENDED. Both options default OFF; do not combine them.
+DANGEROUS / NOT RECOMMENDED, never the default choice. Do not combine the options.
 Organization permission is required; policy restrictions and native consent
 still apply. Written settings do not prove effective approval. Targets only
 normal VS Code default user settings, not named profiles or Copilot CLI.
+Individual runner approval is VS Code only. This GLOBAL setting is also VS Code only;
+Copilot CLI global approval requires separate CLI permission options (also dangerous).
 Copilot acceptance is never run by the installer or product tests.
 """
 

@@ -94,18 +94,23 @@ Referencesでは、DBに元資料URLがあればクリックできるリンク�
 
 ### 承認画面について
 
-**既定では承認設定を変更しません。既存の許可も自動解除しません。**
+**Windowsインストーラーの選択画面では「個別ランナー許可」が初期選択です。Enterで確定します。**
+「設定しない」を選ぶと既存設定を維持します。既存の許可を自動解除することもありません。
 実行確認の有無はVS Code／Copilot CLIと組織の承認設定に従います。
 このSkillを使うために包括的なterminal許可や組織MCPポリシーの変更は必要ありません。
 
-Windowsのソース版・配布ZIP版installerでは、次のオプションを明示指定できます。
-両方とも既定はOFFで、同時指定時は適用しません。
+Windowsのソース版・配布ZIP版installerは同じ選択肢を表示します。
+グローバル許可は初期選択せず、明示選択が必要です。無人実行で対話入力がなければ
+設定を変更しません。自動実行では次のオプションで選択を固定できます。
 
 | オプション | 設定する範囲 |
 | --- | --- |
-| 指定なし | 既存設定を維持。実行確認はhostと既存規則に従う |
-| `-ConfigureVSCodeRunnerApproval` | 固定venv Python＋`-I -X utf8 -B`＋固定`skill_runner.py`＋`list/search/detail/setup`の限定規則 |
-| `-ConfigureVSCodeAutoApprove` | **危険・非推奨**。全workspaceのファイル操作・terminal・MCP等を含む全体の自動承認 |
+| 指定なし | 選択画面を表示。初期選択は個別ランナー許可。対話入力がない場合は設定を維持 |
+| `-ConfigureVSCodeRunnerApproval` | **VS Codeのみ**。固定venv Python＋`-I -X utf8 -B`＋固定`skill_runner.py`＋`list/search/detail/setup`の限定規則 |
+| `-ConfigureVSCodeAutoApprove` | **危険・非推奨、VS Codeのみ**。全workspaceのファイル操作・terminal・MCP等を含む全体の自動承認 |
+| `-SkipVSCodeAutoApprove` | 選択画面を出さず既存設定を維持。他の許可指定より優先 |
+
+runnerとglobalの同時指定は競合として適用しません。
 
 ```powershell
 # 個別ランナー許可（ソース版 / ZIP版のどちらか）
@@ -121,6 +126,9 @@ Windowsのソース版・配布ZIP版installerでは、次のオプションを�
 `chat.tools.global.autoApprove`を、通常版VS Codeの
 `%APPDATA%\Code\User\settings.json`に設定します。
 名前付きprofile、Insiders、Remote環境、Copilot CLIの`copilot -i`には適用しません。
+**Copilot CLIの全許可は別の機能です。** CLI自身の`--allow-all-tools`や`--allow-all`等が
+必要で、このインストーラーが設定するVS Codeのglobal許可とは連動しません。
+CLIの全許可も危険・非推奨です。[Copilot CLIの許可仕様](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools)を確認してください。
 個別規則はWindows PowerShellの固定絶対path形式と、既定install先の場合のみ
 Skill記載の`$env:USERPROFILE`形式に対応します。環境変数の差替えを防ぐ仕組みではありません。
 単一引用符の質問（内部の引用符は二重化）を使い、連結・パイプ・リダイレクト・
@@ -182,10 +190,11 @@ Skill展開とrunner呼出しを確認していますが、実地試験には試
 ```
 
 置き換わるのはZIPに含まれる同名DBだけで、別名DBは保持します。
-自動実行で終了待ちを省く場合は`-NoPause`を追加できます。
+自動実行で終了待ちを省く場合は`-NoPause`を追加できます。承認の選択も省略するには
+`-SkipVSCodeAutoApprove`または明示的な許可オプションを併用してください。
 
-新規installはMCP設定・カスタムAgent・PowerShell profile・既定でのVS Code承認設定を
-作成しません。旧版からの更新時だけ、所有manifestとhashを確認し、製品が配置した
+新規installはMCP設定・カスタムAgent・PowerShell profileを作成しません。
+VS Code承認設定は上記の選択に従います。旧版からの更新時だけ、所有manifestとhashを確認し、製品が配置した
 旧Agent003／MCP／launcherを撤去します。無関係な設定・Agent・profile本文は保持し、
 所有物と確認できない場合は勝手に削除しません。
 Copilotによる実地受入はinstallerや製品testでは実行しません。

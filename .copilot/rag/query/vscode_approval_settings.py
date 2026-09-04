@@ -1,4 +1,4 @@
-"""Opt-in Windows VS Code settings edits, not an authorization boundary."""
+"""User-selected Windows VS Code settings edits, not an authorization boundary."""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,8 @@ def runner_rule(install_root: Path) -> str:
 
 
 def patch(text: str, root: Path, mode: str) -> str:
+    if mode not in ("global", "runner"):
+        raise ValueError("an explicit approval mode is required")
     bom = "\ufeff" if text.startswith("\ufeff") else ""
     body = text.removeprefix(bom) if bom else text
     body = body if body.strip() else "{}\n"
@@ -109,23 +111,49 @@ def configure(settings: Path, root: Path, mode: str) -> str:
     return "settings_written_not_effective_permission_verified"
 
 
+def choose_mode() -> str | None:
+    """Enter selects runner only in a real terminal; EOF/pipes never consent."""
+    print("1. Individual runner approval [default]: VS Code only; NOT Copilot CLI.")
+    print("2. Leave approval settings unchanged.")
+    print("3. Global approval [DANGER / NOT RECOMMENDED]: VS Code ALL tools/workspaces.")
+    print("   This VS Code setting does NOT affect standalone Copilot CLI; CLI requires its own permission options.")
+    if not sys.stdin.isatty():
+        print("No interactive input: approval settings unchanged. Use an explicit installer approval option to configure them.")
+        return None
+    try:
+        selection = input("Approval choice [1]: ").strip()
+    except (EOFError, OSError):
+        print("No selection received: approval settings unchanged.")
+        return None
+    if selection in ("", "1"):
+        return "runner"
+    if selection == "3":
+        return "global"
+    if selection != "2":
+        print("Unrecognized selection: approval settings unchanged.")
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--install-root", type=Path, required=True)
-    parser.add_argument("--mode", choices=("global", "runner"), required=True)
+    parser.add_argument("--mode", choices=("global", "runner", "choose"), required=True)
     args = parser.parse_args()
     print("WARNING: Organization permission is required. Policy may disable this option. Native VS Code consent is not bypassed.")
-    if args.mode == "global":
-        print("DANGER / NOT RECOMMENDED: global auto approval covers ALL tools and workspaces, including destructive commands, files and MCP.")
+    mode = choose_mode() if args.mode == "choose" else args.mode
+    if mode is None:
+        return 0
+    if mode == "global":
+        print("DANGER / NOT RECOMMENDED: global auto approval covers ALL VS Code tools and workspaces, including destructive commands, files and MCP. This setting does NOT affect standalone Copilot CLI.")
     else:
         print("Runner approval is best-effort, Windows PowerShell only; it is not a security boundary and does not affect Copilot CLI.")
     try:
         if os.name != "nt" or not os.environ.get("APPDATA"):
             raise ValueError("Windows APPDATA is required")
-        if not policy_allows(args.mode):
+        if not policy_allows(mode):
             raise ValueError("organization policy disables auto approval")
         settings = Path(os.environ["APPDATA"]) / "Code/User/settings.json"
-        print(configure(settings, args.install_root.absolute(), args.mode))
+        print(configure(settings, args.install_root.absolute(), mode))
         return 0
     except (ValueError, OSError):
         # Do not print user settings, commands or document content.

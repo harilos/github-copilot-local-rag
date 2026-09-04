@@ -406,7 +406,7 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 self.assertNotIn("three installed LOCAL-RAG Agents", readme)
                 self.assertIn("does not register an MCP server", normalized_readme)
                 self.assertIn(
-                    "does not change VS Code approval settings",
+                    "selection defaults to Individual runner approval",
                     normalized_readme,
                 )
                 self.assertIn(
