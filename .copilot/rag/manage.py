@@ -50,6 +50,7 @@ TOP_MENU = (
     ("4", "配布・管理PCの引っ越し"),
     ("5", "この端末の設定・動作確認"),
     ("6", "検索daemonを終了する"),
+    ("7", "全DBの全Sourceを全件取り直しが必要な状態にする【危険】"),
     ("0", "終了"),
 )
 DATABASE_MENU = (
@@ -289,8 +290,10 @@ class LocalRagManager:
                     self._machine_setup_screen()
                 elif choice == "6":
                     self._stop_search_daemon()
+                elif choice == "7":
+                    self._reset_all_derived_artifacts()
                 else:
-                    self._invalid_selection("0～6")
+                    self._invalid_selection("0～7")
             except Exception as exc:
                 self._print_internal_diagnostic(
                     exc,
@@ -528,6 +531,74 @@ class LocalRagManager:
             return
         self._print_success(f"派生成果物をリセットしました（削除: {len(result['removed'])}件）。")
         self._print_info("次回の全Source更新で現在範囲を全件取り直します。")
+
+    def _reset_all_derived_artifacts(self) -> None:
+        self._print_screen_header("全DBの全Sourceを全件取り直しが必要な状態にする【危険】")
+        names = list(dict.fromkeys(
+            str(item["name"]) for item in self._database_summaries()
+        ))
+        if not names:
+            self._print_info("リセットできるDBがありません。")
+            return
+        self.output(f"対象: {len(names)} DB（各DBの全Source）")
+        for name in names:
+            self.output(f"  - {name}")
+        self.output(
+            "Source設定・取得済みwork・イベント・Source Link・DB情報は保持します。\n"
+            "全DBのclean data、catalog、検索index、取込stateを削除します。\n"
+            "再取得・反映が完了するまで、対象DBは検索できなくなります。\n"
+            "この操作だけでは取得・ADD・embedding・再構築・再試行を開始しません。"
+        )
+        self._print_warning("別のManagerでSource更新や再構築を実行していないことを確認してください。")
+        if not self._confirm("上記の全DB・全Sourceをリセットしますか？"):
+            self._print_info("リセットを開始しませんでした。")
+            return
+        from source_manager.artifact_reset import reset_derived_artifacts
+        from source_manager.daemon_control import stop_search_daemon
+
+        try:
+            stopped = stop_search_daemon(self.rag_root, timeout_seconds=10.0)
+            daemon_status = str(stopped.get("status") or "")
+            if daemon_status not in {"stopped", "not_running"}:
+                raise SourceManagerError(
+                    "search daemon stop was not confirmed", stage="artifact_reset.daemon_stop"
+                )
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc, operation="全DBの派生成果物リセット",
+                stage="artifact_reset.daemon_stop", can_resume=True,
+            )
+            self._print_info("リセットを開始しませんでした。")
+            return
+
+        completed: list[str] = []
+        failed: list[str] = []
+        # Reuse the per-DB writer lock and fail-closed path checks, sequentially.
+        for index, db_name in enumerate(names, start=1):
+            self.output(f"\n[{index}/{len(names)}] DB「{db_name}」をリセットします。")
+            if not self._guard_valid_database_target(db_name):
+                failed.append(db_name)
+                continue
+            try:
+                result = reset_derived_artifacts(
+                    self._database_root(db_name), daemon_status=daemon_status
+                )
+            except Exception as exc:
+                failed.append(db_name)
+                self._print_internal_diagnostic(
+                    exc, operation="全DBの派生成果物リセット",
+                    stage=str(getattr(exc, "stage", None) or "artifact_reset"),
+                    db_name=db_name, can_resume=True,
+                )
+                continue
+            completed.append(db_name)
+            self._print_success(f"DB「{db_name}」: リセット完了（削除: {len(result['removed'])}件）。")
+        self.output(f"\n全DBのリセット結果: 成功 {len(completed)} DB / 失敗 {len(failed)} DB")
+        if failed:
+            self._print_warning("未完了のDB: " + ", ".join(failed))
+            self._print_info("完了済みDBは元に戻しません。失敗DBは一部削除済みの場合があります。")
+        if completed:
+            self._print_info("次にメインメニューの「3. 全DBの全Sourceを更新・再開する」を実行すると、現在範囲を全件取り直します。")
 
     def _repair_search_automatically(self, db_name: str) -> None:
         self._print_screen_header("検索を修復する", db_name=db_name)
