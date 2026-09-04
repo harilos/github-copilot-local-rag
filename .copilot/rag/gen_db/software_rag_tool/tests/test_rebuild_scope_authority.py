@@ -58,6 +58,7 @@ class ExtractRebuildScopeAuthorityTests(unittest.TestCase):
             "scan_subdir": "docs",
             "include_root_name_in_path": True,
             "operation": "add",
+            "batch_size_files": 7,
             "chunk_max_chars": 900,
             "chunk_overlap": 0,
             **overrides,
@@ -78,7 +79,7 @@ class ExtractRebuildScopeAuthorityTests(unittest.TestCase):
                     redirect_stdout(io.StringIO()),
                 ):
                     rebuild._rebuild(
-                        argparse.Namespace(component="extract", batch_size_files=7),
+                        argparse.Namespace(component="extract", batch_size_files=None),
                         "fixture-rag",
                     )
                 add.assert_called_once_with(
@@ -96,22 +97,81 @@ class ExtractRebuildScopeAuthorityTests(unittest.TestCase):
                     persistent_root_identity="sha256:stable-source-identity",
                 )
 
-    def test_old_canonical_scope_uses_defaults_not_progress_options(self) -> None:
-        self._write("index_state.json", {"ingestion": {
-            "root": str(self.root), "source_id": "canonical-source",
-        }})
+    def test_old_canonical_scope_defaults_only_missing_chunk_options(self) -> None:
+        canonical = self._scope()
+        canonical.pop("chunk_max_chars")
+        canonical.pop("chunk_overlap")
+        self._write("index_state.json", {"ingestion": canonical})
         self._write("progress.json", self._scope())
         scope = rebuild._extract_rebuild_scope()
-        self.assertEqual(".", scope["scan_subdir"])
-        self.assertEqual("build", scope["operation"])
+        self.assertEqual("docs", scope["scan_subdir"])
+        self.assertEqual("add", scope["operation"])
+        self.assertEqual(7, scope["batch_size_files"])
         self.assertEqual(1400, scope["chunk_max_chars"])
         self.assertEqual(160, scope["chunk_overlap"])
 
-    def test_legacy_progress_used_only_without_canonical_scope_key(self) -> None:
+    def test_optional_legacy_root_inclusion_flag_still_enforces_inclusion(self) -> None:
+        canonical = self._scope()
+        canonical.pop("include_root_name_in_path")
+        self._write("index_state.json", {"ingestion": canonical})
+        with (
+            mock.patch.object(rebuild, "add_or_update_root", return_value={}) as add,
+            redirect_stdout(io.StringIO()),
+        ):
+            rebuild._rebuild(
+                argparse.Namespace(component="extract", batch_size_files=None),
+                "fixture-rag",
+            )
+        self.assertIs(True, add.call_args.kwargs["include_root_name_in_path"])
+
+    def test_missing_canonical_scope_never_uses_legacy_progress(self) -> None:
         self._write("progress.json", self._scope())
-        self.assertEqual("canonical-source", rebuild._extract_rebuild_scope()["source_id"])
-        self._write("index_state.json", {"version": 1, "files": {}})
-        self.assertEqual(0, rebuild._extract_rebuild_scope()["chunk_overlap"])
+        for state in (None, {"version": 1, "files": {}}, {"ingestion": {}}):
+            with self.subTest(state=state):
+                if state is not None:
+                    self._write("index_state.json", state)
+                with (
+                    mock.patch.object(rebuild, "add_or_update_root") as add,
+                    self.assertRaisesRegex(RuntimeError, "canonical ingestion scope"),
+                ):
+                    rebuild._rebuild(
+                        argparse.Namespace(component="extract", batch_size_files=None),
+                        "fixture-rag",
+                    )
+                add.assert_not_called()
+
+    def test_missing_required_canonical_fields_never_borrow_progress_values(self) -> None:
+        self._write("progress.json", self._scope())
+        for field in ("root", "source_id", "scan_subdir", "operation", "batch_size_files"):
+            with self.subTest(field=field):
+                canonical = self._scope()
+                canonical.pop(field)
+                self._write("index_state.json", {"ingestion": canonical})
+                with self.assertRaisesRegex(RuntimeError, "canonical ingestion scope"):
+                    rebuild._extract_rebuild_scope()
+
+    def test_explicit_batch_must_match_canonical_batch(self) -> None:
+        self._write("index_state.json", {"ingestion": self._scope()})
+        for requested in (1, 20, 0, True):
+            with (
+                self.subTest(requested=requested),
+                mock.patch.object(rebuild, "add_or_update_root") as add,
+                self.assertRaisesRegex(RuntimeError, "saved ingestion batch_size_files"),
+            ):
+                rebuild._rebuild(
+                    argparse.Namespace(component="extract", batch_size_files=requested),
+                    "fixture-rag",
+                )
+            add.assert_not_called()
+        with (
+            mock.patch.object(rebuild, "add_or_update_root", return_value={}) as add,
+            redirect_stdout(io.StringIO()),
+        ):
+            rebuild._rebuild(
+                argparse.Namespace(component="extract", batch_size_files=7),
+                "fixture-rag",
+            )
+        self.assertEqual(7, add.call_args.kwargs["batch_size_files"])
 
     def test_malformed_or_incomplete_canonical_scope_never_falls_back(self) -> None:
         self._write("progress.json", self._scope(source_id="stale"))
@@ -121,6 +181,10 @@ class ExtractRebuildScopeAuthorityTests(unittest.TestCase):
             self._scope(source_id=17),
             self._scope(scan_subdir=None),
             self._scope(operation=""),
+            self._scope(operation="unknown"),
+            self._scope(batch_size_files=0),
+            self._scope(batch_size_files=True),
+            self._scope(batch_size_files="7"),
             self._scope(chunk_max_chars=True),
             self._scope(chunk_overlap="0"),
             self._scope(chunk_overlap=900),

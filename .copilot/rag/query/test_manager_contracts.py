@@ -668,10 +668,11 @@ class ManagerContractTests(unittest.TestCase):
         manager._resume_saved_operation(
             "example-rag",
             {
-                "operation": "add",
-                "root": "Example Root",
-                "source_id": "source-a",
-                "scan_subdir": "docs",
+                "can_resume": True,
+                "ingestion": {
+                    "operation": "add", "root": str(self.base / "Example Root"),
+                    "source_id": "source-a", "scan_subdir": "docs", "batch_size_files": 7,
+                },
                 "resume_command": "untrusted command",
             },
         )
@@ -705,6 +706,59 @@ class ManagerContractTests(unittest.TestCase):
             self.assertNotIn(key, writer_env)
             self.assertEqual(poison[key], reader_env[key])
 
+    def test_resume_uses_canonical_controls_not_conflicting_flat_display(self) -> None:
+        scope = {
+            "root": str(self.base / "canonical"), "source_id": "canonical-source",
+            "operation": "build", "scan_subdir": "current", "batch_size_files": 9,
+            "chunk_max_chars": 900, "chunk_overlap": 0, "resolved_root": "sha256:fixture",
+        }
+        self.manager()._resume_saved_operation("example-rag", {
+            "can_resume": True, "ingestion": scope,
+            "root": "old-root", "source_id": "old-source", "operation": "add",
+            "batch_size_files": 1, "resume_command": ["untrusted"],
+        })
+        argv = self.runner.calls[0][0]
+        self.assertEqual(Path(argv[1]).name, "build_db.py")
+        for option, value in (("root", scope["root"]), ("source-id", "canonical-source"),
+                              ("batch-size-files", "9"), ("scan-subdir", "current"),
+                              ("chunk-max-chars", "900"), ("chunk-overlap", "0"),
+                              ("persistent-root-identity", "sha256:fixture")):
+            self.assertEqual(argv[argv.index("--" + option) + 1], value)
+        self.assertNotIn("old-root", argv)
+        self.assertNotIn("old-source", argv)
+
+    def test_resume_refuses_missing_invalid_private_or_unapproved_canonical_scope(self) -> None:
+        scope = {
+            "root": str(self.base / "canonical"), "source_id": "canonical-source",
+            "operation": "add", "scan_subdir": ".", "batch_size_files": 7,
+        }
+        for candidate in ({}, {"can_resume": True},
+                          {"can_resume": False, "ingestion": scope},
+                          {"can_resume": True, "ingestion": {**scope, "operation": "unknown"}},
+                          {"can_resume": True, "ingestion": {**scope, "batch_size_files": True}},
+                          {"can_resume": True, "ingestion": {**scope, "privacy_safe_root": True}}):
+            with self.subTest(candidate=candidate):
+                self.manager()._resume_saved_operation("example-rag", candidate)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_build_wrapper_preserves_canonical_identity_and_extraction_options(self) -> None:
+        spec = importlib.util.spec_from_file_location("saved_scope_build", MANAGER_PATH.parent / "gen_db/build_db.py")
+        build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build)
+        argv = ["build_db.py", "--db", "fixture-rag", "--root", str(self.base),
+                "--source-id", "fixture", "--resume", "--batch-size-files", "9",
+                "--chunk-max-chars", "900", "--chunk-overlap", "0",
+                "--persistent-root-identity", "sha256:fixture"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(build, "_runtime_python_or_exit", return_value=sys.executable), mock.patch.object(build.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as execute:
+            self.assertEqual(build.main(), 0)
+        command = execute.call_args.args[0]
+        for option, value in (("persistent-root-identity", "sha256:fixture"),
+                              ("chunk-max-chars", "900"), ("chunk-overlap", "0"),
+                              ("batch-size-files", "9"), ("operation", "build")):
+            self.assertEqual(command[command.index("--" + option) + 1], value)
+        self.assertIn("--resume", command)
+        self.assertNotIn("--reset-db", command)
+
     def test_resume_confirmation_shows_saved_scope_before_execution(
         self,
     ) -> None:
@@ -717,13 +771,17 @@ class ManagerContractTests(unittest.TestCase):
             "root": "Example Root",
             "source_id": "source-a",
             "scan_subdir": "docs",
+            "ingestion": {
+                "operation": "add", "root": str(self.base / "Example Root"),
+                "source_id": "source-a", "scan_subdir": "docs", "batch_size_files": 7,
+            },
         }
         self.runner.respond("status.py", stdout=json.dumps(status))
         manager = self.manager(["2", "n"])
         manager._build_or_resume("example-rag")
         text = "\n".join(self.output)
         self.assertIn("再開する保存済み処理", text)
-        self.assertIn("論理ルート: Example Root", text)
+        self.assertIn(f"論理ルート: {self.base / 'Example Root'}", text)
         self.assertIn("Source ID: source-a", text)
         self.assertIn("読込範囲: docs", text)
         self.assertEqual(

@@ -1,5 +1,7 @@
 # Issue #20 — Windows progress I/O 堅牢化の結果
 
+> 2026-09-05追記: 以下は初回試験時点の記録です。以後、status/manageが古いprogressから再開条件を選ぶ制御依存が見つかり、main統合前NO-GOとなりました。追加修正・再試験は[正本scope追補](windows-status-scope-authority-followup-issue20.md)を参照してください。以下の旧progress fallback記述も追加修正で廃止しています。mainは未統合です。
+
 実施日: 2026-09-04。判定: **GO_WITH_RESIDUAL**。
 
 Windows実機で内蔵Watcherの自己競合を再現し、修正候補の関連236テストが全件PASSした。skip・FAIL・ERRORは0件。Windows 10の別実機、実運用AV/同期ソフト下、突然の電源断は未実施なので、全Windows環境への無条件GOとはしない。Issue #20を参照のみとし、重複Issue #21、Issue/PRコメント、main、Release、公開ZIPは操作していない。

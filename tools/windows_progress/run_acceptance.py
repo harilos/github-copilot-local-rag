@@ -51,6 +51,17 @@ GROUPS = {
     "scope": [
         "test_ingestion_scope_contracts",
         "test_sharepoint_read_error_hotfix",
+        "test_resume_root_identity",
+    ],
+    "status_scope": [
+        "test_status_scope_authority",
+        "test_manager_contracts.ManagerContractTests.test_resume_reconstructs_allowlisted_argv",
+        "test_manager_contracts.ManagerContractTests.test_resume_confirmation_shows_saved_scope_before_execution",
+        "test_manager_contracts.ManagerContractTests.test_resume_uses_canonical_controls_not_conflicting_flat_display",
+        "test_manager_contracts.ManagerContractTests.test_resume_refuses_missing_invalid_private_or_unapproved_canonical_scope",
+        "test_manager_contracts.ManagerContractTests.test_build_wrapper_preserves_canonical_identity_and_extraction_options",
+        "test_manager_contracts.ManagerContractTests.test_force_rebuild_requires_selected_database_name",
+        "test_manager_contracts.ManagerContractTests.test_repair_components_are_strictly_bounded",
     ],
 }
 

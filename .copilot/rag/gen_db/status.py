@@ -15,12 +15,12 @@ sys.path.insert(0, str(RAG_ROOT))
 sys.path.insert(0, str(TOOL_ROOT))
 
 from help_links import MANAGER_HELP_EPILOG
-from software_rag_tool.config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
 from software_rag_tool.catalog import counts as catalog_counts
 from software_rag_tool.read_io import read_text_with_windows_retry
+from software_rag_tool.ingestion_paths import validated_saved_ingestion, saved_ingestion_has_local_root
 
 
 def main() -> None:
@@ -42,43 +42,29 @@ def main() -> None:
     os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
     logs_root = db_root / "logs"
 
-    progress = _load_json(logs_root / "progress.json")
     state = _load_json(logs_root / "index_state.json")
+    # Read authority first. Optional progress cannot supply control fields or
+    # prevent status from reporting a valid saved scope when its sink is bad.
+    try:
+        observed_progress = _load_json(logs_root / "progress.json")
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        observed_progress = {}
+    ingestion = validated_saved_ingestion(state) or {}
+    progress_matches_scope = _progress_matches_scope(observed_progress, ingestion)
+    progress = observed_progress if progress_matches_scope else {}
     manifest = _load_json(db_root / "index" / "manifest.json")
     version = read_db_version(db_root)
     errors = _load_json(logs_root / "prepare_errors.json", default=[])
     events = _tail_jsonl(logs_root / "events.jsonl", args.tail_events)
     catalog = catalog_counts()
 
-    status = _effective_status(progress, args.stale_minutes)
-    operation = str(progress.get("operation") or "")
-    saved_ingestion = (
-        state.get("ingestion")
-        if isinstance(state, dict)
-        and isinstance(state.get("ingestion"), dict)
-        else {}
-    )
-    ingestion = {
-        key: progress.get(key, saved_ingestion.get(key))
-        for key in (
-            "root",
-            "resolved_root",
-            "root_display_name",
-            "scan_subdir",
-            "scan_root",
-            "stored_path_prefix",
-            "include_root_name_in_path",
-            "source_id",
-            "batch_size_files",
-        )
-    }
+    status = _effective_status(progress, args.stale_minutes) if progress_matches_scope else "progress_unavailable"
+    operation = str(ingestion.get("operation") or "")
     root = str(ingestion.get("root") or "")
     source_id = str(ingestion.get("source_id") or "")
     scan_subdir = str(ingestion.get("scan_subdir") or ".")
-    batch_size_files = int(
-        ingestion.get("batch_size_files")
-        or DEFAULT_INGESTION_BATCH_SIZE_FILES
-    )
+    batch_size_files = ingestion.get("batch_size_files")
+    command_scope_valid = bool(ingestion and saved_ingestion_has_local_root(ingestion))
     resume_command = _resume_command(
         db_name,
         operation,
@@ -86,7 +72,9 @@ def main() -> None:
         source_id,
         scan_subdir,
         batch_size_files,
-    )
+    ) if command_scope_valid else []
+    if resume_command:
+        _append_saved_options(resume_command, ingestion)
     state_files = state.get("files") if isinstance(state, dict) else {}
     if not isinstance(state_files, dict):
         state_files = {}
@@ -96,8 +84,11 @@ def main() -> None:
         "db_root": str(db_root),
         "exists": db_root.exists(),
         "version": version,
+        "ingestion": ingestion,
+        "scope_valid": bool(ingestion),
+        "progress_matches_scope": progress_matches_scope,
         "status": status,
-        "raw_status": progress.get("status") or "not_started",
+        "raw_status": progress.get("status") or "progress_unavailable",
         "phase": progress.get("phase") or "",
         "updated_at": progress.get("updated_at") or "",
         "operation": operation,
@@ -133,7 +124,10 @@ def main() -> None:
         "errors_path": str(logs_root / "prepare_errors.json"),
         "error_count_total": len(errors) if isinstance(errors, list) else 0,
         "events": events,
-        "can_resume": bool(resume_command and status in {"failed", "stale_running", "completed", "not_started"}),
+        "can_resume": bool(resume_command and status in {
+            "failed", "stale_running", "completed", "not_started",
+            "success", "partial", "failure", "progress_unavailable",
+        }),
         "appears_active": status == "running",
         "resume_command": resume_command,
         "force_rebuild_command": _force_rebuild_command(
@@ -141,14 +135,41 @@ def main() -> None:
             root,
             source_id,
             scan_subdir,
-        ),
+            batch_size_files,
+        ) if command_scope_valid else [],
     }
+    if output["force_rebuild_command"]:
+        _append_saved_options(output["force_rebuild_command"], ingestion)
 
     if args.json:
         print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
         return
 
     _print_human(output)
+
+
+def _progress_matches_scope(progress: Any, ingestion: dict[str, Any]) -> bool:
+    if not ingestion or not isinstance(progress, dict):
+        return False
+    fields = (
+        "root", "resolved_root", "root_display_name", "scan_subdir",
+        "scan_root", "stored_path_prefix", "include_root_name_in_path",
+        "source_id", "operation", "batch_size_files", "chunk_max_chars",
+        "chunk_overlap", "privacy_safe_root",
+    )
+    return all(
+        key in progress and key in ingestion
+        and type(progress[key]) is type(ingestion[key])
+        and progress[key] == ingestion[key]
+        for key in fields if key in ingestion or key in progress
+    )
+
+
+def _append_saved_options(command: list[str], ingestion: dict[str, Any]) -> None:
+    for field in ("chunk_max_chars", "chunk_overlap", "resolved_root"):
+        if field in ingestion:
+            option = "persistent-root-identity" if field == "resolved_root" else field.replace("_", "-")
+            command.extend(["--" + option, str(ingestion[field])])
 
 
 def _load_json(path: Path, default: Any | None = None) -> Any:
@@ -209,7 +230,7 @@ def _resume_command(
     scan_subdir: str = ".",
     batch_size_files: int | None = None,
 ) -> list[str]:
-    if not root or not source_id:
+    if not root or not source_id or operation not in {"add", "build"}:
         return []
     if operation == "build":
         command = [
@@ -249,6 +270,7 @@ def _force_rebuild_command(
     root: str,
     source_id: str,
     scan_subdir: str = ".",
+    batch_size_files: int | None = None,
 ) -> list[str]:
     if not root or not source_id:
         return []
@@ -266,6 +288,8 @@ def _force_rebuild_command(
     ]
     if scan_subdir and scan_subdir != ".":
         command.extend(["--scan-subdir", scan_subdir])
+    if batch_size_files is not None:
+        command.extend(["--batch-size-files", str(batch_size_files)])
     return command
 
 
@@ -285,6 +309,8 @@ def _print_human(output: dict[str, Any]) -> None:
     if version:
         print(f"Version: created_at={version.get('created_at')} db_hash={version.get('db_hash')}")
     print(f"Status: {output['status']} phase={output['phase']} updated_at={output['updated_at']}")
+    if not output["progress_matches_scope"]:
+        print("Progress is unavailable or does not match the canonical ingestion scope; old progress is not used.")
     print(f"Root:                {output['root']}")
     print(f"Root display name:   {output['root_display_name']}")
     print(f"Scan subdirectory:   {output['scan_subdir']}")

@@ -2447,32 +2447,33 @@ class LocalRagManager:
         if not self._guard_valid_database_target(db_name):
             return
         status = self._status_json(db_name)
+        saved_scope = self._saved_resume_scope(status or {})
         self._print_screen_header("DBを構築・再開", db_name=db_name)
         self.output(
             "buildは取り込み元からDBを初めて構築します。"
             "中断済み処理がある場合は同じ条件で再開できます。"
         )
         entries = [("1", "新しく構築する")]
-        if status and status.get("can_resume"):
+        if saved_scope:
             entries.append(("2", "保存済み処理を再開する"))
         entries.extend((("3", "強制的に再構築する【危険】"), ("0", "戻る")))
         self._print_menu("操作", entries)
         choice = self._ask("番号を入力してください: ")
         if choice in (None, "0"):
             return
-        if choice == "2" and status and status.get("can_resume"):
+        if choice == "2" and saved_scope:
             self.output("\n再開する保存済み処理")
             self.output(f"  DB: {db_name}")
-            self.output(f"  操作: {status.get('operation') or 'build'}")
-            self.output(f"  論理ルート: {status.get('root') or '不明'}")
-            self.output(f"  Source ID: {status.get('source_id') or '不明'}")
+            self.output(f"  操作: {saved_scope['operation']}")
+            self.output(f"  論理ルート: {saved_scope['root']}")
+            self.output(f"  Source ID: {saved_scope['source_id']}")
             self.output(
                 "  読込範囲: "
-                f"{status.get('scan_subdir') or '論理ルート全体'}"
+                f"{saved_scope['scan_subdir']}"
             )
             self.output(
                 "  確定単位: "
-                f"{int(status.get('batch_size_files') or 5)}文書"
+                f"{saved_scope['batch_size_files']}文書"
             )
             if self._confirm(f"DB「{db_name}」の保存済み処理を再開しますか？"):
                 self._resume_saved_operation(db_name, status)
@@ -2529,23 +2530,35 @@ class LocalRagManager:
             self._show_operation_result(result, "DB構築")
             self._print_success(f"DB「{db_name}」の構築が完了しました。")
 
+    @staticmethod
+    def _saved_resume_scope(status: dict[str, Any]) -> dict[str, Any] | None:
+        from software_rag_tool.ingestion_paths import (
+            validated_saved_ingestion, saved_ingestion_has_local_root,
+        )
+        scope = validated_saved_ingestion(status)
+        if (status.get("can_resume") is True and scope
+                and saved_ingestion_has_local_root(scope)):
+            return scope
+        return None
+
     def _resume_saved_operation(
         self,
         db_name: str,
         status: dict[str, Any],
     ) -> None:
-        # Never execute the resume_command stored in progress. Reconstruct the
-        # allowlisted argv from individually validated status fields.
-        root = str(status.get("root") or "")
-        source_id = str(status.get("source_id") or "")
-        scan_subdir = str(status.get("scan_subdir") or ".")
-        batch_size_files = int(status.get("batch_size_files") or 5)
-        if not root or not source_id:
+        # Only the status child’s canonical ingestion object supplies control
+        # data. Never execute its rendered command or trust flat display fields.
+        scope = self._saved_resume_scope(status)
+        if not scope:
             self._print_error(
-                "再開に必要な論理ルートまたはSource IDが保存されていません。"
+                "再開に必要な正本の取り込み条件を確認できません。Source更新から再開してください。"
             )
             return
-        operation = str(status.get("operation") or "build")
+        root = scope["root"]
+        source_id = scope["source_id"]
+        scan_subdir = scope["scan_subdir"]
+        batch_size_files = scope["batch_size_files"]
+        operation = scope["operation"]
         script = (
             "gen_db/add_data.py"
             if operation == "add"
@@ -2565,6 +2578,10 @@ class LocalRagManager:
         ]
         if scan_subdir and scan_subdir != ".":
             arguments.extend(["--scan-subdir", scan_subdir])
+        for field in ("chunk_max_chars", "chunk_overlap", "resolved_root"):
+            if field in scope:
+                option = "persistent-root-identity" if field == "resolved_root" else field.replace("_", "-")
+                arguments.extend(["--" + option, str(scope[field])])
         self._print_info(
             "保存済み処理を再開しています。完了までお待ちください。"
         )

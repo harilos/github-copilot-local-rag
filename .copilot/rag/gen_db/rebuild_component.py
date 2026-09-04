@@ -16,6 +16,7 @@ from software_rag_tool.catalog import rebuild_from_clean
 from software_rag_tool.dbs import require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
+from software_rag_tool.ingestion_paths import validated_saved_ingestion
 from software_rag_tool.jsonl import read_jsonl
 from software_rag_tool.manifest import write_manifest
 from software_rag_tool.paths import clean_dir, dbs_dir, logs_dir
@@ -36,7 +37,12 @@ def main() -> int:
     )
     parser.add_argument("--db", required=True, help="Target DB name, e.g. project-rag")
     parser.add_argument("--component", required=True, choices=["lexical", "catalog", "vector", "extract", "all"])
-    parser.add_argument("--batch-size-files", type=int, default=20)
+    parser.add_argument(
+        "--batch-size-files",
+        type=int,
+        default=None,
+        help="For extract rebuild, must match the saved ingestion batch size",
+    )
     args = parser.parse_args()
 
     try:
@@ -79,12 +85,20 @@ def _rebuild(args: argparse.Namespace, db_name: str) -> None:
 
     if args.component == "extract":
         scope = _extract_rebuild_scope()
+        if args.batch_size_files is not None and (
+            type(args.batch_size_files) is not int
+            or args.batch_size_files != scope["batch_size_files"]
+        ):
+            raise RuntimeError(
+                "extract rebuild requires the saved ingestion batch_size_files; "
+                "omit --batch-size-files or use the saved value"
+            )
         summary = add_or_update_root(
             root=Path(scope["root"]),
             source_id=scope["source_id"],
             scan_subdir=scope["scan_subdir"],
-            include_root_name_in_path=scope["include_root_name_in_path"],
-            batch_size_files=args.batch_size_files,
+            include_root_name_in_path=scope.get("include_root_name_in_path", True),
+            batch_size_files=scope["batch_size_files"],
             reset_db=True,
             reset_clean=True,
             retry_errors=True,
@@ -131,58 +145,20 @@ def _all_clean_records() -> list[dict]:
 
 
 def _extract_rebuild_scope() -> dict:
-    """Use durable scope, consulting progress only for pre-scope databases."""
+    """Require the canonical ingestion scope, never a progress-derived command."""
 
     state = _load_json(logs_dir() / "index_state.json")
-    if "ingestion" in state:
-        # A present but damaged authority must never be replaced by a stale
-        # progress snapshot, especially before this destructive rebuild.
-        scope = state["ingestion"]
-        origin = "index_state.json ingestion"
-    else:
-        scope = _load_json(logs_dir() / "progress.json")
-        origin = "legacy progress.json"
-    if not isinstance(scope, dict) or not scope:
-        raise RuntimeError(f"extract rebuild requires valid scope in {origin}")
-    scope = dict(scope)
-    for field in ("root", "source_id"):
-        if not isinstance(scope.get(field), str) or not scope[field].strip():
-            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
-    private = scope.get("privacy_safe_root", False)
-    if not isinstance(private, bool):
-        raise RuntimeError(f"extract rebuild requires valid privacy_safe_root in {origin}")
-    if private or scope["root"] == "<EXTERNAL_SOURCE_ROOT>":
+    scope = validated_saved_ingestion(state)
+    if scope is None:
+        raise RuntimeError(
+            "extract rebuild requires valid canonical ingestion scope in "
+            "index_state.json; run the source update with explicit settings first"
+        )
+    if scope.get("privacy_safe_root") or scope["root"] == "<EXTERNAL_SOURCE_ROOT>":
         raise RuntimeError(
             "extract rebuild cannot recover a privacy-safe external root; "
             "run the source update/rebuild with its original root instead"
         )
-    if not Path(scope["root"]).is_absolute():
-        raise RuntimeError(f"extract rebuild requires an absolute root in {origin}")
-    # Older canonical scopes predate these extraction options.  Keep the
-    # historical defaults, never borrowing values from newer/stale progress.
-    for field, default in (
-        ("scan_subdir", "."),
-        ("operation", "build"),
-        ("chunk_max_chars", 1400),
-        ("chunk_overlap", 160),
-        ("include_root_name_in_path", True),
-    ):
-        scope.setdefault(field, default)
-    for field in ("scan_subdir", "operation"):
-        if not isinstance(scope[field], str) or not scope[field].strip():
-            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
-    if scope["include_root_name_in_path"] is not True:
-        raise RuntimeError("extract rebuild requires root-name inclusion")
-    for field in ("chunk_max_chars", "chunk_overlap"):
-        if type(scope[field]) is not int:
-            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
-    if not 0 <= scope["chunk_overlap"] < scope["chunk_max_chars"]:
-        raise RuntimeError(f"extract rebuild requires valid chunk settings in {origin}")
-    if "resolved_root" in scope and (
-        not isinstance(scope["resolved_root"], str)
-        or not scope["resolved_root"].strip()
-    ):
-        raise RuntimeError(f"extract rebuild requires valid resolved_root in {origin}")
     return scope
 
 

@@ -9,6 +9,71 @@ from typing import Any
 WHOLE_ROOT_SCAN = "."
 
 
+def validated_saved_ingestion(state: Any) -> dict[str, Any] | None:
+    """Validate durable control data, never supplement it from observation files."""
+    value = state.get("ingestion") if isinstance(state, dict) else None
+    if not isinstance(value, dict):
+        return None
+    scope = {field: value[field] for field in (
+        "root", "resolved_root", "root_display_name", "scan_subdir",
+        "scan_root", "stored_path_prefix", "include_root_name_in_path",
+        "source_id", "operation", "batch_size_files", "chunk_max_chars",
+        "chunk_overlap", "privacy_safe_root",
+    ) if field in value}
+    for field in ("root", "source_id", "scan_subdir"):
+        if not isinstance(scope.get(field), str) or not scope[field].strip() or "\x00" in scope[field]:
+            return None
+    if scope.get("operation") not in ("add", "build"):
+        return None
+    batch = scope.get("batch_size_files")
+    if type(batch) is not int or batch <= 0:
+        return None
+    private = scope.get("privacy_safe_root", False)
+    if not isinstance(private, bool):
+        return None
+    if scope["root"] != "<EXTERNAL_SOURCE_ROOT>" and not Path(scope["root"]).is_absolute():
+        return None
+    try:
+        _normalize_scan_subdir_input(scope["scan_subdir"])
+    except ValueError:
+        return None
+    for field in ("resolved_root", "root_display_name", "scan_root", "stored_path_prefix"):
+        if field in scope and (not isinstance(scope[field], str) or not scope[field].strip() or "\x00" in scope[field]):
+            return None
+    if private or scope["root"] == "<EXTERNAL_SOURCE_ROOT>":
+        # Private snapshots contain a redacted root, opaque identity, and a
+        # relative scan. Reject mixed legacy/plaintext shapes before display.
+        if scope["root"] != "<EXTERNAL_SOURCE_ROOT>":
+            return None
+        if any(separator in scope.get("resolved_root", "") for separator in ("/", "\\")):
+            return None
+        if scope.get("scan_root", scope["scan_subdir"]) != scope["scan_subdir"]:
+            return None
+        if any(separator in scope.get("root_display_name", "") for separator in ("/", "\\")):
+            return None
+        try:
+            _normalize_scan_subdir_input(scope.get("stored_path_prefix", "."))
+        except ValueError:
+            return None
+    if scope.get("include_root_name_in_path", True) is not True:
+        return None
+    # Pre-option canonical states retain historical extraction defaults only;
+    # root/source/operation/scan/batch must actually be present in the state.
+    scope.setdefault("chunk_max_chars", 1400)
+    scope.setdefault("chunk_overlap", 160)
+    if (type(scope["chunk_max_chars"]) is not int
+            or type(scope["chunk_overlap"]) is not int
+            or not 0 <= scope["chunk_overlap"] < scope["chunk_max_chars"]):
+        return None
+    return scope
+
+
+def saved_ingestion_has_local_root(scope: dict[str, Any]) -> bool:
+    return (not scope.get("privacy_safe_root", False)
+            and scope.get("root") != "<EXTERNAL_SOURCE_ROOT>"
+            and bool(scope.get("root")) and Path(scope["root"]).is_absolute())
+
+
 @dataclass(frozen=True)
 class StoredFilePath:
     resolved_path: Path

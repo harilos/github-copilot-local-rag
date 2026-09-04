@@ -67,6 +67,7 @@ def main() -> int:
     )
     parser.add_argument("--force-rebuild", action="store_true", help="Delete clean records and recreate the Chroma collection")
     parser.add_argument("--append", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--persistent-root-identity", help=argparse.SUPPRESS)
     parser.add_argument("--retry-errors", action="store_true", help="Retry unchanged files that previously failed extraction")
     parser.add_argument(
         "--chunk-max-chars",
@@ -119,6 +120,8 @@ def main() -> int:
     ]
     if args.batch_size_files is not None:
         cmd.extend(["--batch-size-files", str(args.batch_size_files)])
+    if args.persistent_root_identity is not None:
+        cmd.extend(["--persistent-root-identity", args.persistent_root_identity])
     if args.force_rebuild:
         cmd.extend(["--reset-db", "--reset-clean"])
     if args.scan_subdir is not None:

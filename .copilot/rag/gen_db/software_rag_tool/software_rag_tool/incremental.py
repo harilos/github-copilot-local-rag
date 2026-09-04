@@ -94,15 +94,6 @@ def add_or_update_root(
     )
     if persistent_root_identity is not None:
         persistent_scope_fields["resolved_root"] = str(persistent_root_identity)
-    if privacy_safe_root:
-        _migrate_private_scope_paths(
-            state,
-            scope=scope,
-            source_id=source_id,
-            persistent_root_identity=str(
-                persistent_scope_fields["resolved_root"]
-            ),
-        )
     effective_batch_size_files = _effective_batch_size_files(
         state,
         requested=batch_size_files,
@@ -115,6 +106,18 @@ def add_or_update_root(
             source_id,
             effective_batch_size_files,
             privacy_safe_root=privacy_safe_root,
+            persistent_root_identity=persistent_root_identity,
+        )
+    if privacy_safe_root:
+        # Resume must validate the saved authority before migration replaces
+        # any of its root/scope fields with the requested values.
+        _migrate_private_scope_paths(
+            state,
+            scope=scope,
+            source_id=source_id,
+            persistent_root_identity=str(
+                persistent_scope_fields["resolved_root"]
+            ),
         )
     state["ingestion"] = {
         **persistent_scope_fields,
@@ -892,6 +895,7 @@ def _validate_resume_state(
     source_id: str,
     batch_size_files: int | None = None,
     privacy_safe_root: bool = False,
+    persistent_root_identity: str | None = None,
 ) -> None:
     saved = state.get("ingestion")
     if not isinstance(saved, dict) or not saved:
@@ -904,6 +908,17 @@ def _validate_resume_state(
     if batch_size_files is not None:
         expected["batch_size_files"] = batch_size_files
     keys = ["resolved_root", "source_id", "scan_subdir"]
+    if persistent_root_identity is not None:
+        # Filtered Source work retains the original Source's identity, but
+        # that identity must not authorize resuming from an unrelated root.
+        expected["resolved_root"] = str(persistent_root_identity)
+        keys.extend(("root", "scan_root"))
+        if privacy_safe_root and str(persistent_root_identity) != _private_root_identity(scope):
+            # A redacted root plus an unrelated custom identity does not
+            # contain enough evidence to prove the current physical root.
+            raise ValueError(
+                "resume settings do not match saved index state: resolved_root"
+            )
     if "batch_size_files" in saved and batch_size_files is not None:
         keys.append("batch_size_files")
     mismatches = [
