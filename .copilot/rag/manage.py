@@ -775,6 +775,7 @@ class LocalRagManager:
                         or ""
                     )
                     self.output(f"  - {name}" + (f": {reason}" if reason else ""))
+                    self._print_observability_warning(value)
                     diagnostic = value.get("failure_diagnostic")
                     if key == "failed" and isinstance(diagnostic, dict):
                         self._print_error(
@@ -1319,6 +1320,7 @@ class LocalRagManager:
         self._print_ingestion_diagnostics(values)
 
     def _print_ingestion_diagnostics(self, values: dict[str, Any]) -> None:
+        self._print_observability_warning(values)
         diagnostics = values.get("ingestion_diagnostics")
         if not isinstance(diagnostics, dict):
             return
@@ -1350,6 +1352,16 @@ class LocalRagManager:
                 self.output(f"  - {path}")
             if count > len(paths):
                 self.output(f"  - ほか {count - len(paths):,}件")
+
+    def _print_observability_warning(self, values: dict[str, Any]) -> None:
+        from source_manager.runner import _observability_result_fields
+
+        observation = _observability_result_fields(values)
+        if observation.get("observability_degraded"):
+            self._print_warning(
+                "進捗・イベントの観測情報を一部保存できませんでした。"
+                "表示が古い可能性があります。DBへの反映結果とは別の警告です。"
+            )
 
     def _print_screen_header(
         self,
@@ -3488,6 +3500,8 @@ class LocalRagManager:
             summary = result.get("add_summary")
             if isinstance(summary, dict):
                 self._print_ingestion_diagnostics(summary)
+            else:
+                self._print_observability_warning(result)
         elif result_status == "partial":
             self._print_source_partial_result(result)
         elif result_status in {"failed", "error"}:

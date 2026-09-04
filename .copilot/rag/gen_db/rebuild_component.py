@@ -78,25 +78,20 @@ def _rebuild(args: argparse.Namespace, db_name: str) -> None:
         return
 
     if args.component == "extract":
-        progress = _load_json(logs_dir() / "progress.json")
-        root = str(progress.get("root") or "")
-        source_id = str(progress.get("source_id") or "")
-        if not root or not source_id:
-            raise RuntimeError("extract rebuild requires a previous run with root/source_id in logs/progress.json")
+        scope = _extract_rebuild_scope()
         summary = add_or_update_root(
-            root=Path(root),
-            source_id=source_id,
-            scan_subdir=str(progress.get("scan_subdir") or "."),
-            include_root_name_in_path=True,
+            root=Path(scope["root"]),
+            source_id=scope["source_id"],
+            scan_subdir=scope["scan_subdir"],
+            include_root_name_in_path=scope["include_root_name_in_path"],
             batch_size_files=args.batch_size_files,
             reset_db=True,
             reset_clean=True,
             retry_errors=True,
-            operation=str(progress.get("operation") or "build"),
-            chunk_max_chars=int(
-                progress.get("chunk_max_chars") or 1400
-            ),
-            chunk_overlap=int(progress.get("chunk_overlap") or 160),
+            operation=scope["operation"],
+            chunk_max_chars=scope["chunk_max_chars"],
+            chunk_overlap=scope["chunk_overlap"],
+            persistent_root_identity=scope.get("resolved_root"),
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -135,10 +130,72 @@ def _all_clean_records() -> list[dict]:
     return records
 
 
+def _extract_rebuild_scope() -> dict:
+    """Use durable scope, consulting progress only for pre-scope databases."""
+
+    state = _load_json(logs_dir() / "index_state.json")
+    if "ingestion" in state:
+        # A present but damaged authority must never be replaced by a stale
+        # progress snapshot, especially before this destructive rebuild.
+        scope = state["ingestion"]
+        origin = "index_state.json ingestion"
+    else:
+        scope = _load_json(logs_dir() / "progress.json")
+        origin = "legacy progress.json"
+    if not isinstance(scope, dict) or not scope:
+        raise RuntimeError(f"extract rebuild requires valid scope in {origin}")
+    scope = dict(scope)
+    for field in ("root", "source_id"):
+        if not isinstance(scope.get(field), str) or not scope[field].strip():
+            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
+    private = scope.get("privacy_safe_root", False)
+    if not isinstance(private, bool):
+        raise RuntimeError(f"extract rebuild requires valid privacy_safe_root in {origin}")
+    if private or scope["root"] == "<EXTERNAL_SOURCE_ROOT>":
+        raise RuntimeError(
+            "extract rebuild cannot recover a privacy-safe external root; "
+            "run the source update/rebuild with its original root instead"
+        )
+    if not Path(scope["root"]).is_absolute():
+        raise RuntimeError(f"extract rebuild requires an absolute root in {origin}")
+    # Older canonical scopes predate these extraction options.  Keep the
+    # historical defaults, never borrowing values from newer/stale progress.
+    for field, default in (
+        ("scan_subdir", "."),
+        ("operation", "build"),
+        ("chunk_max_chars", 1400),
+        ("chunk_overlap", 160),
+        ("include_root_name_in_path", True),
+    ):
+        scope.setdefault(field, default)
+    for field in ("scan_subdir", "operation"):
+        if not isinstance(scope[field], str) or not scope[field].strip():
+            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
+    if scope["include_root_name_in_path"] is not True:
+        raise RuntimeError("extract rebuild requires root-name inclusion")
+    for field in ("chunk_max_chars", "chunk_overlap"):
+        if type(scope[field]) is not int:
+            raise RuntimeError(f"extract rebuild requires valid {field} in {origin}")
+    if not 0 <= scope["chunk_overlap"] < scope["chunk_max_chars"]:
+        raise RuntimeError(f"extract rebuild requires valid chunk settings in {origin}")
+    if "resolved_root" in scope and (
+        not isinstance(scope["resolved_root"], str)
+        or not scope["resolved_root"].strip()
+    ):
+        raise RuntimeError(f"extract rebuild requires valid resolved_root in {origin}")
+    return scope
+
+
 def _load_json(path: Path) -> dict:
-    if not path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
-    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, UnicodeError, ValueError):
+        raise RuntimeError(f"extract rebuild cannot read valid {path.name}") from None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"extract rebuild requires an object in {path.name}")
+    return data
 
 
 if __name__ == "__main__":

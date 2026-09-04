@@ -1474,6 +1474,8 @@ def _execute_add(
             return False
         if not isinstance(value.get("error_details"), list):
             return False
+        if not _valid_observability_result(value):
+            return False
         ingestion_diagnostics = value.get("ingestion_diagnostics")
         if (
             ingestion_diagnostics is not None
@@ -1616,6 +1618,7 @@ def _execute_add(
     input_error_files = int(summary.get("input_error_files") or 0)
     extract_error_files = int(summary.get("extract_error_files") or 0)
     ingestion_diagnostics = summary.get("ingestion_diagnostics")
+    observability = _observability_result_fields(summary)
     result_status = str(summary.get("result_status") or "")
     completed_files = int(summary.get("indexed_files") or 0) + int(
         summary.get("skipped_files") or 0
@@ -1678,6 +1681,7 @@ def _execute_add(
         }
         if ingestion_diagnostics is not None:
             summary["ingestion_diagnostics"] = ingestion_diagnostics
+        summary.update(observability)
         if summary["result_status"] == "partial":
             summary["warning_ja"] = (
                 f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
@@ -1687,7 +1691,56 @@ def _execute_add(
         "source_id": reported_source_id,
         "status": result_status,
         "summary": summary,
+        **observability,
     }
+
+
+def _valid_observability_result(value: Mapping[str, Any]) -> bool:
+    fields = {"observability_degraded", "observability_failed_sinks"}
+    present = fields.intersection(value)
+    if not present:
+        return True
+    if present != fields:
+        return False
+    degraded = value["observability_degraded"]
+    sinks = value["observability_failed_sinks"]
+    return (
+        isinstance(degraded, bool)
+        and isinstance(sinks, list)
+        and len(sinks) <= 2
+        and all(
+            isinstance(sink, str) and sink in {"progress", "events"}
+            for sink in sinks
+        )
+        and len(set(sinks)) == len(sinks)
+        and degraded == bool(sinks)
+    )
+
+
+def _observability_result_fields(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only the closed observation schema, never sink paths or errors."""
+    if (
+        not _valid_observability_result(value)
+        or "observability_degraded" not in value
+    ):
+        return {}
+    return {
+        "observability_degraded": value["observability_degraded"],
+        "observability_failed_sinks": sorted(value["observability_failed_sinks"]),
+    }
+
+
+def _merge_observability_result(
+    target: dict[str, Any],
+    summary: Mapping[str, Any],
+) -> None:
+    fields = _observability_result_fields(summary)
+    if fields.get("observability_degraded"):
+        target["observability_degraded"] = True
+        target["observability_failed_sinks"] = sorted(
+            set(target.get("observability_failed_sinks") or [])
+            | set(fields["observability_failed_sinks"])
+        )
 
 
 def _valid_ingestion_diagnostics(value: Any) -> bool:
@@ -1789,6 +1842,7 @@ def _update_redmine_source(
     force_full_materialization: bool,
 ) -> dict[str, Any]:
     """Fetch Redmine serially and reflect each stable ADD batch."""
+    observability: dict[str, Any] = {}
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)
@@ -1866,6 +1920,7 @@ def _update_redmine_source(
             command_runner=command_runner,
             progress_callback=progress_callback,
         )
+        _merge_observability_result(observability, _summary)
 
     state_holder = [current_state]
     source_holder = [current_source]
@@ -2003,6 +2058,7 @@ def _update_redmine_source(
             command_runner=command_runner,
             progress_callback=progress_callback,
         )
+        _merge_observability_result(observability, _summary)
         _emit_progress(
             progress_callback,
             {
@@ -2183,6 +2239,7 @@ def _update_redmine_source(
     return {
         **_source_dto(store, store.read_source(source.payload["local_source_key"])),
         **sync_result,
+        **observability,
         "status": (
             "metadata_sync_pending"
             if sync_result.get("metadata_sync_pending")
@@ -2213,6 +2270,7 @@ def _update_gitlab_issues_source(
 ) -> dict[str, Any]:
     """Fetch GitLab Issues serially and reflect stable batches of five."""
 
+    observability: dict[str, Any] = {}
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)
@@ -2272,6 +2330,7 @@ def _update_gitlab_issues_source(
             command_runner=command_runner,
             progress_callback=progress_callback,
         )
+        _merge_observability_result(observability, _summary)
 
     state_holder = [current_state]
     source_holder = [current_source]
@@ -2432,6 +2491,7 @@ def _update_gitlab_issues_source(
             command_runner=command_runner,
             progress_callback=progress_callback,
         )
+        _merge_observability_result(observability, _summary)
         _emit_progress(
             progress_callback,
             {
@@ -2633,6 +2693,7 @@ def _update_gitlab_issues_source(
             store.read_source(source.payload["local_source_key"]),
         ),
         **sync_result,
+        **observability,
         "status": (
             "metadata_sync_pending"
             if sync_result.get("metadata_sync_pending")
@@ -3172,6 +3233,7 @@ def _reflect_and_sync(
         **sync_result,
         "state_revision": final_state.revision,
         "add_summary": add_summary,
+        **_observability_result_fields(add_summary),
     }
     if partial and not sync_result.get("metadata_sync_pending"):
         result.update(

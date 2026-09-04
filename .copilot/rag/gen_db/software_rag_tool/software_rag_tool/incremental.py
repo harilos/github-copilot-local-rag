@@ -15,7 +15,7 @@ from .jsonl import write_jsonl
 from .manifest import validate_existing_index_tokenizer, write_manifest
 from .paths import clean_dir, logs_dir
 from .profile import update_profile_from_clean
-from .progress import emit_event, write_progress
+from .progress import emit_event, write_progress, observability_run
 from .records import (
     SUPPORTED_EXTENSIONS,
     build_records_for_file,
@@ -32,6 +32,7 @@ from .records import chunker_config
 from .tokenize import require_index_tokenizer
 
 
+@observability_run
 def add_or_update_root(
     root: Path,
     source_id: str,
@@ -118,10 +119,13 @@ def add_or_update_root(
     state["ingestion"] = {
         **persistent_scope_fields,
         "batch_size_files": effective_batch_size_files,
+        "operation": operation,
+        "chunk_max_chars": chunk_max_chars,
+        "chunk_overlap": chunk_overlap,
     }
-    # Persist the effective scope before discovery.  If scanning is
-    # interrupted, a later --resume must still validate against the exact
-    # root/source/scope that started the run.
+    # This is the durable recovery/rebuild authority, independent of the
+    # best-effort progress snapshot.  Save before discovery or any progress
+    # emission so interrupted runs retain their effective extraction scope.
     _save_state(state)
     scope_fields = {
         **persistent_scope_fields,

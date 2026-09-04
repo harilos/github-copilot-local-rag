@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import functools
 import json
 import os
@@ -36,7 +37,6 @@ from software_rag_tool.writer_runtime import (
 _PROGRESS_FRAME = "@@LOCAL_RAG_PROGRESS_V1@@"
 _RESULT_FRAME = "@@LOCAL_RAG_RESULT_V1@@"
 _LOCAL_SOURCE_KEY = re.compile(r"^src_[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{12}$")
-_PROGRESS_PATCH_MARKER = "_local_rag_exact_file_index_installed"
 
 
 class _ManagerProtocolWriter:
@@ -72,11 +72,9 @@ class _ManagerProtocolWriter:
         sys.stderr.flush()
 
 
-def _install_exact_file_index_progress() -> None:
-    """Add a producer-side file ordinal to every persisted ADD progress update."""
-
-    if bool(getattr(incremental_module, _PROGRESS_PATCH_MARKER, False)):
-        return
+@contextlib.contextmanager
+def _install_exact_file_index_progress(watcher):
+    """Run-local producer snapshot handoff; never leave a monkeypatch installed."""
     original = incremental_module.write_progress
     current_file = ""
     current_index = 0
@@ -98,10 +96,15 @@ def _install_exact_file_index_progress() -> None:
             current_index += 1
         if current_index > 0:
             updates.setdefault("current_file_index", current_index)
-        return original(**updates)
+        snapshot = original(**updates)
+        watcher.offer(snapshot)
+        return snapshot
 
     incremental_module.write_progress = write_progress
-    setattr(incremental_module, _PROGRESS_PATCH_MARKER, True)
+    try:
+        yield
+    finally:
+        incremental_module.write_progress = original
 
 
 class _AddProgressWatcher:
@@ -109,12 +112,10 @@ class _AddProgressWatcher:
 
     def __init__(
         self,
-        path: Path,
         *,
         enabled: bool,
         estimated_total: int | None = None,
     ) -> None:
-        self._path = Path(path)
         self._enabled = bool(enabled)
         self._estimated_total = (
             max(0, int(estimated_total))
@@ -122,33 +123,50 @@ class _AddProgressWatcher:
             else None
         )
         self._stop = threading.Event()
+        self._condition = threading.Condition()
+        self._snapshot: dict[str, Any] | None = None
+        self._revision = 0
         self._thread: threading.Thread | None = None
         self._started = time.monotonic()
         self._last_emit = float("-inf")
         self._last_signature = ""
         self._last_payload: dict[str, Any] | None = None
-        try:
-            self._baseline_mtime_ns = self._path.stat().st_mtime_ns
-        except OSError:
-            self._baseline_mtime_ns = None
-        self._saw_current_run = False
+
+    def offer(self, snapshot: dict[str, Any]) -> None:
+        if not self._enabled:
+            return
+        with self._condition:
+            self._snapshot = copy.deepcopy(snapshot)
+            self._revision += 1
+            self._condition.notify()
 
     def start(self) -> None:
         if not self._enabled:
             return
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._run, name="add-progress-heartbeat", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         if not self._enabled:
             return
         self._stop.set()
+        with self._condition:
+            self._condition.notify()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         self._publish(force=True)
 
     def _run(self) -> None:
-        while not self._stop.wait(0.5):
+        seen = -1
+        while True:
+            with self._condition:
+                self._condition.wait_for(
+                    lambda: self._stop.is_set() or self._revision != seen,
+                    timeout=0.5,
+                )
+                if self._stop.is_set():
+                    return
+                seen = self._revision
             self._publish(force=False)
 
     def _publish(self, *, force: bool) -> None:
@@ -183,24 +201,8 @@ class _AddProgressWatcher:
         self._last_emit = now
 
     def _read_snapshot(self) -> dict[str, Any] | None:
-        try:
-            stat_result = self._path.stat()
-        except OSError:
-            return None
-        if (
-            not self._saw_current_run
-            and self._baseline_mtime_ns is not None
-            and stat_result.st_mtime_ns == self._baseline_mtime_ns
-        ):
-            return None
-        try:
-            value = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(value, dict):
-            return None
-        self._saw_current_run = True
-        return value
+        with self._condition:
+            return copy.deepcopy(self._snapshot)
 
     def _progress_payload(
         self,
@@ -424,7 +426,6 @@ def main() -> int:
     try:
         db_name = require_db_name(args.db)
         with database_writer_session(dbs_dir(), db_name) as target:
-            _install_exact_file_index_progress()
             protocol_writer = _ManagerProtocolWriter()
             output_context = (
                 contextlib.redirect_stdout(protocol_writer)
@@ -432,7 +433,6 @@ def main() -> int:
                 else contextlib.nullcontext()
             )
             watcher = _AddProgressWatcher(
-                target.db_root / "logs" / "progress.json",
                 enabled=args.manager_protocol_v1,
                 estimated_total=_preflight_estimated_documents(
                     target.db_root,
@@ -441,7 +441,7 @@ def main() -> int:
             )
             watcher.start()
             try:
-                with output_context:
+                with output_context, _install_exact_file_index_progress(watcher):
                     summary = incremental_module.add_or_update_root(
                         root=Path(args.root),
                         source_id=args.source_id,

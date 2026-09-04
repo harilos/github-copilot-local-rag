@@ -23,7 +23,8 @@ class AddProgressContracts(unittest.TestCase):
         self.assertIn('"eta_seconds"', text)
         self.assertIn('"remaining_seconds_min"', text)
         self.assertIn('"remaining_seconds_max"', text)
-        self.assertIn('db_root / "logs" / "progress.json"', text)
+        self.assertIn('watcher.offer(snapshot)', text)
+        self.assertIn('incremental_module.write_progress = original', text)
         self.assertIn("preflight_estimated_documents", text)
 
     def test_renderer_keeps_required_japanese_progress_phrasing(self) -> None:

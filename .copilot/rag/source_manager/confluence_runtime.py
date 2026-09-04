@@ -575,6 +575,7 @@ def _update_confluence_source(
     therefore publishes canonical metadata only after that callback succeeds.
     """
 
+    observability: dict[str, Any] = {}
     if (
         source.payload.get("source_id")
         and source.payload.get("metadata_sync_pending")
@@ -663,6 +664,7 @@ def _update_confluence_source(
             progress_callback=progress_callback,
             final_batch=pending_is_final,
         )
+        runner._merge_observability_result(observability, _summary)
 
     state_holder = [current_state]
     source_holder = [current_source]
@@ -873,6 +875,7 @@ def _update_confluence_source(
                 final_batch=is_final,
             )
         )
+        runner._merge_observability_result(observability, _summary)
 
     def confluence_progress(event: Mapping[str, Any]) -> None:
         if event.get("event") == "confluence.http_attempt":
@@ -1025,6 +1028,7 @@ def _update_confluence_source(
             store.read_source(source.payload["local_source_key"]),
         ),
         **sync_result,
+        **observability,
         "status": (
             "metadata_sync_pending"
             if sync_result.get("metadata_sync_pending")
