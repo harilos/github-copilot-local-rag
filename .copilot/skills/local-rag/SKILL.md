@@ -65,12 +65,14 @@ does not rerun retrieval.
 
 ### `mode=thorough`
 
-- After database routing, make at least three and at most four
-  selected-database searches.
+- After database routing, make at most four selected-database searches.
+  Start with one search and stop when the requested coverage is supported;
+  there is no minimum search count beyond that initial retrieval.
 - First search with the unchanged semantic question.
 - Build an internal coverage checklist for every requested fact,
   classification, comparison, period, URL, relationship, contradiction, and
-  uncertainty. Search from distinct viewpoints needed by that checklist.
+  uncertainty. Use a further search only for a material gap or conflict found
+  in the evidence, from a distinct viewpoint needed by that checklist.
 - Immediately before answering, review the checklist against the collected
   evidence. If a required item is missing, use at most one `detail` call for up
   to three relevant IDs, then use the remaining search budget for one narrow,
