@@ -7,6 +7,7 @@ from typing import Any
 
 from .jsonl import read_jsonl
 from .paths import clean_dir, output_root
+from .atomic_io import atomic_write_bytes
 
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{2,}|[一-龯ぁ-んァ-ヴー]{2,}")
@@ -49,6 +50,8 @@ STOPWORDS = {
     "いる",
     "及び",
 }
+AUTO_PROFILE_START = "<!-- local-rag:auto-profile:start -->"
+AUTO_PROFILE_END = "<!-- local-rag:auto-profile:end -->"
 
 
 def update_profile_from_clean(*, max_records: int = 2000, max_terms: int = 24) -> bool:
@@ -66,25 +69,68 @@ def update_profile_from_clean(*, max_records: int = 2000, max_terms: int = 24) -
         f"- Source IDs: {', '.join(source_ids) if source_ids else 'n/a'}\n"
         f"- Representative files: {', '.join(titles) if titles else 'n/a'}\n"
     )
-    existing = (
-        profile_path.read_text(encoding="utf-8", errors="replace")
-        if profile_path.exists()
-        else f"# {title}\n\n## Query Hint\n\n{_default_query_hint(terms=terms, source_ids=source_ids, titles=titles)}\n"
-    )
-    query_hint = _section_body(existing, "Query Hint") or _default_query_hint(
-        terms=terms,
-        source_ids=source_ids,
-        titles=titles,
-    )
-    profile_path.write_text(
-        f"# {_profile_title(existing, title)}\n\n"
-        "## Query Hint\n\n"
-        f"{query_hint.strip()}\n\n"
-        "## Auto Profile\n\n"
-        f"{auto_profile.strip()}\n",
-        encoding="utf-8",
-    )
+    if profile_path.exists():
+        original = profile_path.read_bytes()
+        bom = original.startswith(b"\xef\xbb\xbf")
+        existing = original[3:].decode("utf-8", errors="strict") if bom else original.decode(
+            "utf-8", errors="strict"
+        )
+    else:
+        bom = False
+        existing = (
+            f"# {title}\n\n## Query Hint\n\n"
+            f"{_default_query_hint(terms=terms, source_ids=source_ids, titles=titles)}\n"
+        )
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    replacement = newline.join(
+        (
+            AUTO_PROFILE_START,
+            "## Auto Profile",
+            "",
+            auto_profile.strip().replace("\n", newline),
+            AUTO_PROFILE_END,
+        )
+    ) + newline
+    updated = _replace_owned_auto_profile(existing, replacement, newline)
+    payload = updated.encode("utf-8")
+    if bom:
+        payload = b"\xef\xbb\xbf" + payload
+    atomic_write_bytes(profile_path, payload)
     return True
+
+
+def _replace_owned_auto_profile(text: str, replacement: str, newline: str) -> str:
+    start_count = text.count(AUTO_PROFILE_START)
+    end_count = text.count(AUTO_PROFILE_END)
+    if start_count or end_count:
+        if start_count != 1 or end_count != 1:
+            raise ValueError("DB_PROFILE has ambiguous Local RAG owned blocks")
+        start = text.index(AUTO_PROFILE_START)
+        end = text.index(AUTO_PROFILE_END, start) + len(AUTO_PROFILE_END)
+        if end < start:
+            raise ValueError("DB_PROFILE Local RAG owned block is invalid")
+        if text[end : end + 2] == "\r\n":
+            end += 2
+        elif text[end : end + 1] == "\n":
+            end += 1
+        return text[:start] + replacement + text[end:]
+
+    headings = list(re.finditer(r"(?m)^## Auto Profile[ \t]*(?:\r?\n|$)", text))
+    if len(headings) > 1:
+        raise ValueError("DB_PROFILE has ambiguous Auto Profile sections")
+    if headings:
+        start = headings[0].start()
+        next_heading = re.search(r"(?m)^## [^\r\n]+(?:\r?\n|$)", text[headings[0].end() :])
+        end = (
+            headings[0].end() + next_heading.start()
+            if next_heading
+            else len(text)
+        )
+        return text[:start] + replacement + text[end:]
+    separator = "" if not text or text.endswith(("\n", "\r")) else newline
+    if text and not text.endswith(newline * 2):
+        separator += newline
+    return text + separator + replacement
 
 
 def _load_sample_records(*, max_records: int) -> list[dict[str, Any]]:

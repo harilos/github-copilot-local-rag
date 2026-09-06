@@ -25,6 +25,7 @@ sys.path.insert(0, str(TOOL_ROOT))
 from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.config import DEFAULT_DAEMON_IDLE_TIMEOUT_SECONDS
 from software_rag_tool.dbs import resolve_db_name
+from software_rag_tool.data_lifecycle import assert_ready_epoch, capture_ready_epoch
 from software_rag_tool.search_request import (
     SearchRequestError,
     add_search_request_arguments,
@@ -1156,7 +1157,15 @@ def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
         )
         return
     if getattr(args, "result_delivery", "stdout") == "file":
-        pointer = publish_result_bundle(payload)
+        selected_db = str(payload.get("selected_db") or payload.get("db") or "")
+        bundle_payload = dict(payload)
+        data_epoch = None
+        if selected_db:
+            data_epoch = capture_ready_epoch(DBS_ROOT / selected_db)
+            bundle_payload["_data_epoch"] = data_epoch
+        pointer = publish_result_bundle(bundle_payload)
+        if selected_db and data_epoch is not None:
+            assert_ready_epoch(DBS_ROOT / selected_db, data_epoch)
         print(
             json.dumps(
                 pointer,
@@ -1166,6 +1175,10 @@ def _print_search_payload(payload: dict, *, args: argparse.Namespace) -> None:
         )
         return
     payload = dict(payload)
+    selected_db = str(payload.get("selected_db") or payload.get("db") or "")
+    if selected_db:
+        data_epoch = capture_ready_epoch(DBS_ROOT / selected_db)
+        assert_ready_epoch(DBS_ROOT / selected_db, data_epoch)
     if os.getenv("LOCAL_RAG_WRAPPER_INTERNAL") != "1":
         payload.pop("_result_detail_items", None)
     if args.format == "json":

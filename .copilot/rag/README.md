@@ -146,8 +146,24 @@ Top-level menu:
 4. Create or import a distribution/management-PC package.
 5. Verify this computer's setup.
 6. Stop the authenticated search daemon.
+7. Detach old data for every database and require a fresh fetch (dangerous).
 0. Exit.
 ```
+
+Reset option 7 preserves database and Source configuration, credentials,
+user-authored profile text, and external originals. It first marks a new
+non-ready data generation, then moves acquired work, clean data, indexes,
+catalogs, checkpoints, progress, and cached results out of normal read paths.
+It does not fetch, convert, embed, or rebuild. Search, cached detail, resume,
+packaging, and database copy remain blocked until the current Source scope has
+been fetched successfully. One-time imports are sealed outside normal read
+paths and require explicit re-registration instead of being silently reused.
+Databases with no registered Source remain attention-required until a Source
+is registered and refreshed; exceptions are never reported as a full reset.
+
+Automation can inspect the same preflight with `manage.py reset-data --all
+--plan-only`; execution additionally requires `--yes` and either `--all` or
+`--db <name>`.
 
 Selected-database menu:
 

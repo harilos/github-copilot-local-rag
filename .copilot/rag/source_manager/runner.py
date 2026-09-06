@@ -7,6 +7,7 @@ import re
 import sqlite3
 import sys
 import time
+from functools import wraps
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from .github_content import (
 )
 from .metadata import publish_source_metadata
 from .networking import resolve_source_network_route
+from .operation_lock import database_operation_lock
 from .providers import validate_provider_config
 from .redmine import (
     REDMINE_CUTOFF_STATE_KEY,
@@ -60,6 +62,64 @@ FetchExecutor = Callable[[dict[str, Any], Path, dict[str, Any]], Mapping[str, An
 CommandRunner = Callable[[list[str]], Any]
 MetadataPublisher = Callable[[Path, Mapping[str, Any], Path], None]
 _FORCE_FULL_MATERIALIZATION = ContextVar("force_full_materialization", default=False)
+
+
+def _with_database_operation_lock(function: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(function)
+    def locked(db_root: Path, *args: Any, **kwargs: Any) -> Any:
+        # A few pure unit seams intentionally pass a synthetic, non-existent
+        # root while replacing the storage layer with mocks.  Real management
+        # operations can only mutate an existing database directory; invalid
+        # roots are still rejected by the wrapped implementation.
+        if not Path(db_root).is_dir():
+            return function(db_root, *args, **kwargs)
+        with database_operation_lock(Path(db_root)):
+            return function(db_root, *args, **kwargs)
+
+    return locked
+
+
+def _data_lifecycle_module() -> Any:
+    tool_root = Path(__file__).resolve().parents[1] / "gen_db" / "software_rag_tool"
+    if str(tool_root) not in sys.path:
+        sys.path.insert(0, str(tool_root))
+    from software_rag_tool import data_lifecycle
+
+    return data_lifecycle
+
+
+def _read_data_lifecycle(db_root: Path) -> Any:
+    return _data_lifecycle_module().read_lifecycle(db_root)
+
+
+def _complete_data_refresh(
+    db_root: Path, lifecycle: Any, source_items: list[dict[str, Any]]
+) -> str:
+    from .artifact_reset import plan_data_reset
+
+    current = _data_lifecycle_module().read_lifecycle(db_root, allow_missing=False)
+    if current is None or current.epoch != lifecycle.epoch:
+        raise SourceManagerError(
+            "database lifecycle changed during refresh",
+            stage="data_refresh.lifecycle_changed",
+        )
+    plan = plan_data_reset(db_root)
+    blocking_exceptions = [
+        item
+        for item in plan["exceptions"]
+        if item.get("reason") != "one_shot_original_requires_reimport"
+    ]
+    if blocking_exceptions:
+        return current.status
+    if not _search_artifacts_ready_for_all_sources(db_root, source_items):
+        return current.status
+    updated = _data_lifecycle_module().transition_lifecycle(
+        db_root,
+        current,
+        status=_data_lifecycle_module().READY,
+        source_config_digest=plan["source_config_digest"],
+    )
+    return updated.status
 
 
 def _emit_progress(
@@ -102,6 +162,7 @@ def _persistable_http_diagnostic(
     return value
 
 
+@_with_database_operation_lock
 def register_source(
     db_root: Path,
     *,
@@ -225,6 +286,7 @@ def list_sources(db_root: Path) -> list[dict[str, Any]]:
     return values
 
 
+@_with_database_operation_lock
 def update_source(
     db_root: Path,
     local_source_key: str,
@@ -256,11 +318,15 @@ def update_source(
     provider_command_runner = command_runner
     provider_http_get = http_get
     provider_environment = environment
-    force_full_materialization = _FORCE_FULL_MATERIALIZATION.get()
+    lifecycle = _read_data_lifecycle(Path(db_root))
+    force_full_materialization = _FORCE_FULL_MATERIALIZATION.get() or bool(
+        lifecycle is not None and lifecycle.status != "ready"
+    )
     existing_state = store.read_state(local_source_key)
     if (
         source.payload.get("source_id")
         and source.payload.get("metadata_sync_pending")
+        and not force_full_materialization
         and (
             not existing_state.payload
             or existing_state.payload.get("phase")
@@ -785,6 +851,7 @@ def _previous_success_matches_plan(
     )
 
 
+@_with_database_operation_lock
 def update_all_sources(
     db_root: Path,
     *,
@@ -800,14 +867,38 @@ def update_all_sources(
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     source_items = list_sources(db_root)
-    force_full_materialization = not _search_artifacts_ready_for_all_sources(
-        Path(db_root),
-        source_items,
-    )
+    lifecycle = _read_data_lifecycle(Path(db_root))
+    force_full_materialization = bool(
+        lifecycle is not None and lifecycle.status != "ready"
+    ) or not _search_artifacts_ready_for_all_sources(Path(db_root), source_items)
     for source_index, item in enumerate(source_items, start=1):
         key = str(item.get("local_source_key") or "")
         if not key or item.get("status") == "invalid":
             results.append(item)
+            _emit_source_count_progress(
+                progress_callback,
+                item,
+                source_index,
+                len(source_items),
+            )
+            continue
+        if (
+            item.get("source_type") == "other"
+            and lifecycle is not None
+            and lifecycle.status != "ready"
+        ):
+            reimported = _one_shot_reimport_ready(Path(db_root), key)
+            results.append(
+                {
+                    **item,
+                    "status": "skipped",
+                    "skip_reason": (
+                        "one_shot_source_reimported"
+                        if reimported
+                        else "one_shot_source_requires_reimport"
+                    ),
+                }
+            )
             _emit_source_count_progress(
                 progress_callback,
                 item,
@@ -913,12 +1004,16 @@ def update_all_sources(
     blocking_skips = [
         item
         for item in results
-        if item.get("skip_reason") == "sharepoint_update_requires_windows"
+        if item.get("skip_reason") in {
+            "sharepoint_update_requires_windows",
+            "one_shot_source_requires_reimport",
+        }
     ]
     updateable = [
         item
         for item in results
-        if item.get("skip_reason") != "one_shot_source_complete"
+        if item.get("skip_reason")
+        not in {"one_shot_source_complete", "one_shot_source_reimported"}
     ]
     successful_statuses = {"updated", "complete", "success"}
     completed_source_count = sum(
@@ -927,7 +1022,7 @@ def update_all_sources(
         if item.get("status") in successful_statuses
         or item.get("skip_reason") == "repository_revision_unchanged"
     )
-    return {
+    result = {
         "status": (
             "ok"
             if not failed and not partial
@@ -944,6 +1039,28 @@ def update_all_sources(
         ),
         "results": results,
     }
+    if result["snapshot_marker_eligible"] and lifecycle is not None:
+        result["lifecycle_status"] = _complete_data_refresh(
+            Path(db_root), lifecycle, source_items
+        )
+    elif lifecycle is not None:
+        result["lifecycle_status"] = lifecycle.status
+    return result
+
+
+def _one_shot_reimport_ready(db_root: Path, local_source_key: str) -> bool:
+    try:
+        store = SourceStore(db_root)
+        paths = store.paths(local_source_key)
+        work = paths.absolute(db_root, paths.work_directory)
+        state = store.read_state(local_source_key).payload
+        return (
+            work.is_dir()
+            and any(path.is_file() for path in work.rglob("*"))
+            and state.get("status") == "complete"
+        )
+    except (OSError, SourceManagerError):
+        return False
 
 
 def _emit_source_count_progress(
@@ -980,6 +1097,7 @@ def _is_windows() -> bool:
 _UNSET = object()
 
 
+@_with_database_operation_lock
 def update_source_configuration(
     db_root: Path,
     local_source_key: str,

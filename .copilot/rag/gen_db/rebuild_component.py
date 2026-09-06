@@ -14,6 +14,7 @@ from help_links import MANAGER_HELP_EPILOG
 from software_rag_tool.catalog import counts as catalog_counts
 from software_rag_tool.catalog import rebuild_from_clean
 from software_rag_tool.dbs import require_db_name
+from software_rag_tool.data_lifecycle import capture_ready_epoch
 from software_rag_tool.env import load_env
 from software_rag_tool.incremental import add_or_update_root
 from software_rag_tool.ingestion_paths import validated_saved_ingestion
@@ -47,6 +48,7 @@ def main() -> int:
 
     try:
         db_name = require_db_name(args.db)
+        capture_ready_epoch(dbs_dir() / db_name)
         with database_writer_session(dbs_dir(), db_name):
             _rebuild(args, db_name)
     except DatabaseBusyError as exc:

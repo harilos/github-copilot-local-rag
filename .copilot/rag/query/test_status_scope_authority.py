@@ -24,6 +24,10 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 status = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(status)
+from software_rag_tool.data_lifecycle import (  # noqa: E402
+    new_reset_lifecycle,
+    write_lifecycle,
+)
 
 MISSING = object()
 MALFORMED_JSON = object()
@@ -155,6 +159,24 @@ class StatusScopeAuthorityTests(unittest.TestCase):
         self.assertEqual(self.canonical["root"], result["root"])
         self.assert_canonical_commands(result)
         self.assert_progress_unavailable(result)
+
+    def test_nonready_generation_never_exposes_old_resume_or_progress(self):
+        marker = new_reset_lifecycle(
+            self.database,
+            source_config_digest="0" * 64,
+        )
+        write_lifecycle(self.database, marker)
+        result = self.read_status(snapshot=self.progress())
+        self.assertFalse(result["data_lifecycle_ready"])
+        self.assertEqual("resetting", result["data_lifecycle_status"])
+        self.assertEqual("resetting", result["status"])
+        self.assertFalse(result["scope_valid"])
+        self.assertFalse(result["progress_matches_scope"])
+        self.assertFalse(result["can_resume"])
+        self.assertEqual([], result["resume_command"])
+        self.assertEqual([], result["force_rebuild_command"])
+        self.assertEqual(0, result["indexed_files"])
+        self.assertEqual(0, result["collection_count"])
 
     def test_same_scope_with_different_operation_does_not_reuse_progress(self):
         snapshot = self.progress()

@@ -19,6 +19,7 @@ from software_rag_tool.dbs import read_db_version, require_db_name
 from software_rag_tool.env import load_env
 from software_rag_tool.paths import dbs_dir
 from software_rag_tool.catalog import counts as catalog_counts
+from software_rag_tool.data_lifecycle import read_lifecycle
 from software_rag_tool.read_io import read_text_with_windows_retry
 from software_rag_tool.ingestion_paths import validated_saved_ingestion, saved_ingestion_has_local_root
 
@@ -42,6 +43,9 @@ def main() -> None:
     os.environ["RAG_OUTPUT_ROOT"] = str(db_root)
     logs_root = db_root / "logs"
 
+    lifecycle = read_lifecycle(db_root)
+    lifecycle_ready = lifecycle is None or lifecycle.status == "ready"
+
     state = _load_json(logs_root / "index_state.json")
     # Read authority first. Optional progress cannot supply control fields or
     # prevent status from reporting a valid saved scope when its sink is bad.
@@ -49,16 +53,40 @@ def main() -> None:
         observed_progress = _load_json(logs_root / "progress.json")
     except (OSError, UnicodeError, json.JSONDecodeError):
         observed_progress = {}
-    ingestion = validated_saved_ingestion(state) or {}
+    ingestion = (validated_saved_ingestion(state) or {}) if lifecycle_ready else {}
     progress_matches_scope = _progress_matches_scope(observed_progress, ingestion)
     progress = observed_progress if progress_matches_scope else {}
-    manifest = _load_json(db_root / "index" / "manifest.json")
+    manifest = (
+        _load_json(db_root / "index" / "manifest.json")
+        if lifecycle_ready
+        else {}
+    )
     version = read_db_version(db_root)
-    errors = _load_json(logs_root / "prepare_errors.json", default=[])
-    events = _tail_jsonl(logs_root / "events.jsonl", args.tail_events)
-    catalog = catalog_counts()
+    errors = (
+        _load_json(logs_root / "prepare_errors.json", default=[])
+        if lifecycle_ready
+        else []
+    )
+    events = (
+        _tail_jsonl(logs_root / "events.jsonl", args.tail_events)
+        if lifecycle_ready
+        else []
+    )
+    catalog = (
+        catalog_counts()
+        if lifecycle_ready
+        else {"exists": False, "chunks": 0, "documents": 0}
+    )
 
-    status = _effective_status(progress, args.stale_minutes) if progress_matches_scope else "progress_unavailable"
+    status = (
+        _effective_status(progress, args.stale_minutes)
+        if progress_matches_scope
+        else (
+            "progress_unavailable"
+            if lifecycle_ready
+            else str(lifecycle.status)
+        )
+    )
     operation = str(ingestion.get("operation") or "")
     root = str(ingestion.get("root") or "")
     source_id = str(ingestion.get("source_id") or "")
@@ -75,7 +103,11 @@ def main() -> None:
     ) if command_scope_valid else []
     if resume_command:
         _append_saved_options(resume_command, ingestion)
-    state_files = state.get("files") if isinstance(state, dict) else {}
+    state_files = (
+        state.get("files")
+        if lifecycle_ready and isinstance(state, dict)
+        else {}
+    )
     if not isinstance(state_files, dict):
         state_files = {}
 
@@ -83,6 +115,8 @@ def main() -> None:
         "db": db_name,
         "db_root": str(db_root),
         "exists": db_root.exists(),
+        "data_lifecycle_status": lifecycle.status if lifecycle else "legacy",
+        "data_lifecycle_ready": lifecycle_ready,
         "version": version,
         "ingestion": ingestion,
         "scope_valid": bool(ingestion),

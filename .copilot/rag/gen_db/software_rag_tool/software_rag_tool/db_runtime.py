@@ -18,6 +18,12 @@ except ModuleNotFoundError:
 
 from . import catalog
 from .dbs import collection_name_for_db, read_db_config, read_db_version, read_profile_hint, require_db_name
+from .data_lifecycle import (
+    LEGACY_EPOCH,
+    assert_ready_epoch,
+    capture_ready_epoch,
+    lifecycle_path,
+)
 from .embeddings import embedding_fingerprint, get_embedder
 from .manifest import ConfigMismatchError, read_manifest, validate_embedding_manifest
 from .tokenize import TokenizerFingerprintError, validate_tokenizer_fingerprint
@@ -35,6 +41,7 @@ class DbContext:
     manifest: dict[str, Any]
     profile_hint: str
     embedding_fingerprint: dict[str, Any]
+    data_epoch: str = LEGACY_EPOCH
 
 
 class DbStore:
@@ -62,6 +69,7 @@ class DbStore:
         top_k: int,
         source: str = "any",
     ) -> list[list[dict[str, Any]]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         if chromadb is None:
             raise RuntimeError("chromadb is not installed. Run python ~/.copilot/rag/query/setup.py before dense search or DB generation.")
@@ -109,6 +117,7 @@ class DbStore:
         return output
 
     def exact_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         return catalog.exact_search(
             question,
@@ -119,6 +128,7 @@ class DbStore:
         )
 
     def bm25_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         try:
             self._validate_lexical_tokenizer()
@@ -133,6 +143,7 @@ class DbStore:
         )
 
     def anchor_lexical_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         try:
             self._validate_lexical_tokenizer()
@@ -147,6 +158,7 @@ class DbStore:
         )
 
     def metadata_search(self, question: str, *, top_k: int, source: str = "any") -> list[dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         try:
             self._validate_lexical_tokenizer()
@@ -161,6 +173,7 @@ class DbStore:
         )
 
     def fetch_rows_by_ids(self, ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         return catalog.fetch_rows_by_ids(
             ids,
@@ -169,6 +182,7 @@ class DbStore:
         )
 
     def get_neighbor_rows(self, chunk_uid: str, *, window: int = 1) -> list[dict[str, Any]]:
+        self._assert_epoch()
         self._last_used_at = time.monotonic()
         return catalog.get_neighbor_rows(
             chunk_uid,
@@ -245,6 +259,10 @@ class DbStore:
         if mismatches:
             raise ConfigMismatchError(f"DB collection metadata mismatch: {json.dumps(mismatches, ensure_ascii=False, sort_keys=True)}")
         validate_embedding_manifest(self.context.manifest, collection=expected_collection)
+        self._assert_epoch()
+
+    def _assert_epoch(self) -> None:
+        assert_ready_epoch(self.context.root, self.context.data_epoch)
 
 
 class DbRegistry:
@@ -298,6 +316,7 @@ class DbRegistry:
         manifest_path = root / "index" / "manifest.json"
         version_path = root / "VERSION.json"
         db_config_path = root / "db.json"
+        marker_path = lifecycle_path(root)
         return (
             name,
             str(root),
@@ -305,11 +324,13 @@ class DbRegistry:
             _mtime(manifest_path),
             _mtime(version_path),
             _mtime(db_config_path),
+            _mtime(marker_path),
             collection_name_for_db(name),
         )
 
 
 def _context_from_root(root: Path, name: str) -> DbContext:
+    data_epoch = capture_ready_epoch(root)
     db_config = read_db_config(root)
     version = read_db_version(root)
     manifest = read_manifest(root / "index" / "manifest.json")
@@ -325,6 +346,7 @@ def _context_from_root(root: Path, name: str) -> DbContext:
         manifest=manifest,
         profile_hint=read_profile_hint(root),
         embedding_fingerprint=embedding_fingerprint(),
+        data_epoch=data_epoch,
     )
 
 

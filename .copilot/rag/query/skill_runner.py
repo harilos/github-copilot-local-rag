@@ -17,7 +17,9 @@ from typing import Any, Mapping, Sequence
 
 QUERY_ROOT = Path(__file__).resolve().parent
 RAG_ROOT = QUERY_ROOT.parent
+TOOL_ROOT = RAG_ROOT / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(QUERY_ROOT))
+sys.path.insert(0, str(TOOL_ROOT))
 
 from agent003_answer_packet import (
     DETAIL_SCHEMA_VERSION,
@@ -38,6 +40,11 @@ from result_gateway import (
     parse_search_pointer,
     revalidate_result_binding,
     validated_item_ids,
+)
+from software_rag_tool.data_lifecycle import (
+    DataLifecycleError,
+    assert_ready_epoch,
+    capture_ready_epoch,
 )
 
 
@@ -454,10 +461,17 @@ def _run_search(args: argparse.Namespace) -> dict[str, Any]:
         timeout=SEARCH_TIMEOUT_SECONDS, invalid_code="invalid_search_pointer",
     )
     result_id, pointer_size = parse_search_pointer(pointer)
-    summary, expiry = load_initial_summary(result_id, args.db, spool_root=SPOOL_ROOT)
+    data_epoch = capture_ready_epoch(DBS_ROOT / args.db)
+    summary, expiry = load_initial_summary(
+        result_id,
+        args.db,
+        spool_root=SPOOL_ROOT,
+        expected_epoch=data_epoch,
+    )
     if summary is None or expiry is None:
         raise RunnerError("invalid_result_bundle")
     binding = create_result_binding(result_id, args.db, summary, expiry, pointer_size, spool_root=SPOOL_ROOT)
+    assert_ready_epoch(DBS_ROOT / args.db, data_epoch)
     token = DiskTokenRegistry(REGISTRY_ROOT).add(binding) if binding.evidence_ids else ""
     return build_search_packet(summary, result_token=token, inspectable_evidence_ids=binding.evidence_ids)
 
@@ -469,15 +483,28 @@ def _run_detail(args: argparse.Namespace) -> dict[str, Any]:
     if binding is None or any(item not in binding.evidence_ids for item in requested):
         return build_stale_evidence_detail()
     try:
+        current_epoch = capture_ready_epoch(DBS_ROOT / binding.selected_db)
         revalidate_result_binding(binding, spool_root=SPOOL_ROOT)
         expanded, _expiry = load_expanded_result(
             binding.result_set_id, requested, detail_level=args.detail_level,
             spool_root=SPOOL_ROOT,
         )
         revalidate_result_binding(binding, spool_root=SPOOL_ROOT)
+        if (
+            str(expanded.pop("_selected_db", "")) != binding.selected_db
+            or str(expanded.pop("_data_epoch", "legacy")) != current_epoch
+        ):
+            raise GatewayError("stale_result")
+        assert_ready_epoch(DBS_ROOT / binding.selected_db, current_epoch)
         if expanded.get("status") != "ok":
             raise GatewayError("stale_result")
-    except (GatewayError, OSError, ValueError, json.JSONDecodeError):
+    except (
+        DataLifecycleError,
+        GatewayError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
         registry.discard(args.result_token)
         return build_stale_evidence_detail()
     expanded = dict(expanded)

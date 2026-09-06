@@ -9,6 +9,7 @@ import stat
 import tempfile
 import time
 import uuid
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -63,6 +64,7 @@ def publish_result_bundle(
 
     expires = current + timedelta(seconds=DEFAULT_TTL_SECONDS)
     hard_expires = current + timedelta(seconds=HARD_LIFETIME_SECONDS)
+    data_epoch = str(payload.get("_data_epoch") or "legacy")
     try:
         summary, detail_items = build_initial_summary(
             payload,
@@ -114,6 +116,7 @@ def publish_result_bundle(
             "result_set_id": result_set_id,
             "created_at": _iso_z(current),
             "expires_at": _iso_z(expires),
+            "data_epoch": data_epoch,
             "items": entries,
             # meta.json is a mutable ready/access marker and manifest.json
             # cannot hash itself.  Every immutable payload file is recorded.
@@ -131,6 +134,7 @@ def publish_result_bundle(
             "selected_db": str(
                 payload.get("selected_db") or payload.get("db") or ""
             ),
+            "data_epoch": data_epoch,
             "item_count": len(entries),
         }
         content_bytes = _tree_size(result_dir)
@@ -257,6 +261,7 @@ def load_initial_summary(
     *,
     spool_root: Path | None = None,
     now: datetime | None = None,
+    expected_epoch: str | None = None,
 ) -> tuple[dict[str, Any] | None, datetime | None]:
     """Load one ready initial summary without exposing its spool identity.
 
@@ -300,11 +305,15 @@ def load_initial_summary(
             return None, None
         if str(meta.get("selected_db") or "") != database:
             return None, None
+        bundle_epoch = str(meta.get("data_epoch") or "legacy")
+        if expected_epoch is not None and bundle_epoch != str(expected_epoch):
+            return None, None
 
         manifest = _read_json(manifest_path)
         if (
             manifest.get("schema_version") != MANIFEST_SCHEMA
             or manifest.get("result_set_id") != result_set_id
+            or str(manifest.get("data_epoch") or "legacy") != bundle_epoch
         ):
             return None, None
         manifest_files = manifest.get("files")
@@ -356,6 +365,9 @@ def load_expanded_result(
         return _expired_packet(result_set_id), None
 
     manifest = _read_json(result_dir / "manifest.json")
+    bundle_epoch = str(meta.get("data_epoch") or "legacy")
+    if str(manifest.get("data_epoch") or "legacy") != bundle_epoch:
+        return _expired_packet(result_set_id), None
     summary_path = result_dir / "summary.json"
     manifest_files = manifest.get("files")
     if (
@@ -433,8 +445,36 @@ def load_expanded_result(
         "expanded_items": expanded,
         "answer_draft_markdown": _expanded_answer_draft(expanded),
         "warnings": warnings,
+        "_selected_db": str(meta.get("selected_db") or ""),
+        "_data_epoch": bundle_epoch,
     }
     return packet, new_expires
+
+
+def validate_expanded_lifecycle(packet: dict[str, Any], dbs_root: Path) -> bool:
+    """Consume private bundle identity and reject a stale DB generation."""
+    selected_db = str(packet.pop("_selected_db", ""))
+    bundle_epoch = str(packet.pop("_data_epoch", "legacy"))
+    if packet.get("status") != "ok":
+        return False
+    if not selected_db:
+        return False
+    tool_root = Path(__file__).resolve().parents[1] / "gen_db" / "software_rag_tool"
+    if str(tool_root) not in sys.path:
+        sys.path.insert(0, str(tool_root))
+    from software_rag_tool.data_lifecycle import (  # noqa: PLC0415
+        DataLifecycleError,
+        assert_ready_epoch,
+        capture_ready_epoch,
+    )
+    try:
+        current_epoch = capture_ready_epoch(Path(dbs_root) / selected_db)
+        if bundle_epoch != current_epoch:
+            return False
+        assert_ready_epoch(Path(dbs_root) / selected_db, current_epoch)
+    except DataLifecycleError:
+        return False
+    return True
 
 
 def publish_expanded_packet(

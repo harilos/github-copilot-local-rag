@@ -50,8 +50,14 @@ class SkillRunnerContractTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.spool = self.root / "results"
         self.registry = self.root / "bindings"
+        self.dbs = self.root / "dbs"
+        (self.dbs / "project-rag").mkdir(parents=True)
+        (self.dbs / "wrong-rag").mkdir()
+        self.dbs_patch = mock.patch.object(skill_runner, "DBS_ROOT", self.dbs)
+        self.dbs_patch.start()
 
     def tearDown(self) -> None:
+        self.dbs_patch.stop()
         self.temporary.cleanup()
 
     def _main(self, arguments: list[str]) -> tuple[int, str, str]:
@@ -86,7 +92,7 @@ class SkillRunnerContractTests(unittest.TestCase):
         self.assertIn("file", command)
         self.assertIn("--stdin", command)
         self.assertNotIn(args.question, command)
-        self.assertEqual(str(RAG_ROOT / "dbs"), skill_runner._child_environment()["RAG_DBS_ROOT"])
+        self.assertEqual(str(self.dbs), skill_runner._child_environment()["RAG_DBS_ROOT"])
         self.assertNotIn("PYTHONPATH", skill_runner._child_environment())
 
     def test_search_reads_fixed_bundle_and_emits_one_path_free_packet(self) -> None:

@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
 from .package_installers import INSTALL_PS1_TEXT, INSTALL_SH_TEXT
+from .lifecycle_bridge import require_ready_database
 
 
 PACKAGE_SCHEMA = "local-rag.package.v1"
@@ -133,6 +134,7 @@ _DB_SEARCH_FILES = frozenset(
         "VERSION.json",
         "catalog.sqlite",
         "db.json",
+        "data-lifecycle.json",
         "source-links.json",
     }
 )
@@ -1113,6 +1115,7 @@ def _database_entries(
     databases: list[dict[str, Any]] = []
     for name in names:
         db_root = _safe_database_root(root, name)
+        require_ready_database(db_root)
         content_snapshot_at, content_snapshot_reason = (
             _database_content_snapshot(db_root)
         )

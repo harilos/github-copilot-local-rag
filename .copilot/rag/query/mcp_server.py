@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 QUERY_ROOT = Path(__file__).resolve().parent
+TOOL_ROOT = QUERY_ROOT.parent / "gen_db" / "software_rag_tool"
 sys.path.insert(0, str(QUERY_ROOT))
+sys.path.insert(0, str(TOOL_ROOT))
 
 from agent003_answer_packet import (
     DETAIL_SCHEMA_VERSION,
@@ -38,6 +40,11 @@ from result_gateway import (
     create_result_binding,
     parse_search_pointer,
     revalidate_result_binding,
+)
+from software_rag_tool.data_lifecycle import (
+    DataLifecycleError,
+    assert_ready_epoch,
+    capture_ready_epoch,
 )
 
 SERVER_NAME, SERVER_VERSION = "local-rag-agent003", "1.0.0"
@@ -307,8 +314,13 @@ class LocalRagTools:
             result_id, pointer_size = parse_search_pointer(pointer)
         except GatewayError as exc:
             raise RuntimeErrorCode(exc.code) from exc
+        data_epoch = capture_ready_epoch(self.paths.rag_root / "dbs" / database)
         summary, expiry = load_initial_summary(
-            result_id, database, spool_root=self.paths.spool_root)
+            result_id,
+            database,
+            spool_root=self.paths.spool_root,
+            expected_epoch=data_epoch,
+        )
         if summary is None or expiry is None:
             raise RuntimeErrorCode("invalid_result_bundle")
         try:
@@ -323,6 +335,7 @@ class LocalRagTools:
             self._daemon_identity(),
             time.monotonic() + max(0.0, gateway.expires_at.timestamp() - time.time()),
         )
+        assert_ready_epoch(self.paths.rag_root / "dbs" / database, data_epoch)
         token = self.registry.add(binding) if gateway.evidence_ids else ""
         return build_search_packet(summary, result_token=token,
                                    inspectable_evidence_ids=gateway.evidence_ids)
@@ -335,6 +348,9 @@ class LocalRagTools:
         ):
             return build_stale_evidence_detail()
         try:
+            current_epoch = capture_ready_epoch(
+                self.paths.rag_root / "dbs" / binding.gateway.selected_db
+            )
             if self._daemon_identity() != binding.daemon_identity:
                 raise RuntimeErrorCode("stale_result")
             revalidate_result_binding(
@@ -346,8 +362,25 @@ class LocalRagTools:
             if expanded.get("status") != "ok":
                 raise RuntimeErrorCode("stale_result")
             expanded = dict(expanded)
+            if (
+                str(expanded.pop("_selected_db", ""))
+                != binding.gateway.selected_db
+                or str(expanded.pop("_data_epoch", "legacy")) != current_epoch
+            ):
+                raise RuntimeErrorCode("stale_result")
+            assert_ready_epoch(
+                self.paths.rag_root / "dbs" / binding.gateway.selected_db,
+                current_epoch,
+            )
             expanded["selected_db"] = binding.gateway.selected_db
-        except (GatewayError, RuntimeErrorCode, OSError, ValueError, json.JSONDecodeError):
+        except (
+            DataLifecycleError,
+            GatewayError,
+            RuntimeErrorCode,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
             self.registry.discard(token)
             return build_stale_evidence_detail()
         return build_evidence_detail(expanded, result_token=token,

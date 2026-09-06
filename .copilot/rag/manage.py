@@ -50,7 +50,7 @@ TOP_MENU = (
     ("4", "配布・管理PCの引っ越し"),
     ("5", "この端末の設定・動作確認"),
     ("6", "検索daemonを終了する"),
-    ("7", "全DBの全Sourceを全件取り直しが必要な状態にする【危険】"),
+    ("7", "全DBの過去データを切り離して現在設定から取り直す【危険】"),
     ("0", "終了"),
 )
 DATABASE_MENU = (
@@ -482,7 +482,7 @@ class LocalRagManager:
                     ("2", "処理状況と最近のエラーを見る"),
                     ("3", "検索を修復する"),
                     ("4", "技術情報を表示する"),
-                    ("5", "全件取り直しが必要な状態にする【危険】"),
+                    ("5", "このDBの過去データを切り離して取り直す【危険】"),
                     ("0", "戻る"),
                 ),
             )
@@ -505,55 +505,102 @@ class LocalRagManager:
     def _reset_derived_artifacts(self, db_name: str) -> None:
         if not self._guard_valid_database_target(db_name):
             return
-        self._print_screen_header("全件取り直しが必要な状態にする【危険】", db_name=db_name)
-        self.output(
-            "Source設定・取得済みwork・イベント・Source Link・DB情報は保持します。\n"
-            "clean data、catalog、検索index、取込stateを削除します。\n"
-            "この操作だけでは取得・ADD・embedding・再構築・再試行を開始しません。"
+        self._print_screen_header(
+            "過去データを切り離して現在設定から取り直す【危険】",
+            db_name=db_name,
         )
-        self._print_warning("別のManagerでSource更新や再構築を実行していないことを確認してください。")
+        from source_manager.artifact_reset import plan_data_reset, reset_data
+
+        try:
+            plan = plan_data_reset(self._database_root(db_name))
+        except Exception as exc:
+            self._print_internal_diagnostic(
+                exc,
+                operation="データリセットの事前確認",
+                stage="data_reset.preflight",
+                db_name=db_name,
+                can_resume=False,
+            )
+            return
+        self.output(
+            "DB・Source設定、認証、外部の元資料、利用者の説明は保持します。\n"
+            "取得済みwork、clean、索引、catalog、再開状態、進捗は通常経路から切り離します。\n"
+            "この操作だけではネットワーク取得・変換・embedding・再構築を開始しません。"
+        )
+        self._print_data_reset_plan(plan)
         if not self._confirm(f"DB「{db_name}」をリセットしますか？"):
             self._print_info("リセットを開始しませんでした。")
             return
         try:
-            from source_manager.artifact_reset import reset_derived_artifacts
             from source_manager.daemon_control import stop_search_daemon
             stopped = stop_search_daemon(self.rag_root, timeout_seconds=10.0)
-            result = reset_derived_artifacts(
+            result = reset_data(
                 self._database_root(db_name), daemon_status=str(stopped.get("status") or "")
             )
         except Exception as exc:
             self._print_internal_diagnostic(
-                exc, operation="派生成果物のリセット",
-                stage=str(getattr(exc, "stage", None) or "artifact_reset"),
+                exc, operation="過去データの切り離し",
+                stage=str(getattr(exc, "stage", None) or "data_reset"),
                 db_name=db_name, can_resume=True,
             )
             return
-        self._print_success(f"派生成果物をリセットしました（削除: {len(result['removed'])}件）。")
-        self._print_info("次回の全Source更新で現在範囲を全件取り直します。")
+        if result["exceptions"]:
+            self._print_warning(
+                f"過去データの切り離しは完了しましたが、要対応です（対象: {len(result['detached'])}件）。"
+            )
+            self._print_warning(
+                "自動再取得できないSourceがあります。表示された例外を解消してください。"
+            )
+        else:
+            self._print_success(
+                f"過去データを切り離しました（対象: {len(result['detached'])}件）。"
+            )
+        self._print_info("次回の全Source更新では、現在の取得条件の範囲だけを取り直します。")
 
     def _reset_all_derived_artifacts(self) -> None:
-        self._print_screen_header("全DBの全Sourceを全件取り直しが必要な状態にする【危険】")
+        self._print_screen_header(
+            "全DBの過去データを切り離して現在設定から取り直す【危険】"
+        )
         names = list(dict.fromkeys(
             str(item["name"]) for item in self._database_summaries()
         ))
         if not names:
             self._print_info("リセットできるDBがありません。")
             return
-        self.output(f"対象: {len(names)} DB（各DBの全Source）")
+        from source_manager.artifact_reset import plan_data_reset, reset_data
+
+        plans: list[dict[str, Any]] = []
+        invalid: list[str] = []
         for name in names:
-            self.output(f"  - {name}")
+            if not self._guard_valid_database_target(name):
+                invalid.append(name)
+                continue
+            try:
+                plans.append(plan_data_reset(self._database_root(name)))
+            except Exception as exc:
+                invalid.append(name)
+                self._print_internal_diagnostic(
+                    exc,
+                    operation="データリセットの事前確認",
+                    stage="data_reset.preflight",
+                    db_name=name,
+                    can_resume=False,
+                )
+        if not plans:
+            self._print_error("安全にリセットできるDBがありません。")
+            return
+        self.output(f"対象: {len(plans)} DB（現在登録済みの全Source）")
+        for plan in plans:
+            self._print_data_reset_plan(plan)
         self.output(
-            "Source設定・取得済みwork・イベント・Source Link・DB情報は保持します。\n"
-            "全DBのclean data、catalog、検索index、取込stateを削除します。\n"
-            "再取得・反映が完了するまで、対象DBは検索できなくなります。\n"
-            "この操作だけでは取得・ADD・embedding・再構築・再試行を開始しません。"
+            "設定・認証・外部の元資料・利用者説明は保持します。\n"
+            "過去の取得物、派生データ、再開情報は通常経路から切り離します。\n"
+            "再取得・反映が完了するまで対象DBは検索・詳細取得できません。\n"
+            "この操作だけではネットワーク取得・変換・embedding・再構築を開始しません。"
         )
-        self._print_warning("別のManagerでSource更新や再構築を実行していないことを確認してください。")
         if not self._confirm("上記の全DB・全Sourceをリセットしますか？"):
             self._print_info("リセットを開始しませんでした。")
             return
-        from source_manager.artifact_reset import reset_derived_artifacts
         from source_manager.daemon_control import stop_search_daemon
 
         try:
@@ -561,44 +608,72 @@ class LocalRagManager:
             daemon_status = str(stopped.get("status") or "")
             if daemon_status not in {"stopped", "not_running"}:
                 raise SourceManagerError(
-                    "search daemon stop was not confirmed", stage="artifact_reset.daemon_stop"
+                    "search daemon stop was not confirmed", stage="data_reset.daemon_stop"
                 )
         except Exception as exc:
             self._print_internal_diagnostic(
                 exc, operation="全DBの派生成果物リセット",
-                stage="artifact_reset.daemon_stop", can_resume=True,
+                stage="data_reset.daemon_stop", can_resume=True,
             )
             self._print_info("リセットを開始しませんでした。")
             return
 
         completed: list[str] = []
+        attention: list[str] = []
         failed: list[str] = []
         # Reuse the per-DB writer lock and fail-closed path checks, sequentially.
-        for index, db_name in enumerate(names, start=1):
-            self.output(f"\n[{index}/{len(names)}] DB「{db_name}」をリセットします。")
-            if not self._guard_valid_database_target(db_name):
-                failed.append(db_name)
-                continue
+        for index, plan in enumerate(plans, start=1):
+            db_name = str(plan["db"])
+            self.output(f"\n[{index}/{len(plans)}] DB「{db_name}」をリセットします。")
             try:
-                result = reset_derived_artifacts(
+                result = reset_data(
                     self._database_root(db_name), daemon_status=daemon_status
                 )
             except Exception as exc:
                 failed.append(db_name)
                 self._print_internal_diagnostic(
                     exc, operation="全DBの派生成果物リセット",
-                    stage=str(getattr(exc, "stage", None) or "artifact_reset"),
+                    stage=str(getattr(exc, "stage", None) or "data_reset"),
                     db_name=db_name, can_resume=True,
                 )
                 continue
-            completed.append(db_name)
-            self._print_success(f"DB「{db_name}」: リセット完了（削除: {len(result['removed'])}件）。")
-        self.output(f"\n全DBのリセット結果: 成功 {len(completed)} DB / 失敗 {len(failed)} DB")
+            if result["exceptions"]:
+                attention.append(db_name)
+                self._print_warning(
+                    f"DB「{db_name}」: 切り離し完了・要対応（対象: {len(result['detached'])}件）。"
+                )
+            else:
+                completed.append(db_name)
+                self._print_success(
+                    f"DB「{db_name}」: 切り離し完了（対象: {len(result['detached'])}件）。"
+                )
+        failed = invalid + failed
+        self.output(
+            "\n全DBのリセット結果: "
+            f"再取得待ち {len(completed)} DB / 要対応 {len(attention)} DB / "
+            f"失敗 {len(failed)} DB"
+        )
+        if attention:
+            self._print_warning("要対応のDB: " + ", ".join(attention))
         if failed:
             self._print_warning("未完了のDB: " + ", ".join(failed))
-            self._print_info("完了済みDBは元に戻しません。失敗DBは一部削除済みの場合があります。")
-        if completed:
+            self._print_info(
+                "完了済みDBは元に戻しません。失敗DBも非readyのまま安全に再実行できます。"
+            )
+        if completed or attention:
             self._print_info("次にメインメニューの「3. 全DBの全Sourceを更新・再開する」を実行すると、現在範囲を全件取り直します。")
+
+    def _print_data_reset_plan(self, plan: dict[str, Any]) -> None:
+        self.output(
+            f"  - {plan['db']}: {plan['source_count']} Source、"
+            f"例外 {len(plan['exceptions'])}件"
+        )
+        for exception in plan["exceptions"]:
+            subject = exception["source_key"] or "DB全体"
+            self.output(
+                "      * "
+                f"{subject}: {exception['reason']}"
+            )
 
     def _repair_search_automatically(self, db_name: str) -> None:
         self._print_screen_header("検索を修復する", db_name=db_name)
@@ -2535,6 +2610,8 @@ class LocalRagManager:
         from software_rag_tool.ingestion_paths import (
             validated_saved_ingestion, saved_ingestion_has_local_root,
         )
+        if status.get("data_lifecycle_ready") is False:
+            return None
         scope = validated_saved_ingestion(status)
         if (status.get("can_resume") is True and scope
                 and saved_ingestion_has_local_root(scope)):
@@ -3210,6 +3287,16 @@ class LocalRagManager:
                 self._invalid_selection("0～6")
 
     def _delete_source_interactive(
+        self,
+        db_name: str,
+        source: dict[str, Any],
+    ) -> bool:
+        from source_manager.operation_lock import database_operation_lock
+
+        with database_operation_lock(self._validated_database_root(db_name)):
+            return self._delete_source_interactive_unlocked(db_name, source)
+
+    def _delete_source_interactive_unlocked(
         self,
         db_name: str,
         source: dict[str, Any],
@@ -6163,10 +6250,133 @@ def main() -> int:
         action="help",
         help="このヘルプを表示して終了します",
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["reset-data"],
+        help="非対話でデータリセットを計画・実行します",
+    )
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--all", action="store_true", help="全DBを対象にします")
+    scope.add_argument("--db", help="対象DB名を指定します")
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="変更せず対象・保持・例外だけをJSON表示します",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="危険なリセットを確認済みとして実行します",
+    )
     parser._optionals.title = "オプション"
-    parser.parse_args()
+    args = parser.parse_args()
+    if args.command == "reset-data":
+        return _run_reset_data_cli(args, parser)
     manager = LocalRagManager()
     return manager.run()
+
+
+def _run_reset_data_cli(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> int:
+    if not args.all and not args.db:
+        parser.error("reset-data requires --all or --db")
+    if not args.plan_only and not args.yes:
+        parser.error("reset-data execution requires --yes")
+    manager = LocalRagManager()
+    from source_manager.artifact_reset import plan_data_reset, reset_data
+
+    names = (
+        [args.db]
+        if args.db
+        else [str(item["name"]) for item in manager._database_summaries()]
+    )
+    plans: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for name in dict.fromkeys(names):
+        try:
+            root = manager._database_root(str(name))
+            if not DATABASE_NAME_PATTERN.fullmatch(str(name)) or not root.is_dir():
+                raise ManagerError("invalid database target")
+            plans.append(plan_data_reset(root))
+        except Exception as exc:
+            failures.append({"db": str(name), "error": type(exc).__name__})
+    if args.plan_only:
+        plan_attention = any(plan["exceptions"] for plan in plans)
+        print(
+            json.dumps(
+                {
+                    "status": (
+                        "partial"
+                        if failures
+                        else "attention_required"
+                        if plan_attention
+                        else "ok"
+                    ),
+                    "plans": [_public_reset_plan(plan) for plan in plans],
+                    "failures": failures,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0 if plans and not failures else 2
+    if not plans:
+        print(json.dumps({"status": "error", "failures": failures}))
+        return 2
+    from source_manager.daemon_control import stop_search_daemon
+
+    stopped = stop_search_daemon(manager.rag_root, timeout_seconds=10.0)
+    daemon_status = str(stopped.get("status") or "")
+    if daemon_status not in {"stopped", "not_running"}:
+        print(json.dumps({"status": "error", "error": "daemon_stop_unconfirmed"}))
+        return 2
+    results: list[dict[str, Any]] = []
+    for plan in plans:
+        try:
+            value = reset_data(
+                manager._database_root(str(plan["db"])),
+                daemon_status=daemon_status,
+            )
+            results.append(
+                {
+                    "db": plan["db"],
+                    "status": value["status"],
+                    "detached_count": len(value["detached"]),
+                    "exception_count": len(value["exceptions"]),
+                }
+            )
+        except Exception as exc:
+            failures.append({"db": str(plan["db"]), "error": type(exc).__name__})
+    print(
+        json.dumps(
+            {
+                "status": (
+                    "partial"
+                    if failures
+                    else "attention_required"
+                    if any(item["status"] == "attention_required" for item in results)
+                    else "ok"
+                ),
+                "results": results,
+                "failures": failures,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0 if not failures else 2
+
+
+def _public_reset_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "db": plan["db"],
+        "source_count": plan["source_count"],
+        "preserved": plan["preserved"],
+        "detached": plan["detached"],
+        "exceptions": plan["exceptions"],
+    }
 
 
 def _configure_standard_streams() -> None:

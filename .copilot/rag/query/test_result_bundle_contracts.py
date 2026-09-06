@@ -993,8 +993,13 @@ class ResultBundleContractTests(unittest.TestCase):
                         "publish_expanded_packet",
                         return_value=pointer,
                     ) as publish:
-                        with contextlib.redirect_stdout(stream):
-                            code = result_detail.main()
+                        with mock.patch.object(
+                            result_detail,
+                            "validate_expanded_lifecycle",
+                            return_value=True,
+                        ):
+                            with contextlib.redirect_stdout(stream):
+                                code = result_detail.main()
         self.assertEqual(0, code)
         load.assert_called_once_with(
             packet["result_set_id"],

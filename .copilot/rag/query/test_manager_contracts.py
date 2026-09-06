@@ -214,7 +214,7 @@ class ManagerContractTests(unittest.TestCase):
                 "配布・管理PCの引っ越し",
                 "この端末の設定・動作確認",
                 "検索daemonを終了する",
-                "全DBの全Sourceを全件取り直しが必要な状態にする【危険】",
+                "全DBの過去データを切り離して現在設定から取り直す【危険】",
                 "終了",
             ],
         )

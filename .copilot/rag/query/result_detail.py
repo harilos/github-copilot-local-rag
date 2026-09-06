@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from reference_contract import install_result_bundle_reference_contract
 
@@ -13,6 +14,7 @@ from result_bundle import (  # noqa: E402
     cleanup_result_spool,
     load_expanded_result,
     publish_expanded_packet,
+    validate_expanded_lifecycle,
 )
 
 
@@ -54,6 +56,15 @@ def main() -> int:
         args.item_id,
         detail_level=args.detail_level,
     )
+    if packet.get("status") == "ok" and not validate_expanded_lifecycle(
+        packet, Path(__file__).resolve().parents[1] / "dbs"
+    ):
+        packet = {
+            "schema_version": "rag-expanded-answer-v1",
+            "status": "error",
+            "warnings": ["stale_result"],
+        }
+        expires_at = None
     if (
         args.result_delivery == "file"
         and packet.get("status") == "ok"

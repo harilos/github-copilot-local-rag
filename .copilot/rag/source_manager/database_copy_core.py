@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .errors import SourceManagerError
 from .persistent_paths import create_persistent_staging_directory
+from .lifecycle_bridge import require_ready_database
 from .database_copy_storage import (
     copy_catalog_snapshot,
     copy_chroma_snapshot,
@@ -43,6 +44,7 @@ def copy_database(
     """Copy a DB independently, preserving Source locations and removing exclusions."""
 
     source = required_real_directory(source_root, label="copy source DB")
+    require_ready_database(source)
     destination = Path(destination_root).expanduser()
     name = require_db_name(destination_name)
     if destination.name != name:
@@ -143,6 +145,9 @@ def live_database_ignore(source_root: Path):
                     "catalog.sqlite",
                     "catalog.sqlite-wal",
                     "catalog.sqlite-shm",
+                    "data-lifecycle.json",
+                    ".retired-data",
+                    ".protected-originals",
                 }
             )
         if current == source / "index":
