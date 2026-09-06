@@ -60,7 +60,7 @@
   3. `gh api repos/harilos/github-copilot-local-rag --jq .permissions.push`が終了コード0で、出力が厳密に`true`。
 - 終了コード0でも空出力は合格にしない。pipeや複合コマンドで直前の失敗を隠さず、各ゲートの終了コードと値を個別に検査する。
 - `401`は認証失敗、`403`はscope、repository access、SSO、ruleset等の認可問題として区別する。いずれかのゲートが不合格ならGitHub writeを行わず、`AUTH_REQUIRED`として停止する。
-- device code、token、秘密値はrepository、prompt、コマンド引数、設定、ログへ保存しない。`gh auth status --show-token`、出力を保持する`gh auth token`、`GH_DEBUG=api`、`--insecure-storage`を使わない。
+- one-time device codeは認証中にユーザーへ一度提示する以外、repository、設定、永続ログへ保存しない。tokenや秘密値はprompt、コマンド引数を含むいずれの出力にも載せない。`gh auth status --show-token`、出力を保持する`gh auth token`、`GH_DEBUG=api`、`--insecure-storage`を使わない。
 - 認証待ちの間に対象が変わっていないことを`git status`とHEADで再確認してからpushし、push後はremote branchのSHAを再取得して期待HEADと一致することを確認する。
 
 ## 品質と承認判断の原則
