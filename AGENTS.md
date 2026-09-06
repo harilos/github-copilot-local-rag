@@ -53,7 +53,8 @@
 ## GitHub CLI認証（Windows Codex）
 
 - Windows Codexは通常ユーザーと異なる資格情報領域で動く場合がある。ブラウザに認証成功と表示されたことや、公開repositoryへの`fetch`成功だけを、write認証成功の根拠にしない。
-- 対話認証が必要な場合は、GitHub操作を行うものと同じCodex実行環境で`gh auth login --hostname github.com --git-protocol https --web`を開始する。
+- ファイルサンドボックス内の`gh auth login`は、device認証の完了後に`AppData\Roaming\GitHub CLI\hosts.yml: Access is denied`となり、認証を保存できない場合がある。この表示を成功扱いせず、ACL変更や`--insecure-storage`で迂回しない。対話認証が必要な場合は、明示承認されたサンドボックス外実行で`gh auth login --hostname github.com --git-protocol https --web`を開始する。
+- 認証3ゲートと認証を使うwrite／`push`は、認証を保存・読取できる同じ権限境界で実行する。通常サンドボックスでの`401`と、サンドボックス外での成功を混ぜて判定しない。
 - GitHubへのwriteや`push`の直前に、同じ実行環境で次の3ゲートを順に確認する。
   1. `gh auth status --active --hostname github.com`が終了コード0。
   2. `gh api user --jq .login`が終了コード0で、期待するaccount（このrepositoryでは`harilos`）を返す。
