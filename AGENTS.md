@@ -50,6 +50,19 @@
 - 作業開始時に未コミット変更を確認し、ユーザー所有の変更を保持する。無関係な変更をcommitへ混ぜない。
 - force pushや破壊的なGit操作を、作業ツリーをきれいにする目的で使わない。
 
+## GitHub CLI認証（Windows Codex）
+
+- Windows Codexは通常ユーザーと異なる資格情報領域で動く場合がある。ブラウザに認証成功と表示されたことや、公開repositoryへの`fetch`成功だけを、write認証成功の根拠にしない。
+- 対話認証が必要な場合は、GitHub操作を行うものと同じCodex実行環境で`gh auth login --hostname github.com --git-protocol https --web`を開始する。
+- GitHubへのwriteや`push`の直前に、同じ実行環境で次の3ゲートを順に確認する。
+  1. `gh auth status --active --hostname github.com`が終了コード0。
+  2. `gh api user --jq .login`が終了コード0で、期待するaccount（このrepositoryでは`harilos`）を返す。
+  3. `gh api repos/harilos/github-copilot-local-rag --jq .permissions.push`が終了コード0で、出力が厳密に`true`。
+- 終了コード0でも空出力は合格にしない。pipeや複合コマンドで直前の失敗を隠さず、各ゲートの終了コードと値を個別に検査する。
+- `401`は認証失敗、`403`はscope、repository access、SSO、ruleset等の認可問題として区別する。いずれかのゲートが不合格ならGitHub writeを行わず、`AUTH_REQUIRED`として停止する。
+- device code、token、秘密値はrepository、prompt、コマンド引数、設定、ログへ保存しない。`gh auth status --show-token`、出力を保持する`gh auth token`、`GH_DEBUG=api`、`--insecure-storage`を使わない。
+- 認証待ちの間に対象が変わっていないことを`git status`とHEADで再確認してからpushし、push後はremote branchのSHAを再取得して期待HEADと一致することを確認する。
+
 ## 品質と承認判断の原則
 
 - レビュー内容は重めに、運用手続きは軽めにする。
