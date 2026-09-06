@@ -156,6 +156,27 @@ class ArtifactResetTests(unittest.TestCase):
         self.assertEqual(ATTENTION_REQUIRED, result["status"])
         self.assertFalse((self.db / "index").exists())
 
+    def test_failed_reset_blocks_updates_until_reset_retry_completes(self) -> None:
+        with mock.patch.object(
+            artifact_reset, "_move_if_present", side_effect=PermissionError("busy")
+        ):
+            with self.assertRaises(PermissionError):
+                artifact_reset.reset_data(self.db, daemon_status="stopped")
+        before = self._snapshot()
+        with mock.patch.object(runner, "_update_source_for_run") as update:
+            with self.assertRaisesRegex(SourceManagerError, "リセットが未完了"):
+                runner.update_all_sources(self.db)
+            with self.assertRaisesRegex(SourceManagerError, "リセットが未完了"):
+                runner.update_source(self.db, "src_git-0123456789ab")
+            with self.assertRaisesRegex(SourceManagerError, "リセットが未完了"):
+                runner._complete_data_refresh(self.db, read_lifecycle(self.db), [])
+        update.assert_not_called()
+        self.assertEqual(before, self._snapshot())
+        self.assertEqual(RESETTING, read_lifecycle(self.db).status)
+        artifact_reset.reset_data(self.db, daemon_status="stopped")
+        self.assertFalse((self.db / "data/clean/record.json").exists())
+        self.assertNotEqual(RESETTING, read_lifecycle(self.db).status)
+
     def test_retry_repairs_one_shot_seal_after_atomic_move(self) -> None:
         real_manifest = artifact_reset._protected_manifest
         attempts = 0
@@ -351,6 +372,22 @@ class ArtifactResetTests(unittest.TestCase):
 
 
 class ForceRunScopeTests(unittest.TestCase):
+    def test_teams_normalization_preserves_refresh_completion_rules(self) -> None:
+        from source_manager.teams_source import normalize_update_all_result
+
+        for item, eligible in (
+            ({"status": "partial"}, False),
+            ({"status": "skipped", "skip_reason": "one_shot_source_requires_reimport"}, False),
+            ({"status": "skipped", "skip_reason": "one_shot_source_reimported"}, True),
+            ({"status": "failed", "source_type": "teams",
+              "error": "Teams Source updates require Windows"}, False),
+        ):
+            with self.subTest(item=item):
+                result = normalize_update_all_result({"results": [item]})
+                self.assertEqual(eligible, result["snapshot_marker_eligible"])
+                if item["status"] == "partial":
+                    self.assertEqual("partial", result["status"])
+
     def test_nonready_lifecycle_forces_fresh_fetch_and_blocks_one_shot_reuse(self) -> None:
         items = [
             {"local_source_key": "src_one-0123456789ab", "source_type": "github"},
@@ -377,7 +414,9 @@ class ForceRunScopeTests(unittest.TestCase):
                     "source_config_digest"
                 ],
             )
+            from software_rag_tool.data_lifecycle import transition_lifecycle
             write_lifecycle(db, marker)
+            transition_lifecycle(db, marker, status="refetch_required")
             seen: list[bool] = []
 
             def update(_root: Path, _key: str, force: bool, **_kwargs: object) -> dict[str, str]:
@@ -419,7 +458,9 @@ class ForceRunScopeTests(unittest.TestCase):
                     "source_config_digest"
                 ],
             )
+            from software_rag_tool.data_lifecycle import transition_lifecycle
             write_lifecycle(db, marker)
+            transition_lifecycle(db, marker, status="refetch_required")
             with (
                 mock.patch.object(runner, "list_sources", return_value=items),
                 mock.patch.object(runner, "_one_shot_reimport_ready", return_value=True),

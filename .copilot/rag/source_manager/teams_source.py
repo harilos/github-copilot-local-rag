@@ -315,44 +315,11 @@ def normalize_update_all_result(result: Mapping[str, Any]) -> dict[str, Any]:
                 "process_diagnostic",
             ):
                 item.pop(key, None)
-    failed = [
-        item
-        for item in items
-        if isinstance(item, dict) and item.get("status") == "failed"
-    ]
-    blocking_reasons = {
-        "sharepoint_update_requires_windows",
-        "teams_update_requires_windows",
-    }
-    blocking = [
-        item
-        for item in items
-        if isinstance(item, dict) and item.get("skip_reason") in blocking_reasons
-    ]
-    updateable = [
-        item
-        for item in items
-        if isinstance(item, dict)
-        and item.get("skip_reason") != "one_shot_source_complete"
-    ]
-    successful = {"updated", "complete", "success"}
-    completed = sum(
-        1
-        for item in updateable
-        if item.get("status") in successful
-        or item.get("skip_reason") == "repository_revision_unchanged"
-    )
-    value.update(
-        {
-            "status": "ok" if not failed else "partial",
-            "source_count": len(items),
-            "updateable_source_count": len(updateable),
-            "completed_source_count": completed,
-            "snapshot_marker_eligible": (
-                not failed and not blocking and completed == len(updateable)
-            ),
-        }
-    )
+    from .runner import _summarize_source_results
+
+    value.update(_summarize_source_results(
+        [item for item in items if isinstance(item, dict)]
+    ))
     return value
 
 

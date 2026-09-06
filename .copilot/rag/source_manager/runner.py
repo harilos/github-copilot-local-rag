@@ -92,12 +92,23 @@ def _read_data_lifecycle(db_root: Path) -> Any:
     return _data_lifecycle_module().read_lifecycle(db_root)
 
 
+def _require_reset_complete(db_root: Path) -> Any:
+    lifecycle = _read_data_lifecycle(db_root)
+    if lifecycle is not None and lifecycle.status == "resetting":
+        raise SourceManagerError(
+            "データリセットが未完了です。リセットを再実行してから更新してください。",
+            stage="data_refresh.reset_incomplete",
+        )
+    return lifecycle
+
+
 def _complete_data_refresh(
     db_root: Path, lifecycle: Any, source_items: list[dict[str, Any]]
 ) -> str:
     from .artifact_reset import plan_data_reset
 
     current = _data_lifecycle_module().read_lifecycle(db_root, allow_missing=False)
+    _require_reset_complete(db_root)
     if current is None or current.epoch != lifecycle.epoch:
         raise SourceManagerError(
             "database lifecycle changed during refresh",
@@ -303,6 +314,7 @@ def update_source(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Prepare or execute one fetch; network access exists only in executor."""
+    _require_reset_complete(Path(db_root))
     store = SourceStore(db_root)
     source = store.read_source(local_source_key)
     if not source.payload:
@@ -866,8 +878,8 @@ def update_all_sources(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
+    lifecycle = _require_reset_complete(Path(db_root))
     source_items = list_sources(db_root)
-    lifecycle = _read_data_lifecycle(Path(db_root))
     force_full_materialization = bool(
         lifecycle is not None and lifecycle.status != "ready"
     ) or not _search_artifacts_ready_for_all_sources(Path(db_root), source_items)
@@ -999,6 +1011,17 @@ def update_all_sources(
                 source_index,
                 len(source_items),
             )
+    result = _summarize_source_results(results)
+    if result["snapshot_marker_eligible"] and lifecycle is not None:
+        result["lifecycle_status"] = _complete_data_refresh(
+            Path(db_root), lifecycle, source_items
+        )
+    elif lifecycle is not None:
+        result["lifecycle_status"] = lifecycle.status
+    return result
+
+
+def _summarize_source_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     failed = [item for item in results if item.get("status") == "failed"]
     partial = [item for item in results if item.get("status") == "partial"]
     blocking_skips = [
@@ -1006,6 +1029,7 @@ def update_all_sources(
         for item in results
         if item.get("skip_reason") in {
             "sharepoint_update_requires_windows",
+            "teams_update_requires_windows",
             "one_shot_source_requires_reimport",
         }
     ]
@@ -1022,7 +1046,7 @@ def update_all_sources(
         if item.get("status") in successful_statuses
         or item.get("skip_reason") == "repository_revision_unchanged"
     )
-    result = {
+    return {
         "status": (
             "ok"
             if not failed and not partial
@@ -1039,13 +1063,6 @@ def update_all_sources(
         ),
         "results": results,
     }
-    if result["snapshot_marker_eligible"] and lifecycle is not None:
-        result["lifecycle_status"] = _complete_data_refresh(
-            Path(db_root), lifecycle, source_items
-        )
-    elif lifecycle is not None:
-        result["lifecycle_status"] = lifecycle.status
-    return result
 
 
 def _one_shot_reimport_ready(db_root: Path, local_source_key: str) -> bool:
