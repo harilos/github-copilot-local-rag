@@ -29,6 +29,7 @@ from software_rag_tool.network import (
     resolve_network_configuration,
 )
 from setup_contract import (
+    INSTALLATION_SCHEMA,
     completion_marker_for,
     completion_contract_payload,
     completion_contract_valid,
@@ -102,7 +103,7 @@ def main() -> int:
     parser.add_argument(
         "--no-prepare-model",
         action="store_true",
-        help="Do not download or recreate the model; verification still applies",
+        help="Do not download or recreate the model",
     )
     parser.add_argument(
         "--force-model",
@@ -296,7 +297,24 @@ def main() -> int:
             _emit(payload, args.format)
             return 1
 
-    verification = _run_verification(python)
+    if offline_modes:
+        verification = _run_verification(python)
+    else:
+        # Installing components is not an end-to-end runtime/DB health test.
+        verification = {
+            "status": "installed",
+            "setup_complete": True,
+            "lookup_ready": None,
+            "verification": "not_run",
+            "installation_steps": {
+                "dependencies": "completed",
+                "model_prepare": (
+                    "skipped_by_request" if args.no_prepare_model else "completed"
+                ),
+            },
+            "runtime": {},
+            "warnings": [],
+        }
     verification["network"] = network.details
     verification["warnings"] = [
         *network.warnings,
@@ -704,7 +722,7 @@ def _run_verification(python: Path) -> dict[str, Any]:
         return _error_payload(
             failed_check="verification",
             error_kind="verification_timeout",
-            message="Post-install verification exceeded 120 seconds.",
+            message="Requested runtime verification exceeded 120 seconds.",
         )
     except OSError as exc:
         return _error_payload(
@@ -738,6 +756,15 @@ def _write_completion_marker(
         rag_root=RAG_ROOT,
         verified_at=datetime.now(timezone.utc).isoformat(),
     )
+    if verification.get("verification") == "not_run":
+        payload = {
+            "schema": INSTALLATION_SCHEMA,
+            "status": "complete",
+            "installed_at": datetime.now(timezone.utc).isoformat(),
+            "requirements_sha256": requirements_fingerprint(RAG_ROOT),
+            "verification": "not_run",
+            "installation_steps": verification["installation_steps"],
+        }
     if requirements_sha256 is not None:
         payload["requirements_sha256"] = requirements_sha256
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -835,7 +862,9 @@ def _emit(payload: dict[str, Any], output_format: str) -> None:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
     if payload.get("setup_complete"):
-        if payload.get("lookup_ready"):
+        if payload.get("status") == "installed":
+            print("Installation complete. Runtime and database verification was not run.")
+        elif payload.get("lookup_ready"):
             print("Ready: runtime verification and lookup gate passed")
         elif (
             payload.get("status")

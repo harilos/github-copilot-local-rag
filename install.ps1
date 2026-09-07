@@ -373,20 +373,10 @@ foreach ($RetiredDirectoryRelative in @(
 }
 
 if (Test-Path -LiteralPath $RuntimePython -PathType Leaf) {
-    $InstallStage = "runtime_refresh"
-    try {
-        Invoke-Setup `
-            -PythonCommand $RuntimePython `
-            -SetupArguments @("--refresh-completion-marker", "--format", "json")
-    } catch {
-        Write-Warning (
-            "The existing runtime needs dependency or model repair; " +
-            "running normal setup once."
-        )
-        Invoke-Setup `
-            -PythonCommand $RuntimePython `
-            -SetupArguments @("--format", "json")
-    }
+    $InstallStage = "runtime_install"
+    Invoke-Setup `
+        -PythonCommand $RuntimePython `
+        -SetupArguments @("--format", "json")
 } else {
     $InstallStage = "runtime_create"
     $Bootstrap = Resolve-BootstrapPython -Requested $BootstrapPython

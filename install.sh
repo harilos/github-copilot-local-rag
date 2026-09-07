@@ -157,8 +157,8 @@ remove_retired_directories
 
 if [ -x "$RUNTIME_PYTHON" ]; then
   if ! "$RUNTIME_PYTHON" "$TARGET_DIR/rag/query/setup.py" \
-      --refresh-completion-marker --format json >/dev/null; then
-    echo "setup_required: existing RAG runtime verification failed; run Local RAG setup before lookup." >&2
+      --format json >/dev/null; then
+    echo "setup_required: RAG runtime installation failed; run Local RAG setup before lookup." >&2
     exit 1
   fi
 elif [ -n "$LEGACY_BACKUP" ]; then

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 COMPLETION_SCHEMA = "local-rag.setup-completion.v1"
+INSTALLATION_SCHEMA = "local-rag.installation-completion.v1"
 REQUIRED_RUNTIME_PASSES = (
     "venv",
     "dependencies",
@@ -88,7 +89,7 @@ def completion_contract_valid(
         payload = json.loads(marker.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return False, "completion_marker_not_object"
-        if payload.get("schema") != COMPLETION_SCHEMA:
+        if payload.get("schema") not in {COMPLETION_SCHEMA, INSTALLATION_SCHEMA}:
             return False, "completion_marker_schema"
         if payload.get("status") != "complete":
             return False, "completion_marker_status"
@@ -96,6 +97,15 @@ def completion_contract_valid(
             rag_root
         ):
             return False, "completion_marker_requirements"
+        if payload.get("schema") == INSTALLATION_SCHEMA:
+            if payload.get("verification") != "not_run":
+                return False, "completion_marker_verification"
+            steps = payload.get("installation_steps")
+            if not isinstance(steps, dict) or steps.get("dependencies") != "completed":
+                return False, "completion_marker_installation_steps"
+            if steps.get("model_prepare") not in {"completed", "skipped_by_request"}:
+                return False, "completion_marker_model_prepare"
+            return True, None
         runtime = payload.get("runtime")
         if not isinstance(runtime, dict):
             return False, "completion_marker_runtime"

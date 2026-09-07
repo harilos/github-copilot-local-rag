@@ -114,8 +114,8 @@ class InstallerExclusionContractTests(unittest.TestCase):
         )
         self.assertEqual(2, powershell.count("-ErrorAction Stop"))
         self.assertNotIn("rm -rf", shell)
-        self.assertIn("--refresh-completion-marker", shell)
-        self.assertIn("--refresh-completion-marker", powershell)
+        self.assertNotIn("--refresh-completion-marker", shell)
+        self.assertNotIn("--refresh-completion-marker", powershell)
         self.assertNotIn("--migrate-legacy-marker", shell)
         self.assertNotIn("--migrate-legacy-marker", powershell)
         self.assertIn("exit 1", shell)
@@ -334,7 +334,7 @@ class InstallerExclusionContractTests(unittest.TestCase):
                 (target_query / "search.py").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "--refresh-completion-marker",
+                "--format\njson",
                 refresh_log.read_text(encoding="utf-8"),
             )
             for relative in (

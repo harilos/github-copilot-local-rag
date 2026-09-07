@@ -51,6 +51,36 @@ from setup_contract import (
 
 
 class SetupNetworkContractTests(unittest.TestCase):
+    def test_install_records_completion_without_running_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            python = root / ".venv/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            marker = python.parent.parent / ".rag-deps-installed"
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(sys, "argv", ["setup.py", "--format", "json"]),
+                mock.patch.object(sys, "version_info", (3, 13, 0)),
+                mock.patch.object(SETUP, "_setup_paths", return_value=(root, python.parent.parent, python, marker)),
+                mock.patch.object(SETUP, "resolve_network_configuration", return_value=self._network(selected_route="direct")),
+                mock.patch.object(SETUP, "_run_child"),
+                mock.patch.object(SETUP, "_run_verification", side_effect=AssertionError("no automatic verification")),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(0, SETUP.main())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("installed", payload["status"])
+            self.assertIsNone(payload["lookup_ready"])
+            self.assertTrue(completion_contract_valid(marker, SETUP.RAG_ROOT)[0])
+            receipt = json.loads(marker.read_text())
+            self.assertEqual("not_run", receipt["verification"])
+            self.assertNotIn("verified_at", receipt)
+            self.assertNotIn("runtime", receipt)
+            receipt["installation_steps"]["dependencies"] = "failed"
+            marker.write_text(json.dumps(receipt))
+            self.assertFalse(completion_contract_valid(marker, SETUP.RAG_ROOT)[0])
+
     @staticmethod
     def _complete_verification() -> dict[str, object]:
         return {
