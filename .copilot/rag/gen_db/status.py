@@ -45,6 +45,7 @@ def main() -> None:
 
     lifecycle = read_lifecycle(db_root)
     lifecycle_ready = lifecycle is None or lifecycle.status == "ready"
+    lifecycle_searchable = lifecycle is None or lifecycle.status in {"ready", "searchable_partial"}
 
     state = _load_json(logs_root / "index_state.json")
     # Read authority first. Optional progress cannot supply control fields or
@@ -53,28 +54,28 @@ def main() -> None:
         observed_progress = _load_json(logs_root / "progress.json")
     except (OSError, UnicodeError, json.JSONDecodeError):
         observed_progress = {}
-    ingestion = (validated_saved_ingestion(state) or {}) if lifecycle_ready else {}
+    ingestion = (validated_saved_ingestion(state) or {}) if lifecycle_searchable else {}
     progress_matches_scope = _progress_matches_scope(observed_progress, ingestion)
     progress = observed_progress if progress_matches_scope else {}
     manifest = (
         _load_json(db_root / "index" / "manifest.json")
-        if lifecycle_ready
+        if lifecycle_searchable
         else {}
     )
     version = read_db_version(db_root)
     errors = (
         _load_json(logs_root / "prepare_errors.json", default=[])
-        if lifecycle_ready
+        if lifecycle_searchable
         else []
     )
     events = (
         _tail_jsonl(logs_root / "events.jsonl", args.tail_events)
-        if lifecycle_ready
+        if lifecycle_searchable
         else []
     )
     catalog = (
         catalog_counts()
-        if lifecycle_ready
+        if lifecycle_searchable
         else {"exists": False, "chunks": 0, "documents": 0}
     )
 
@@ -83,7 +84,7 @@ def main() -> None:
         if progress_matches_scope
         else (
             "progress_unavailable"
-            if lifecycle_ready
+            if lifecycle_searchable
             else str(lifecycle.status)
         )
     )
@@ -105,7 +106,7 @@ def main() -> None:
         _append_saved_options(resume_command, ingestion)
     state_files = (
         state.get("files")
-        if lifecycle_ready and isinstance(state, dict)
+        if lifecycle_searchable and isinstance(state, dict)
         else {}
     )
     if not isinstance(state_files, dict):
@@ -117,6 +118,7 @@ def main() -> None:
         "exists": db_root.exists(),
         "data_lifecycle_status": lifecycle.status if lifecycle else "legacy",
         "data_lifecycle_ready": lifecycle_ready,
+        "data_lifecycle_searchable": lifecycle_searchable,
         "version": version,
         "ingestion": ingestion,
         "scope_valid": bool(ingestion),
@@ -146,6 +148,7 @@ def main() -> None:
         "indexed_files": progress.get("indexed_files") or _count_state(state_files, "indexed"),
         "skipped_files": progress.get("skipped_files") or 0,
         "error_files": progress.get("error_files") or _count_state(state_files, "error"),
+        "empty_files": progress.get("empty_files") or _count_state(state_files, "no_text"),
         "upserted_records": progress.get("upserted_records") or 0,
         "deleted_records": progress.get("deleted_records") or 0,
         "collection_count": progress.get("collection_count") or manifest.get("record_count") or 0,

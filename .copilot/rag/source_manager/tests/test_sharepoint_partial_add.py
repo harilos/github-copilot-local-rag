@@ -77,6 +77,43 @@ def _summary(source_id: str, *, status: str = "partial") -> dict:
 
 
 class SharePointPartialAddRunnerTests(unittest.TestCase):
+    def test_zero_text_warning_and_document_extraction_partial_are_trusted(self) -> None:
+        key = "src_sharepoint-0123456789ab"
+        diagnostics = {
+            name: {"count": int(name == "zero_text"), "paths": ["root/empty.txt"] if name == "zero_text" else []}
+            for name in ("unsupported", "zero_text", "extraction_error")
+        }
+        warning = {
+            **_summary(key), "file_count": 2, "result_status": "success",
+            "error_files": 0, "input_error_files": 0, "error_details": [],
+            "empty_files": 1, "searchable_files": 1, "ingestion_diagnostics": diagnostics,
+        }
+        partial = {
+            **_summary(key), "input_error_files": 0, "extract_error_files": 1,
+            "searchable_files": 1,
+            "error_details": [{"path": "root/broken.pdf", "stage": "extract", "error_type": "ValueError", "retryable": False}],
+        }
+        for summary in (warning, partial):
+            with self.subTest(status=summary["result_status"]):
+                result = runner._execute_add(
+                    db_root=Path("fixture-rag"),
+                    source={"local_source_key": key, "source_type": "sharepoint"},
+                    work=Path("root"), python_executable=Path("python"), rag_root=Path("rag"),
+                    command_runner=lambda _args: SimpleNamespace(returncode=0, stdout=_framed(summary), stderr=""),
+                    progress_callback=None,
+                )
+                self.assertEqual(summary["result_status"], result["status"])
+                self.assertEqual(1, result["summary"]["searchable_files"])
+                self.assertTrue(result["summary"]["warning_ja"])
+        malformed = {**warning, "empty_files": 2, "file_count": 3}
+        with self.assertRaises(SourceManagerError):
+            runner._execute_add(
+                db_root=Path("fixture-rag"), source={"local_source_key": key, "source_type": "sharepoint"},
+                work=Path("root"), python_executable=Path("python"), rag_root=Path("rag"),
+                command_runner=lambda _args: SimpleNamespace(returncode=0, stdout=_framed(malformed), stderr=""),
+                progress_callback=None,
+            )
+
     def test_execute_add_accepts_typed_partial_and_adds_privacy_flag(self) -> None:
         observed: list[str] = []
 

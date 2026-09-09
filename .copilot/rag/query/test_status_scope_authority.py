@@ -27,6 +27,7 @@ SPEC.loader.exec_module(status)
 from software_rag_tool.data_lifecycle import (  # noqa: E402
     new_reset_lifecycle,
     write_lifecycle,
+    transition_lifecycle,
 )
 
 MISSING = object()
@@ -177,6 +178,17 @@ class StatusScopeAuthorityTests(unittest.TestCase):
         self.assertEqual([], result["force_rebuild_command"])
         self.assertEqual(0, result["indexed_files"])
         self.assertEqual(0, result["collection_count"])
+
+    def test_partial_generation_reports_searchable_current_counts(self):
+        marker = new_reset_lifecycle(self.database, source_config_digest="0" * 64)
+        write_lifecycle(self.database, marker)
+        transition_lifecycle(self.database, marker, status="searchable_partial")
+        result = self.read_status(snapshot={})
+        self.assertFalse(result["data_lifecycle_ready"])
+        self.assertTrue(result["data_lifecycle_searchable"])
+        self.assertEqual("searchable_partial", result["data_lifecycle_status"])
+        self.assertEqual(2, result["indexed_files"])
+        self.assertEqual(4, result["collection_count"])
 
     def test_same_scope_with_different_operation_does_not_reuse_progress(self):
         snapshot = self.progress()

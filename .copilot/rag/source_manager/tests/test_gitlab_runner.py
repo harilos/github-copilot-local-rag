@@ -20,6 +20,7 @@ from source_manager.gitlab_issues import (
 )
 from source_manager.machine_connections import gitlab_token_env
 from source_manager.metadata import _canonical_source
+from source_manager.subprocess_stream import RESULT_FRAME
 from source_manager.tests.test_gitlab_issues import (
     GITLAB_URL,
     PROJECT_ID,
@@ -43,6 +44,10 @@ def _add_summary(source_id: str, file_count: int) -> dict[str, Any]:
         "indexed_files": file_count,
         "skipped_files": 0,
         "error_files": 0,
+        "input_error_files": 0,
+        "extract_error_files": 0,
+        "error_details": [],
+        "result_status": "success",
         "upserted_records": file_count,
         "deleted_records": 0,
     }
@@ -82,9 +87,13 @@ class _AddRunner:
         summary = _add_summary(source_id, len(issue_iids))
         if call_number in self.partial_error_calls:
             summary["error_files"] = 1
+            summary["extract_error_files"] = 1
+            summary["indexed_files"] -= 1
+            summary["result_status"] = "partial" if summary["indexed_files"] else "failure"
+            summary["error_details"] = [{"path": "issues/1.md", "stage": "extract", "error_type": "ValueError", "retryable": False}]
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(
+            stdout=RESULT_FRAME + json.dumps(
                 summary,
                 ensure_ascii=False,
             ),
@@ -242,7 +251,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         api = _GitLabApi({1: [_summary(1)]})
         add = _AddRunner(partial_error_calls={1})
 
-        with self.assertRaisesRegex(SourceManagerError, "抽出に失敗"):
+        with self.assertRaisesRegex(SourceManagerError, "ファイル処理に失敗"):
             self.update(key, api, add)
 
         interrupted = self.state(key)
@@ -263,6 +272,23 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual("complete", final["phase"])
         self.assertEqual(1, final["indexed_confirmed_count"])
         self.assertEqual(0, final["pending_count"])
+
+    def test_mixed_document_extraction_failure_returns_partial_and_resumes(self) -> None:
+        key = self.register()["local_source_key"]
+        api = _GitLabApi({1: [_summary(1), _summary(2)]})
+        add = _AddRunner(partial_error_calls={1})
+        result = self.update(key, api, add)
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(1, result["add_summary"]["extract_error_files"])
+        self.assertEqual("partial", self.state(key)["status"])
+        self.assertEqual(1, self.state(key)["pending_count"])
+        self.assertIn(GITLAB_PROJECT_ID_STATE_KEY, self.state(key))
+        api.calls.clear()
+        result = self.update(key, api, add)
+        self.assertEqual("updated", result["status"])
+        self.assertEqual("complete", self.state(key)["status"])
+        self.assertEqual([], api.inventory_urls())
+        self.assertEqual([], api.detail_iids())
 
     def test_remote_deletion_keeps_historical_issue_without_add(
         self,

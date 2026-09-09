@@ -110,6 +110,35 @@ class ManagerAllDataResetTests(unittest.TestCase):
             dict(manage.TOP_MENU)["7"],
         )
 
+    def test_update_summary_retains_every_database_failure_and_separates_units(self) -> None:
+        manager = self.manager(["y"])
+        for name in ("first-rag", "broken-rag", "last-rag"):
+            self.make_database(name)
+        with (
+            mock.patch.object(manager, "_database_summaries", return_value=[
+                {"name": name} for name in ("first-rag", "broken-rag", "last-rag")
+            ]),
+            mock.patch.object(manager, "_runtime_python", return_value=Path("python")),
+            mock.patch.object(runner, "update_all_sources", side_effect=[
+                {"results": [{"status": "failed", "display_name": "first-failed", "error": "first reason"}]},
+                RuntimeError("database unavailable"),
+                {"results": [
+                    {"status": "updated", "display_name": "good"},
+                    {"status": "updated", "display_name": "empty", "add_summary": {"empty_files": 2}},
+                    {"status": "partial", "display_name": "last-partial"},
+                ]},
+            ]),
+        ):
+            manager._update_all_sources()
+        final = "\n".join(self.output).split("全DBの最終サマリー", 1)[1]
+        self.assertIn("DB処理失敗: 1 DB", final)
+        self.assertIn("成功: 1 Source", final)
+        self.assertIn("警告付き完了: 1 Source", final)
+        self.assertIn("一部反映: 1 Source", final)
+        self.assertIn("失敗: 1 Source", final)
+        for expected in ("first-rag", "first-failed", "first reason", "broken-rag", "database unavailable", "last-rag", "empty", "last-partial"):
+            self.assertIn(expected, final)
+
     def test_no_database_or_decline_has_no_side_effect(self) -> None:
         manager = self.manager()
         with (

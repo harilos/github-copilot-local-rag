@@ -105,9 +105,10 @@ class IngestionObservabilityTests(unittest.TestCase):
             repeated = self._run(root, output)
 
         diagnostics = result["ingestion_diagnostics"]
-        self.assertEqual("failure", result["result_status"])
+        self.assertEqual("partial", result["result_status"])
         self.assertEqual(1, result["indexed_files"])
-        self.assertEqual(2, result["extract_error_files"])
+        self.assertEqual(1, result["extract_error_files"])
+        self.assertEqual(1, result["empty_files"])
         self.assertEqual(1, diagnostics["unsupported"]["count"])
         self.assertIn("unsupported.bin", diagnostics["unsupported"]["paths"][0])
         self.assertEqual(1, diagnostics["zero_text"]["count"])
@@ -123,12 +124,13 @@ class IngestionObservabilityTests(unittest.TestCase):
             "broken.txt",
             repeated_diagnostics["extraction_error"]["paths"][0],
         )
-        self.assertEqual("failure", repeated["result_status"])
+        self.assertEqual("partial", repeated["result_status"])
         self.assertEqual(0, repeated["indexed_files"])
         self.assertEqual(1, repeated["skipped_files"])
-        self.assertEqual(2, repeated["error_files"])
+        self.assertEqual(1, repeated["error_files"])
+        self.assertEqual(1, repeated["empty_files"])
 
-    def test_zero_text_only_never_becomes_indexed_or_successful(self) -> None:
+    def test_zero_text_only_completes_with_warning_and_no_search_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "documents"
             output = Path(temporary) / "db"
@@ -145,20 +147,22 @@ class IngestionObservabilityTests(unittest.TestCase):
             entry = next(iter(state["files"].values()))
 
         for result in (first, repeated):
-            self.assertEqual("failure", result["result_status"])
+            self.assertEqual("success", result["result_status"])
             self.assertEqual(0, result["indexed_files"])
             self.assertEqual(0, result["upserted_records"])
-            self.assertEqual(1, result["error_files"])
-            self.assertEqual(1, result["extract_error_files"])
+            self.assertEqual(0, result["error_files"])
+            self.assertEqual(0, result["extract_error_files"])
+            self.assertEqual(1, result["empty_files"])
+            self.assertEqual(0, result["searchable_files"])
             self.assertEqual(
                 1,
                 result["ingestion_diagnostics"]["zero_text"]["count"],
             )
-        self.assertEqual("error", entry["status"])
+        self.assertEqual("no_text", entry["status"])
         self.assertEqual("zero_text", entry["error_kind"])
         self.assertEqual(0, entry["record_count"])
 
-    def test_legacy_indexed_zero_record_state_is_migrated_to_failure(self) -> None:
+    def test_legacy_indexed_zero_record_state_is_migrated_to_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "documents"
             output = Path(temporary) / "db"
@@ -178,10 +182,10 @@ class IngestionObservabilityTests(unittest.TestCase):
             migrated = json.loads(state_path.read_text(encoding="utf-8"))
             migrated_entry = next(iter(migrated["files"].values()))
 
-        self.assertEqual("failure", result["result_status"])
+        self.assertEqual("success", result["result_status"])
         self.assertEqual(0, result["indexed_files"])
-        self.assertEqual(1, result["error_files"])
-        self.assertEqual("error", migrated_entry["status"])
+        self.assertEqual(0, result["error_files"])
+        self.assertEqual("no_text", migrated_entry["status"])
         self.assertEqual("zero_text", migrated_entry["error_kind"])
 
     def test_clean_run_has_zero_diagnostics_and_ignores_vcs_metadata(self) -> None:

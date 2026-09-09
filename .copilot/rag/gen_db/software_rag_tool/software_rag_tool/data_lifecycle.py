@@ -14,11 +14,13 @@ from .atomic_io import atomic_write_json
 SCHEMA_VERSION = "local-rag.data-lifecycle.v1"
 MARKER_NAME = "data-lifecycle.json"
 READY = "ready"
+SEARCHABLE_PARTIAL = "searchable_partial"
+SEARCHABLE_STATUSES = frozenset({READY, SEARCHABLE_PARTIAL})
 RESETTING = "resetting"
 REFETCH_REQUIRED = "refetch_required"
 ATTENTION_REQUIRED = "attention_required"
 NON_READY_STATUSES = frozenset({RESETTING, REFETCH_REQUIRED, ATTENTION_REQUIRED})
-STATUSES = frozenset({READY, *NON_READY_STATUSES})
+STATUSES = frozenset({*SEARCHABLE_STATUSES, *NON_READY_STATUSES})
 LEGACY_EPOCH = "legacy"
 
 
@@ -161,7 +163,7 @@ def capture_ready_epoch(db_root: Path) -> str:
     lifecycle = read_lifecycle(db_root)
     if lifecycle is None:
         return LEGACY_EPOCH
-    if lifecycle.status != READY:
+    if lifecycle.status not in SEARCHABLE_STATUSES:
         raise DataLifecycleError("database refresh is required")
     return lifecycle.epoch
 

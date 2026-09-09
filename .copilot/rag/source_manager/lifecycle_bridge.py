@@ -16,4 +16,9 @@ def lifecycle_api() -> Any:
 
 def require_ready_database(db_root: Path) -> str:
     """Fail closed for reset generations while preserving markerless DBs."""
-    return str(lifecycle_api().capture_ready_epoch(Path(db_root)))
+    api = lifecycle_api()
+    epoch = api.capture_ready_epoch(Path(db_root))
+    marker = api.read_lifecycle(Path(db_root))
+    if marker is not None and marker.status != api.READY:
+        raise api.DataLifecycleError("database refresh is incomplete for export or copy")
+    return str(epoch)

@@ -159,6 +159,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_fingerprint=catalog_before,
     )
     _strip_private_fields(enriched)
+    _add_ingestion_notice(
+        enriched,
+        _database_root(rag_root, _payload_database_name(enriched, parsed.db)),
+    )
     if deadline is not None and time.monotonic() >= deadline:
         timeout_payload = _wrapper_timeout_payload(
             mode,
@@ -225,6 +229,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _print_json(output, ascii_safe=_is_pointer(output))
     return int(completed.returncode)
+
+
+def _add_ingestion_notice(payload: dict[str, Any], db_root: Path | None) -> None:
+    """Report incomplete coverage without changing retrieval status or ranking."""
+    if db_root is None or payload.get("status") in {"error", "busy", "timeout"}:
+        return
+    incomplete = empty = 0
+    try:
+        from source_manager.store import SourceStore
+        from source_manager.lifecycle_bridge import lifecycle_api
+
+        marker = lifecycle_api().read_lifecycle(db_root)
+        partial_refresh = marker is not None and marker.status == "searchable_partial"
+        store = SourceStore(db_root)
+        for key in store.list_keys():
+            try:
+                state = store.read_state(key).payload
+                incomplete += bool(state and state.get("status") not in {"complete"})
+                empty += int(state.get("empty_files") or 0)
+            except Exception:
+                incomplete += 1
+    except Exception:
+        # This advisory must never turn an otherwise valid search into failure.
+        return
+    notices = []
+    if partial_refresh or incomplete:
+        notices.append("未完了のソースがあります。反映済みの文書を検索しています。")
+    if empty:
+        notices.append(f"本文なしの文書 {empty:,}件は検索対象に含まれません。")
+    if notices:
+        warnings = list(payload.get("warnings") or [])
+        payload["warnings"] = warnings + [notice for notice in notices if notice not in warnings]
 
 
 def _parse_arguments(

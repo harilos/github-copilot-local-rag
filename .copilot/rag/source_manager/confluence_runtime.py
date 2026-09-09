@@ -358,6 +358,8 @@ def _install_runner(runner: Any, providers: Any) -> None:
         )
 
     @functools.wraps(original_update)
+    @runner._with_database_operation_lock
+    @runner._with_refresh_publication
     def update_source(
         db_root: Path,
         local_source_key: str,
@@ -981,7 +983,8 @@ def _update_confluence_source(
             "Confluence exact page links are incomplete",
             stage="metadata.confluence",
         )
-    if bool(state_holder[0].payload.get("initial_database_reflection")):
+    if (bool(state_holder[0].payload.get("initial_database_reflection"))
+            and (state_holder[0].payload.get("ingestion_summary") or {}).get("result_status") != "partial"):
         with runner._database_writer_session(
             store.db_root,
             stage="reflect.snapshot",
@@ -1015,7 +1018,7 @@ def _update_confluence_source(
             }
         )
     else:
-        final = runner.complete_run(final)
+        final = runner._complete_ingestion_run(final)
     final_state = store.save_state(
         source.payload["local_source_key"],
         final,
@@ -1039,6 +1042,7 @@ def _update_confluence_source(
             final_state.payload.get("indexed_confirmed_count") or 0
         ),
         "state_revision": final_state.revision,
+        **runner._ingestion_result_fields(final_state.payload),
     }
 
 
@@ -1058,7 +1062,10 @@ def _confluence_reflect_batch(
     runner.validate_managed_work_tree(work)
     fetched = int(state.payload.get("fetched_count") or 0)
     indexed = int(state.payload.get("indexed_confirmed_count") or 0)
-    batch_count = fetched - indexed
+    batch_count = max(
+        fetched - indexed,
+        int((state.payload.get("ingestion_summary") or {}).get("error_files") or 0),
+    )
     if batch_count <= 0 and not (final_batch and fetched == 0):
         raise SourceManagerError(
             "Confluence ADD batch has no pending pages",
@@ -1129,6 +1136,7 @@ def _confluence_reflect_batch(
             source.payload["local_source_key"]
         )
     reflected = copy.deepcopy(state.payload)
+    reflected.update(runner._ingestion_checkpoint(add_result["summary"]))
     reflected.update(
         {
             "status": "running",

@@ -24,7 +24,7 @@ from .records import (
     iter_input_files,
     sha256_text,
 )
-from .catalog import delete_chunks as delete_catalog_chunks, reset_catalog, upsert_records as upsert_catalog_records
+from .catalog import delete_chunks as delete_catalog_chunks, init_catalog, reset_catalog, upsert_records as upsert_catalog_records
 from .config import DEFAULT_INGESTION_BATCH_SIZE_FILES
 from .embeddings import DocumentTokenBudget, get_document_token_budget
 from .store import collection_count, delete_ids, reset_collection, upsert_records
@@ -151,6 +151,7 @@ def add_or_update_root(
         indexed_files=0,
         skipped_files=0,
         error_files=0,
+        empty_files=0,
         input_error_files=0,
         extract_error_files=0,
         upserted_records=0,
@@ -196,6 +197,7 @@ def add_or_update_root(
         "file_count": len(files),
         "indexed_files": 0,
         "skipped_files": 0,
+        "empty_files": 0,
         "error_files": 0,
         "input_error_files": 0,
         "extract_error_files": 0,
@@ -238,14 +240,23 @@ def add_or_update_root(
             if status == "skip":
                 key = _state_key(source_id, rel)
                 previous = state["files"].get(key) or {}
-                if (
+                if previous.get("status") == "no_text" or (
+                    previous.get("error_kind") == "zero_text"
+                ) or (
                     previous.get("status") == "indexed"
                     and int(previous.get("record_count") or 0) == 0
                 ):
                     _add_ingestion_diagnostic(summary, "zero_text", rel)
+                    summary["empty_files"] += 1
                     _mark_legacy_zero_text(previous, rel)
                     state["files"][key] = previous
                     _save_state(state)
+                    write_progress(
+                        status="running", phase="extract",
+                        files_done=_files_done(summary),
+                        empty_files=summary["empty_files"], current_file=rel,
+                    )
+                    continue
                 elif (
                     previous.get("status") == "error"
                     and previous.get("error_kind") != "input_read"
@@ -324,22 +335,18 @@ def add_or_update_root(
                 deleted = _record_zero_text(state, item, diagnostic)
                 _save_state(state)
                 summary["deleted_records"] += deleted
-                summary["error_files"] += 1
-                summary["extract_error_files"] += 1
-                if len(summary["error_details"]) < 100:
-                    summary["error_details"].append(diagnostic)
+                summary["empty_files"] += 1
                 write_progress(
                     status="running",
                     phase="extract",
                     files_done=_files_done(summary),
-                    error_files=summary["error_files"],
-                    extract_error_files=summary["extract_error_files"],
+                    empty_files=summary["empty_files"],
                     deleted_records=summary["deleted_records"],
                     current_file=rel,
-                    last_error="No searchable text was extracted.",
+                    last_error="",
                 )
                 emit_event(
-                    "file_failed",
+                    "file_without_text",
                     path=rel,
                     error="No searchable text was extracted.",
                     diagnostic=diagnostic,
@@ -374,17 +381,34 @@ def add_or_update_root(
 
         write_progress(status="running", phase="verify", current_file="")
         count = collection_count()
+        if count == 0:
+            # An empty, successfully processed source still needs a readable
+            # catalog, including when no upsert has ever opened the database.
+            init_catalog()
         write_manifest(count, chunker_config=current_chunker_config)
         profile_updated = update_profile_from_clean()
         summary["collection_count"] = count
+        summary["searchable_files"] = sum(
+            1 for entry in state["files"].values()
+            if entry.get("source_id") == source_id and entry.get("record_ids")
+        )
         summary["profile_updated"] = profile_updated
         summary["completed_at"] = datetime.now(timezone.utc).isoformat()
         summary["result_status"] = _result_status(summary)
-        if summary["result_status"] == "partial":
-            summary["warning_ja"] = (
-                f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
-                "読めたファイルは反映済みで、失敗ファイルは次回自動再試行します。"
+        warnings = []
+        if summary["empty_files"]:
+            warnings.append(
+                f"{summary['empty_files']:,}件は検索できる本文がありません。"
+                "本文なしとして処理を完了しました。"
             )
+        if summary["result_status"] == "partial":
+            warnings.append(
+                f"読取り失敗 {summary['input_error_files']:,}件、"
+                f"抽出失敗 {summary['extract_error_files']:,}件。"
+                "処理できた文書は反映済みです。"
+            )
+        if warnings:
+            summary["warning_ja"] = "".join(warnings)
         _write_errors_report(state)
         write_progress(
             status=summary["result_status"],
@@ -393,6 +417,7 @@ def add_or_update_root(
             error_files=summary["error_files"],
             input_error_files=summary["input_error_files"],
             extract_error_files=summary["extract_error_files"],
+            empty_files=summary["empty_files"],
             result_status=summary["result_status"],
             collection_count=count,
             deleted_records=summary["deleted_records"],
@@ -471,7 +496,7 @@ def _zero_text_diagnostic(path: str) -> dict[str, Any]:
 def _mark_legacy_zero_text(previous: dict[str, Any], path: str) -> None:
     previous.update(
         {
-            "status": "error",
+            "status": "no_text",
             "error": "No searchable text was extracted.",
             "error_kind": "zero_text",
             "retryable": False,
@@ -520,7 +545,7 @@ def _record_zero_text(
         "record_ids": [],
         "record_count": 0,
         "records_path": record_path.relative_to(clean_dir()).as_posix(),
-        "status": "error",
+        "status": "no_text",
         "error": "No searchable text was extracted.",
         "error_kind": "zero_text",
         "retryable": False,
@@ -588,6 +613,8 @@ def _prepare_file(
 
     if not force_index and prev and prev.get("content_hash") == content_hash and prev.get("chunker_config") == active_chunker_config:
         if prev.get("status") == "indexed":
+            return {"status": "skip", "rel": rel}
+        if prev.get("status") == "no_text" and not retry_errors:
             return {"status": "skip", "rel": rel}
         if (
             prev.get("status") == "error"
@@ -1004,6 +1031,7 @@ def _progress_line(summary: dict[str, Any]) -> str:
         "PROGRESS "
         f"indexed_files={summary['indexed_files']} "
         f"skipped_files={summary['skipped_files']} "
+        f"empty_files={summary.get('empty_files', 0)} "
         f"error_files={summary['error_files']} "
         f"upserted_records={summary['upserted_records']} "
         f"deleted_records={summary['deleted_records']}"
@@ -1011,7 +1039,8 @@ def _progress_line(summary: dict[str, Any]) -> str:
 
 
 def _files_done(summary: dict[str, Any]) -> int:
-    return int(summary["indexed_files"]) + int(summary["skipped_files"]) + int(summary["error_files"])
+    return (int(summary["indexed_files"]) + int(summary["skipped_files"])
+            + int(summary["error_files"]) + int(summary.get("empty_files") or 0))
 
 
 def _result_status(summary: dict[str, Any]) -> str:
@@ -1021,7 +1050,7 @@ def _result_status(summary: dict[str, Any]) -> str:
     completed = int(summary.get("indexed_files") or 0) + int(
         summary.get("skipped_files") or 0
     )
-    if int(summary.get("extract_error_files") or 0) > 0 or completed == 0:
+    if completed == 0:
         return "failure"
     return "partial"
 

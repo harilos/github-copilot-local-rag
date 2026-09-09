@@ -384,6 +384,17 @@ def _finalize_search_payload(
     _normalize_public_source_paths(payload)
     _strip_private_document_keys(payload)
     _strip_private_source_ids(payload)
+    root = getattr(getattr(store, "context", None), "root", None)
+    if root is not None:
+        from .data_lifecycle import read_lifecycle, SEARCHABLE_PARTIAL
+
+        marker = read_lifecycle(root)
+        if marker is not None and marker.status == SEARCHABLE_PARTIAL:
+            notice = "未完了のソースがあります。反映済みの文書を検索しています。"
+            warnings = list(payload.get("warnings") or [])
+            if notice not in warnings:
+                warnings.append(notice)
+            payload["warnings"] = warnings
     return normalize_search_contract(payload)
 
 

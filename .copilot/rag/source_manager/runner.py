@@ -88,6 +88,33 @@ def _data_lifecycle_module() -> Any:
     return data_lifecycle
 
 
+def _with_refresh_publication(function: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(function)
+    def refreshed(db_root: Path, *args: Any, **kwargs: Any) -> Any:
+        lifecycle = _require_reset_complete(Path(db_root))
+        result = function(db_root, *args, **kwargs)
+        if lifecycle is not None and lifecycle.status != "ready":
+            items = list_sources(db_root)
+            result["lifecycle_status"] = _complete_data_refresh(
+                Path(db_root), lifecycle, items, allow_partial=True
+            )
+            store = SourceStore(db_root)
+            complete = bool(items)
+            for item in items:
+                try:
+                    state = store.read_state(item["local_source_key"]).payload
+                    complete = complete and state.get("status") == "complete"
+                except (SourceManagerError, KeyError, OSError):
+                    complete = False
+            if complete:
+                result["lifecycle_status"] = _complete_data_refresh(
+                    Path(db_root), lifecycle, items
+                )
+        return result
+
+    return refreshed
+
+
 def _read_data_lifecycle(db_root: Path) -> Any:
     return _data_lifecycle_module().read_lifecycle(db_root)
 
@@ -103,7 +130,19 @@ def _require_reset_complete(db_root: Path) -> Any:
 
 
 def _complete_data_refresh(
-    db_root: Path, lifecycle: Any, source_items: list[dict[str, Any]]
+    db_root: Path, lifecycle: Any, source_items: list[dict[str, Any]],
+    *, allow_partial: bool = False,
+) -> str:
+    _require_reset_complete(db_root)
+    with _database_writer_session(db_root, stage="data_refresh.publish"):
+        return _publish_data_refresh(
+            db_root, lifecycle, source_items, allow_partial=allow_partial
+        )
+
+
+def _publish_data_refresh(
+    db_root: Path, lifecycle: Any, source_items: list[dict[str, Any]],
+    *, allow_partial: bool,
 ) -> str:
     from .artifact_reset import plan_data_reset
 
@@ -114,20 +153,32 @@ def _complete_data_refresh(
             "database lifecycle changed during refresh",
             stage="data_refresh.lifecycle_changed",
         )
+    if allow_partial and current.status == _data_lifecycle_module().READY:
+        return current.status
     plan = plan_data_reset(db_root)
     blocking_exceptions = [
         item
         for item in plan["exceptions"]
         if item.get("reason") != "one_shot_original_requires_reimport"
     ]
-    if blocking_exceptions:
+    # These exceptions describe individual Source configuration/availability;
+    # reset isolation itself is checked by the lifecycle and safe path checks.
+    if blocking_exceptions and not allow_partial:
         return current.status
-    if not _search_artifacts_ready_for_all_sources(db_root, source_items):
+    if allow_partial:
+        available = _search_artifacts_ready_for_any_source(db_root, source_items)
+        target_status = _data_lifecycle_module().SEARCHABLE_PARTIAL
+    else:
+        available = _search_artifacts_ready_for_all_sources(db_root, source_items)
+        target_status = _data_lifecycle_module().READY
+    if not available:
+        return current.status
+    if current.status == target_status:
         return current.status
     updated = _data_lifecycle_module().transition_lifecycle(
         db_root,
         current,
-        status=_data_lifecycle_module().READY,
+        status=target_status,
         source_config_digest=plan["source_config_digest"],
     )
     return updated.status
@@ -298,6 +349,7 @@ def list_sources(db_root: Path) -> list[dict[str, Any]]:
 
 
 @_with_database_operation_lock
+@_with_refresh_publication
 def update_source(
     db_root: Path,
     local_source_key: str,
@@ -756,7 +808,8 @@ def _search_artifacts_match_completed_source(
     ):
         return False
     try:
-        expected_documents = int(state.get("indexed_confirmed_count") or 0)
+        summary = state.get("ingestion_summary") or {}
+        expected_documents = int(summary.get("searchable_files", state.get("indexed_confirmed_count")) or 0)
         if expected_documents < 0:
             return False
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -838,6 +891,32 @@ def _search_artifacts_ready_for_all_sources(db_root: Path, items: list[dict[str,
             Path(db_root), source.payload, state.payload
         )
     return bool(items) and all(ready(item) for item in items)
+
+
+def _search_artifacts_ready_for_any_source(db_root: Path, items: list[dict[str, Any]]) -> bool:
+    """Use committed Source checkpoints from the active reset generation.
+
+    Reset detaches all old states before fetching. A confirmed nonempty Source
+    plus the existing cross-store check is sufficient for partial search;
+    missing or failed siblings do not have to finish first.
+    """
+    store = SourceStore(db_root)
+    for item in items:
+        key = str(item.get("local_source_key") or "")
+        if not key or item.get("status") == "invalid":
+            continue
+        try:
+            source = store.read_source(key).payload
+            state = store.read_state(key).payload
+            summary = state.get("ingestion_summary") or {}
+            searchable = int(summary.get("searchable_files", state.get("indexed_confirmed_count")) or 0)
+            if (state.get("status") in {"complete", "partial"}
+                    and searchable > 0
+                    and _search_artifacts_match_completed_source(db_root, source, state)):
+                return True
+        except (OSError, SourceManagerError, ValueError, TypeError):
+            continue
+    return False
 
 
 def _update_source_for_run(db_root: Path, key: str, force: bool, **kwargs: Any) -> dict[str, Any]:
@@ -1011,13 +1090,17 @@ def update_all_sources(
                 source_index,
                 len(source_items),
             )
+        if lifecycle is not None:
+            _complete_data_refresh(
+                Path(db_root), lifecycle, source_items, allow_partial=True
+            )
     result = _summarize_source_results(results)
     if result["snapshot_marker_eligible"] and lifecycle is not None:
         result["lifecycle_status"] = _complete_data_refresh(
             Path(db_root), lifecycle, source_items
         )
     elif lifecycle is not None:
-        result["lifecycle_status"] = lifecycle.status
+        result["lifecycle_status"] = _read_data_lifecycle(Path(db_root)).status
     return result
 
 
@@ -1607,6 +1690,10 @@ def _execute_add(
             "failure",
         }:
             return False
+        for field in ("empty_files", "searchable_files"):
+            count = value.get(field, 0)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                return False
         if not isinstance(value.get("error_details"), list):
             return False
         if not _valid_observability_result(value):
@@ -1679,7 +1766,13 @@ def _execute_add(
         input_errors = int(value["input_error_files"])
         extract_errors = int(value["extract_error_files"])
         completed_files = indexed + skipped
-        if file_count != completed_files + errors:
+        empty_files = int(value.get("empty_files") or 0)
+        if file_count != completed_files + errors + empty_files:
+            return False
+        if empty_files and (
+            ingestion_diagnostics is None
+            or ingestion_diagnostics["zero_text"]["count"] != empty_files
+        ):
             return False
         if errors != input_errors + extract_errors:
             return False
@@ -1690,17 +1783,9 @@ def _execute_add(
         if result_status == "partial":
             return (
                 errors > 0
-                and input_errors == errors
-                and extract_errors == 0
                 and completed_files > 0
-                and all(
-                    bool(detail.get("retryable"))
-                    for detail in value["error_details"]
-                )
             )
-        return errors > 0 and (
-            completed_files == 0 or extract_errors > 0
-        )
+        return errors > 0 and completed_files == 0
 
     try:
         summary = extract_json_result(
@@ -1761,8 +1846,6 @@ def _execute_add(
     valid_partial = (
         result_status == "partial"
         and error_files > 0
-        and input_error_files == error_files
-        and extract_error_files == 0
         and completed_files > 0
     )
     if (
@@ -1797,6 +1880,7 @@ def _execute_add(
             )
         raise error
     if privacy_safe_root:
+        raw_summary = summary
         summary = {
             field: summary[field]
             for field in (
@@ -1816,12 +1900,20 @@ def _execute_add(
         }
         if ingestion_diagnostics is not None:
             summary["ingestion_diagnostics"] = ingestion_diagnostics
+        for field in ("empty_files", "searchable_files"):
+            if field in raw_summary:
+                summary[field] = raw_summary[field]
         summary.update(observability)
-        if summary["result_status"] == "partial":
-            summary["warning_ja"] = (
-                f"{summary['input_error_files']:,}件のファイルを読み取れませんでした。"
-                "読めたファイルは反映済みで、失敗ファイルは次回自動再試行します。"
-            )
+    warnings = []
+    if int(summary.get("empty_files") or 0):
+        warnings.append(f"本文なし {summary['empty_files']:,}件（警告付き完了）。")
+    if result_status == "partial":
+        warnings.append(
+            f"読取り失敗 {input_error_files:,}件、抽出失敗 {extract_error_files:,}件。"
+            "処理できた文書は反映済みです。"
+        )
+    if warnings:
+        summary["warning_ja"] = "".join(warnings)
     return {
         "source_id": reported_source_id,
         "status": result_status,
@@ -2314,7 +2406,7 @@ def _update_redmine_source(
 
     if bool(
         state_holder[0].payload.get("initial_database_reflection")
-    ):
+    ) and (state_holder[0].payload.get("ingestion_summary") or {}).get("result_status") != "partial":
         with _database_writer_session(
             store.db_root, stage="reflect.snapshot"
         ):
@@ -2364,7 +2456,7 @@ def _update_redmine_source(
             }
         )
     else:
-        final = complete_run(final)
+        final = _complete_ingestion_run(final)
     final_state = store.save_state(
         source.payload["local_source_key"],
         final,
@@ -2385,6 +2477,7 @@ def _update_redmine_source(
             final_state.payload.get("indexed_confirmed_count") or 0
         ),
         "state_revision": final_state.revision,
+        **_ingestion_result_fields(final_state.payload),
     }
 
 
@@ -2760,7 +2853,7 @@ def _update_gitlab_issues_source(
 
     if bool(
         state_holder[0].payload.get("initial_database_reflection")
-    ):
+    ) and (state_holder[0].payload.get("ingestion_summary") or {}).get("result_status") != "partial":
         with _database_writer_session(
             store.db_root, stage="reflect.snapshot"
         ):
@@ -2814,8 +2907,9 @@ def _update_gitlab_issues_source(
             }
         )
     else:
-        final = complete_run(final)
-        final.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
+        final = _complete_ingestion_run(final)
+        if final.get("status") == "complete":
+            final.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
     final_state = store.save_state(
         source.payload["local_source_key"],
         final,
@@ -2839,7 +2933,48 @@ def _update_gitlab_issues_source(
             final_state.payload.get("indexed_confirmed_count") or 0
         ),
         "state_revision": final_state.revision,
+        **_ingestion_result_fields(final_state.payload),
     }
+
+
+def _ingestion_checkpoint(summary: Mapping[str, Any]) -> dict[str, Any]:
+    # API batches use indexed_confirmed_count as a fetch cursor. Keep actual
+    # searchable coverage separately and replace the cumulative ADD summary.
+    fields = (
+        "result_status", "indexed_files", "skipped_files", "empty_files",
+        "searchable_files", "error_files", "input_error_files",
+        "extract_error_files", "error_details", "ingestion_diagnostics", "warning_ja",
+    )
+    return {
+        "ingestion_summary": {key: summary[key] for key in fields if key in summary},
+        "empty_files": int(summary.get("empty_files") or 0),
+    }
+
+
+def _complete_ingestion_run(state: Mapping[str, Any]) -> dict[str, Any]:
+    completed = complete_run(dict(state))
+    summary = state.get("ingestion_summary") or {}
+    if summary.get("result_status") == "partial":
+        completed.update({
+            "status": "partial", "phase": "reflect", "can_resume": True,
+            "pending_count": int(summary.get("error_files") or 0),
+            "last_error": summary.get("warning_ja"),
+        })
+    return completed
+
+
+def _ingestion_result_fields(state: Mapping[str, Any]) -> dict[str, Any]:
+    summary = state.get("ingestion_summary") or {}
+    result: dict[str, Any] = {}
+    if summary:
+        result["add_summary"] = dict(summary)
+    if state.get("status") == "partial":
+        result.update({"status": "partial", "can_resume": True})
+    if summary.get("warning_ja"):
+        result["message"] = summary["warning_ja"]
+    if summary.get("empty_files"):
+        result["warning_files"] = int(summary["empty_files"])
+    return result
 
 
 def _gitlab_issues_reflect_batch(
@@ -2922,6 +3057,7 @@ def _gitlab_issues_reflect_batch(
             source.payload["local_source_key"]
         )
     reflected = copy.deepcopy(state.payload)
+    reflected.update(_ingestion_checkpoint(add_result["summary"]))
     confirmed_count = int(reflected.get("fetched_count") or 0)
     reflected.update(
         {
@@ -2956,7 +3092,10 @@ def _redmine_reflect_batch(
     validate_managed_work_tree(work)
     fetched_count = int(state.payload.get("fetched_count") or 0)
     indexed_count = int(state.payload.get("indexed_confirmed_count") or 0)
-    batch_count = fetched_count - indexed_count
+    batch_count = max(
+        fetched_count - indexed_count,
+        int((state.payload.get("ingestion_summary") or {}).get("error_files") or 0),
+    )
     if batch_count <= 0:
         raise SourceManagerError(
             "Redmine ADD batch has no pending Issues",
@@ -3047,6 +3186,7 @@ def _redmine_reflect_batch(
         )
         current_source = store.read_source(source.payload["local_source_key"])
     reflected = copy.deepcopy(state.payload)
+    reflected.update(_ingestion_checkpoint(add_result["summary"]))
     confirmed_count = int(reflected.get("fetched_count") or 0)
     reflected.update(
         {
@@ -3313,17 +3453,24 @@ def _reflect_and_sync(
         },
     )
     reflected = copy.deepcopy(state.payload)
+    reflected.update(_ingestion_checkpoint(add_summary))
     fetched_count = int(reflected.get("fetched_count") or 0)
     input_error_files = int(add_summary.get("input_error_files") or 0)
+    error_files = int(add_summary.get("error_files") or 0)
+    empty_files = int(add_summary.get("empty_files") or 0)
     confirmed_count = int(add_summary.get("indexed_files") or 0) + int(
         add_summary.get("skipped_files") or 0
     )
     reflected.update(
         {
             "indexed_confirmed_count": (
-                confirmed_count if partial else fetched_count
+                int(add_summary["searchable_files"])
+                if "searchable_files" in add_summary
+                else confirmed_count if partial or empty_files else fetched_count
             ),
-            "pending_count": input_error_files if partial else 0,
+            "empty_files": empty_files,
+            "ingestion_diagnostics": add_summary.get("ingestion_diagnostics") or {},
+            "pending_count": error_files if partial else 0,
             "last_completed_item": fetched_count or None,
             "metadata_sync_pending": bool(
                 sync_result.get("metadata_sync_pending")
@@ -3350,6 +3497,7 @@ def _reflect_and_sync(
                 "phase": "reflect",
                 "can_resume": True,
                 "input_error_files": input_error_files,
+                "extract_error_files": int(add_summary.get("extract_error_files") or 0),
                 "input_error_details": list(
                     add_summary.get("error_details") or []
                 )[:100],
@@ -3357,6 +3505,8 @@ def _reflect_and_sync(
         )
     else:
         reflected = complete_run(reflected)
+        for field in ("input_error_files", "extract_error_files", "input_error_details"):
+            reflected.pop(field, None)
     final_state = store.save_state(
         source.payload["local_source_key"],
         reflected,
@@ -3383,6 +3533,9 @@ def _reflect_and_sync(
         )
     elif sync_result.get("metadata_sync_pending"):
         result["status"] = "metadata_sync_pending"
+    elif empty_files:
+        result["warning_files"] = empty_files
+        result["message"] = str(add_summary.get("warning_ja") or "本文なしの文書があります。")
     return result
 
 
@@ -3520,6 +3673,7 @@ def _resume_metadata_sync(
         metadata_publisher=metadata_publisher,
     )
     state = store.read_state(source.payload["local_source_key"])
+    updated: dict[str, Any] = {}
     if state.payload:
         updated = copy.deepcopy(state.payload)
         updated["metadata_sync_pending"] = bool(
@@ -3535,8 +3689,8 @@ def _resume_metadata_sync(
                 }
             )
         else:
-            updated = complete_run(updated)
-            if source.payload.get("source_type") == "gitlab_issues":
+            updated = _complete_ingestion_run(updated)
+            if source.payload.get("source_type") == "gitlab_issues" and updated.get("status") == "complete":
                 updated.pop(GITLAB_PROJECT_ID_STATE_KEY, None)
         store.save_state(
             source.payload["local_source_key"],
@@ -3548,6 +3702,7 @@ def _resume_metadata_sync(
         **_source_dto(store, store.read_source(source.payload["local_source_key"])),
         **result,
         "resumed_operation": "metadata_sync",
+        **_ingestion_result_fields(updated),
     }
 
 

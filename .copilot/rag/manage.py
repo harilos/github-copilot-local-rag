@@ -595,7 +595,7 @@ class LocalRagManager:
         self.output(
             "設定・認証・外部の元資料・利用者説明は保持します。\n"
             "過去の取得物、派生データ、再開情報は通常経路から切り離します。\n"
-            "再取得・反映が完了するまで対象DBは検索・詳細取得できません。\n"
+            "検索可能な文書の再取得・反映が済むまで対象DBは検索・詳細取得できません。\n"
             "この操作だけではネットワーク取得・変換・embedding・再構築を開始しません。"
         )
         if not self._confirm("上記の全DB・全Sourceをリセットしますか？"):
@@ -772,7 +772,7 @@ class LocalRagManager:
         if not self._confirm("全DBの処理を開始しますか？"):
             self._print_info("処理を開始しませんでした。")
             return
-        completed = partial = failed = skipped = 0
+        reports: list[dict[str, Any]] = []
         for index, database in enumerate(databases, start=1):
             db_name = str(database.get("name") or "")
             self.output(
@@ -790,7 +790,10 @@ class LocalRagManager:
                     ),
                 )
             except Exception as exc:
-                failed += 1
+                reports.append({
+                    "db_name": db_name,
+                    "error": sanitize_diagnostic(str(exc), max_chars=400),
+                })
                 self._print_internal_diagnostic(
                     exc,
                     operation="全DBの全Sourceを更新・再開",
@@ -801,23 +804,53 @@ class LocalRagManager:
                 continue
             self._show_source_update_result(result, db_name=db_name)
             groups = self._source_update_groups(result)
-            failed_items = groups["failed"]
-            partial_items = groups["partial"]
-            skipped_items = groups["skipped"]
-            completed += len(groups["completed"])
-            partial += len(partial_items)
-            failed += len(failed_items)
-            skipped += len(skipped_items)
+            reports.append({"db_name": db_name, "groups": groups})
             if bool(result.get("snapshot_marker_eligible")):
                 self._write_content_snapshot(
                     db_name,
                     reason="all_sources_updated",
                 )
-        self.output("\n全DBの処理結果")
-        self.output(f"成功: {completed} Source")
-        self.output(f"一部反映: {partial} Source")
-        self.output(f"失敗: {failed} Source")
-        self.output(f"スキップ: {skipped} Source")
+        self._show_all_database_update_summary(reports)
+
+    def _show_all_database_update_summary(self, reports: list[dict[str, Any]]) -> None:
+        labels = (
+            ("completed", "成功"), ("warning", "警告付き完了"),
+            ("partial", "一部反映"), ("failed", "失敗"), ("skipped", "スキップ"),
+        )
+        self.output("\n全DBの最終サマリー")
+        db_errors = sum("error" in report for report in reports)
+        self.output(f"処理対象: {len(reports)} DB / DB処理失敗: {db_errors} DB")
+        for key, label in labels:
+            count = sum(len(report.get("groups", {}).get(key, [])) for report in reports)
+            self.output(f"{label}: {count} Source")
+        self.output("\nDB別の結果")
+        for report in reports:
+            name = report["db_name"]
+            if "error" in report:
+                self.output(f"  - DB「{name}」: DB処理失敗")
+                continue
+            counts = " / ".join(
+                f"{label} {len(report['groups'][key])}" for key, label in labels
+            )
+            self.output(f"  - DB「{name}」: {counts} Source")
+        self.output("\n警告・一部反映・失敗・スキップの一覧（全DB）")
+        details = 0
+        for report in reports:
+            db_name = report["db_name"]
+            if "error" in report:
+                self.output(f"  - DB「{db_name}」 [DB処理失敗]: {report['error']}")
+                details += 1
+                continue
+            for key, label in labels[1:]:
+                for value in report["groups"][key]:
+                    item = value if isinstance(value, dict) else {"name": str(value)}
+                    name = str(item.get("display_name") or item.get("name") or item.get("local_source_key") or "Source")
+                    reason = str(item.get("message") or item.get("skip_reason") or item.get("reason") or item.get("error") or "")
+                    reason = " ".join(sanitize_diagnostic(reason, max_chars=400).split())
+                    self.output(f"  - DB「{db_name}」 / {name} [{label}]" + (f": {reason}" if reason else ""))
+                    details += 1
+        if not details:
+            self.output("  なし")
 
     def _show_source_update_result(
         self,
@@ -829,6 +862,7 @@ class LocalRagManager:
         groups = self._source_update_groups(result)
         for key, label in (
             ("completed", "成功"),
+            ("warning", "警告付き完了"),
             ("partial", "一部反映"),
             ("failed", "失敗"),
             ("skipped", "スキップ"),
@@ -851,6 +885,8 @@ class LocalRagManager:
                     )
                     self.output(f"  - {name}" + (f": {reason}" if reason else ""))
                     self._print_observability_warning(value)
+                    if key in {"warning", "partial"}:
+                        self._print_ingestion_diagnostics(value.get("add_summary") or value)
                     diagnostic = value.get("failure_diagnostic")
                     if key == "failed" and isinstance(diagnostic, dict):
                         self._print_error(
@@ -886,12 +922,21 @@ class LocalRagManager:
                 "success",
                 "updated",
             }
+            def has_warning(value: dict[str, Any]) -> bool:
+                summary = value.get("add_summary") or {}
+                return bool(value.get("warning_files") or summary.get("empty_files"))
+
             return {
                 "completed": [
                     value
                     for value in values
                     if str(value.get("status") or "")
                     in completed_statuses
+                    and not has_warning(value)
+                ],
+                "warning": [
+                    value for value in values
+                    if value.get("status") in completed_statuses and has_warning(value)
                 ],
                 "skipped": [
                     value
@@ -912,7 +957,7 @@ class LocalRagManager:
             }
         return {
             key: list(result.get(key) or [])
-            for key in ("completed", "partial", "failed", "skipped")
+            for key in ("completed", "warning", "partial", "failed", "skipped")
         }
 
     def _write_content_snapshot(self, db_name: str, *, reason: str) -> None:
@@ -1380,16 +1425,18 @@ class LocalRagManager:
         indexed = int(values.get("indexed_files") or 0)
         skipped = int(values.get("skipped_files") or 0)
         failed = int(values.get("input_error_files") or 0)
+        extraction_failed = int(values.get("extract_error_files") or 0)
+        empty = int(values.get("empty_files") or 0)
         self._print_warning(
             "Sourceは一部反映されました。"
             f"反映: {indexed:,}件 / 未変更: {skipped:,}件 / "
-            f"読取り失敗: {failed:,}件"
+            f"本文なし: {empty:,}件 / 読取り失敗: {failed:,}件 / 抽出失敗: {extraction_failed:,}件"
         )
         self.output(
-            "読取りに失敗したファイルの以前の検索データは保持されています。"
+            "処理できた文書は検索に利用できます。"
         )
         self.output(
-            "対応: ファイルを読める状態に戻して同じSourceを更新すると、"
+            "対応: 失敗原因を解消して同じSourceを更新すると、"
             "失敗ファイルを自動的に再試行します。"
         )
         self._print_ingestion_diagnostics(values)
