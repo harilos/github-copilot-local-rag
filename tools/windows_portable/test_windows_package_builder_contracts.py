@@ -346,7 +346,12 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 ):
                     self.assertNotIn(removed, installer)
                 self.assertIn("Assert-Amd64PortableRuntime", installer)
-                self.assertIn("-ReplaceExistingDatabases", installer)
+                self.assertIn("[switch]$ReplaceExistingDatabases", installer)
+                for removed in (
+                    "$BackupDbs", "$StageDbs", "$DatabaseBackedUp",
+                    "database already exists; use -ReplaceExistingDatabases",
+                ):
+                    self.assertNotIn(removed, installer)
                 self.assertIn("[System.IO.Directory]::Move", installer)
                 self.assertIn("function Move-PublishedRuntime", installer)
                 self.assertIn(
@@ -367,7 +372,7 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     installer.index(
                         "[System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)"
                     ),
-                    installer.index("$PayloadRoot ="),
+                    installer.index("Get-ChildItem -LiteralPath $Payload -Force -Recurse |"),
                 )
                 self.assertGreater(
                     installer.index('$InstallStage = "slash_skill"'),
@@ -1038,16 +1043,15 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             unrelated = target / "dbs" / "unrelated-rag"
             unrelated.mkdir()
             (unrelated / "keep.txt").write_text("keep\n", encoding="utf-8")
-            rejected = self._run(package, profile)
-            self.assertNotEqual(0, rejected.returncode)
-            self.assertEqual(
-                b"old-db",
-                (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
-            )
-            replaced = self._run(
-                package, profile, "-ReplaceExistingDatabases"
-            )
+            stale = target / "dbs" / "selected-rag" / "old-only.txt"
+            stale.write_bytes(b"obsolete")
+            replaced = self._run(package, profile)
             self.assertEqual(0, replaced.returncode, replaced.stderr)
+            self.assertFalse(stale.exists())
+            self.assertEqual(
+                {"selected-rag", "unrelated-rag"},
+                {path.name for path in (target / "dbs").iterdir()},
+            )
             self.assertEqual(
                 b"new-db",
                 (target / "dbs" / "selected-rag" / "catalog.sqlite").read_bytes(),
@@ -1060,6 +1064,76 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 {"user-owned.agent.md"},
                 {path.name for path in agents.glob("*.agent.md")},
+            )
+
+    def test_db_copy_failure_does_not_restore_old_or_leave_partial_db(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            database_parent = profile / ".copilot" / "rag" / "dbs"
+            database = database_parent / "selected-rag"
+            database.mkdir(parents=True)
+            (database / "old-only.txt").write_bytes(b"old-db")
+            installer = package / "internal" / "install.ps1"
+            original = installer.read_text(encoding="utf-8")
+            copy = (
+                '            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (\n'
+                '                $Existing\n'
+                '            ) -Recurse'
+            )
+            self.assertIn(copy, original)
+            installer.write_text(original.replace(copy, copy + '\n'
+                '            throw "synthetic DB copy failure"', 1), encoding="utf-8")
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertFalse(database.exists())
+            self.assertEqual([], list(database_parent.glob("*")))
+
+    def test_overlapping_payload_is_rejected_before_db_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            database = profile / ".copilot" / "rag" / "dbs" / "selected-rag"
+            database.mkdir(parents=True)
+            old = database / "old-only.txt"
+            old.write_bytes(b"old-db")
+            package = self._package(database)
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("must not overlap", completed.stdout + completed.stderr)
+            self.assertEqual(b"old-db", old.read_bytes())
+            self.assertTrue((package / ".copilot").is_dir())
+
+    def test_later_failure_keeps_new_db_without_old_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            database_parent = profile / ".copilot" / "rag" / "dbs"
+            database = database_parent / "selected-rag"
+            database.mkdir(parents=True)
+            (database / "old-only.txt").write_bytes(b"old-db")
+            unrelated = database_parent / "unrelated-rag"
+            unrelated.mkdir()
+            (unrelated / "keep.txt").write_bytes(b"keep")
+            installer = package / "internal" / "install.ps1"
+            installer.write_text(
+                installer.read_text(encoding="utf-8").replace(
+                    '    $DatabaseStatus = "READY"',
+                    '    throw "synthetic post-DB failure"',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(b"new-db", (database / "catalog.sqlite").read_bytes())
+            self.assertFalse((database / "old-only.txt").exists())
+            self.assertEqual(b"keep", (unrelated / "keep.txt").read_bytes())
+            self.assertEqual(
+                {"selected-rag", "unrelated-rag"},
+                {path.name for path in database_parent.iterdir()},
             )
 
     def test_slash_skill_is_not_created_after_failed_product_publish(self) -> None:

@@ -589,8 +589,9 @@ $ragPython = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
 
 完成ZIPには利用者向けの`install.cmd`と`README-WINDOWS.md`が入ります。作成時に
 固定Python、依存package、model、DB、manifest、checksumを検証します。配布先では
-ZIPをすべて展開し、同梱READMEに従ってinstallします。同名DBを更新する場合は、
-更新対象であることを確認したうえで`install.cmd -ReplaceExistingDatabases`を使います。
+ZIPをすべて展開し、同梱READMEに従って`install.cmd`を実行します。
+同名DBは無条件で置き換え、別名DBは保持します。旧DBのバックアップやインストール先への
+DB全体の事前コピーは作りません。途中で失敗した場合は再インストールしてください。
 
 ### 管理PC引っ越しpackage
 
@@ -601,6 +602,8 @@ ZIPをすべて展開し、同梱READMEに従ってinstallします。同名DB�
 
 受取側はManagerの`配布・管理PCの引っ越し`から
 `パッケージを取り込む・検証する`を選びます。
+取り込みを開始すると同名DBを上書きし、旧DBのバックアップは作りません。
+失敗時は原因を解消して、同じパッケージを再度取り込んでください。
 
 Windows PowerShellから作る場合:
 

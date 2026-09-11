@@ -633,9 +633,11 @@ summary, and shows the absolute log path. There is no final PowerShell pause.
 The approval chooser can still prompt: for unattended installation, combine
 `-NoPause` with `-SkipVSCodeAutoApprove` or an explicit approval option.
 
-The package contains only the databases selected by the builder. Existing
-unrelated databases are preserved. Replacing a same-name database requires
-`install.cmd -ReplaceExistingDatabases`.
+The package contains only the databases selected by the builder. Same-name
+databases are always replaced, including removal of old files. Other databases
+are preserved. No database backup or extra installed-database staging copy is
+created. If installation fails, run install.cmd again; old databases are not
+restored. The legacy -ReplaceExistingDatabases option is still accepted.
 
 In GitHub Copilot Chat or Copilot CLI, run `/local-rag <question>`. The installed
 personal Skill uses Local RAG's fixed runner command boundary; lookup operations

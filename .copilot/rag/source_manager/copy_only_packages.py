@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
@@ -12,10 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .machine_connections import configured_sharepoint_root
 from .setup_copy_bridge import restore_portable_database
-from .persistent_paths import (
-    create_persistent_directory,
-    create_persistent_staging_directory,
-)
+from .persistent_paths import create_persistent_directory
 
 
 _PATCH_MARKER = "_local_rag_copy_only_packages_installed"
@@ -118,16 +116,16 @@ def _import_package(package_path: Path, copilot_home: Path) -> dict[str, Any]:
     """Import through the same copy layout users can perform manually.
 
     Package files live only below ``.copilot``.  A human may extract the package
-    and copy that directory to the home directory.  Manager import adds staged DB
-    replacement and rollback, but does not depend on a generated installer.
+    and copy that directory to the home directory. Manager import replaces each
+    included DB directly, without retaining its old contents or a staged DB copy.
     """
 
     from . import packages
 
     package = Path(package_path).expanduser()
     target = Path(copilot_home).expanduser()
-    if target.is_symlink():
-        raise packages.PackageError("install_target_symlink_forbidden")
+    _check_target_path(target, directory=True, packages=packages)
+    _reject_overlap(package, target, packages)
     if not target.exists():
         create_persistent_directory(
             target,
@@ -163,57 +161,108 @@ def _publish_copy_tree(
     packages: Any,
 ) -> None:
     database_names = _database_names(manifest, packages)
-    database_parent = _safe_directory(target, PurePosixPath("rag/dbs"), packages)
-    staging_parent = create_persistent_staging_directory(
-        database_parent,
-        prefix=".local-rag-import-",
-    )
-    database_stages = {
-        name: staging_parent / name
-        for name in database_names
-    }
-    try:
-        for record in manifest.get("files", []):
-            relative = packages._safe_relative(str(record.get("path") or ""))
-            if relative.as_posix() == "bootstrap.py":
-                # Backward-compatible import of an older package; never execute it.
-                continue
-            if relative.as_posix() in _PACKAGE_INSTALLERS:
-                # Package-root helpers copy the .copilot payload when a human
-                # installs an extracted package. Manager import already owns
-                # the destination publication and does not copy these helpers.
-                continue
-            if not relative.parts or relative.parts[0] != ".copilot":
-                raise packages.PackageError("package_copy_root_invalid")
-            source = package_root.joinpath(*relative.parts)
-            if source.is_symlink() or not source.is_file():
-                raise packages.PackageError("package_source_missing")
-            database_name, database_relative = _database_path(relative, database_names)
-            if database_name is not None:
-                destination = _safe_destination(
-                    database_stages[database_name],
-                    database_relative,
-                    packages,
-                )
-            else:
-                destination = _safe_destination(
-                    target,
-                    PurePosixPath(*relative.parts[1:]),
-                    packages,
-                )
-            _copy_atomic(source, destination)
+    _reject_overlap(package_root, target, packages)
+    database_parent = target / "rag" / "dbs"
+    files: list[tuple[Path, PurePosixPath, str | None]] = []
+    for record in manifest.get("files", []):
+        relative = packages._safe_relative(str(record.get("path") or ""))
+        if any(":" in part for part in relative.parts):
+            raise packages.PackageError("package_path_invalid")
+        if relative.as_posix() in {"bootstrap.py", *_PACKAGE_INSTALLERS}:
+            continue
+        if not relative.parts or relative.parts[0] != ".copilot":
+            raise packages.PackageError("package_copy_root_invalid")
+        source = package_root.joinpath(*relative.parts)
+        for path in (source, *source.parents):
+            if path == package_root.parent:
+                break
+            if _is_link(path):
+                raise packages.PackageError("package_symlink_forbidden")
+        if not source.is_file():
+            raise packages.PackageError("package_source_missing")
+        name, database_relative = _database_path(relative, database_names)
+        destination_relative = (
+            database_relative if name is not None else PurePosixPath(*relative.parts[1:])
+        )
+        if name is None:
+            _check_target_path(
+                target.joinpath(*destination_relative.parts),
+                directory=False, packages=packages,
+            )
+        files.append((source, destination_relative, name))
 
-        for name, stage in database_stages.items():
-            _validate_staged_database(stage, name, manifest, packages)
+    # Check every DB and target before removing any old database.
+    for name in database_names:
+        _check_target_path(database_parent / name, directory=True, packages=packages)
+        _validate_database(
+            package_root / ".copilot" / "rag" / "dbs" / name, name, manifest, packages,
+        )
+
+    if database_names:
+        create_persistent_directory(
+            database_parent, trusted_root=target, parents=True, exist_ok=True,
+        )
+    for source, relative, name in files:
+        if name is None:
+            _copy_atomic(source, _safe_destination(target, relative, packages))
+    for name in database_names:
+        destination = database_parent / name
+        _check_target_path(destination, directory=True, packages=packages)
+        try:
+            if destination.exists():
+                shutil.rmtree(destination)
+            for source, relative, database_name in files:
+                if database_name == name:
+                    _copy_atomic(source, _safe_destination(destination, relative, packages))
+            _validate_database(destination, name, manifest, packages)
             if manifest.get("kind") == packages._ADMIN_KIND:
                 restore_portable_database(
-                    stage,
-                    portable_root=database_parent / name,
+                    destination,
+                    portable_root=destination,
                     rag_root=target / "rag",
                 )
-        _publish_databases(database_parent, database_stages, packages)
-    finally:
-        shutil.rmtree(staging_parent, ignore_errors=True)
+        except BaseException as exc:
+            # The old DB is intentionally gone; remove only this incomplete DB.
+            try:
+                _check_target_path(destination, directory=True, packages=packages)
+                if destination.exists():
+                    shutil.rmtree(destination)
+            except (OSError, packages.PackageError):
+                raise packages.PackageError(
+                    "install_database_cleanup_failed_reinstall_required"
+                ) from exc
+            raise packages.PackageError("install_database_failed_reinstall_required") from exc
+
+
+def _is_link(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _check_target_path(path: Path, *, directory: bool, packages: Any) -> None:
+    absolute = path.absolute()
+    for current in (*reversed(absolute.parents), absolute):
+        if _is_link(current):
+            raise packages.PackageError("install_target_symlink_forbidden")
+        if current.exists():
+            expected_directory = directory or current != absolute
+            if (expected_directory and not current.is_dir()) or (
+                not expected_directory and not current.is_file()
+            ):
+                raise packages.PackageError("install_target_path_invalid")
+
+
+def _reject_overlap(package: Path, target: Path, packages: Any) -> None:
+    source = package.resolve(strict=False)
+    destination = target.resolve(strict=False)
+    if source == destination or source in destination.parents or destination in source.parents:
+        raise packages.PackageError("install_source_target_overlap")
 
 
 def _database_names(manifest: Mapping[str, Any], packages: Any) -> list[str]:
@@ -221,9 +270,9 @@ def _database_names(manifest: Mapping[str, Any], packages: Any) -> list[str]:
     seen: set[str] = set()
     for item in manifest.get("dbs", []):
         name = str(item.get("name") or "").strip() if isinstance(item, Mapping) else ""
-        if not packages._DB_NAME.fullmatch(name) or name in seen:
+        if not packages._DB_NAME.fullmatch(name) or name.casefold() in seen:
             raise packages.PackageError("package_database_invalid")
-        seen.add(name)
+        seen.add(name.casefold())
         output.append(name)
     return output
 
@@ -233,32 +282,14 @@ def _database_path(
     database_names: Iterable[str],
 ) -> tuple[str | None, PurePosixPath]:
     parts = relative.parts
-    if len(parts) < 4 or parts[:3] != (".copilot", "rag", "dbs"):
+    if parts[:3] != (".copilot", "rag", "dbs"):
         return None, PurePosixPath()
+    if len(parts) < 5:
+        raise ValueError("package_database_not_declared")
     name = parts[3]
-    if name not in set(database_names) or len(parts) < 5:
+    if name not in set(database_names):
         raise ValueError("package_database_not_declared")
     return name, PurePosixPath(*parts[4:])
-
-
-def _safe_directory(target: Path, relative: PurePosixPath, packages: Any) -> Path:
-    current = target
-    resolved_target = target.resolve(strict=True)
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise packages.PackageError("install_target_symlink_forbidden")
-        if current.exists() and not current.is_dir():
-            raise packages.PackageError("install_target_path_invalid")
-        create_persistent_directory(
-            current,
-            trusted_root=target,
-            exist_ok=True,
-        )
-        resolved = current.resolve(strict=True)
-        if resolved != resolved_target and resolved_target not in resolved.parents:
-            raise packages.PackageError("install_target_escape")
-    return current
 
 
 def _safe_destination(target: Path, relative: PurePosixPath, packages: Any) -> Path:
@@ -273,7 +304,7 @@ def _safe_destination(target: Path, relative: PurePosixPath, packages: Any) -> P
     resolved_target = target.resolve(strict=True)
     for part in relative.parts[:-1]:
         current = current / part
-        if current.is_symlink():
+        if _is_link(current):
             raise packages.PackageError("install_target_symlink_forbidden")
         if current.exists() and not current.is_dir():
             raise packages.PackageError("install_target_path_invalid")
@@ -286,7 +317,7 @@ def _safe_destination(target: Path, relative: PurePosixPath, packages: Any) -> P
         if resolved != resolved_target and resolved_target not in resolved.parents:
             raise packages.PackageError("install_target_escape")
     destination = current / relative.parts[-1]
-    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+    if _is_link(destination) or (destination.exists() and not destination.is_file()):
         raise packages.PackageError("install_target_path_invalid")
     return destination
 
@@ -305,8 +336,8 @@ def _copy_atomic(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _validate_staged_database(
-    stage: Path,
+def _validate_database(
+    root: Path,
     db_name: str,
     manifest: Mapping[str, Any],
     packages: Any,
@@ -317,74 +348,26 @@ def _validate_staged_database(
         for item in manifest.get("files", [])
         if isinstance(item, Mapping) and str(item.get("path") or "").startswith(prefix)
     }
-    if stage.is_symlink() or not stage.is_dir() or not expected:
-        raise packages.PackageError("staged_database_invalid")
+    if _is_link(root) or not root.is_dir() or not expected:
+        raise packages.PackageError("package_database_invalid")
     actual: dict[str, Path] = {}
-    for path in stage.rglob("*"):
-        if path.is_symlink():
+    for path in root.rglob("*"):
+        if _is_link(path):
             raise packages.PackageError("package_symlink_forbidden")
         if not path.is_file():
             continue
-        relative = path.relative_to(stage).as_posix()
+        relative = path.relative_to(root).as_posix()
         packages._safe_relative(relative)
         actual[relative] = path
     if set(actual) != set(expected):
-        raise packages.PackageError("staged_database_manifest_mismatch")
+        raise packages.PackageError("package_database_manifest_mismatch")
     for relative, path in actual.items():
         record = expected[relative]
         if (
             path.stat().st_size != int(record.get("size", -1))
             or _sha256(path) != record.get("sha256")
         ):
-            raise packages.PackageError("staged_database_checksum_mismatch")
-
-
-def _publish_databases(
-    database_parent: Path,
-    database_stages: Mapping[str, Path],
-    packages: Any,
-) -> None:
-    backups: dict[str, Path] = {}
-    published: list[str] = []
-    try:
-        for name in sorted(database_stages):
-            destination = database_parent / name
-            if destination.is_symlink():
-                raise packages.PackageError("install_database_symlink_forbidden")
-            if destination.exists():
-                if not destination.is_dir():
-                    raise packages.PackageError("install_database_path_invalid")
-                backup = database_parent / f".{name}.{uuid.uuid4().hex}.previous"
-                os.replace(destination, backup)
-                backups[name] = backup
-        for name in sorted(database_stages):
-            os.replace(database_stages[name], database_parent / name)
-            published.append(name)
-    except BaseException:
-        restore_failed = False
-        for name in reversed(published):
-            destination = database_parent / name
-            try:
-                if destination.is_dir() and not destination.is_symlink():
-                    shutil.rmtree(destination)
-                elif destination.exists() or destination.is_symlink():
-                    destination.unlink()
-            except OSError:
-                restore_failed = True
-        for name in reversed(sorted(backups)):
-            backup = backups[name]
-            destination = database_parent / name
-            try:
-                if backup.exists() and not destination.exists():
-                    os.replace(backup, destination)
-            except OSError:
-                restore_failed = True
-        if restore_failed:
-            raise packages.PackageError("install_database_restore_failed")
-        raise
-    else:
-        for backup in backups.values():
-            shutil.rmtree(backup, ignore_errors=True)
+            raise packages.PackageError("package_database_checksum_mismatch")
 
 
 def _safe_relative(value: str) -> PurePosixPath:

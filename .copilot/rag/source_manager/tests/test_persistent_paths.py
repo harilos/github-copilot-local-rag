@@ -343,7 +343,7 @@ class PersistentPathPolicyTests(unittest.TestCase):
                 any(path.name.startswith(".copy-copy-rag-") for path in root.iterdir())
             )
 
-    def test_copy_only_import_replaces_database_via_persistent_stage(self) -> None:
+    def test_copy_only_import_replaces_database_without_persistent_stage(self) -> None:
         class PackageError(ValueError):
             pass
 
@@ -460,7 +460,7 @@ class PersistentPathPolicyTests(unittest.TestCase):
             ),
             "github_content.py": ("create_persistent_staging_directory(",),
             "database_copy_core.py": ("create_persistent_staging_directory(",),
-            "copy_only_packages.py": ("create_persistent_staging_directory(",),
+            "copy_only_packages.py": ("create_persistent_directory(",),
         }
         violations: list[str] = []
         for name in names:

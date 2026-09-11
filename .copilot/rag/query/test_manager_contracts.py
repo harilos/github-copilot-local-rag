@@ -364,7 +364,7 @@ class ManagerContractTests(unittest.TestCase):
             ],
             "total": {"files": 3, "bytes": 10},
         }
-        manager = self.manager([str(package), "y", "example-rag"])
+        manager = self.manager([str(package), "y"])
         with (
             mock.patch.object(
                 source_packages,
@@ -387,10 +387,11 @@ class ManagerContractTests(unittest.TestCase):
             self.rag_root.parent.resolve(),
         )
         text = "\n".join(self.output)
-        self.assertIn("同名DBを安全に差し替えます", text)
+        self.assertIn("同名DBは配布内容で上書きします", text)
+        self.assertIn("バックアップは作成しません", text)
         self.assertIn("取り込んだDB: example-rag", text)
 
-    def test_package_import_mismatched_confirmation_does_not_write(
+    def test_package_import_declined_does_not_write(
         self,
     ) -> None:
         self.make_db("example-rag")
@@ -401,7 +402,7 @@ class ManagerContractTests(unittest.TestCase):
             "dbs": [{"name": "example-rag"}],
             "total": {"files": 1, "bytes": 1},
         }
-        manager = self.manager([str(package), "y", "wrong-rag"])
+        manager = self.manager([str(package), "n"])
         with (
             mock.patch.object(
                 source_packages,
@@ -416,9 +417,26 @@ class ManagerContractTests(unittest.TestCase):
             manager._verify_or_import_package()
         importer.assert_not_called()
         self.assertIn(
-            "取り込みを開始しませんでした",
+            "取り込みは行っていません",
             "\n".join(self.output),
         )
+
+    def test_package_import_failure_instructs_reimport_without_restore_promise(self) -> None:
+        self.make_db("example-rag")
+        package = self.base / "package.zip"
+        package.write_bytes(b"fixture")
+        manager = self.manager([str(package), "y"])
+        with (
+            mock.patch.object(source_packages, "validate_distribution_zip", return_value={
+                "kind": "distribution", "dbs": [{"name": "example-rag"}],
+                "total": {"files": 1, "bytes": 1},
+            }),
+            mock.patch.object(source_packages, "import_package", side_effect=OSError("copy failed")),
+        ):
+            manager._verify_or_import_package()
+        text = "\n".join(self.output)
+        self.assertIn("再度取り込んでください", text)
+        self.assertNotIn("同名DBは保持されています", text)
 
     def test_source_update_groups_use_runner_result_contract(self) -> None:
         groups = manage.LocalRagManager._source_update_groups(

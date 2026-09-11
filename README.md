@@ -182,14 +182,15 @@ Skill展開とrunner呼出しを確認していますが、実地試験には試
 ### 配布版を更新する
 
 配布DBは作成時点のsnapshotです。元資料を更新した場合は、管理者から新しい配布版を
-受け取ります。同名DBは既定で置き換えません。置換してよい更新版と確認できた場合に
-限り、新しいZIPの展開先で次を実行します。
+受け取ります。新しいZIPの展開先で次を実行すると、同名DBを無条件で置き換えます。
 
 ```powershell
-.\install.cmd -ReplaceExistingDatabases
+.\install.cmd
 ```
 
 置き換わるのはZIPに含まれる同名DBだけで、別名DBは保持します。
+旧DBのバックアップやインストール先でのDB全体の事前コピーは作りません。
+旧DBを削除してから新DBを配置するため、途中で失敗した場合は再インストールしてください。
 自動実行で終了待ちを省く場合は`-NoPause`を追加できます。承認の選択も省略するには
 `-SkipVSCodeAutoApprove`または明示的な許可オプションを併用してください。
 
@@ -205,7 +206,7 @@ Copilotによる実地受入はinstallerや製品testでは実行しません。
 |---|---|
 | VS Codeの`/`メニューに出ない | 完全終了して再起動し、`Chat: Open Customizations`のSkillsで`local-rag`を確認 |
 | CLIに出ない | `/skills reload` → `/skills info local-rag` |
-| 同名DBがありinstallできない | 更新版と確認したうえで`-ReplaceExistingDatabases`を指定 |
+| DB更新の途中でinstallが失敗した | 原因を解消し、同じ配布版の`install.cmd`を再実行 |
 | DBを選べない | 管理者から案内されたDB名を質問へ明記 |
 | 根拠が不足する | 条件や比較軸を追加するか、`mode=thorough`で質問 |
 | runtimeがない・setupが失敗する | インストール結果を確認し、同じinstallerでの修復を管理者へ相談 |

@@ -4,7 +4,7 @@ param(
     [switch]$ConfigureVSCodeRunnerApproval,
     [switch]$SkipVSCodeAutoApprove,
     [switch]$RetryVSCodeApprovals,
-    [switch]$ReplaceExistingDatabases,
+    [switch]$ReplaceExistingDatabases, # Compatibility: replacement is always enabled.
     [switch]$LauncherArgumentError
 )
 
@@ -28,14 +28,10 @@ $StageRuntime = Join-Path $TargetQuery (".venv.stage-" + $Transaction)
 $BackupRuntime = Join-Path $TargetQuery (".venv.backup-" + $Transaction)
 $StageModel = Join-Path (Split-Path -Parent $TargetModel) (".model.stage-" + $Transaction)
 $BackupModel = Join-Path (Split-Path -Parent $TargetModel) (".model.backup-" + $Transaction)
-$StageDbs = Join-Path $TargetDbs (".portable.stage-" + $Transaction)
-$BackupDbs = Join-Path $TargetDbs (".portable.backup-" + $Transaction)
 $BackupProduct = Join-Path $TargetQuery (".product.backup-" + $Transaction)
 $ProductBackedUp = @()
 $ProductCreatedFiles = @()
 $ProductCreatedDirectories = @()
-$DatabaseBackedUp = @()
-$DatabaseFresh = @()
 $RuntimePublished = $false
 $ModelPublished = $false
 $InstallStage = "validate_package"
@@ -367,6 +363,15 @@ Assert-NoReparseTree -Path $Payload
 Assert-NoReparseTree -Path $SourceRuntime
 Assert-NoReparseTree -Path $SourceModel
 Assert-Amd64PortableRuntime -Runtime $SourceRuntime
+$PayloadRoot = [System.IO.Path]::GetFullPath($Payload).TrimEnd('\')
+$TargetRoot = [System.IO.Path]::GetFullPath($Target).TrimEnd('\')
+if (
+    $PayloadRoot -ieq $TargetRoot -or
+    $PayloadRoot.StartsWith($TargetRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $TargetRoot.StartsWith($PayloadRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+) {
+    throw "install payload and target must not overlap"
+}
 if (Test-Path -LiteralPath (Join-Path $TargetQuery "run\ragd.json") -PathType Leaf) {
     throw "stop the owned Local RAG daemon before updating"
 }
@@ -396,14 +401,8 @@ foreach ($Name in $DatabaseNames) {
     ) {
         throw ("same-name database target is not a directory: " + $Name)
     }
-    if (
-        (Test-Path -LiteralPath $Existing -PathType Container) -and
-        -not $ReplaceExistingDatabases
-    ) {
-        throw (
-            "database already exists; use -ReplaceExistingDatabases to replace it: " +
-            $Name
-        )
+    if (Test-Path -LiteralPath $Existing -PathType Container) {
+        Assert-NoReparseTree -Path $Existing
     }
 }
 
@@ -416,14 +415,6 @@ try {
     ) | Out-Null
     Copy-Item -LiteralPath $SourceRuntime -Destination $StageRuntime -Recurse
     Copy-Item -LiteralPath $SourceModel -Destination $StageModel -Recurse
-    if ($DatabaseNames.Count -gt 0) {
-        New-Item -ItemType Directory -Path $StageDbs | Out-Null
-        foreach ($Name in $DatabaseNames) {
-            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (
-                Join-Path $StageDbs $Name
-            ) -Recurse
-        }
-    }
 
     # Close both the managed-setup marker gate and the fixed portable-runtime
     # gate before changing product files or selected databases.  The staged
@@ -510,22 +501,26 @@ try {
     [System.IO.Directory]::Move($StageModel, $TargetModel)
     $ModelPublished = $true
 
+    $InstallStage = "replace_databases"
     foreach ($Name in $DatabaseNames) {
         $Existing = Join-Path $TargetDbs $Name
+        Assert-NoReparsePath -Path $Existing
         if (Test-Path -LiteralPath $Existing -PathType Container) {
-            New-Item -ItemType Directory -Force -Path $BackupDbs | Out-Null
-            [System.IO.Directory]::Move(
-                $Existing,
-                (Join-Path $BackupDbs $Name)
-            )
-            $DatabaseBackedUp += $Name
-        } else {
-            $DatabaseFresh += $Name
+            Assert-NoReparseTree -Path $Existing
         }
-        [System.IO.Directory]::Move(
-            (Join-Path $StageDbs $Name),
-            $Existing
-        )
+        # Free the old DB before copying. Never stage, back up, or restore a DB.
+        $DatabaseStatus = "REINSTALL_REQUIRED"
+        Remove-Tree $Existing
+        try {
+            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (
+                $Existing
+            ) -Recurse
+        } catch {
+            try { Remove-Tree $Existing } catch {
+                Write-Warning "Incomplete database removal failed; reinstall this package."
+            }
+            throw
+        }
     }
     $DatabaseStatus = "READY"
 
@@ -620,14 +615,6 @@ try {
     }
     $LegacyAgent003Status = [string]$CopilotCliResult.status
 } catch {
-    foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
-        $Current = Join-Path $TargetDbs $Name
-        if (Test-Path -LiteralPath $Current) { Remove-Tree $Current }
-        $Backup = Join-Path $BackupDbs $Name
-        if (Test-Path -LiteralPath $Backup) {
-            [System.IO.Directory]::Move($Backup, $Current)
-        }
-    }
     if ($RuntimePublished -and (Test-Path -LiteralPath $TargetRuntime)) {
         Remove-Tree $TargetRuntime
     }
@@ -656,8 +643,6 @@ try {
         }
     }
     Remove-Tree $BackupProduct
-    Remove-Tree $BackupDbs
-    Remove-Tree $StageDbs
     Remove-Tree $StageRuntime
     Remove-Tree $StageModel
     foreach ($Path in ($ProductCreatedDirectories |
@@ -689,9 +674,7 @@ try {
 foreach ($Path in @(
     $BackupRuntime,
     $BackupModel,
-    $BackupProduct,
-    $BackupDbs,
-    $StageDbs
+    $BackupProduct
 )) {
     try {
         Remove-Tree $Path
