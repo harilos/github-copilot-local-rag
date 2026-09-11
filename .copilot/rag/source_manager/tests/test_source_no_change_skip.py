@@ -17,6 +17,10 @@ from source_manager.runner import (
     update_all_sources,
     update_source,
 )
+from source_manager.source_exclusion import (
+    FILE_BASED_SOURCE_TYPES,
+    exclusion_signature,
+)
 from source_manager.store import MISSING_ETAG, SourceStore
 
 
@@ -235,6 +239,41 @@ class SourceNoChangeSkipTests(unittest.TestCase):
         self.assertFalse(
             _previous_success_matches_plan({}, complete, "same")
         )
+
+    def test_excluded_source_requires_proof_of_the_matching_filter_before_skip(self) -> None:
+        complete = {
+            "status": "complete", "phase": "complete", "plan_etag": "same",
+            "pending_count": 0, "metadata_sync_pending": False,
+            "preflight_filter_applied": True,
+            "preflight_exclusion_hash": exclusion_signature(["build"]),
+        }
+        for source_type in sorted(FILE_BASED_SOURCE_TYPES):
+            with self.subTest(source_type=source_type):
+                source = {
+                    "source_id": "src_fixture-0123456789ab",
+                    "source_type": source_type,
+                    "fetch": {"exclude_paths": ["build"]},
+                }
+                self.assertTrue(
+                    _previous_success_matches_plan(source, complete, "same")
+                )
+                for changed in (
+                    {**complete, "preflight_filter_applied": False},
+                    {**complete, "preflight_exclusion_hash": exclusion_signature(["old"])},
+                    {
+                        name: value for name, value in complete.items()
+                        if not name.startswith("preflight_")
+                    },
+                ):
+                    with self.subTest(changed=changed):
+                        self.assertFalse(
+                            _previous_success_matches_plan(source, changed, "same")
+                        )
+                        # Existing sources without exclusions keep their normal
+                        # unchanged-revision optimization, including old states.
+                        self.assertTrue(_previous_success_matches_plan(
+                            {**source, "fetch": {"exclude_paths": []}}, changed, "same",
+                        ))
 
     @staticmethod
     def _create_search_artifacts(

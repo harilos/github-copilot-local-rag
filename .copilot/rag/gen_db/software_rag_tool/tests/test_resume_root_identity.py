@@ -96,6 +96,33 @@ class ResumeRootIdentityTests(unittest.TestCase):
         self.assertEqual(identity, self.saved_scope()["resolved_root"])
         self.records.assert_not_called()
 
+    def test_excluding_previously_indexed_files_reconciles_and_can_restore_them(self):
+        first = self.run_add(root=self.original)
+        self.assertEqual(1, first["indexed_files"])
+        empty = self.base / "empty" / "source"
+        (empty / "docs").mkdir(parents=True)
+        self.delete.reset_mock()
+        self.delete.return_value = 1
+
+        excluded = self.run_add(
+            root=empty, persistent_root_identity=str(self.original.resolve()),
+        )
+
+        self.assertEqual("success", excluded["result_status"])
+        self.assertEqual(0, excluded["file_count"])
+        self.assertEqual(1, excluded["deleted_files"])
+        self.assertEqual(1, excluded["deleted_records"])
+        self.delete.assert_called_once_with(["fixture-record"])
+        self.assertEqual(
+            {}, json.loads(self.state_path.read_text(encoding="utf-8"))["files"],
+        )
+        self.assertTrue((self.original / "docs" / "fixture.txt").is_file())
+
+        restored = self.run_add(root=self.original)
+        self.assertEqual("success", restored["result_status"])
+        self.assertEqual(1, restored["indexed_files"])
+        self.assertEqual(0, restored["deleted_files"])
+
     def test_saved_identity_does_not_authorize_other_root_source_scope_or_batch(self):
         identity = str(self.original.resolve())
         self.run_add(persistent_root_identity=identity)

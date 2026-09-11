@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from source_manager import (
     SourceStore,
@@ -13,10 +14,14 @@ from source_manager import (
     providers,
     register_source,
     update_source,
+    update_source_configuration,
 )
+from source_manager import runner, source_preflight
 from source_manager.errors import SourceManagerError
+from source_manager.git_host_urls import GIT_SOURCE_TYPES
 from source_manager.runner import _file_preview_add_resume_required
 from source_manager.source_exclusion import (
+    exclusion_signature,
     is_excluded,
     normalize_exclusion_paths,
     preview_and_prepare_work,
@@ -92,15 +97,18 @@ class SourceExclusionTests(unittest.TestCase):
             self.assertFalse((filtered / "build").exists())
 
     def test_git_svn_and_local_schema_accept_exclusions_only(self) -> None:
-        git = providers.validate_provider_config(
-            "github",
-            {
-                "repository_url": "https://git.example/group/project.git",
-                "include_paths": [],
-                "updated_within_days": None,
-                "exclude_paths": ["build", "**/*.tmp"],
-            },
-        )
+        for source_type in sorted(GIT_SOURCE_TYPES):
+            with self.subTest(source_type=source_type):
+                git = providers.validate_provider_config(
+                    source_type,
+                    {
+                        "repository_url": "https://git.example/group/project.git",
+                        "include_paths": [],
+                        "updated_within_days": None,
+                        "exclude_paths": ["build", "**/*.tmp"],
+                    },
+                )
+                self.assertEqual(["build", "**/*.tmp"], git["exclude_paths"])
         svn = providers.validate_provider_config(
             "svn",
             {
@@ -114,7 +122,6 @@ class SourceExclusionTests(unittest.TestCase):
             "other",
             {"one_shot": True, "exclude_paths": ["private"]},
         )
-        self.assertEqual(["build", "**/*.tmp"], git["exclude_paths"])
         self.assertEqual(["generated"], svn["exclude_paths"])
         self.assertEqual(["private"], local["exclude_paths"])
 
@@ -155,6 +162,173 @@ class SourceExclusionTests(unittest.TestCase):
     def test_all_excluded_add_failure_resumes_without_provider_fetch(self) -> None:
         self._assert_all_excluded_resume(RuntimeError)
 
+    def test_all_git_providers_apply_exclusions_on_registration_and_changes(self) -> None:
+        self._assert_git_exclusion_updates(legacy=False)
+
+    def test_legacy_unfiltered_git_run_is_repaired_even_without_remote_changes(self) -> None:
+        self._assert_git_exclusion_updates(legacy=True)
+
+    def _assert_git_exclusion_updates(self, *, legacy: bool) -> None:
+        files = {
+            "keep.md", "src/build/keep.md", "build/generated.md",
+            "scratch.tmp", "docs/cache.tmp",
+        }
+        included = {"keep.md", "src/build/keep.md"}
+        patterns = ["build", "**/*.tmp"]
+        for source_type in sorted(GIT_SOURCE_TYPES):
+            with (
+                self.subTest(source_type=source_type),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                db_root = Path(temporary) / "fixture-rag"
+                db_root.mkdir()
+                fetched_as_complete: list[bool] = []
+                reflected: list[set[str]] = []
+                identities: list[Path] = []
+                plans: list[str] = []
+
+                def fetch(_plan, work, _state, **kwargs):
+                    completed = kwargs["previous_run_complete"]
+                    fetched_as_complete.append(completed)
+                    for relative in files:
+                        path = work / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("fixture", encoding="utf-8")
+                    return {
+                        "status": "ok", "documents": len(files),
+                        "revision": "unchanged-revision", "no_change": completed,
+                    }
+
+                def add(arguments):
+                    root = Path(arguments[arguments.index("--root") + 1])
+                    identity = (
+                        Path(arguments[
+                            arguments.index("--persistent-root-identity") + 1
+                        ])
+                        if "--persistent-root-identity" in arguments else root
+                    )
+                    identities.append(identity)
+                    reflected.append({
+                        path.relative_to(root).as_posix()
+                        for path in root.rglob("*") if path.is_file()
+                    })
+                    self.assertEqual(files, {
+                        path.relative_to(identity).as_posix()
+                        for path in identity.rglob("*") if path.is_file()
+                    })
+                    count = len(reflected[-1])
+                    summary = {
+                        "operation": "add",
+                        "source_id": list_sources(db_root)[0]["local_source_key"],
+                        "file_count": count, "indexed_files": count,
+                        "skipped_files": 0, "error_files": 0,
+                        "input_error_files": 0, "extract_error_files": 0,
+                        "error_details": [], "upserted_records": count,
+                        "deleted_records": 0, "result_status": "success",
+                    }
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout="@@LOCAL_RAG_RESULT_V1@@" + json.dumps(summary),
+                        stderr="",
+                    )
+
+                runtime = {
+                    "python_executable": db_root / "venv-python",
+                    "rag_root": db_root / "rag-runtime",
+                    "command_runner": add,
+                    "metadata_publisher": lambda *_: None,
+                }
+                settings = {
+                    "repository_url": "https://git.example/group/project.git",
+                    "exclude_paths": patterns,
+                }
+                with (
+                    mock.patch.object(runner, "execute_fetch_plan", side_effect=fetch),
+                    mock.patch.object(
+                        runner, "_search_artifacts_match_completed_source",
+                        return_value=True,
+                    ),
+                ):
+                    # Recreate a completed run from before file preview supported
+                    # hosted Git types, with the configured exclusions ignored.
+                    with mock.patch.object(
+                        source_preflight, "FILE_BASED_SOURCE_TYPES",
+                        (
+                            frozenset() if legacy
+                            else source_preflight.FILE_BASED_SOURCE_TYPES
+                        ),
+                    ):
+                        registered = register_source(
+                            db_root, source_type=source_type,
+                            display_name=f"{source_type} fixture", fetch=settings,
+                            start=True, **runtime,
+                        )
+                    self.assertEqual("updated", registered["status"])
+                    self.assertEqual(files if legacy else included, reflected[-1])
+                    key = registered["local_source_key"]
+                    store = SourceStore(db_root)
+                    if legacy:
+                        self.assertNotIn(
+                            "preflight_filter_applied", store.read_state(key).payload,
+                        )
+                        repaired = update_source(db_root, key, **runtime)
+                        self.assertEqual("updated", repaired["status"])
+                        self.assertEqual([False, False], fetched_as_complete)
+                        self.assertEqual(included, reflected[-1])
+
+                    preview = store.read_state(key).payload
+                    self.assertEqual(5, preview["preflight_acquired_count"])
+                    self.assertEqual(2, preview["preflight_included_count"])
+                    self.assertEqual(3, preview["preflight_excluded_count"])
+                    self.assertEqual(
+                        exclusion_signature(patterns), preview["preflight_exclusion_hash"],
+                    )
+                    plans.append(preview["plan_etag"])
+
+                    # Repeated unchanged updates retain the evidence that this
+                    # exact exclusion policy was reflected, without another ADD.
+                    add_count = len(reflected)
+                    for _ in range(2):
+                        skipped = update_source(db_root, key, **runtime)
+                        self.assertEqual("skipped", skipped["status"])
+                        self.assertEqual(add_count, len(reflected))
+                        self.assertEqual(
+                            {
+                                name: value for name, value in preview.items()
+                                if name.startswith("preflight_")
+                            },
+                            {
+                                name: value
+                                for name, value in store.read_state(key).payload.items()
+                                if name.startswith("preflight_")
+                            },
+                        )
+
+                    for changed, expected in (
+                        (["src/build"], files - {"src/build/keep.md"}), ([], files),
+                    ):
+                        update_source_configuration(
+                            db_root, key, fetch={**settings, "exclude_paths": changed},
+                        )
+                        updated = update_source(db_root, key, **runtime)
+                        self.assertEqual("updated", updated["status"])
+                        self.assertFalse(fetched_as_complete[-1])
+                        self.assertEqual(expected, reflected[-1])
+                        source = store.read_source(key).payload
+                        self.assertEqual(source_type, source["source_type"])
+                        self.assertEqual(changed, source["fetch"]["exclude_paths"])
+                        self.assertEqual(registered["source_id"], source["source_id"])
+                        state = store.read_state(key).payload
+                        self.assertEqual(
+                            len(expected), state["preflight_included_count"],
+                        )
+                        self.assertEqual(
+                            len(files - expected), state["preflight_excluded_count"],
+                        )
+                        plans.append(state["plan_etag"])
+                    self.assertEqual(3, len(set(plans)))
+                    self.assertEqual(1, len(set(identities)))
+
     def test_all_excluded_keyboard_interrupt_resumes_without_provider_fetch(
         self,
     ) -> None:
@@ -165,9 +339,12 @@ class SourceExclusionTests(unittest.TestCase):
         interruption_type: type[BaseException],
     ) -> None:
         provider_settings = {
-            "github": {
-                "repository_url": "https://git.example/group/project.git",
-                "exclude_paths": ["drop"],
+            **{
+                source_type: {
+                    "repository_url": "https://git.example/group/project.git",
+                    "exclude_paths": ["drop"],
+                }
+                for source_type in sorted(GIT_SOURCE_TYPES)
             },
             "svn": {
                 "repository_url": "https://svn.example/project/trunk",

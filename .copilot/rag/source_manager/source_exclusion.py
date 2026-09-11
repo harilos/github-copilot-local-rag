@@ -13,9 +13,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable
 
 from .errors import SourceManagerError
+from .git_host_urls import GIT_SOURCE_TYPES
 
 
-FILE_BASED_SOURCE_TYPES = frozenset({"github", "svn", "other"})
+FILE_BASED_SOURCE_TYPES = GIT_SOURCE_TYPES | {"svn", "other"}
 MAX_EXCLUSION_PATHS = 100
 _GLOB_MAGIC = re.compile(r"[*?[]")
 _SPLIT_INPUT = re.compile(r"[,、;；\r\n]+")

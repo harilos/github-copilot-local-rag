@@ -49,6 +49,11 @@ from .redmine import (
     repair_generated_redmine_link,
 )
 from .redmine_contract import is_redmine_state_checkpoint
+from .source_exclusion import (
+    FILE_BASED_SOURCE_TYPES,
+    exclusion_signature,
+    normalize_exclusion_paths,
+)
 from .store import MISSING_ETAG, SourceStore, StoredJson
 from .subprocess_stream import (
     ProgressCallback,
@@ -655,6 +660,15 @@ def update_source(
     ):
         for field in ("fetched_count", "indexed_confirmed_count"):
             runtime_state[field] = int(state_stored.payload.get(field) or 0)
+        # No ADD ran: retain the preview that proves the current exclusions
+        # were reflected, so subsequent unchanged updates can still skip.
+        runtime_state.update(
+            {
+                field: copy.deepcopy(value)
+                for field, value in state_stored.payload.items()
+                if field.startswith("preflight_")
+            }
+        )
         completed = complete_run(runtime_state)
         skipped = store.save_state(
             local_source_key,
@@ -778,7 +792,7 @@ def _file_preview_add_resume_required(
 
     return (
         str(source.get("source_type") or "").strip().lower()
-        in {"github", "svn", "other"}
+        in FILE_BASED_SOURCE_TYPES
         and state.get("status") == "interrupted"
         and state.get("phase") == "reflect"
         and state.get("preflight_filter_applied") is True
@@ -932,6 +946,18 @@ def _previous_success_matches_plan(
     state: Mapping[str, Any],
     plan_etag: str,
 ) -> bool:
+    source_type = str(source.get("source_type") or "").strip().lower()
+    if source_type in FILE_BASED_SOURCE_TYPES:
+        fetch = source.get("fetch")
+        settings = fetch if isinstance(fetch, Mapping) else {}
+        paths = normalize_exclusion_paths(settings.get("exclude_paths"))
+        if paths and (
+            state.get("preflight_filter_applied") is not True
+            or state.get("preflight_exclusion_hash") != exclusion_signature(paths)
+        ):
+            # Older hosted-Git runs could complete without applying exclusions.
+            # Reflect once with this policy even if the revision is unchanged.
+            return False
     return bool(
         source.get("source_id")
         and state.get("status") == "complete"
