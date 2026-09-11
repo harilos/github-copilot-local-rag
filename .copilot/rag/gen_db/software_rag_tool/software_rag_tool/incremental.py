@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .atomic_io import atomic_write_json
+from .file_selection import normalize_include_paths, normalize_exclusion_paths, walk_selected, validate_selected_folders
 from .ingestion_paths import IngestionScope, resolve_ingestion_scope
 from .jsonl import write_jsonl
 from .manifest import validate_existing_index_tokenizer, write_manifest
@@ -49,7 +50,13 @@ def add_or_update_root(
     document_token_budget: DocumentTokenBudget | None = None,
     privacy_safe_root: bool = False,
     persistent_root_identity: str | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> dict[str, Any]:
+    include_paths = normalize_include_paths(include_paths)
+    exclude_paths = normalize_exclusion_paths(exclude_paths)
+    if (include_paths or exclude_paths) and scan_subdir not in (None, "."):
+        raise ValueError("folder selection requires a whole-root scan")
     if chunk_max_chars <= 0:
         raise ValueError("chunk_max_chars must be positive")
     if chunk_overlap < 0:
@@ -76,6 +83,7 @@ def add_or_update_root(
         document_token_budget=token_budget,
     )
     scope = resolve_ingestion_scope(root, scan_subdir)
+    validate_selected_folders(scope.logical_root, include_paths, exclude_paths)
     if reset_db:
         # Vector reset is the destructive gate.  Do it before clean/state or
         # catalog mutation so a lock, permission, corruption, or client error
@@ -100,6 +108,10 @@ def add_or_update_root(
         resume=resume,
     )
     if resume:
+        saved = state.get("ingestion") or {}
+        for key, value in (("include_paths", include_paths), ("exclude_paths", exclude_paths)):
+            if saved.get(key, []) != value:
+                raise ValueError(f"resume settings do not match saved index state: {key}")
         _validate_resume_state(
             state,
             scope,
@@ -121,6 +133,8 @@ def add_or_update_root(
         )
     state["ingestion"] = {
         **persistent_scope_fields,
+        "include_paths": include_paths,
+        "exclude_paths": exclude_paths,
         "batch_size_files": effective_batch_size_files,
         "operation": operation,
         "chunk_max_chars": chunk_max_chars,
@@ -174,8 +188,9 @@ def add_or_update_root(
         emit_event("collection_reset")
 
     try:
-        files = list(iter_input_files(scope.scan_root))
-        unsupported_paths = _unsupported_input_paths(scope)
+        selection = {"include_paths": include_paths, "exclude_paths": exclude_paths} if include_paths or exclude_paths else {}
+        files = list(iter_input_files(scope.scan_root, **selection))
+        unsupported_paths = _unsupported_input_paths(scope, **selection)
     except Exception as exc:
         error_text = _run_failure_text(
             exc,
@@ -449,18 +464,10 @@ def add_or_update_root(
         raise
 
 
-def _unsupported_input_paths(scope: IngestionScope) -> list[str]:
+def _unsupported_input_paths(scope: IngestionScope, include_paths=(), exclude_paths=()) -> list[str]:
     paths: list[str] = []
 
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for directory, child_directories, filenames in os.walk(
-        scope.scan_root,
-        topdown=True,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
+    for directory, child_directories, filenames in walk_selected(scope.scan_root, include_paths, exclude_paths):
         child_directories[:] = sorted(
             name for name in child_directories if name not in {".git", ".svn"}
         )

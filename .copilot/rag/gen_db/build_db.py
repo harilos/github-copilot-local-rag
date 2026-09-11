@@ -36,6 +36,8 @@ def main() -> int:
             "svn-repository, filesystem-docs."
         ),
     )
+    parser.add_argument("--include-path", action="append", default=[], help="Root-relative folder to include; repeat for multiple folders")
+    parser.add_argument("--exclude-path", action="append", default=[], help="Root-relative path/glob to exclude; repeat for multiple patterns")
     parser.add_argument(
         "--scan-subdir",
         help="Relative subdirectory to scan while keeping paths relative to --root",
@@ -126,6 +128,8 @@ def main() -> int:
         cmd.extend(["--reset-db", "--reset-clean"])
     if args.scan_subdir is not None:
         cmd.extend(["--scan-subdir", args.scan_subdir])
+    for option, values in (("--include-path", args.include_path), ("--exclude-path", args.exclude_path)):
+        cmd.extend(f"{option}={value}" for value in values)
     if args.resume:
         cmd.append("--resume")
     if args.retry_errors:

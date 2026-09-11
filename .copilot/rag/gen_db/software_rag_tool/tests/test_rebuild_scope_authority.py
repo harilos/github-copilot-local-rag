@@ -86,6 +86,8 @@ class ExtractRebuildScopeAuthorityTests(unittest.TestCase):
                     root=self.root,
                     source_id="canonical-source",
                     scan_subdir="docs",
+                    include_paths=[],
+                    exclude_paths=[],
                     include_root_name_in_path=True,
                     batch_size_files=7,
                     reset_db=True,

@@ -404,6 +404,26 @@ packageまたは管理PC引っ越しpackageでmacOSへ移せます。macOSでは
 `LOCAL_RAG_SHAREPOINT_ROOT`環境変数は既存環境との互換用fallbackです。通常は
 ManagerのSource接続設定から登録します。
 
+Source追加・取得設定の変更で「同期フォルダ全体」または「指定フォルダのみ」を
+選べます。指定フォルダはGitと同じカンマ区切りです。
+
+```text
+取得フォルダ: docs, specifications/api
+除外パス／glob: docs/archive, **/*.tmp
+```
+
+どちらもSourceに登録した相対folderを起点とする相対パスです。指定フォルダの
+配下を再帰的に取り込み、除外条件を優先します。「全体」はフォルダ指定なし、
+除外欄の `-` は既存の除外条件を解除します。設定保存後の次回更新で反映し、
+対象外になった既存の検索データも取り除きます。同期元のファイルは変更しません。
+途中の処理は再開・完了してから設定を変更してください。取り込み済みSourceの
+基準フォルダは固定ですが、その中の取得フォルダと除外条件は変更できます。
+指定したフォルダが存在しない場合は、空の取得結果として反映せずエラーにします。
+
+対象外・除外フォルダには入らず、対象ファイルだけを直接読み取ります。
+この指定が制御するのはRAGへの取り込みで、OneDrive／SharePoint同期clientの
+同期範囲ではありません。初回確認の概算件数にも取得・除外条件を適用します。
+
 ### Teams
 
 追加・更新はWindowsだけです。OneDriveで同期済みのTeams共有folderを、
@@ -436,8 +456,10 @@ build, **/*.tmp, docs/*/draft.md
 
 separatorは`/`を使うroot相対表記です。入力した`\`は`/`へ正規化します。
 絶対path、Windows drive／UNC path、`..`によるroot外参照は保存できません。
-空欄は除外なしで、暗黙の既定除外はありません。Redmine、GitLab Issue、
-SharePoint、Teamsにはこの設定を使いません。
+新規入力の空欄は除外なしで、暗黙の既定除外はありません。Redmine、GitLab Issue、
+Teamsにはこの設定を使いません。SharePointの同じパス／glob指定は上記の
+「SharePoint」を参照してください（同期フォルダを直接読み取るため、以下の
+取得済みworkのpreview／フィルタ用viewは使いません）。
 
 Provider取得後、初回のADD前にfile本文を読むことなくfile metadataから次を表示し、
 続行を確認します。

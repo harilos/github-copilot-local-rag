@@ -203,6 +203,8 @@ def _progress_matches_scope(progress: Any, ingestion: dict[str, Any]) -> bool:
 
 
 def _append_saved_options(command: list[str], ingestion: dict[str, Any]) -> None:
+    for field, option in (("include_paths", "--include-path"), ("exclude_paths", "--exclude-path")):
+        command.extend(f"{option}={value}" for value in ingestion.get(field, []))
     for field in ("chunk_max_chars", "chunk_overlap", "resolved_root"):
         if field in ingestion:
             option = "persistent-root-identity" if field == "resolved_root" else field.replace("_", "-")

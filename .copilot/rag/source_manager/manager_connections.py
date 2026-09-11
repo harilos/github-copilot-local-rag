@@ -36,6 +36,50 @@ _HOOK_MARKER = "_local_rag_connection_ui_hook_installed"
 _CLASS_MARKER = "_local_rag_connection_ui_installed"
 
 
+
+def prompt_sharepoint_selection(self: Any, fetch: dict[str, Any]) -> dict[str, Any] | None:
+    from .source_exclusion import parse_include_input, parse_exclusion_input
+    from .errors import SourceManagerError
+
+    current = list(fetch.get("include_paths") or [])
+    scope = self._select_value(
+        "取り込む範囲",
+        (("all", "同期フォルダ全体"), ("partial", "指定フォルダのみ")),
+        default="partial" if current else "all",
+    )
+    if scope is None:
+        return None
+    includes: list[str] = []
+    if scope == "partial":
+        raw = self._prompt_preserving_value(
+            "同期フォルダ内フォルダ（カンマ区切り）", ", ".join(current), required=True,
+            description="Sourceの同期フォルダからの相対フォルダです。例: docs, specifications/api",
+        )
+        if raw is None:
+            return None
+        try:
+            includes = parse_include_input(raw)
+        except SourceManagerError as exc:
+            self._print_error(str(exc))
+            return None
+        if not includes:
+            self._print_error("少なくとも1つのフォルダを入力してください。")
+            return None
+    raw = self._prompt_preserving_value(
+        "除外パス／glob（カンマ区切り）", ", ".join(fetch.get("exclude_paths") or []), required=False,
+        description="Sourceの同期フォルダからの相対パス／globです。例: docs/archive, **/*.tmp。- で除外なしに戻します。",
+        empty_help="除外なし",
+    )
+    if raw is None:
+        return None
+    try:
+        excludes = parse_exclusion_input(raw)
+    except SourceManagerError as exc:
+        self._print_error(str(exc))
+        return None
+    return {"include_paths": includes, "exclude_paths": excludes}
+
+
 def install_manage_custom_hook() -> None:
     """Install the Manager extension before manage.py imports load_manage_custom.
 
@@ -999,6 +1043,9 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
         )
         if relative is None or browser is None or name is None:
             return None
+        selection = prompt_sharepoint_selection(self, {})
+        if selection is None:
+            return None
         return {
             "source_type": "sharepoint",
             "label": "SharePoint",
@@ -1006,6 +1053,7 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
             "fetch": {
                 "relative_path": relative,
                 "root_env": SHAREPOINT_ROOT_ENV,
+                **selection,
             },
             "link": {
                 "enabled": True,
@@ -1014,6 +1062,8 @@ def install_manager_connection_ui(manager_class: type[Any]) -> None:
             },
             "summary": (
                 ("同期フォルダ", relative),
+                ("取得フォルダ", ", ".join(selection["include_paths"]) or "全体"),
+                ("除外パス", ", ".join(selection["exclude_paths"]) or "なし"),
                 ("Webリンク", "ファイル直接リンク"),
                 ("追加・更新", "Windowsのみ"),
             ),

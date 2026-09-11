@@ -208,13 +208,15 @@ def execute_fetch_plan(
             relative = str(parameters.get("relative_path") or "")
             if relative:
                 source = source.joinpath(*relative.split("/"))
-            validate_external_add_root(source)
+            selection = {key: parameters.get(key, ()) for key in ("include_paths", "exclude_paths")}
+            validate_external_add_root(source, **selection)
             result = {
                 "status": "ok",
                 "documents": _regular_file_count(
                     source,
                     progress_callback=progress_callback,
                     provider="sharepoint",
+                    **selection,
                 ),
                 "external_add_root": str(source),
             }
@@ -1768,11 +1770,14 @@ def _regular_file_count(
     *,
     progress_callback: HttpProgressCallback | None = None,
     provider: str = "",
+    include_paths: Any = (),
+    exclude_paths: Any = (),
 ) -> int:
     count = 0
     from .document_filter_counts import is_office_temporary_file
 
-    for directory, _children, files in os.walk(root, followlinks=False):
+    from .source_exclusion import walk_selected
+    for directory, _children, files in walk_selected(root, include_paths, exclude_paths):
         for name in files:
             if is_office_temporary_file(name):
                 continue
@@ -1847,14 +1852,18 @@ def validate_managed_work_tree(work: Path) -> None:
                 )
 
 
-def validate_external_add_root(root: Path) -> None:
+def validate_external_add_root(root: Path, *, include_paths: Any = (), exclude_paths: Any = ()) -> None:
     """Validate a synchronized external tree without copying or mutating it."""
     candidate = Path(root)
     if not candidate.is_absolute():
         raise SourceManagerError("external ADD root must be absolute")
     try:
         _reject_unsafe_external_path_components(candidate)
-        _validate_external_sharepoint_tree(candidate)
+        from software_rag_tool.file_selection import path_selected
+        for relative in include_paths:
+            if path_selected(relative, (), exclude_paths, directory=True):
+                _reject_unsafe_external_path_components(candidate.joinpath(*relative.split("/")))
+        _validate_external_sharepoint_tree(candidate, include_paths=include_paths, exclude_paths=exclude_paths)
     except SourceManagerError as exc:
         exc.suppress_traceback = True
         raise
@@ -1872,7 +1881,7 @@ def validate_external_add_root(root: Path) -> None:
         raise error from None
 
 
-def _validate_external_sharepoint_tree(root: Path) -> None:
+def _validate_external_sharepoint_tree(root: Path, *, include_paths: Any = (), exclude_paths: Any = ()) -> None:
     metadata = os.lstat(root)
     if (
         _is_unsafe_external_reparse(root, metadata)
@@ -1880,15 +1889,8 @@ def _validate_external_sharepoint_tree(root: Path) -> None:
     ):
         raise SourceManagerError("external ADD root is unsafe")
 
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for directory, child_names, file_names in os.walk(
-        root,
-        topdown=True,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
+    from .source_exclusion import walk_selected
+    for directory, child_names, file_names in walk_selected(root, include_paths, exclude_paths):
         directory_path = Path(directory)
         for name in sorted(child_names):
             child = directory_path / name

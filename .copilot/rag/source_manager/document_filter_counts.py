@@ -53,7 +53,10 @@ def install_document_filter_count_runtime() -> None:
             return result
         root_value = result.get("external_add_root") or work_directory
         root = Path(str(root_value))
-        result["documents"] = count_document_files(root)
+        parameters = (plan.get("steps") or [{}])[0].get("parameters") or {}
+        selection = ({key: parameters.get(key, ()) for key in ("include_paths", "exclude_paths")}
+                     if plan.get("provider") == "sharepoint" else {})
+        result["documents"] = count_document_files(root, **selection)
         return result
 
     execution.execute_fetch_plan = execute_fetch_plan
@@ -61,7 +64,7 @@ def install_document_filter_count_runtime() -> None:
     setattr(execution, _MARKER, True)
 
 
-def count_document_files(root: Path) -> int:
+def count_document_files(root: Path, *, include_paths: Any = (), exclude_paths: Any = ()) -> int:
     value = Path(root)
     if value.is_symlink():
         raise OSError("document count root must not be a symlink")
@@ -74,15 +77,8 @@ def count_document_files(root: Path) -> int:
         return 0
     count = 0
 
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for directory, child_directories, filenames in os.walk(
-        value,
-        topdown=True,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
+    from .source_exclusion import walk_selected
+    for directory, child_directories, filenames in walk_selected(value, include_paths, exclude_paths):
         current = Path(directory)
         child_directories[:] = sorted(
             name

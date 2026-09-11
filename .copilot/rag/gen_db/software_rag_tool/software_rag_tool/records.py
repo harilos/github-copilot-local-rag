@@ -80,18 +80,11 @@ def is_office_temporary_file(path: Path | str) -> bool:
     return Path(path).name.startswith("~$")
 
 
-def iter_input_files(root: Path) -> Iterable[Path]:
+def iter_input_files(root: Path, include_paths=(), exclude_paths=()) -> Iterable[Path]:
     discovered: list[Path] = []
 
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for directory, child_directories, filenames in os.walk(
-        root,
-        topdown=True,
-        onerror=raise_walk_error,
-        followlinks=False,
-    ):
+    from .file_selection import walk_selected
+    for directory, child_directories, filenames in walk_selected(root, include_paths, exclude_paths):
         child_directories.sort()
         for filename in sorted(filenames):
             if is_office_temporary_file(filename):

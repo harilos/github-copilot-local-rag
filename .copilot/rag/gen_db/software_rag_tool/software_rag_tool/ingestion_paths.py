@@ -18,7 +18,7 @@ def validated_saved_ingestion(state: Any) -> dict[str, Any] | None:
         "root", "resolved_root", "root_display_name", "scan_subdir",
         "scan_root", "stored_path_prefix", "include_root_name_in_path",
         "source_id", "operation", "batch_size_files", "chunk_max_chars",
-        "chunk_overlap", "privacy_safe_root",
+        "chunk_overlap", "privacy_safe_root", "include_paths", "exclude_paths",
     ) if field in value}
     for field in ("root", "source_id", "scan_subdir"):
         if not isinstance(scope.get(field), str) or not scope[field].strip() or "\x00" in scope[field]:
@@ -64,6 +64,15 @@ def validated_saved_ingestion(state: Any) -> dict[str, Any] | None:
     if (type(scope["chunk_max_chars"]) is not int
             or type(scope["chunk_overlap"]) is not int
             or not 0 <= scope["chunk_overlap"] < scope["chunk_max_chars"]):
+        return None
+    from .file_selection import normalize_include_paths, normalize_exclusion_paths
+    try:
+        for key, normalizer in (("include_paths", normalize_include_paths), ("exclude_paths", normalize_exclusion_paths)):
+            values = scope.get(key, [])
+            if not isinstance(values, list) or normalizer(values) != values:
+                return None
+            scope[key] = values
+    except ValueError:
         return None
     return scope
 

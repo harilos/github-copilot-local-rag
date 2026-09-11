@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -14,6 +14,15 @@ from typing import Any, Iterable
 
 from .errors import SourceManagerError
 from .git_host_urls import GIT_SOURCE_TYPES
+
+_TOOL_ROOT = Path(__file__).resolve().parents[1] / "gen_db" / "software_rag_tool"
+if str(_TOOL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TOOL_ROOT))
+from software_rag_tool.file_selection import (
+    is_excluded, walk_selected,
+    normalize_exclusion_paths as _normalize_exclusions,
+    normalize_include_paths as _normalize_includes,
+)
 
 
 FILE_BASED_SOURCE_TYPES = GIT_SOURCE_TYPES | {"svn", "other"}
@@ -63,45 +72,21 @@ def parse_exclusion_input(value: Any) -> list[str]:
 
 
 def normalize_exclusion_paths(value: Any) -> list[str]:
-    """Normalize root-relative paths/globs to a portable POSIX list."""
+    try:
+        return _normalize_exclusions(value)
+    except ValueError as exc:
+        raise SourceManagerError(str(exc)) from exc
 
-    if value in (None, ""):
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, (list, tuple)):
-        raise SourceManagerError("exclude_paths must be an array")
-    if len(value) > MAX_EXCLUSION_PATHS:
-        raise SourceManagerError(
-            f"exclude_paths cannot contain more than {MAX_EXCLUSION_PATHS} entries"
-        )
 
-    normalized: list[str] = []
-    for raw in value:
-        if not isinstance(raw, str):
-            raise SourceManagerError("exclude_paths entries must be text")
-        text = raw.strip()
-        if not text:
-            continue
-        windows = PureWindowsPath(text)
-        if windows.is_absolute() or windows.drive or text.startswith(("/", "\\")):
-            raise SourceManagerError("exclude_paths must be root-relative")
-        text = text.replace("\\", "/")
-        parts: list[str] = []
-        for part in text.split("/"):
-            if part in {"", "."}:
-                continue
-            if part == "..":
-                raise SourceManagerError("exclude_paths must not escape the Source root")
-            if "\x00" in part or any(ord(character) < 32 for character in part):
-                raise SourceManagerError("exclude_paths contains control characters")
-            parts.append(part)
-        if not parts:
-            raise SourceManagerError("exclude_paths entries must not be empty")
-        path = PurePosixPath(*parts).as_posix()
-        if path not in normalized:
-            normalized.append(path)
-    return normalized
+def normalize_include_paths(value: Any) -> list[str]:
+    try:
+        return _normalize_includes(value)
+    except ValueError as exc:
+        raise SourceManagerError(str(exc)) from exc
+
+
+def parse_include_input(value: str) -> list[str]:
+    return normalize_include_paths([part.strip() for part in _SPLIT_INPUT.split(value) if part.strip()])
 
 
 def exclusion_signature(paths: Iterable[str]) -> str:
@@ -112,22 +97,6 @@ def exclusion_signature(paths: Iterable[str]) -> str:
     ).encode("utf-8")
     return hashlib.sha256(body).hexdigest()
 
-
-def is_excluded(relative_path: str, patterns: Iterable[str]) -> bool:
-    path_parts = tuple(PurePosixPath(relative_path).parts)
-    if not path_parts:
-        return False
-    for pattern in patterns:
-        pattern_parts = tuple(PurePosixPath(pattern).parts)
-        if not _GLOB_MAGIC.search(pattern):
-            if path_parts[: len(pattern_parts)] == pattern_parts:
-                return True
-            continue
-        # A glob selecting a directory excludes everything below it as well.
-        for end in range(1, len(path_parts) + 1):
-            if _match_segments(path_parts[:end], pattern_parts):
-                return True
-    return False
 
 
 def preview_and_prepare_work(
@@ -248,18 +217,6 @@ def discard_prepared_work(prepared_root: Path, acquired_root: Path) -> None:
     except OSError:
         return
 
-
-def _match_segments(path: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
-    if not pattern:
-        return not path
-    head = pattern[0]
-    if head == "**":
-        return _match_segments(path, pattern[1:]) or (
-            bool(path) and _match_segments(path[1:], pattern)
-        )
-    return bool(path) and fnmatch.fnmatchcase(path[0], head) and _match_segments(
-        path[1:], pattern[1:]
-    )
 
 
 def _unsafe_link(path: Path, metadata: os.stat_result) -> bool:

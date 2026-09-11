@@ -21,7 +21,7 @@ from .security import (
     validate_svn_fetch_url,
     validate_web_url,
 )
-from .source_exclusion import normalize_exclusion_paths
+from .source_exclusion import normalize_exclusion_paths, normalize_include_paths
 
 
 SUPPORTED_PROVIDERS = frozenset(
@@ -112,10 +112,11 @@ def validate_provider_config(
     if kind == "gitlab_issues":
         return _validate_gitlab_issues(supplied)
     if kind == "sharepoint":
-        return _validate_environment_source(
-            supplied,
-            environment_key="root_env",
-        )
+        selected = {key: supplied.pop(key, None) for key in ("include_paths", "exclude_paths")}
+        normalized = _validate_environment_source(supplied, environment_key="root_env")
+        normalized["include_paths"] = normalize_include_paths(selected["include_paths"])
+        normalized["exclude_paths"] = normalize_exclusion_paths(selected["exclude_paths"])
+        return normalized
     _only_keys(supplied, {"one_shot", "exclude_paths"})
     if "one_shot" in supplied and supplied["one_shot"] is not True:
         raise SourceManagerError("Other one_shot must be true")

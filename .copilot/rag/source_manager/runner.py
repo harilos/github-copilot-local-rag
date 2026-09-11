@@ -1252,7 +1252,8 @@ def update_source_configuration(
     if (
         source.payload.get("source_id")
         and source.payload.get("source_type") == "sharepoint"
-        and normalized_fetch != source.payload.get("fetch")
+        and any(normalized_fetch.get(key, "") != (source.payload.get("fetch") or {}).get(key, "")
+                for key in ("root_env", "relative_path"))
     ):
         raise SourceManagerError(
             "sharepoint_ingestion_root_is_immutable_add_new_source"
@@ -1543,6 +1544,9 @@ def _execute_add(
     ]
     if privacy_safe_root:
         arguments.append("--privacy-safe-root")
+        for field, option in (("include_paths", "--include-path"), ("exclude_paths", "--exclude-path")):
+            for value in (source.get("fetch") or {}).get(field) or []:
+                arguments.append(f"{option}={value}")
     if persistent_root_identity is not None:
         arguments.extend(
             [
@@ -3340,7 +3344,8 @@ def _reflect_and_sync(
 ) -> dict[str, Any]:
     work = Path(add_root)
     if str(source.payload.get("source_type") or "") == "sharepoint":
-        validate_external_add_root(work)
+        settings = source.payload.get("fetch") or {}
+        validate_external_add_root(work, include_paths=settings.get("include_paths", ()), exclude_paths=settings.get("exclude_paths", ()))
     else:
         validate_managed_work_tree(work)
     state, initial_database_reflection = _record_initial_snapshot_candidate(

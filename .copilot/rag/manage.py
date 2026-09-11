@@ -2165,6 +2165,10 @@ class LocalRagManager:
         )
         if relative is None or browser is None or name is None:
             return None
+        from source_manager.manager_connections import prompt_sharepoint_selection
+        selection = prompt_sharepoint_selection(self, {})
+        if selection is None:
+            return None
         return {
             "source_type": "sharepoint",
             "label": "SharePoint",
@@ -2172,6 +2176,7 @@ class LocalRagManager:
             "fetch": {
                 "relative_path": relative,
                 "root_env": "LOCAL_RAG_SHAREPOINT_ROOT",
+                **selection,
             },
             "link": {
                 "enabled": True,
@@ -2180,6 +2185,8 @@ class LocalRagManager:
             },
             "summary": (
                 ("同期フォルダ", relative),
+                ("取得フォルダ", ", ".join(selection["include_paths"]) or "全体"),
+                ("除外パス", ", ".join(selection["exclude_paths"]) or "なし"),
                 ("Webリンク", "ファイル直接リンク"),
                 ("追加・更新", "Windowsのみ"),
             ),
@@ -3693,6 +3700,7 @@ class LocalRagManager:
             "updated_within_days": "取得期間（日）",
             "one_shot": "取り込み方式",
             "exclude_paths": "除外パス／glob",
+            "include_paths": "取得フォルダ",
         }
         shown = False
         for key, label in public_labels.items():
@@ -3703,8 +3711,8 @@ class LocalRagManager:
                 value = "含める" if bool(value) else "この階層だけ"
             elif key == "one_shot":
                 value = "今回だけ取り込む"
-            elif key == "exclude_paths":
-                value = ", ".join(str(item) for item in value) or "なし"
+            elif key in {"exclude_paths", "include_paths"}:
+                value = ", ".join(str(item) for item in value) or ("全体" if key == "include_paths" else "なし")
             elif value is None:
                 value = "制限なし"
             self.output(f"{label}: {value}")
@@ -3733,17 +3741,6 @@ class LocalRagManager:
             self._print_info(
                 "Otherは今回だけ取り込む方式です。"
                 "再取り込み時にファイルまたはフォルダを選び直します。"
-            )
-            return
-        if source_type == "sharepoint" and source.get("source_id"):
-            self._print_warning(
-                "検索へ反映済みのSharePoint Sourceでは、"
-                "同期ルートからの相対フォルダを変更できません。"
-            )
-            self._print_info(
-                "別のフォルダを取り込む場合は、"
-                "「新しいSourceを追加する」から登録してください。"
-                "検索結果リンクは別メニューで変更できます。"
             )
             return
         if source_type == "sharepoint" and os.name != "nt":
@@ -4030,16 +4027,27 @@ class LocalRagManager:
                 )
             )
         elif source_type == "sharepoint":
-            relative = self._prompt_preserving_value(
-                "SharePoint rootからの相対フォルダ",
-                str(fetch.get("relative_path") or ""),
-                required=True,
-                examples=self._examples("sharepoint_relative_path"),
-            )
-            if relative is None:
+            from source_manager.manager_connections import prompt_sharepoint_selection
+
+            if not source.get("source_id"):
+                relative = self._prompt_preserving_value(
+                    "SharePoint rootからの相対フォルダ", str(fetch.get("relative_path") or ""),
+                    required=True, examples=self._examples("sharepoint_relative_path"),
+                )
+                if relative is None:
+                    return
+                updated["relative_path"] = relative
+            else:
+                self._print_info("登録済みの同期フォルダを基準に、取得フォルダと除外設定を変更します。")
+            selection = prompt_sharepoint_selection(self, fetch)
+            if selection is None:
                 return
-            updated["relative_path"] = relative
-            summary.append(("同期ルートからの相対フォルダ", relative))
+            updated.update(selection)
+            summary.extend((
+                ("同期ルートからの相対フォルダ", updated.get("relative_path", "")),
+                ("取得フォルダ", ", ".join(selection["include_paths"]) or "全体"),
+                ("除外パス", ", ".join(selection["exclude_paths"]) or "なし"),
+            ))
         self.output("\n変更後の取得設定")
         for label, value in summary:
             self.output(f"{label}: {value}")

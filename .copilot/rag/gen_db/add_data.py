@@ -355,6 +355,8 @@ def main() -> int:
             "svn-repository, filesystem-docs."
         ),
     )
+    parser.add_argument("--include-path", action="append", default=[], help="Root-relative folder to include; repeat for multiple folders")
+    parser.add_argument("--exclude-path", action="append", default=[], help="Root-relative path/glob to exclude; repeat for multiple patterns")
     parser.add_argument(
         "--scan-subdir",
         help="Relative subdirectory to scan while keeping paths relative to --root",
@@ -446,6 +448,8 @@ def main() -> int:
                         root=Path(args.root),
                         source_id=args.source_id,
                         scan_subdir=args.scan_subdir,
+                        include_paths=args.include_path,
+                        exclude_paths=args.exclude_path,
                         include_root_name_in_path=True,
                         batch_size_files=args.batch_size_files,
                         reset_db=args.reset_db,

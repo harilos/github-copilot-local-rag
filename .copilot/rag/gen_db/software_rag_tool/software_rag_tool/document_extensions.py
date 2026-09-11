@@ -85,8 +85,8 @@ def install_document_extension_runtime() -> None:
             embedding_path=embedding_path,
         )
 
-    def iter_input_files(root: Path) -> Iterable[Path]:
-        values = original_iter(Path(root))
+    def iter_input_files(root: Path, include_paths=(), exclude_paths=()) -> Iterable[Path]:
+        values = original_iter(Path(root), include_paths=include_paths, exclude_paths=exclude_paths)
         selection = str(os.getenv(FILE_SELECTION_ENV) or FILE_SELECTION_ALL).strip()
         if selection != FILE_SELECTION_DOCUMENTS:
             yield from values

@@ -132,7 +132,7 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
         store = runner.SourceStore(Path(db_root))
         source = store.read_source(local_source_key)
         source_type = str(source.payload.get("source_type") or "").strip().lower()
-        if source.payload.get("source_id") and source_type in _EXTERNAL_FOLDER_TYPES:
+        if source.payload.get("source_id") and source_type == "teams":
             normalized = providers.validate_provider_config(source_type, fetch)
             current = dict(source.payload.get("fetch") or {})
             if _without_selection(normalized) == _without_selection(current):
@@ -246,7 +246,7 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         updated_fetch[FILE_SELECTION_KEY] = selection
         updated_source["fetch"] = updated_fetch
 
-        if source_type in _EXTERNAL_FOLDER_TYPES and source.get("source_id"):
+        if source_type == "teams" and source.get("source_id"):
             if selection == current_selection:
                 return original_edit(self, db_name, updated_source)
             return _save_selection_only(

@@ -99,6 +99,8 @@ def _rebuild(args: argparse.Namespace, db_name: str) -> None:
             root=Path(scope["root"]),
             source_id=scope["source_id"],
             scan_subdir=scope["scan_subdir"],
+            include_paths=scope.get("include_paths", []),
+            exclude_paths=scope.get("exclude_paths", []),
             include_root_name_in_path=scope.get("include_root_name_in_path", True),
             batch_size_files=scope["batch_size_files"],
             reset_db=True,
