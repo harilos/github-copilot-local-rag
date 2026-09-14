@@ -1078,7 +1078,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             installer = package / "internal" / "install.ps1"
             original = installer.read_text(encoding="utf-8")
             copy = (
-                '            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (\n'
+                '            Copy-InstallPayload -LiteralPath (Join-Path $SourceDbs $Name) -Destination (\n'
                 '                $Existing\n'
                 '            ) -Recurse'
             )

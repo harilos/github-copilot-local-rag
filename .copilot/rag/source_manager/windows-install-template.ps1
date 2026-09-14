@@ -46,6 +46,86 @@ $LegacyAgent003Status = "not_reached"
 $InstallLogPath = ""
 $InstallTranscriptStarted = $false
 
+# Stage percentages are estimates, not byte counts or remaining-time promises.
+$InstallProgressClock = [Diagnostics.Stopwatch]::StartNew()
+$InstallProgressPercent = 0
+$InstallProgressStage = "validate_package"
+$InstallProgressSecond = -1
+$InstallProgressLogSecond = -5
+$InstallProgressLabels = @{
+    cleanup = "5LiA5pmC44OV44Kh44Kk44Or44KS54mH5LuY44GR5Lit"
+    completed = "5a6M5LqG"
+    copy_databases = "44OH44O844K/44OZ44O844K544KS44Kz44OU44O85Lit"
+    copy_model = "5qSc57Si44Oi44OH44Or44KS44Kz44OU44O85Lit"
+    copy_product = "44OX44Ot44Kw44Op44Og44KS6YWN572u5Lit"
+    copy_runtime = "UHl0aG9u5a6f6KGM55Kw5aKD44KS44Kz44OU44O85Lit"
+    format = "57SEIHswfSUgfCB7MX0gfCDntYzpgY4gezJ956eSIHszfQ=="
+    publish_runtime = "5a6f6KGM55Kw5aKD44KS5YiH44KK5pu/44GI5Lit"
+    retire_agent003 = "5pei5a2Y6Kit5a6a44KS5pW055CG5Lit"
+    rollback = "5aSx5pWX44GX44Gf5Yem55CG44KS54mH5LuY44GR5Lit"
+    slash_skill = "5qSc57Si44Kz44Oe44Oz44OJ44KS6Kit5a6a5Lit"
+    title = "TG9jYWwgUkFHIOOCpOODs+OCueODiOODvOODq++8iOamgueul++8iQ=="
+    validate_package = "44OR44OD44Kx44O844K456K66KqN5Lit"
+}
+
+function Write-InstallProgress {
+    param(
+        [int]$Percent = $script:InstallProgressPercent,
+        [string]$Stage = $script:InstallProgressStage,
+        [switch]$Force
+    )
+    $script:InstallProgressPercent = $Percent
+    $script:InstallProgressStage = $Stage
+    $Seconds = [long][Math]::Floor($script:InstallProgressClock.Elapsed.TotalSeconds)
+    if (-not $Force -and $Seconds -eq $script:InstallProgressSecond) { return }
+    $script:InstallProgressSecond = $Seconds
+    $Title = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+        $script:InstallProgressLabels.title
+    ))
+    $Label = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+        $script:InstallProgressLabels[$Stage]
+    ))
+    $Format = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(
+        $script:InstallProgressLabels.format
+    ))
+    $Status = $Format -f $Percent, $Label, $Seconds, @("|", "/", "-", "\")[$Seconds % 4]
+    Write-Progress -Id 1 -Activity $Title -Status $Status -PercentComplete $Percent
+    # Keep activity visible in transcripts and hosts that hide progress bars.
+    if ($Force -or $Seconds - $script:InstallProgressLogSecond -ge 5) {
+        Write-Host $Status
+        $script:InstallProgressLogSecond = $Seconds
+    }
+}
+
+function Copy-InstallPayload {
+    param([string]$LiteralPath, [string]$Destination, [switch]$Recurse)
+    # Run the same Copy-Item operation while this thread keeps the UI alive.
+    # No byte-count prescan, extra copy, background process, or persisted state.
+    $Worker = [PowerShell]::Create()
+    $Pending = $null
+    try {
+        [void]$Worker.AddCommand("Copy-Item")
+        [void]$Worker.AddParameter("LiteralPath", $LiteralPath)
+        [void]$Worker.AddParameter("Destination", $Destination)
+        [void]$Worker.AddParameter("Recurse", $Recurse.IsPresent)
+        [void]$Worker.AddParameter("ErrorAction", "Stop")
+        $Pending = $Worker.BeginInvoke()
+        while (-not $Pending.IsCompleted) {
+            Write-InstallProgress
+            [void]$Pending.AsyncWaitHandle.WaitOne(1000)
+        }
+        [void]$Worker.EndInvoke($Pending)
+        if ($Worker.HadErrors) { throw $Worker.Streams.Error[0] }
+    } finally {
+        # Stop and join before caller rollback can remove a partial copy.
+        try {
+            if ($null -ne $Pending -and -not $Pending.IsCompleted) { $Worker.Stop() }
+        } finally {
+            $Worker.Dispose()
+        }
+    }
+}
+
 function Start-InstallTranscript {
     $FileName = "portable-install-{0}-{1}.log" -f (
         Get-Date -Format "yyyyMMdd-HHmmss"
@@ -101,6 +181,10 @@ function Write-InstallSummary {
         [bool]$Succeeded,
         [string]$Reason = ""
     )
+    if ($Succeeded) {
+        Write-InstallProgress -Percent 100 -Stage "completed" -Force
+    }
+    Write-Progress -Id 1 -Activity "Local RAG" -Completed
     $Utf8 = [Text.Encoding]::UTF8
     $OutcomeJa = if ($Succeeded) {
         $Utf8.GetString([Convert]::FromBase64String("5oiQ5Yqf"))
@@ -151,6 +235,7 @@ trap {
 }
 
 Start-InstallTranscript
+Write-InstallProgress -Percent 0 -Stage "validate_package" -Force
 if ($LauncherArgumentError) {
     throw "install.cmd received an unsupported argument"
 }
@@ -196,6 +281,7 @@ function Assert-NoReparseTree {
         Get-ChildItem -LiteralPath $Path -Recurse -Force
     )
     foreach ($Entry in $Entries) {
+        Write-InstallProgress
         if (($Entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw ("portable package contains a reparse point: " + $Entry.FullName)
         }
@@ -207,6 +293,7 @@ function Remove-Tree {
     if ($Path -and (Test-Path -LiteralPath $Path)) {
         Assert-ChildPath -Root $Target -Candidate $Path
         foreach ($Entry in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+            Write-InstallProgress
             if (($Entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw ("refusing to delete a transaction tree containing a reparse point: " + $Entry.FullName)
             }
@@ -296,6 +383,7 @@ function Assert-Amd64PortableRuntime {
             }
     )
     foreach ($Binary in $Binaries) {
+        Write-InstallProgress
         Assert-Amd64PeFile -Path $Binary.FullName
     }
 }
@@ -414,14 +502,19 @@ try {
         (Split-Path -Parent $TargetModel),
         $TargetDbs
     ) | Out-Null
-    Copy-Item -LiteralPath $SourceRuntime -Destination $StageRuntime -Recurse
-    Copy-Item -LiteralPath $SourceModel -Destination $StageModel -Recurse
+    Write-InstallProgress -Percent 10 -Stage "copy_runtime" -Force
+    Copy-InstallPayload -LiteralPath $SourceRuntime -Destination $StageRuntime -Recurse
+    Write-InstallProgress -Percent 30 -Stage "copy_model" -Force
+    Copy-InstallPayload -LiteralPath $SourceModel -Destination $StageModel -Recurse
     if ($DatabaseNames.Count -gt 0) {
         New-Item -ItemType Directory -Path $StageDbs | Out-Null
+        $DatabaseOrdinal = 0
         foreach ($Name in $DatabaseNames) {
-            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (
+            Write-InstallProgress -Percent (40 + [int](35 * $DatabaseOrdinal / $DatabaseNames.Count)) -Stage "copy_databases" -Force
+            Copy-InstallPayload -LiteralPath (Join-Path $SourceDbs $Name) -Destination (
                 Join-Path $StageDbs $Name
             ) -Recurse
+            $DatabaseOrdinal++
         }
     }
 
@@ -433,8 +526,10 @@ try {
         [System.IO.Directory]::Move($TargetRuntime, $BackupRuntime)
     }
 
+    Write-InstallProgress -Percent 80 -Stage "copy_product" -Force
     $PayloadRoot = [System.IO.Path]::GetFullPath($Payload)
     Get-ChildItem -LiteralPath $Payload -Force -Recurse | ForEach-Object {
+        Write-InstallProgress
         $Relative = $_.FullName.Substring($PayloadRoot.Length).TrimStart(
             [System.IO.Path]::DirectorySeparatorChar
         )
@@ -530,11 +625,13 @@ try {
     $DatabaseStatus = "READY"
 
     $InstallStage = "publish_runtime"
+    Write-InstallProgress -Percent 85 -Stage "publish_runtime" -Force
     Move-PublishedRuntime -Source $StageRuntime -Destination $TargetRuntime
     $RuntimePublished = $true
     $RuntimeStatus = "READY"
 
     $InstallStage = "slash_skill"
+    Write-InstallProgress -Percent 90 -Stage "slash_skill" -Force
     $SlashSkillPath = Join-Path $Target "skills\local-rag\SKILL.md"
     if (-not (Test-Path -LiteralPath $SlashSkillPath -PathType Leaf)) {
         throw "Local RAG slash Skill is missing from the installed payload."
@@ -542,6 +639,7 @@ try {
     $SlashSkillStatus = "READY"
 
     $InstallStage = "retire_agent003"
+    Write-InstallProgress -Percent 92 -Stage "retire_agent003" -Force
     $VSCodeMcpTarget = $null
     if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
         $VSCodeMcpTarget = [System.IO.Path]::GetFullPath((
@@ -620,6 +718,7 @@ try {
     }
     $LegacyAgent003Status = [string]$CopilotCliResult.status
 } catch {
+    Write-InstallProgress -Stage "rollback" -Force
     foreach ($Name in @($DatabaseBackedUp) + @($DatabaseFresh)) {
         $Current = Join-Path $TargetDbs $Name
         if (Test-Path -LiteralPath $Current) { Remove-Tree $Current }
@@ -686,6 +785,7 @@ try {
     throw
 }
 
+Write-InstallProgress -Percent 97 -Stage "cleanup" -Force
 foreach ($Path in @(
     $BackupRuntime,
     $BackupModel,
@@ -700,6 +800,8 @@ foreach ($Path in @(
     }
 }
 
+# Do not leave a progress bar over the optional interactive approval prompt.
+Write-Progress -Id 1 -Activity "Local RAG" -Completed
 if ($ConfigureVSCodeAutoApprove -and $ConfigureVSCodeRunnerApproval) {
     Write-Warning "Approval options conflict; no approval settings changed."
 } elseif ($SkipVSCodeAutoApprove) {
