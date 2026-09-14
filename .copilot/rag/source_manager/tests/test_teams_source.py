@@ -78,7 +78,12 @@ class TeamsSourceTests(unittest.TestCase):
                 **_kwargs: object,
             ) -> str:
                 self.prompts.append(label)
+                if "除外" in label:
+                    return ""
                 return "Team A/General" if "相対パス" in label else "Team A General"
+
+            def _select_value(self, *_args: object, **_kwargs: object) -> str:
+                return "all"
 
             def _examples(self, _key: str) -> tuple[str, ...]:
                 return ()

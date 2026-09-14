@@ -55,7 +55,7 @@ def install_document_filter_count_runtime() -> None:
         root = Path(str(root_value))
         parameters = (plan.get("steps") or [{}])[0].get("parameters") or {}
         selection = ({key: parameters.get(key, ()) for key in ("include_paths", "exclude_paths")}
-                     if plan.get("provider") == "sharepoint" else {})
+                     if plan.get("provider") in {"sharepoint", "teams"} else {})
         result["documents"] = count_document_files(root, **selection)
         return result
 

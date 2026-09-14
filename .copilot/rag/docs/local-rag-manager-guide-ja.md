@@ -430,6 +430,13 @@ Source追加・取得設定の変更で「同期フォルダ全体」または�
 SharePointと同じ同期rootから指定します。入力するのはTeamsのチャネル名ではなく、
 端末上の同期rootからの相対folderです。
 
+SharePointと同じく「指定フォルダのみ」でカンマ区切りの取得フォルダを指定でき、
+除外パス／globも設定できます（例: 取得 `docs, specifications/api`、除外
+`docs/archive, **/*.tmp`）。基準は登録したTeams共有folderです。既存Sourceでも
+基準folderを変えずに条件を変更でき、次回更新で対象外の検索データを取り除きます。
+「同期フォルダ全体」で取得フォルダ指定を解除し、除外欄の `-` で除外なしに戻せます。
+途中の処理は再開・完了してから条件を変更してください。同期元ファイルは変更しません。
+
 Teams Sourceもabsolute pathをDBへ保存しません。検索結果のWebリンクは初期設定
 では付けず、stored pathを表示します。リンクがなくても検索順位や検索可否は
 変わりません。
@@ -456,9 +463,9 @@ build, **/*.tmp, docs/*/draft.md
 
 separatorは`/`を使うroot相対表記です。入力した`\`は`/`へ正規化します。
 絶対path、Windows drive／UNC path、`..`によるroot外参照は保存できません。
-新規入力の空欄は除外なしで、暗黙の既定除外はありません。Redmine、GitLab Issue、
-Teamsにはこの設定を使いません。SharePointの同じパス／glob指定は上記の
-「SharePoint」を参照してください（同期フォルダを直接読み取るため、以下の
+新規入力の空欄は除外なしで、暗黙の既定除外はありません。Redmine、GitLab Issue
+にはこの設定を使いません。SharePointとTeamsの同じパス／glob指定は上記の
+各節を参照してください（同期フォルダを直接読み取るため、以下の
 取得済みworkのpreview／フィルタ用viewは使いません）。
 
 Provider取得後、初回のADD前にfile本文を読むことなくfile metadataから次を表示し、

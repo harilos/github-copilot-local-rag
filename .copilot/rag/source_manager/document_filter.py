@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import functools
-import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,7 +10,6 @@ FILE_SELECTION_KEY = "file_selection"
 FILE_SELECTION_ALL = "all_supported"
 FILE_SELECTION_DOCUMENTS = "documents_only"
 FILE_SOURCE_TYPES = frozenset({"github", "svn", "sharepoint", "teams", "other"})
-_EXTERNAL_FOLDER_TYPES = frozenset({"sharepoint", "teams"})
 _PROVIDER_MARKER = "_local_rag_document_filter_provider_installed"
 _RUNNER_MARKER = "_local_rag_document_filter_runner_installed"
 _MANAGER_HOOK_MARKER = "_local_rag_document_filter_manager_hook_installed"
@@ -24,7 +22,7 @@ def install_document_filter_runtime() -> None:
     from . import manager_connections, providers, runner, store as store_module
 
     _install_provider_contract(providers, runner, store_module)
-    _install_runner_contract(runner, providers)
+    _install_runner_contract(runner)
     _install_manager_hook(manager_connections)
 
 
@@ -53,11 +51,10 @@ def _install_provider_contract(providers: Any, runner: Any, store_module: Any) -
     setattr(providers, _PROVIDER_MARKER, True)
 
 
-def _install_runner_contract(runner: Any, providers: Any) -> None:
+def _install_runner_contract(runner: Any) -> None:
     if bool(getattr(runner, _RUNNER_MARKER, False)):
         return
     original_execute_add = runner._execute_add
-    original_update_configuration = runner.update_source_configuration
 
     @functools.wraps(original_execute_add)
     def execute_add(
@@ -120,64 +117,8 @@ def _install_runner_contract(runner: Any, providers: Any) -> None:
             initial_database_reflection=initial_database_reflection,
         )
 
-    @functools.wraps(original_update_configuration)
-    def update_source_configuration(
-        db_root: Path,
-        local_source_key: str,
-        *,
-        fetch: Mapping[str, Any],
-        display_name: str | None = None,
-        pending_link: Any = runner._UNSET,
-    ) -> dict[str, Any]:
-        store = runner.SourceStore(Path(db_root))
-        source = store.read_source(local_source_key)
-        source_type = str(source.payload.get("source_type") or "").strip().lower()
-        if source.payload.get("source_id") and source_type == "teams":
-            normalized = providers.validate_provider_config(source_type, fetch)
-            current = dict(source.payload.get("fetch") or {})
-            if _without_selection(normalized) == _without_selection(current):
-                payload = copy.deepcopy(source.payload)
-                payload["fetch"] = normalized
-                if display_name is not None:
-                    payload["display_name"] = str(display_name)
-                if pending_link is not runner._UNSET:
-                    if pending_link is None:
-                        payload.pop("pending_metadata", None)
-                    else:
-                        payload["pending_metadata"] = {
-                            "source_type": payload["source_type"],
-                            "link": copy.deepcopy(dict(pending_link)),
-                        }
-                saved = store.save_source(
-                    payload,
-                    expected_revision=source.revision,
-                    expected_etag=source.etag,
-                )
-                store.append_event(
-                    local_source_key,
-                    "source.file_selection_updated",
-                    {FILE_SELECTION_KEY: normalized[FILE_SELECTION_KEY]},
-                )
-                return runner._source_dto(store, saved)
-        arguments: dict[str, Any] = {
-            "fetch": fetch,
-            "display_name": display_name,
-        }
-        if pending_link is not runner._UNSET:
-            arguments["pending_link"] = pending_link
-        return original_update_configuration(
-            db_root,
-            local_source_key,
-            **arguments,
-        )
-
     runner._execute_add = execute_add
-    runner.update_source_configuration = update_source_configuration
     setattr(runner, _RUNNER_MARKER, True)
-    package = sys.modules.get(__package__)
-    if package is not None:
-        setattr(package, "update_source_configuration", update_source_configuration)
-
 
 def _install_manager_hook(manager_connections: Any) -> None:
     if bool(getattr(manager_connections, _MANAGER_HOOK_MARKER, False)):
@@ -246,15 +187,6 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         updated_fetch[FILE_SELECTION_KEY] = selection
         updated_source["fetch"] = updated_fetch
 
-        if source_type == "teams" and source.get("source_id"):
-            if selection == current_selection:
-                return original_edit(self, db_name, updated_source)
-            return _save_selection_only(
-                self,
-                db_name,
-                updated_source,
-                updated_fetch,
-            )
         if source_type == "other":
             if selection == current_selection:
                 return original_edit(self, db_name, updated_source)
@@ -367,12 +299,6 @@ def _selection_from_fetch(fetch: Mapping[str, Any]) -> str:
 def _source_selection(source: Mapping[str, Any]) -> str:
     fetch = source.get("fetch")
     return _selection_from_fetch(fetch if isinstance(fetch, Mapping) else {})
-
-
-def _without_selection(value: Mapping[str, Any]) -> dict[str, Any]:
-    output = dict(value)
-    output.pop(FILE_SELECTION_KEY, None)
-    return output
 
 
 def _selection_label(selection: str) -> str:

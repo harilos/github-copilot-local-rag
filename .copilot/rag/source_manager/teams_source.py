@@ -238,7 +238,8 @@ def _install_runner_runtime(runner: Any, providers: Any) -> None:
             == "teams"
         ):
             normalized = providers.validate_provider_config("teams", fetch)
-            if normalized != source.payload.get("fetch"):
+            if any(normalized.get(key, "") != (source.payload.get("fetch") or {}).get(key, "")
+                   for key in ("root_env", "relative_path")):
                 raise SourceManagerError(
                     "teams_ingestion_root_is_immutable_add_new_source"
                 )
@@ -389,33 +390,34 @@ def _install_manager_ui(manager_class: type[Any]) -> None:
         if not local_key:
             self._print_info("このSourceには変更できる取得設定がありません。")
             return
-        if source.get("source_id"):
-            self._print_warning(
-                "検索へ反映済みのTeams Sourceでは、"
-                "同期ルートからの相対フォルダを変更できません。"
-            )
-            self._print_info(
-                "別の共有フォルダを取り込む場合は、"
-                "「新しいSourceを追加する」から登録してください。"
-            )
-            return
         if os.name != "nt":
             self._print_warning(
                 "このOSではTeams共有フォルダの取得設定を変更できません。"
             )
             return
-        relative = self._prompt_preserving_value(
-            "SharePoint同期ルートからのTeams共有フォルダ相対パス",
-            str(fetch.get("relative_path") or ""),
-            required=True,
-            examples=self._examples("sharepoint_relative_path"),
-        )
-        if relative is None:
-            return
+        from .manager_connections import prompt_sharepoint_selection
+
         updated = dict(fetch)
-        updated["relative_path"] = relative
+        if not source.get("source_id"):
+            relative = self._prompt_preserving_value(
+                "SharePoint同期ルートからのTeams共有フォルダ相対パス",
+                str(fetch.get("relative_path") or ""),
+                required=True,
+                examples=self._examples("sharepoint_relative_path"),
+            )
+            if relative is None:
+                return
+            updated["relative_path"] = relative
+        else:
+            self._print_info("登録済みの同期フォルダを基準に、取得フォルダと除外設定を変更します。")
+        selection = prompt_sharepoint_selection(self, fetch)
+        if selection is None:
+            return
+        updated.update(selection)
         self.output("\n変更後の取得設定")
-        self.output(f"同期ルートからの相対フォルダ: {relative}")
+        self.output(f"同期ルートからの相対フォルダ: {updated.get('relative_path', '')}")
+        self.output("取得フォルダ: " + (", ".join(selection["include_paths"]) or "全体"))
+        self.output("除外パス: " + (", ".join(selection["exclude_paths"]) or "なし"))
         if not self._confirm("この内容で取得設定を保存しますか？"):
             self._print_info("取得設定は変更されていません。")
             return
@@ -514,6 +516,11 @@ def prompt_new_teams_source(self: Any) -> dict[str, Any] | None:
     )
     if relative is None or name is None:
         return None
+    from .manager_connections import prompt_sharepoint_selection
+
+    selection = prompt_sharepoint_selection(self, {})
+    if selection is None:
+        return None
     return {
         "source_type": "teams",
         "label": "Microsoft Teams共有フォルダ",
@@ -521,9 +528,12 @@ def prompt_new_teams_source(self: Any) -> dict[str, Any] | None:
         "fetch": {
             "relative_path": relative,
             "root_env": SHAREPOINT_ROOT_ENV,
+            **selection,
         },
         "summary": (
             ("同期フォルダ", relative),
+            ("取得フォルダ", ", ".join(selection["include_paths"]) or "全体"),
+            ("除外パス", ", ".join(selection["exclude_paths"]) or "なし"),
             ("同期方式", "OneDriveで同期済みのローカルフォルダ"),
             ("Webリンク", "初期設定なし"),
             ("追加・更新", "Windowsのみ"),

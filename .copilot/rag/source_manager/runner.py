@@ -488,7 +488,7 @@ def update_source(
                 state_stored.payload,
             )
         )
-        and source.payload.get("source_type") != "sharepoint"
+        and source.payload.get("source_type") not in {"sharepoint", "teams"}
         and not force_full_materialization
     ):
         return _resume_add_only(
@@ -1527,7 +1527,7 @@ def _execute_add(
     key = str(source["local_source_key"])
     privacy_safe_root = (
         str(source.get("source_type") or "").strip().lower()
-        == "sharepoint"
+        in {"sharepoint", "teams"}
     )
     arguments = [
         str(python_executable),
@@ -3343,7 +3343,7 @@ def _reflect_and_sync(
     persistent_root_identity: Path | None = None,
 ) -> dict[str, Any]:
     work = Path(add_root)
-    if str(source.payload.get("source_type") or "") == "sharepoint":
+    if str(source.payload.get("source_type") or "") in {"sharepoint", "teams"}:
         settings = source.payload.get("fetch") or {}
         validate_external_add_root(work, include_paths=settings.get("include_paths", ()), exclude_paths=settings.get("exclude_paths", ()))
     else:

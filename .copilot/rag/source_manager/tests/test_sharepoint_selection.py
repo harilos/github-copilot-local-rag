@@ -15,6 +15,8 @@ from source_manager.document_filter_counts import count_document_files
 
 
 class SharePointSelectionTests(unittest.TestCase):
+    provider = 'sharepoint'
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -30,23 +32,23 @@ class SharePointSelectionTests(unittest.TestCase):
     def test_comma_separated_folders_and_portable_settings(self):
         folders = parse_include_input(r'docs\guide, api, docs, docs')
         self.assertEqual(['api', 'docs'], folders)
-        value = providers.validate_provider_config('sharepoint', {
+        value = providers.validate_provider_config(self.provider, {
             **self.settings, 'include_paths': folders, 'exclude_paths': ['docs/archive', '**/*.tmp'],
         })
         self.assertEqual(folders, value['include_paths'])
         self.assertEqual(['docs/archive', '**/*.tmp'], value['exclude_paths'])
-        legacy = providers.validate_provider_config('sharepoint', self.settings)
+        legacy = providers.validate_provider_config(self.provider, self.settings)
         self.assertEqual([], legacy['include_paths'])
         self.assertEqual([], legacy['exclude_paths'])
         for paths in (['../other'], ['/absolute'], ['C:\\private'], ['docs/*'], ['.git']):
             with self.subTest(paths=paths), self.assertRaises(SourceManagerError):
-                providers.validate_provider_config('sharepoint', {**self.settings, 'include_paths': paths})
+                providers.validate_provider_config(self.provider, {**self.settings, 'include_paths': paths})
 
     def test_fetch_prunes_unselected_and_excluded_before_validation_and_count(self):
         # A VCS tree / symlink in an ignored branch must not block selected documents.
         (self.root / 'other' / '.svn').mkdir()
         (self.root / 'docs' / 'archive' / 'link').symlink_to(self.base, target_is_directory=True)
-        plan = providers.build_fetch_plan(source_key='fixture', provider='sharepoint',
+        plan = providers.build_fetch_plan(source_key='fixture', provider=self.provider,
             settings={**self.settings, 'include_paths': ['docs', 'api'], 'exclude_paths': ['docs/archive']},
             logical_root='work/fixture', work_path='work/fixture')
         (self.base / 'work').mkdir()
@@ -62,7 +64,7 @@ class SharePointSelectionTests(unittest.TestCase):
     def test_indexed_settings_can_change_filters_but_not_root(self):
         db = self.base / 'fixture-rag'
         db.mkdir()
-        dto = runner.register_source(db, source_type='sharepoint', display_name='fixture', fetch=self.settings, start=False)
+        dto = runner.register_source(db, source_type=self.provider, display_name='fixture', fetch=self.settings, start=False)
         key = dto['local_source_key']
         store = SourceStore(db)
         saved = store.read_source(key)
@@ -72,6 +74,12 @@ class SharePointSelectionTests(unittest.TestCase):
         self.assertEqual(['docs'], store.read_source(key).payload['fetch']['include_paths'])
         with self.assertRaisesRegex(SourceManagerError, 'immutable'):
             runner.update_source_configuration(db, key, fetch={**self.settings, 'relative_path': 'Other'})
+        with self.assertRaisesRegex(SourceManagerError, 'immutable'):
+            runner.update_source_configuration(db, key, fetch={**self.settings, 'root_env': 'OTHER_ROOT'})
+        cleared = runner.update_source_configuration(db, key, fetch={**self.settings, 'file_selection': 'documents_only'})
+        self.assertEqual(key, cleared['source_id'])
+        self.assertEqual([], store.read_source(key).payload['fetch']['include_paths'])
+        self.assertEqual([], store.read_source(key).payload['fetch']['exclude_paths'])
         state = store.read_state(key)
         from source_manager.checkpoints import new_run_state
         plan = store.plan(store.read_source(key).payload)
@@ -88,7 +96,7 @@ class SharePointSelectionTests(unittest.TestCase):
             'upserted_records':1,'deleted_records':0,'result_status':'success','error_details':[]}
         command = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=RESULT_FRAME+json.dumps(summary), stderr=''))
         runner._execute_add(db_root=self.base/'fixture-rag', source={
-            'local_source_key':key,'source_type':'sharepoint',
+            'local_source_key':key,'source_type':self.provider,
             'fetch':{**self.settings,'include_paths':['docs','api'],'exclude_paths':['docs/archive','**/*.tmp']},
         }, work=self.root, python_executable=Path('python'), rag_root=self.base/'rag', command_runner=command, progress_callback=None)
         command.assert_called_once()
