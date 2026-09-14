@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import shutil
 import struct
 import sys
@@ -173,7 +174,12 @@ class WindowsRuntimeCacheTests(unittest.TestCase):
         product.assert_called_once_with(self.home, admin=False, include_models=False)
         with zipfile.ZipFile(output) as archive:
             names = set(archive.namelist())
-        self.assertIn(f".copilot/rag/models/{distribution.MODEL_NAME}/model.onnx", names)
+            payload_name = (
+                f".copilot/rag/models/{distribution.MODEL_NAME}/payload.zip"
+            )
+            self.assertIn(payload_name, names)
+            with zipfile.ZipFile(io.BytesIO(archive.read(payload_name))) as inner:
+                self.assertIn("model.onnx", inner.namelist())
         self.assertFalse(any("unused-builder-model" in name for name in names))
 
 

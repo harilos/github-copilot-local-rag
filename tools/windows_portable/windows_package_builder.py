@@ -49,6 +49,7 @@ def _load_source_manager_module(name: str):
 
 _SNAPSHOT_MODULE = _load_source_manager_module("packages")
 _WINDOWS_BANNER_MODULE = _load_source_manager_module("windows_banner")
+_COMPACT_MODULE = _load_source_manager_module("compact_payload")
 PackageError = _SNAPSHOT_MODULE.PackageError
 stage_search_database_snapshots = (
     _SNAPSHOT_MODULE.stage_search_database_snapshots
@@ -143,6 +144,7 @@ def build_package(request: BuildRequest) -> BuildResult:
 
         _prune_foreign_arch_setuptools_launchers(runtime_target)
         _prune_pip_distlib_launchers(runtime_target)
+        _prune_runtime_completion_markers(runtime_target)
         _assert_amd64_runtime(runtime_target)
         _write_text(
             package_root / "install.cmd",
@@ -158,6 +160,7 @@ def build_package(request: BuildRequest) -> BuildResult:
         _write_json(package_root / "sbom.spdx.json", _sbom(request))
 
         _assert_no_forbidden_payload(package_root)
+        _COMPACT_MODULE.compact_heavy_payloads(package_root, database_names)
         _write_deterministic_zip(package_root, zip_path)
 
     return BuildResult(
@@ -457,6 +460,13 @@ def _prune_pip_distlib_launchers(runtime_root: Path) -> None:
             path.unlink()
 
 
+def _prune_runtime_completion_markers(runtime_root: Path) -> None:
+    for path in runtime_root.glob(".rag-deps-installed*"):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("runtime completion marker is not a regular file")
+        path.unlink()
+
+
 def _pe_machine(path: Path) -> int:
     try:
         with path.open("rb") as handle:
@@ -506,7 +516,13 @@ def _write_deterministic_zip(package_root: Path, destination: Path) -> None:
                     continue
                 relative = Path(package_root.name) / path.relative_to(package_root)
                 info = zipfile.ZipInfo(relative.as_posix(), (2026, 1, 1, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
+                info.compress_type = (
+                    zipfile.ZIP_STORED
+                    if _COMPACT_MODULE.is_inner_payload_path(
+                        path.relative_to(package_root).as_posix()
+                    )
+                    else zipfile.ZIP_DEFLATED
+                )
                 info.external_attr = 0o100644 << 16
                 with path.open("rb") as source:
                     info.file_size = os.fstat(source.fileno()).st_size

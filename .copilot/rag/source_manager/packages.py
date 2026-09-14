@@ -1807,6 +1807,8 @@ def _backup_sqlite(
 
 
 def _write_zip(root: Path, output: Path) -> None:
+    from .compact_payload import is_inner_payload_path
+
     with zipfile.ZipFile(
         output,
         "x",
@@ -1821,7 +1823,15 @@ def _write_zip(root: Path, output: Path) -> None:
                 raise PackageError("package_symlink_forbidden")
             relative = path.relative_to(root).as_posix()
             _safe_relative(relative)
-            package.write(path, relative)
+            package.write(
+                path,
+                relative,
+                compress_type=(
+                    zipfile.ZIP_STORED
+                    if is_inner_payload_path(relative)
+                    else zipfile.ZIP_DEFLATED
+                ),
+            )
 
 
 def _validate_manifest_shape(

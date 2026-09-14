@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Sequence
 
-from . import packages, windows_banner
+from . import compact_payload, packages, windows_banner
 from .operation_lock import database_operation_lock
 
 
@@ -113,6 +113,11 @@ def create_windows_distribution_package(
                 databases=databases,
                 created=created,
                 tool_version=version,
+            )
+            compact_payload.compact_heavy_payloads(
+                stage,
+                [str(item["name"]) for item in databases],
+                manifest_name=packages.MANIFEST_NAME,
             )
         packages.validate_package_tree(
             stage,
@@ -613,6 +618,10 @@ def _generated_installer_entries(work: Path) -> list[packages._Entry]:
         "`%LOCALAPPDATA%\\LocalRAG\\logs` with a TEMP fallback. If Windows "
         "PowerShell cannot start, the cmd launcher itself prints Japanese "
         "failure guidance and writes the same class of run log.\n\n"
+        "Runtime, model, and selected databases are stored once as inner "
+        "`payload.zip` archives. The installer validates every inner path, then "
+        "extracts directly into `%USERPROFILE%\\.copilot`; it does not create a "
+        "second expanded heavy tree beside the package.\n\n"
         "After installation, run `/local-rag <question>` in GitHub Copilot "
         "Chat or Copilot CLI. The installed personal Skill uses Local RAG's "
         "fixed public command boundary; lookup operations are read-only. "
@@ -654,24 +663,50 @@ def _verify_staged_structure(
     stage: Path,
     databases: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    runtime = stage / ".copilot" / "rag" / "query" / ".venv"
-    _validate_runtime(runtime)
-    _validate_model(stage / ".copilot")
+    runtime = stage / ".copilot" / "rag" / "query" / ".venv" / "payload.zip"
+    runtime_names = set(compact_payload.inner_archive_names(runtime))
+    if "Scripts/python.exe" not in runtime_names:
+        raise packages.PackageError("windows_offline_runtime_layout_mismatch")
+    model = (
+        stage
+        / ".copilot"
+        / "rag"
+        / "models"
+        / MODEL_NAME
+        / "payload.zip"
+    )
+    model_names = set(compact_payload.inner_archive_names(model))
+    if not set(MODEL_REQUIRED).issubset(model_names) or not (
+        {"tokenizer.json", "tokenizer.model"} & model_names
+    ):
+        raise packages.PackageError("windows_offline_model_layout_mismatch")
     expected = {str(item["name"]) for item in databases}
     dbs_root = stage / ".copilot" / "rag" / "dbs"
     packaged = (
         {
             path.name
             for path in dbs_root.iterdir()
-            if path.is_dir() and not path.is_symlink()
+            if path.is_dir()
+            and not path.is_symlink()
+            and (path / "payload.zip").is_file()
         }
         if dbs_root.is_dir()
         else set()
     )
     if packaged != expected:
         raise packages.PackageError("windows_offline_database_layout_mismatch")
+    for name in expected:
+        names = set(
+            compact_payload.inner_archive_names(
+                dbs_root / name / compact_payload.INNER_PAYLOAD_NAME
+            )
+        )
+        if not {"VERSION.json", "catalog.sqlite", "db.json"}.issubset(names) or not any(
+            value.startswith("index/") for value in names
+        ):
+            raise packages.PackageError("windows_offline_database_layout_mismatch")
     return {
-        "runtime_layout": "pass",
+        "runtime_layout": "inner-payload-pass",
         "model_required_files": "pass",
         "packaged_databases": sorted(packaged, key=str.casefold),
         "manifest": "pass",

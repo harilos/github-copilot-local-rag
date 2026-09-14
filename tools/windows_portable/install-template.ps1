@@ -12,14 +12,17 @@ $ErrorActionPreference = "Stop"
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $Utf8NoBom
 [Console]::OutputEncoding = $Utf8NoBom
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 $PackageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $Payload = Join-Path $PackageRoot ".copilot"
 $Target = Join-Path $env:USERPROFILE ".copilot"
 $SourceQuery = Join-Path $Payload "rag\query"
 $TargetQuery = Join-Path $Target "rag\query"
 $SourceRuntime = Join-Path $SourceQuery ".venv"
+$SourceRuntimeArchive = Join-Path $SourceRuntime "payload.zip"
 $TargetRuntime = Join-Path $TargetQuery ".venv"
 $SourceModel = Join-Path $Payload "rag\models\ruri-v3-30m-onnx-int8"
+$SourceModelArchive = Join-Path $SourceModel "payload.zip"
 $TargetModel = Join-Path $Target "rag\models\ruri-v3-30m-onnx-int8"
 $SourceDbs = Join-Path $Payload "rag\dbs"
 $TargetDbs = Join-Path $Target "rag\dbs"
@@ -198,6 +201,97 @@ function Assert-NoReparseTree {
     }
 }
 
+function Get-SafeArchiveEntryNames {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        throw ("inner payload archive is missing: " + $ArchivePath)
+    }
+    Assert-NoReparsePath -Path $ArchivePath
+    $Root = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\')
+    $Seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $Files = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $Directories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $Names = @()
+    $Archive = $null
+    try {
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        foreach ($Entry in $Archive.Entries) {
+            $Raw = [string]$Entry.FullName
+            $Relative = $Raw.Replace('/', '\').TrimEnd('\')
+            if ([string]::IsNullOrWhiteSpace($Relative)) { continue }
+            if (
+                [System.IO.Path]::IsPathRooted($Relative) -or
+                $Relative -match '^[A-Za-z]:' -or
+                $Relative.Split('\') -contains '..' -or
+                $Relative.Split('\') -contains '.' -or
+                $Relative.Contains(':')
+            ) {
+                throw "inner payload archive path is invalid"
+            }
+            if ((($Entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000) {
+                throw "inner payload archive link is forbidden"
+            }
+            $Candidate = [System.IO.Path]::GetFullPath((Join-Path $Root $Relative))
+            if (-not $Candidate.StartsWith(
+                $Root + '\', [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "inner payload archive path escapes its target"
+            }
+            if (-not $Seen.Add($Candidate)) {
+                throw "inner payload archive contains duplicate targets"
+            }
+            $Parent = [System.IO.Path]::GetDirectoryName($Candidate)
+            while ($Parent.StartsWith(
+                $Root + '\', [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                if ($Files.Contains($Parent)) {
+                    throw "inner payload archive contains a file/directory collision"
+                }
+                $null = $Directories.Add($Parent)
+                $Parent = [System.IO.Path]::GetDirectoryName($Parent)
+            }
+            if ([string]::IsNullOrEmpty($Entry.Name)) {
+                if ($Files.Contains($Candidate)) {
+                    throw "inner payload archive contains a file/directory collision"
+                }
+                $null = $Directories.Add($Candidate)
+            } else {
+                if ($Directories.Contains($Candidate)) {
+                    throw "inner payload archive contains a file/directory collision"
+                }
+                $null = $Files.Add($Candidate)
+            }
+            $Names += $Raw
+        }
+    } finally {
+        if ($null -ne $Archive) { $Archive.Dispose() }
+    }
+    return $Names
+}
+
+function Expand-SafeArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $null = @(Get-SafeArchiveEntryNames `
+        -ArchivePath $ArchivePath -Destination $Destination)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
+        $ArchivePath,
+        $Destination
+    )
+}
+
 function Remove-Tree {
     param([string]$Path)
     if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -360,9 +454,10 @@ Assert-NoReparsePath -Path $TargetQuery
 Assert-NoReparsePath -Path $TargetRuntime
 Assert-NoReparsePath -Path $TargetModel
 Assert-NoReparseTree -Path $Payload
-Assert-NoReparseTree -Path $SourceRuntime
-Assert-NoReparseTree -Path $SourceModel
-Assert-Amd64PortableRuntime -Runtime $SourceRuntime
+$null = @(Get-SafeArchiveEntryNames `
+    -ArchivePath $SourceRuntimeArchive -Destination $StageRuntime)
+$null = @(Get-SafeArchiveEntryNames `
+    -ArchivePath $SourceModelArchive -Destination $StageModel)
 $PayloadRoot = [System.IO.Path]::GetFullPath($Payload).TrimEnd('\')
 $TargetRoot = [System.IO.Path]::GetFullPath($Target).TrimEnd('\')
 if (
@@ -385,6 +480,10 @@ if (Test-Path -LiteralPath $SourceDbs -PathType Container) {
             throw ("portable package database name is invalid: " + $Database.Name)
         }
         Assert-NoReparseTree -Path $Database.FullName
+        $DatabaseArchive = Join-Path $Database.FullName "payload.zip"
+        $null = @(Get-SafeArchiveEntryNames `
+            -ArchivePath $DatabaseArchive `
+            -Destination (Join-Path $TargetDbs $Database.Name))
         $DatabaseNames += $Database.Name
     }
 }
@@ -413,8 +512,11 @@ try {
         (Split-Path -Parent $TargetModel),
         $TargetDbs
     ) | Out-Null
-    Copy-Item -LiteralPath $SourceRuntime -Destination $StageRuntime -Recurse
-    Copy-Item -LiteralPath $SourceModel -Destination $StageModel -Recurse
+    Expand-SafeArchive `
+        -ArchivePath $SourceRuntimeArchive -Destination $StageRuntime
+    Expand-SafeArchive `
+        -ArchivePath $SourceModelArchive -Destination $StageModel
+    Assert-Amd64PortableRuntime -Runtime $StageRuntime
 
     # Close both the managed-setup marker gate and the fixed portable-runtime
     # gate before changing product files or selected databases.  The staged
@@ -512,9 +614,9 @@ try {
         $DatabaseStatus = "REINSTALL_REQUIRED"
         Remove-Tree $Existing
         try {
-            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (
-                $Existing
-            ) -Recurse
+            Expand-SafeArchive `
+                -ArchivePath (Join-Path (Join-Path $SourceDbs $Name) "payload.zip") `
+                -Destination $Existing
         } catch {
             try { Remove-Tree $Existing } catch {
                 Write-Warning "Incomplete database removal failed; reinstall this package."

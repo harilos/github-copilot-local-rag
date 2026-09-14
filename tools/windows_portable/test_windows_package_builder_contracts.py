@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 import re
 import shutil
@@ -42,6 +43,10 @@ def _write_pe(path: Path, machine: int = 0x8664) -> None:
     struct.pack_into("<H", payload, 0x84, machine)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
+
+
+def _inner_archive(outer: zipfile.ZipFile, name: str) -> zipfile.ZipFile:
+    return zipfile.ZipFile(io.BytesIO(outer.read(name)))
 
 
 def _fixture(root: Path, *, database_names: tuple[str, ...] = ("alpha-rag",)):
@@ -295,19 +300,24 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                     launcher,
                 )
                 self.assertIn(prefix + "internal/install.ps1", names)
-                self.assertIn(
-                    prefix + ".copilot/rag/query/.venv/Scripts/python.exe",
-                    names,
-                )
-                self.assertIn(
+                runtime_payload = prefix + ".copilot/rag/query/.venv/payload.zip"
+                model_payload = (
                     prefix
-                    + ".copilot/rag/models/ruri-v3-30m-onnx-int8/model.onnx",
-                    names,
+                    + ".copilot/rag/models/ruri-v3-30m-onnx-int8/payload.zip"
                 )
-                self.assertIn(
-                    prefix + ".copilot/rag/dbs/alpha-rag/catalog.sqlite",
-                    names,
+                database_payload = (
+                    prefix + ".copilot/rag/dbs/alpha-rag/payload.zip"
                 )
+                self.assertIn(runtime_payload, names)
+                self.assertIn(model_payload, names)
+                self.assertIn(database_payload, names)
+                self.assertEqual(zipfile.ZIP_STORED, archive.getinfo(runtime_payload).compress_type)
+                with _inner_archive(archive, runtime_payload) as inner:
+                    self.assertIn("Scripts/python.exe", inner.namelist())
+                with _inner_archive(archive, model_payload) as inner:
+                    self.assertIn("model.onnx", inner.namelist())
+                with _inner_archive(archive, database_payload) as inner:
+                    self.assertIn("catalog.sqlite", inner.namelist())
                 for admin in ("data", "logs", "sources"):
                     self.assertFalse(
                         any(
@@ -665,14 +675,16 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             result = build_package(request)
 
             with zipfile.ZipFile(result.zip_path) as archive:
-                archived = set(archive.namelist())
-                self.assertTrue(any(name.endswith("/pip/__init__.py") for name in archived))
+                runtime_payload = next(
+                    name for name in archive.namelist()
+                    if name.endswith("/.copilot/rag/query/.venv/payload.zip")
+                )
+                with _inner_archive(archive, runtime_payload) as inner:
+                    archived = set(inner.namelist())
+                self.assertIn("Lib/site-packages/pip/__init__.py", archived)
                 for name in package_builder.PIP_DISTLIB_LAUNCHERS:
                     self.assertFalse(
-                        any(
-                            entry.endswith(f"/pip/_vendor/distlib/{name}")
-                            for entry in archived
-                        )
+                        f"Lib/site-packages/pip/_vendor/distlib/{name}" in archived
                     )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -738,6 +750,21 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
                 (distlib / name).unlink()
             result = build_package(request)
             self.assertTrue(result.zip_path.is_file())
+
+    def test_prunes_runtime_completion_marker_before_packaging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = _request(Path(directory), no_database=True)
+            (request.runtime_root / ".rag-deps-installed").write_text(
+                "machine-local\n", encoding="utf-8"
+            )
+            result = build_package(request)
+            with zipfile.ZipFile(result.zip_path) as archive:
+                payload_name = next(
+                    name for name in archive.namelist()
+                    if name.endswith("/.copilot/rag/query/.venv/payload.zip")
+                )
+                with _inner_archive(archive, payload_name) as inner:
+                    self.assertNotIn(".rag-deps-installed", inner.namelist())
 
     def test_rejects_unknown_profile_and_database_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -865,10 +892,12 @@ class WindowsPackageBuilderContractTests(unittest.TestCase):
             )
             result = build_package(request)
             with zipfile.ZipFile(result.zip_path) as archive:
-                value = archive.read(
+                payload = archive.read(
                     "local-rag-windows-x64-1.2.3/"
-                    ".copilot/rag/query/.venv/Scripts/python313._pth"
-                ).decode("utf-8")
+                    ".copilot/rag/query/.venv/payload.zip"
+                )
+                with zipfile.ZipFile(io.BytesIO(payload)) as inner:
+                    value = inner.read("Scripts/python313._pth").decode("utf-8")
             self.assertEqual(1, value.splitlines().count(r"..\.."))
             self.assertLess(
                 value.splitlines().index(r"..\.."),
@@ -937,6 +966,9 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
         database = package / ".copilot" / "rag" / "dbs" / "selected-rag"
         database.mkdir(parents=True)
         (database / "catalog.sqlite").write_bytes(database_content)
+        package_builder._COMPACT_MODULE.compact_heavy_payloads(
+            package, ("selected-rag",)
+        )
         return package
 
     def _run(
@@ -1066,6 +1098,60 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
                 {path.name for path in agents.glob("*.agent.md")},
             )
 
+    def test_rejects_inner_database_traversal_before_deleting_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            database = profile / ".copilot/rag/dbs/selected-rag"
+            database.mkdir(parents=True)
+            old = database / "old.txt"
+            old.write_bytes(b"old")
+            payload = package / ".copilot/rag/dbs/selected-rag/payload.zip"
+            payload.unlink()
+            with zipfile.ZipFile(payload, "w") as archive:
+                archive.writestr("../escape.txt", b"escape")
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(b"old", old.read_bytes())
+            self.assertFalse((profile / ".copilot/rag/dbs/escape.txt").exists())
+
+    def test_rejects_inner_database_duplicate_before_deleting_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            database = profile / ".copilot/rag/dbs/selected-rag"
+            database.mkdir(parents=True)
+            old = database / "old.txt"
+            old.write_bytes(b"old")
+            payload = package / ".copilot/rag/dbs/selected-rag/payload.zip"
+            payload.unlink()
+            with zipfile.ZipFile(payload, "w") as archive:
+                archive.writestr("A.txt", b"one")
+                archive.writestr("a.txt", b"two")
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(b"old", old.read_bytes())
+
+    def test_rejects_inner_file_directory_collision_before_deleting_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            package = self._package(root)
+            database = profile / ".copilot/rag/dbs/selected-rag"
+            database.mkdir(parents=True)
+            old = database / "old.txt"
+            old.write_bytes(b"old")
+            payload = package / ".copilot/rag/dbs/selected-rag/payload.zip"
+            payload.unlink()
+            with zipfile.ZipFile(payload, "w") as archive:
+                archive.writestr("collision", b"file")
+                archive.writestr("collision/child.txt", b"child")
+            completed = self._run(package, profile)
+            self.assertNotEqual(0, completed.returncode)
+            self.assertEqual(b"old", old.read_bytes())
+
     def test_db_copy_failure_does_not_restore_old_or_leave_partial_db(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1078,9 +1164,9 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             installer = package / "internal" / "install.ps1"
             original = installer.read_text(encoding="utf-8")
             copy = (
-                '            Copy-Item -LiteralPath (Join-Path $SourceDbs $Name) -Destination (\n'
-                '                $Existing\n'
-                '            ) -Recurse'
+                '            Expand-SafeArchive `\n'
+                '                -ArchivePath (Join-Path (Join-Path $SourceDbs $Name) "payload.zip") `\n'
+                '                -Destination $Existing'
             )
             self.assertIn(copy, original)
             installer.write_text(original.replace(copy, copy + '\n'

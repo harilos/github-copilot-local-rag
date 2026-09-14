@@ -21,7 +21,7 @@ for module_root in (RAG_ROOT, QUERY_ROOT):
     if str(module_root) not in sys.path:
         sys.path.insert(0, str(module_root))
 
-from source_manager import windows_distribution  # noqa: E402
+from source_manager import packages, windows_distribution  # noqa: E402
 import mcp_config  # noqa: E402
 
 
@@ -208,6 +208,19 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             output = Path(directory) / "offline.zip"
             cache_home = Path(directory) / "cache-home"
             cache_home.mkdir()
+            model = (
+                cache_home
+                / "rag"
+                / "models"
+                / windows_distribution.MODEL_NAME
+            )
+            model.mkdir(parents=True)
+            for name in windows_distribution.MODEL_REQUIRED:
+                (model / name).write_bytes(b"fixture")
+            (model / "tokenizer.json").write_bytes(b"{}")
+            product_entries = packages._product_entries(
+                RAG_ROOT.parent, admin=False, include_models=False
+            )
             cached_runtime = windows_distribution._cached_runtime
             with (
                 mock.patch.object(
@@ -218,6 +231,11 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
                 mock.patch.object(
                     windows_distribution,
                     "_validate_model",
+                ),
+                mock.patch.object(
+                    packages,
+                    "_product_entries",
+                    return_value=product_entries,
                 ),
                 mock.patch.object(
                     windows_distribution,
@@ -234,7 +252,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             ):
                 result = (
                     windows_distribution.create_windows_distribution_package(
-                        RAG_ROOT.parent,
+                        cache_home,
                         output,
                         db_names=(),
                     )
@@ -248,7 +266,7 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
             self.assertIn("install.cmd", names)
             self.assertIn("internal/install.ps1", names)
             self.assertIn(
-                ".copilot/rag/query/.venv/Scripts/python.exe",
+                ".copilot/rag/query/.venv/payload.zip",
                 names,
             )
             self.assertIn(".copilot/rag/list_dbs.py", names)
