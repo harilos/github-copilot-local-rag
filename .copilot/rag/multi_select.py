@@ -80,6 +80,7 @@ def toggle_selection(
 
 def database_selection_rows(
     summaries: Iterable[Mapping[str, object]], dbs_root: Path,
+    *, include_size: bool = True,
 ) -> tuple[SelectionRow, ...]:
     rows: list[SelectionRow] = []
     root = _trusted_database_root(Path(dbs_root))
@@ -95,8 +96,8 @@ def database_selection_rows(
             raise ValueError("database path escapes trusted root")
         display = safe_label(summary.get("display_name") or summary.get("label") or
                              summary.get("title") or name)
-        rows.append(SelectionRow(name, f"{safe_label(name)}  display: {display}  "
-                                 f"{_format_size(_tree_size(resolved))}"))
+        size = f"  {_format_size(_tree_size(resolved))}" if include_size else ""
+        rows.append(SelectionRow(name, f"{safe_label(name)}  display: {display}{size}"))
     rows.sort(key=lambda row: row.key.casefold())
     return tuple(rows)
 

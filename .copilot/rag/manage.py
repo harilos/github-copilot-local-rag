@@ -1009,11 +1009,19 @@ class LocalRagManager:
         from multi_select import (
             SelectionResult,
             database_selection_rows,
+            discover_database_summaries,
             toggle_selection,
         )
 
-        summaries = self._database_summaries()
-        rows = database_selection_rows(summaries, self.dbs_root)
+        is_distribution = kind == "distribution"
+        summaries = (
+            discover_database_summaries(self.dbs_root)
+            if is_distribution
+            else self._database_summaries()
+        )
+        rows = database_selection_rows(
+            summaries, self.dbs_root, include_size=not is_distribution,
+        )
         if rows:
             selection = toggle_selection(
                 rows,
@@ -1036,7 +1044,6 @@ class LocalRagManager:
             self._print_info("Package creation was cancelled.")
             return
 
-        is_distribution = kind == "distribution"
         label = (
             "利用者向け検索パッケージ"
             if is_distribution

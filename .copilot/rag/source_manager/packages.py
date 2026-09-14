@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Mapping, Sequence
+from typing import Any, BinaryIO, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
 from .package_installers import INSTALL_PS1_TEXT, INSTALL_SH_TEXT
@@ -842,13 +842,65 @@ def validate_distribution_zip(
     archive = Path(archive_path)
     if archive.is_symlink() or not archive.is_file():
         raise PackageError("package_archive_missing")
-    with tempfile.TemporaryDirectory(prefix="local-rag-package-verify.") as temp:
-        root = Path(temp)
-        return _extract_distribution_zip(
-            archive,
-            root,
-            expected_kind=expected_kind,
-        )
+    try:
+        with zipfile.ZipFile(archive, "r") as package:
+            seen: set[str] = set()
+            actual: dict[str, zipfile.ZipInfo] = {}
+            for info in package.infolist():
+                name = info.filename.rstrip("/")
+                if not name:
+                    continue
+                relative = _safe_relative(name)
+                normalized = relative.as_posix()
+                if normalized in seen:
+                    raise PackageError("package_archive_duplicate_path")
+                seen.add(normalized)
+                mode = stat.S_IFMT((info.external_attr >> 16) & 0xFFFF)
+                if mode == stat.S_IFLNK:
+                    raise PackageError("package_symlink_forbidden")
+                expected_mode = stat.S_IFDIR if info.is_dir() else stat.S_IFREG
+                if mode not in {0, expected_mode}:
+                    raise PackageError("package_special_file_forbidden")
+                if not info.is_dir():
+                    actual[normalized] = info
+            # Extraction also rejects files that occupy another entry's parent.
+            for name in seen:
+                if any(str(parent) in actual for parent in PurePosixPath(name).parents):
+                    raise PackageError("package_archive_invalid")
+            manifest_info = actual.pop(MANIFEST_NAME, None)
+            if manifest_info is None:
+                raise PackageError("package_manifest_missing")
+            try:
+                manifest = json.loads(package.read(manifest_info).decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise PackageError("package_manifest_invalid") from exc
+            _validate_manifest_shape(manifest, expected_kind=expected_kind)
+            expected: dict[str, Mapping[str, Any]] = {}
+            for record in manifest["files"]:
+                name = _safe_relative(str(record["path"])).as_posix()
+                if name == MANIFEST_NAME or name in expected:
+                    raise PackageError("package_manifest_path_invalid")
+                expected[name] = record
+            if set(actual) != set(expected):
+                raise PackageError("package_manifest_coverage_mismatch")
+            total_size = 0
+            for name, record in expected.items():
+                digest = hashlib.sha256()
+                size = 0
+                with package.open(actual[name], "r") as source:
+                    while chunk := source.read(_BUFFER_SIZE):
+                        digest.update(chunk)
+                        size += len(chunk)
+                if size != record["size"] or digest.hexdigest() != record["sha256"]:
+                    raise PackageError("package_checksum_mismatch")
+                total_size += size
+            if manifest["total"] != {"files": len(actual), "bytes": total_size}:
+                raise PackageError("package_total_mismatch")
+            return manifest
+    except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as exc:
+        if isinstance(exc, PackageError):
+            raise
+        raise PackageError("package_archive_invalid") from exc
 
 
 def import_package(
@@ -995,6 +1047,7 @@ def _product_entries(
     copilot_home: Path,
     *,
     admin: bool,
+    include_models: bool = True,
 ) -> list[_Entry]:
     """Collect product files by denylist, outside security-sensitive DBs.
 
@@ -1049,7 +1102,10 @@ def _product_entries(
             rag_root=rag_root,
             admin=admin,
         ),
-        descend=lambda path: _product_payload_directory(
+        descend=lambda path: (
+            include_models or path.relative_to(rag_root).parts[0].casefold() != "models"
+        )
+        and _product_payload_directory(
             path,
             rag_root=rag_root,
             admin=admin,
@@ -1220,6 +1276,7 @@ def _stage_package(
     for entry in entries:
         destination = stage.joinpath(*_safe_relative(entry.destination).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        destination_fingerprint = None
         if entry.mode == "bootstrap":
             _atomic_bytes(destination, _BOOTSTRAP_TEXT.encode("utf-8"))
             source_fingerprint = "generated"
@@ -1249,6 +1306,14 @@ def _stage_package(
                 source_root=entry.source_root,
             )
             source_fingerprint = _sha256(destination)
+            destination_fingerprint = source_fingerprint
+        elif entry.mode == "copy" and kind == _DISTRIBUTION_KIND:
+            source_fingerprint = _copy_stable_regular_file(
+                entry.source,
+                destination,
+                source_root=entry.source_root,
+            )
+            destination_fingerprint = source_fingerprint
         else:
             source_fingerprint, raw = _stable_read(
                 entry.source,
@@ -1271,12 +1336,13 @@ def _stage_package(
             _atomic_bytes(destination, raw)
             if entry.mode == "copy" and _sha256(destination) != source_fingerprint:
                 raise PackageError("package_source_changed")
+            destination_fingerprint = hashlib.sha256(raw).hexdigest()
         observations.append((entry, source_fingerprint))
         records.append(
             {
                 "path": entry.destination,
                 "size": destination.stat().st_size,
-                "sha256": _sha256(destination),
+                "sha256": destination_fingerprint or _sha256(destination),
             }
         )
     _verify_source_fingerprints(observations)
@@ -1334,7 +1400,7 @@ def _verify_source_fingerprints(
                 )
                 after = _sha256(snapshot)
             else:
-                after, _raw = _stable_read(
+                after = _stable_hash(
                     entry.source,
                     source_root=entry.source_root,
                 )
@@ -2222,10 +2288,9 @@ def _copy_stable_regular_file(
     destination: Path,
     *,
     source_root: Path | None = None,
-) -> None:
-    """Copy one safe source while detecting replacement or concurrent writes."""
+) -> str:
+    """Copy and hash a safe source in one bounded pass."""
 
-    before = _assert_regular_source(source, source_root=source_root)
     temporary = destination.parent / (
         f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
@@ -2236,24 +2301,14 @@ def _copy_stable_regular_file(
             0o600,
         )
         try:
-            with source.open("rb") as reader, os.fdopen(
-                descriptor, "wb", closefd=False
-            ) as writer:
-                shutil.copyfileobj(reader, writer, length=_BUFFER_SIZE)
+            with os.fdopen(descriptor, "wb", closefd=False) as writer:
+                digest = _stable_hash(source, target=writer, source_root=source_root)
                 writer.flush()
                 os.fsync(writer.fileno())
         finally:
             os.close(descriptor)
-        after = _assert_regular_source(source, source_root=source_root)
-        if (
-            before.st_dev != after.st_dev
-            or before.st_ino != after.st_ino
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
-            or temporary.stat().st_size != after.st_size
-        ):
-            raise PackageError("package_source_changed")
         os.replace(temporary, destination)
+        return digest
     except PackageError:
         raise
     except OSError as exc:
@@ -2263,6 +2318,44 @@ def _copy_stable_regular_file(
             temporary.unlink()
         except OSError:
             pass
+
+
+def _stable_hash(
+    path: Path,
+    *,
+    target: BinaryIO | None = None,
+    source_root: Path | None = None,
+) -> str:
+    before = _assert_regular_source(path, source_root=source_root)
+    digest = hashlib.sha256()
+    size = 0
+    is_git_config = _git_security_file(path)
+    prefix_limit = _MAX_TEXT_CONFIG_BYTES + 1 if is_git_config else 16 * 1024
+    prefix = bytearray()
+    try:
+        with path.open("rb") as source:
+            while chunk := source.read(_BUFFER_SIZE):
+                digest.update(chunk)
+                size += len(chunk)
+                if len(prefix) < prefix_limit:
+                    prefix.extend(chunk[:prefix_limit - len(prefix)])
+                if target is not None:
+                    target.write(chunk)
+    except OSError as exc:
+        raise PackageError("package_source_unreadable") from exc
+    after = _assert_regular_source(path, source_root=source_root)
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or size != after.st_size
+    ):
+        raise PackageError("package_source_changed")
+    _reject_private_key_payload(bytes(prefix))
+    if is_git_config:
+        _validate_git_configuration_payload(bytes(prefix))
+    return digest.hexdigest()
 
 
 def _stable_read(

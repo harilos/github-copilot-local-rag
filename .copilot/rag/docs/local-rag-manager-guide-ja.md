@@ -567,12 +567,15 @@ Source詳細から状態、取得件数、反映件数、未反映件数、最�
 
 - Windows x64 offline ZIP（Windows x64の管理者PCで作成）
 - 選択したDB（初期状態は全選択）
-- 公開wrapperと新規に組み立てた固定Python・検索runtime
+- 公開wrapperと固定Python・検索runtime
 - 必要なmodel
 - 選択DBの現行schemaとして検証済みのSource Metadata
 - 管理用取得stateは含めない
 
-作成時だけ管理者PCのPythonとnetworkを使います。受取側はZIPを展開して
+固定Python・検索runtimeは初回と構成変更時に準備し、次回から再利用します。
+準備時は管理者PCのPythonとnetworkを使います。配布用のDB選択画面では名前と表示名を
+表示し、選択前の文書数・全フォルダ容量集計は行いません。元資料の再取得も行いません。
+受取側はZIPを展開して
 `install.cmd`を実行します。利用者PCのPython、pip、network、PATH変更、
 管理者権限は不要です。実検索はpackage作成中には行わず、release／回帰test側で
 確認します。`list_dbs`の起動確認も同じくtest側で行います。installerは個人Skill
@@ -595,7 +598,9 @@ $ragPython = "$env:USERPROFILE\.copilot\rag\query\.venv\Scripts\python.exe"
 ```
 
 完成ZIPには利用者向けの`install.cmd`と`README-WINDOWS.md`が入ります。作成時に
-固定Python、依存package、model、DB、manifest、checksumを検証します。配布先では
+固定Python、依存package、model、DB、manifest、checksumを検証します。
+大容量ファイルは分割してコピーし、完成ZIPも検証用フォルダへ全展開せずに内容を確認します。
+Windows配布には検索用の`ruri-v3-30m-onnx-int8`モデルだけを同梱します。配布先では
 ZIPをすべて展開し、同梱READMEに従って`install.cmd`を実行します。
 同名DBは無条件で置き換え、別名DBは保持します。旧DBのバックアップやインストール先への
 DB全体の事前コピーは作りません。途中で失敗した場合は再インストールしてください。

@@ -11,10 +11,12 @@ import sys
 import tempfile
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from . import packages, windows_banner
+from .operation_lock import database_operation_lock
 
 
 RAG_ROOT = Path(__file__).resolve().parents[1]
@@ -76,31 +78,42 @@ def create_windows_distribution_package(
     )
     try:
         emit("[1/5] 固定Pythonを準備しています。")
-        runtime = work / "runtime"
-        _prepare_runtime(home, runtime, emit=emit)
+        with _cached_runtime(home, emit=emit) as runtime:
+            emit("[2/5] 検索コード、モデル、選択DBを収集しています。")
+            entries = packages._product_entries(
+                home, admin=False, include_models=False
+            )
+            packages._add_tree(
+                entries,
+                home / "rag" / "models" / MODEL_NAME,
+                f".copilot/rag/models/{MODEL_NAME}",
+                include=lambda path: packages._product_payload_file(
+                    path, rag_root=home / "rag", admin=False
+                ),
+                descend=lambda path: packages._product_payload_directory(
+                    path, rag_root=home / "rag", admin=False
+                ),
+            )
+            database_entries, databases = packages._database_entries(
+                home / "rag" / "dbs",
+                db_names=db_names,
+                distribution=True,
+            )
+            entries.extend(database_entries)
+            entries.extend(_runtime_entries(runtime))
+            entries.extend(_generated_installer_entries(work))
+            entries = packages._dedupe_entries(entries)
 
-        emit("[2/5] 検索コード、モデル、選択DBを収集しています。")
-        entries = packages._product_entries(home, admin=False)
-        database_entries, databases = packages._database_entries(
-            home / "rag" / "dbs",
-            db_names=db_names,
-            distribution=True,
-        )
-        entries.extend(database_entries)
-        entries.extend(_runtime_entries(runtime))
-        entries.extend(_generated_installer_entries(work))
-        entries = packages._dedupe_entries(entries)
-
-        emit("[3/5] package manifestとZIPを作成しています。")
-        stage = work / "package"
-        manifest = packages._stage_package(
-            stage,
-            entries,
-            kind=packages._DISTRIBUTION_KIND,
-            databases=databases,
-            created=created,
-            tool_version=version,
-        )
+            emit("[3/5] package manifestとZIPを作成しています。")
+            stage = work / "package"
+            manifest = packages._stage_package(
+                stage,
+                entries,
+                kind=packages._DISTRIBUTION_KIND,
+                databases=databases,
+                created=created,
+                tool_version=version,
+            )
         packages.validate_package_tree(
             stage,
             expected_kind=packages._DISTRIBUTION_KIND,
@@ -140,6 +153,50 @@ def create_windows_distribution_package(
             archive_tmp.unlink()
         except OSError:
             pass
+
+
+@contextmanager
+def _cached_runtime(
+    copilot_home: Path, *, emit: Callable[[str], None]
+) -> Iterator[Path]:
+    # Keep the lease until staging has copied the runtime; another build may
+    # then replace an older generation without removing an active source.
+    cache = copilot_home
+    for component in ("rag", "cache", "windows-portable", "runtime"):
+        cache = cache / component
+        cache.mkdir(exist_ok=True)
+        cache = packages._real_directory(cache, "windows_runtime_cache")
+    with database_operation_lock(cache):
+        fingerprint = hashlib.sha256()
+        for source in (LOCK_PATH, SEARCH_REQUIREMENTS, Path(__file__)):
+            fingerprint.update(_sha256(source).encode("ascii"))
+        runtime = cache / fingerprint.hexdigest()
+        if runtime.exists() or runtime.is_symlink():
+            packages._real_directory(runtime, "windows_runtime_cache")
+            try:
+                _validate_runtime(runtime)
+            except packages.PackageError as exc:
+                if str(exc) == "windows_runtime_link_forbidden":
+                    raise
+                shutil.rmtree(runtime)
+        if not runtime.exists():
+            temporary = cache / f".runtime-{uuid.uuid4().hex}.partial"
+            try:
+                _prepare_runtime(copilot_home, temporary, emit=emit)
+                _validate_runtime(temporary)
+                os.replace(temporary, runtime)
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+        else:
+            emit("検索用Python環境は完成済みcacheを再利用します。")
+        # Only builder-owned generations and interrupted builds are removed.
+        for previous in cache.iterdir():
+            if previous != runtime and re.fullmatch(
+                r"[0-9a-f]{64}|\.runtime-[0-9a-f]{32}\.partial", previous.name
+            ):
+                packages._real_directory(previous, "windows_runtime_cache")
+                shutil.rmtree(previous)
+        yield runtime
 
 
 def _prepare_runtime(
@@ -413,14 +470,24 @@ def _prune_pip_distlib_launchers(runtime: Path) -> None:
 
 
 def _validate_runtime(runtime: Path) -> None:
+    packages._real_directory(runtime, "windows_runtime")
     scripts = runtime / "Scripts"
     python = scripts / "python.exe"
     path_files = list(scripts.glob("python*._pth"))
-    if not python.is_file() or len(path_files) != 1:
+    python_zips = list(scripts.glob("python*.zip"))
+    if (
+        not python.is_file()
+        or len(path_files) != 1
+        or not path_files[0].is_file()
+        or len(python_zips) != 1
+        or not python_zips[0].is_file()
+    ):
         raise packages.PackageError("windows_embedded_python_layout_invalid")
-    _assert_amd64_pe(python)
     for path in runtime.rglob("*"):
+        if packages._is_link_or_reparse(path, path.lstat()):
+            raise packages.PackageError("windows_runtime_link_forbidden")
         if path.is_file() and path.suffix.casefold() in {".exe", ".dll", ".pyd"}:
+            packages._assert_regular_source(path, source_root=runtime)
             _assert_amd64_pe(path)
 
 

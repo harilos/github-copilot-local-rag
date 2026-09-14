@@ -171,7 +171,8 @@ class ManagerContractTests(unittest.TestCase):
         manager = self.manager(["2", "c"])
         target = self.base / "distribution-output.zip"
         with (
-            mock.patch.object(manager, "_database_summaries", return_value=summaries),
+            mock.patch.object(manager, "_database_summaries", side_effect=AssertionError("must not query catalogs")),
+            mock.patch("multi_select._tree_size", side_effect=AssertionError("must not scan database contents")),
             mock.patch.object(manager, "_prompt_preserving_value", return_value=str(target)),
             mock.patch.object(manager, "_confirm", return_value=True),
             mock.patch.object(manage.sys, "platform", "win32"),

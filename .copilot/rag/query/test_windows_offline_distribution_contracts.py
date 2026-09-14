@@ -206,6 +206,9 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "offline.zip"
+            cache_home = Path(directory) / "cache-home"
+            cache_home.mkdir()
+            cached_runtime = windows_distribution._cached_runtime
             with (
                 mock.patch.object(
                     windows_distribution.sys,
@@ -220,6 +223,13 @@ class WindowsOfflineDistributionContracts(unittest.TestCase):
                     windows_distribution,
                     "_prepare_runtime",
                     side_effect=prepare_runtime,
+                ),
+                mock.patch.object(
+                    windows_distribution,
+                    "_cached_runtime",
+                    side_effect=lambda _home, *, emit: cached_runtime(
+                        cache_home, emit=emit
+                    ),
                 ),
             ):
                 result = (
