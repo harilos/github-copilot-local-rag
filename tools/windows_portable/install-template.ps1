@@ -335,14 +335,39 @@ function Get-SafeArchiveEntryNames {
     return $Names
 }
 
+function Enable-DatabaseCompression {
+    param([Parameter(Mandatory = $true)][string]$Destination)
+    try {
+        # Mark only the new, empty DB directory. Extracted files inherit NTFS
+        # compression, avoiding a second pass over the installed database.
+        $CompactPath = Join-Path $env:SystemRoot "System32\compact.exe"
+        & $CompactPath /C /Q $Destination 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "compact.exe exited with code $LASTEXITCODE"
+        }
+        if (([System.IO.File]::GetAttributes($Destination) -band
+                [System.IO.FileAttributes]::Compressed) -eq 0) {
+            throw "the filesystem did not enable compression"
+        }
+        Write-Host ("Database compression enabled: " + $Destination)
+    } catch {
+        Write-Warning ("Database compression unavailable; continuing installation: " +
+            $Destination + " (" + $_.Exception.Message + ")")
+    }
+}
+
 function Expand-SafeArchive {
     param(
         [Parameter(Mandatory = $true)][string]$ArchivePath,
-        [Parameter(Mandatory = $true)][string]$Destination
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [switch]$CompressDatabase
     )
     $null = @(Get-SafeArchiveEntryNames `
         -ArchivePath $ArchivePath -Destination $Destination)
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    if ($CompressDatabase) {
+        Enable-DatabaseCompression -Destination $Destination
+    }
     $Worker = [PowerShell]::Create()
     $Pending = $null
     try {
@@ -703,7 +728,7 @@ try {
         try {
             Expand-SafeArchive `
                 -ArchivePath (Join-Path (Join-Path $SourceDbs $Name) "payload.zip") `
-                -Destination $Existing
+                -Destination $Existing -CompressDatabase
         } catch {
             try { Remove-Tree $Existing } catch {
                 Write-Warning "Incomplete database removal failed; reinstall this package."

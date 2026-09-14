@@ -1166,7 +1166,7 @@ class WindowsPortableInstallerIntegrationTests(unittest.TestCase):
             copy = (
                 '            Expand-SafeArchive `\n'
                 '                -ArchivePath (Join-Path (Join-Path $SourceDbs $Name) "payload.zip") `\n'
-                '                -Destination $Existing'
+                '                -Destination $Existing -CompressDatabase'
             )
             self.assertIn(copy, original)
             installer.write_text(original.replace(copy, copy + '\n'

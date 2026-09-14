@@ -71,6 +71,15 @@ class WindowsInstallProgressTests(unittest.TestCase):
             self.assertIn('Write-InstallProgress -Stage "rollback" -Force', text)
             self.assertLess(text.index('$DatabaseOrdinal++'), text.index('$DatabaseStatus = "READY"'))
 
+    def test_only_database_archives_enable_compression_before_extraction(self) -> None:
+        for path in TEMPLATES:
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("-CompressDatabase"))
+            self.assertIn("-Destination $Existing -CompressDatabase", text)
+            helper = expand_helper(text)
+            self.assertLess(helper.index("New-Item"), helper.index("Enable-DatabaseCompression"))
+            self.assertLess(helper.index("Enable-DatabaseCompression"), helper.index("$Worker.BeginInvoke()"))
+
     @unittest.skipUnless(POWERSHELL, "PowerShell is not installed")
     def test_parse_and_small_archive_success_failure_and_heartbeat(self) -> None:
         # Helper-only execution: no installation, user profile, runtime or DB.
@@ -106,6 +115,28 @@ $Failed = $false
 try { Expand-SafeArchive -ArchivePath (Join-Path $Fixture "absent.zip") -Destination $Destination }
 catch { $Failed = $true }
 if (-not $Failed) { throw "copy error was swallowed" }
+
+# An unavailable compression command must not prevent archive installation.
+$SavedSystemRoot = $env:SystemRoot
+try {
+    $env:SystemRoot = Join-Path $Fixture "no-windows"
+    Expand-SafeArchive -ArchivePath $Source -Destination (Join-Path $Fixture "fallback") -CompressDatabase
+    if (-not (Test-Path -LiteralPath (Join-Path $Fixture "fallback/nested/data.bin"))) {
+        throw "compression fallback did not extract the archive"
+    }
+} finally { $env:SystemRoot = $SavedSystemRoot }
+
+# On Windows/NTFS, exercise real inheritance through ZIP extraction.
+if ($env:OS -eq "Windows_NT" -and ([System.IO.DriveInfo]::new($Fixture)).DriveFormat -eq "NTFS") {
+    $Compressed = Join-Path $Fixture "compressed [literal]"
+    Expand-SafeArchive -ArchivePath $Source -Destination $Compressed -CompressDatabase
+    foreach ($Relative in @("", "nested", "nested/data.bin")) {
+        $Attributes = [System.IO.File]::GetAttributes((Join-Path $Compressed $Relative))
+        if (($Attributes -band [System.IO.FileAttributes]::Compressed) -eq 0) {
+            throw "ZIP entry did not inherit compression: $Relative"
+        }
+    }
+}
 """
             # Delay just this fixture's worker, not the product or installer.
             delayed = archive.replace(
