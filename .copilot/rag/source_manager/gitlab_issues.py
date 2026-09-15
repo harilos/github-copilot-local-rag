@@ -972,6 +972,7 @@ def _changed_issue_iids(
         if (
             int(local.get("iid") or 0) != item.iid
             or int(local.get("issue_id") or 0) != item.issue_id
+            or local.get("discussions_complete") is False
         ):
             changed.append(item.iid)
             continue
@@ -987,13 +988,20 @@ def _changed_issue_iids(
 
 
 def _local_issue_metadata(path: Path) -> dict[str, Any] | None:
+    match = None
     try:
         if path.is_symlink() or not path.is_file():
             return None
-        text = path.read_text(encoding="utf-8")
+        # Generated documents put the marker near the top. Stop there instead
+        # of loading every Issue body and discussion on each inventory refresh.
+        # Scan until the marker (not a fixed header limit) for older documents.
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                match = _LOCAL_METADATA.search(line)
+                if match is not None:
+                    break
     except (OSError, UnicodeError):
         return None
-    match = _LOCAL_METADATA.search(text)
     if not match:
         return None
     try:

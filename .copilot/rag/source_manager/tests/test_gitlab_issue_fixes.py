@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
+from source_manager import gitlab_issues as gitlab_issues_module
 from source_manager.errors import SourceManagerError
 from source_manager.gitlab_issue_fixes import parse_gitlab_api_project_web_url
 from source_manager.gitlab_issues import (
@@ -110,14 +112,21 @@ class GitLabIssueFixTests(unittest.TestCase):
                     user_notes_count=2,
                 )
             ]
-            self.assertEqual(
-                [1],
-                _changed_issue_iids(
-                    inventory,
-                    issues,
-                    updated_after=None,
-                ),
-            )
+            for cutoff in (None, "2026-08-01T00:00:00Z"):
+                with self.subTest(updated_after=cutoff), mock.patch.object(
+                    gitlab_issues_module,
+                    "_local_issue_metadata",
+                    wraps=gitlab_issues_module._local_issue_metadata,
+                ) as read_metadata:
+                    self.assertEqual(
+                        [1],
+                        _changed_issue_iids(
+                            inventory,
+                            issues,
+                            updated_after=cutoff,
+                        ),
+                    )
+                    read_metadata.assert_called_once_with(issues / "1.md")
 
     def test_invalid_next_page_uses_current_page(self) -> None:
         result = _fetch_discussions(

@@ -5,8 +5,9 @@ import json
 import os
 import re
 import shutil
+import stat
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .atomic_io import atomic_write_json
@@ -52,9 +53,18 @@ def add_or_update_root(
     persistent_root_identity: str | None = None,
     include_paths: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    selected_files: list[str] | None = None,
 ) -> dict[str, Any]:
     include_paths = normalize_include_paths(include_paths)
     exclude_paths = normalize_exclusion_paths(exclude_paths)
+    if selected_files is not None:
+        if (reset_db or reset_clean or resume or scan_subdir not in (None, ".")
+                or include_paths or exclude_paths):
+            raise ValueError(
+                "selected_files cannot be combined with reset, resume, "
+                "scan_subdir or folder selection"
+            )
+        selected_files = _normalize_selected_files(selected_files)
     if (include_paths or exclude_paths) and scan_subdir not in (None, "."):
         raise ValueError("folder selection requires a whole-root scan")
     if chunk_max_chars <= 0:
@@ -84,6 +94,10 @@ def add_or_update_root(
     )
     scope = resolve_ingestion_scope(root, scan_subdir)
     validate_selected_folders(scope.logical_root, include_paths, exclude_paths)
+    selected_paths = (
+        _selected_input_paths(scope, selected_files)
+        if selected_files is not None else None
+    )
     if reset_db:
         # Vector reset is the destructive gate.  Do it before clean/state or
         # catalog mutation so a lock, permission, corruption, or client error
@@ -102,6 +116,23 @@ def add_or_update_root(
     )
     if persistent_root_identity is not None:
         persistent_scope_fields["resolved_root"] = str(persistent_root_identity)
+    if selected_paths is not None and retry_errors:
+        # Later batches must not hide failures from earlier batches. Retry
+        # the matching state's failed inputs without rediscovering the tree.
+        retry_files: list[str] = []
+        for entry in state["files"].values():
+            if (not isinstance(entry, dict)
+                    or entry.get("status") != "error"
+                    or entry.get("source_id") != source_id
+                    or entry.get("resolved_root") != persistent_scope_fields["resolved_root"]):
+                continue
+            stored_path = str(entry.get("stored_path") or entry.get("path") or "")
+            if scope.contains_stored_path(stored_path):
+                retry_files.append(
+                    PurePosixPath(stored_path).relative_to(scope.root_display_name).as_posix()
+                )
+        retry_paths = _selected_input_paths(scope, _normalize_selected_files(retry_files))
+        selected_paths = sorted(set(selected_paths) | set(retry_paths))
     effective_batch_size_files = _effective_batch_size_files(
         state,
         requested=batch_size_files,
@@ -189,8 +220,14 @@ def add_or_update_root(
 
     try:
         selection = {"include_paths": include_paths, "exclude_paths": exclude_paths} if include_paths or exclude_paths else {}
-        files = list(iter_input_files(scope.scan_root, **selection))
-        unsupported_paths = _unsupported_input_paths(scope, **selection)
+        if selected_paths is None:
+            files = list(iter_input_files(scope.scan_root, **selection))
+            unsupported_paths = _unsupported_input_paths(scope, **selection)
+        else:
+            # Manager batches are a temporary write set, not an authoritative
+            # source inventory. Never discover or hash unrelated input files.
+            files = selected_paths
+            unsupported_paths = []
     except Exception as exc:
         error_text = _run_failure_text(
             exc,
@@ -381,15 +418,17 @@ def add_or_update_root(
             _save_state(state)
             print(_progress_line(summary))
 
-        reconciled = _reconcile_missing_files(
-            state,
-            scope=scope,
-            source_id=source_id,
-            discovered_keys=discovered_keys,
-            persistent_root_identity=str(
-                persistent_scope_fields["resolved_root"]
-            ),
-        )
+        reconciled = {"deleted_records": 0, "deleted_files": 0}
+        if selected_paths is None:
+            reconciled = _reconcile_missing_files(
+                state,
+                scope=scope,
+                source_id=source_id,
+                discovered_keys=discovered_keys,
+                persistent_root_identity=str(
+                    persistent_scope_fields["resolved_root"]
+                ),
+            )
         summary["deleted_records"] += reconciled["deleted_records"]
         summary["deleted_files"] = reconciled["deleted_files"]
         _save_state(state)
@@ -410,6 +449,11 @@ def add_or_update_root(
         summary["profile_updated"] = profile_updated
         summary["completed_at"] = datetime.now(timezone.utc).isoformat()
         summary["result_status"] = _result_status(summary)
+        if (selected_paths is not None and summary["result_status"] == "failure"
+                and summary["searchable_files"] > 0):
+            # An error-only retry must retain the already searchable batches
+            # as partial success, just as a whole-root retry would do.
+            summary["result_status"] = "partial"
         warnings = []
         if summary["empty_files"]:
             warnings.append(
@@ -462,6 +506,50 @@ def add_or_update_root(
             # sanitized above.
             raise RuntimeError(error_text) from None
         raise
+
+
+def _normalize_selected_files(selected_files: list[str]) -> list[str]:
+    if not isinstance(selected_files, list):
+        raise ValueError("selected_files must be a list of root-relative file paths")
+    normalized: set[str] = set()
+    for value in selected_files:
+        if (not isinstance(value, str) or not value or "\x00" in value
+                or "\\" in value or ":" in value or ".." in value.split("/")
+                or PurePosixPath(value).is_absolute() or PureWindowsPath(value).drive):
+            raise ValueError("selected_files must contain root-relative file paths without traversal")
+        path = PurePosixPath(value)
+        if (path.as_posix() == "." or path.suffix.lower() not in SUPPORTED_EXTENSIONS
+                or is_office_temporary_file(value) or any(part in {".git", ".svn"} for part in path.parts)):
+            raise ValueError("selected_files must contain supported source document files")
+        normalized.add(path.as_posix())
+    return sorted(normalized)
+
+
+def _selected_input_paths(scope: IngestionScope, selected_files: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for relative in selected_files:
+        path = scope.resolved_root
+        for part in PurePosixPath(relative).parts:
+            path = path / part
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                continue
+            if (stat.S_ISLNK(metadata.st_mode)
+                    or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise ValueError("selected_files must not traverse symbolic links or reparse points")
+            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+                raise ValueError("selected_files must contain regular files")
+        if path.is_dir():
+            raise ValueError("selected_files must contain files, not directories")
+        try:
+            path.resolve().relative_to(scope.resolved_root)
+        except ValueError as exc:
+            raise ValueError("selected_files must resolve inside root") from exc
+        # Keep missing/unreadable files so _prepare_file records a retryable
+        # input error without deleting their previous searchable records.
+        paths.append(path)
+    return paths
 
 
 def _unsupported_input_paths(scope: IngestionScope, include_paths=(), exclude_paths=()) -> list[str]:

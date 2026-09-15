@@ -14,6 +14,7 @@ from source_manager import (
     update_source,
     update_source_configuration,
 )
+from source_manager import runner as runner_module
 from source_manager.gitlab_issues import (
     GITLAB_ISSUE_IDS_STATE_KEY,
     GITLAB_PROJECT_ID_STATE_KEY,
@@ -63,19 +64,32 @@ class _AddRunner:
         self.fail_calls = set(fail_calls or ())
         self.partial_error_calls = set(partial_error_calls or ())
         self.calls: list[dict[str, Any]] = []
+        self.retry_iids: set[int] = set()
+        self.searchable_iids: set[int] = set()
 
     def __call__(self, arguments: list[str]) -> SimpleNamespace:
         root = Path(arguments[arguments.index("--root") + 1])
         source_id = arguments[arguments.index("--source-id") + 1]
-        issue_iids = sorted(
-            int(path.stem) for path in root.glob("issues/*.md")
-        )
+        selected = [
+            argument.split("=", 1)[1]
+            for argument in arguments
+            if argument.startswith("--selected-file=")
+        ]
+        if "--selected-files-only" in arguments:
+            issue_iids = sorted(
+                {int(Path(path).stem) for path in selected} | self.retry_iids
+            )
+        else:
+            issue_iids = sorted(
+                int(path.stem) for path in root.glob("issues/*.md")
+            )
         call_number = len(self.calls) + 1
         self.calls.append(
             {
                 "arguments": list(arguments),
                 "source_id": source_id,
                 "issue_iids": issue_iids,
+                "selected_files": selected,
             }
         )
         if call_number in self.fail_calls:
@@ -85,12 +99,20 @@ class _AddRunner:
                 stderr=f"fixture ADD failure {call_number}",
             )
         summary = _add_summary(source_id, len(issue_iids))
+        self.searchable_iids.update(issue_iids)
+        self.retry_iids.clear()
         if call_number in self.partial_error_calls:
+            self.retry_iids.add(issue_iids[0])
+            self.searchable_iids.discard(issue_iids[0])
             summary["error_files"] = 1
             summary["extract_error_files"] = 1
             summary["indexed_files"] -= 1
             summary["result_status"] = "partial" if summary["indexed_files"] else "failure"
             summary["error_details"] = [{"path": "issues/1.md", "stage": "extract", "error_type": "ValueError", "retryable": False}]
+        summary["searchable_files"] = len(self.searchable_iids)
+        if (summary["result_status"] == "failure" and self.searchable_iids
+                and "--selected-files-only" in arguments):
+            summary["result_status"] = "partial"
         return SimpleNamespace(
             returncode=0,
             stdout=RESULT_FRAME + json.dumps(
@@ -162,7 +184,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
     def state(self, local_source_key: str) -> dict[str, Any]:
         return self.store.read_state(local_source_key).payload
 
-    def test_initial_seven_issues_reflect_at_five_and_final_seven(
+    def test_initial_seven_issues_reflect_only_each_pending_batch(
         self,
     ) -> None:
         registered = self.register()
@@ -177,7 +199,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual("updated", result["status"])
         self.assertEqual(7, result["indexed_confirmed_count"])
         self.assertEqual(
-            [list(range(1, 6)), list(range(1, 8))],
+            [list(range(1, 6)), [6, 7]],
             [call["issue_iids"] for call in add.calls],
         )
         self.assertEqual(list(range(1, 8)), api.detail_iids())
@@ -191,6 +213,9 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertNotIn(GITLAB_PROJECT_ID_STATE_KEY, state)
         self.assertEqual(7, state["indexed_confirmed_count"])
         self.assertEqual(0, state["pending_count"])
+        self.assertEqual(7, result["add_summary"]["searchable_files"])
+        for call in add.calls:
+            self.assertIn("--selected-files-only", call["arguments"])
 
     def test_add_failure_resumes_frozen_inventory_at_first_unfetched_issue(
         self,
@@ -232,7 +257,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
             [
                 list(range(1, 6)),
                 list(range(1, 6)),
-                list(range(1, 8)),
+                [6, 7],
             ],
             [call["issue_iids"] for call in add.calls],
         )
@@ -267,6 +292,8 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual("updated", result["status"])
         self.assertEqual([], api.inventory_urls())
         self.assertEqual([], api.detail_iids())
+        self.assertEqual(["issues/1.md"], add.calls[-1]["selected_files"])
+        self.assertEqual([1], add.calls[-1]["issue_iids"])
         self.assertEqual(2, len(add.calls))
         final = self.state(key)
         self.assertEqual("complete", final["phase"])
@@ -289,6 +316,8 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual("complete", self.state(key)["status"])
         self.assertEqual([], api.inventory_urls())
         self.assertEqual([], api.detail_iids())
+        self.assertEqual([], add.calls[-1]["selected_files"])
+        self.assertEqual([1], add.calls[-1]["issue_iids"])
 
     def test_remote_deletion_keeps_historical_issue_without_add(
         self,
@@ -379,9 +408,88 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual([2], resumed_api.detail_iids())
         self.assertEqual(2, len(add.calls))
         self.assertEqual(
-            [1, 2],
+            [2],
             add.calls[-1]["issue_iids"],
         )
+
+    def test_update_add_excludes_unchanged_historical_issues(self) -> None:
+        key = self.register()["local_source_key"]
+        add = _AddRunner()
+        self.update(key, _GitLabApi({1: [_summary(i) for i in range(1, 13)]}), add)
+        add.calls.clear()
+        inventory = [
+            _summary(i, updated_at="2026-08-01T00:00:00Z")
+            if i in {3, 11} else _summary(i)
+            for i in range(1, 13)
+        ]
+
+        api = _GitLabApi({1: inventory})
+        result = self.update(key, api, add)
+
+        self.assertEqual([3, 11], api.detail_iids())
+        self.assertEqual([[3, 11]], [call["issue_iids"] for call in add.calls])
+        self.assertEqual(12, result["add_summary"]["searchable_files"])
+
+    def test_mid_batch_unavailable_issue_without_markdown_is_not_selected(self) -> None:
+        key = self.register()["local_source_key"]
+        add = _AddRunner()
+        api = _GitLabApi(
+            {1: [_summary(1), _summary(2), _summary(3)]},
+            detail_statuses={2: 404},
+        )
+
+        result = self.update(key, api, add)
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual([[1, 3]], [call["issue_iids"] for call in add.calls])
+        self.assertEqual(3, result["indexed_confirmed_count"])
+
+    def test_earlier_batch_error_is_retried_with_later_pending_batch(self) -> None:
+        key = self.register()["local_source_key"]
+        add = _AddRunner(partial_error_calls={1})
+
+        result = self.update(key, _GitLabApi({1: [_summary(i) for i in range(1, 8)]}), add)
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual(["issues/6.md", "issues/7.md"], add.calls[-1]["selected_files"])
+        self.assertEqual([1, 6, 7], add.calls[-1]["issue_iids"])
+        self.assertEqual(7, result["add_summary"]["searchable_files"])
+
+    def test_error_only_resume_keeps_partial_until_the_error_recovers(self) -> None:
+        key = self.register()["local_source_key"]
+        add = _AddRunner(partial_error_calls={1, 2})
+        api = _GitLabApi({1: [_summary(1), _summary(2)]})
+        self.assertEqual("partial", self.update(key, api, add)["status"])
+
+        result = self.update(key, api, add)
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual([], add.calls[-1]["selected_files"])
+        self.assertEqual([1], add.calls[-1]["issue_iids"])
+        self.assertEqual(1, result["add_summary"]["searchable_files"])
+        self.assertEqual("updated", self.update(key, api, add)["status"])
+
+    def test_artifact_recovery_preserves_whole_root_reflection_across_resume(self) -> None:
+        key = self.register()["local_source_key"]
+        add = _AddRunner(fail_calls={2})
+        self.update(key, _GitLabApi({1: [_summary(1)]}), add)
+        # Issue 1 is no longer in the remote inventory, but its historical
+        # Markdown must still be reflected when recovering missing artifacts.
+        api = _GitLabApi({1: [_summary(i) for i in range(2, 9)]})
+        token = runner_module._FORCE_FULL_MATERIALIZATION.set(True)
+        try:
+            with self.assertRaisesRegex(SourceManagerError, "ADD failed"):
+                self.update(key, api, add)
+        finally:
+            runner_module._FORCE_FULL_MATERIALIZATION.reset(token)
+
+        self.assertTrue(self.state(key)["gitlab_issues_full_reflection"])
+        result = self.update(key, api, add)
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual(list(range(1, 9)), add.calls[-1]["issue_iids"])
+        for call in add.calls[1:]:
+            self.assertNotIn("--selected-files-only", call["arguments"])
 
     def test_unchanged_inventory_does_not_run_add(self) -> None:
         registered = self.register()

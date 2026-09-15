@@ -68,6 +68,7 @@ def _install_runner_contract(runner: Any) -> None:
         progress_callback: Any,
         persistent_root_identity: Path | None = None,
         initial_database_reflection: bool = False,
+        selected_files: list[str] | None = None,
     ) -> dict[str, Any]:
         if _source_selection(source) != FILE_SELECTION_DOCUMENTS:
             return original_execute_add(
@@ -80,6 +81,7 @@ def _install_runner_contract(runner: Any) -> None:
                 progress_callback=progress_callback,
                 persistent_root_identity=persistent_root_identity,
                 initial_database_reflection=initial_database_reflection,
+                **({"selected_files": selected_files} if selected_files is not None else {}),
             )
 
         def document_runner(arguments: list[str]) -> Any:
@@ -115,6 +117,7 @@ def _install_runner_contract(runner: Any) -> None:
             progress_callback=progress_callback,
             persistent_root_identity=persistent_root_identity,
             initial_database_reflection=initial_database_reflection,
+            **({"selected_files": selected_files} if selected_files is not None else {}),
         )
 
     runner._execute_add = execute_add

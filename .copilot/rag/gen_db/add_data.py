@@ -357,6 +357,8 @@ def main() -> int:
     )
     parser.add_argument("--include-path", action="append", default=[], help="Root-relative folder to include; repeat for multiple folders")
     parser.add_argument("--exclude-path", action="append", default=[], help="Root-relative path/glob to exclude; repeat for multiple patterns")
+    parser.add_argument("--selected-file", action="append", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--selected-files-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--scan-subdir",
         help="Relative subdirectory to scan while keeping paths relative to --root",
@@ -422,6 +424,7 @@ def main() -> int:
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
+    selected_files = (args.selected_file or []) if args.selected_files_only else args.selected_file
     if args.resume and (args.reset_db or args.reset_clean):
         parser.error("--resume cannot be combined with --reset-db or --reset-clean")
 
@@ -436,9 +439,9 @@ def main() -> int:
             )
             watcher = _AddProgressWatcher(
                 enabled=args.manager_protocol_v1,
-                estimated_total=_preflight_estimated_documents(
-                    target.db_root,
-                    args.source_id,
+                estimated_total=(
+                    len(selected_files) if selected_files is not None
+                    else _preflight_estimated_documents(target.db_root, args.source_id)
                 ),
             )
             watcher.start()
@@ -450,6 +453,7 @@ def main() -> int:
                         scan_subdir=args.scan_subdir,
                         include_paths=args.include_path,
                         exclude_paths=args.exclude_path,
+                        selected_files=selected_files,
                         include_root_name_in_path=True,
                         batch_size_files=args.batch_size_files,
                         reset_db=args.reset_db,

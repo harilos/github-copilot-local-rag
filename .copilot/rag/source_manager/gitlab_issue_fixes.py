@@ -9,7 +9,6 @@ from . import gitlab_issues as _issues
 
 _MARKER = "_local_rag_gitlab_issue_fixes_installed"
 _ORIGINAL_GITLAB_ISSUE_MARKDOWN = _issues.gitlab_issue_markdown
-_ORIGINAL_CHANGED_ISSUE_IIDS = _issues._changed_issue_iids
 
 
 class _PartialDiscussions(list[Mapping[str, Any]]):
@@ -318,31 +317,6 @@ def _gitlab_issue_markdown(
     )
 
 
-def _changed_issue_iids(
-    inventory: list[_issues.GitLabIssueInventoryItem],
-    issues_directory: Any,
-    *,
-    updated_after: str | None,
-) -> list[int]:
-    changed = set(
-        _ORIGINAL_CHANGED_ISSUE_IIDS(
-            inventory,
-            issues_directory,
-            updated_after=updated_after,
-        )
-    )
-    for item in inventory:
-        local = _issues._local_issue_metadata(
-            issues_directory / f"{item.iid}.md"
-        )
-        if (
-            isinstance(local, Mapping)
-            and local.get("discussions_complete") is False
-        ):
-            changed.add(item.iid)
-    return [item.iid for item in inventory if item.iid in changed]
-
-
 def install_gitlab_issue_fixes() -> None:
     if bool(getattr(_issues, _MARKER, False)):
         return
@@ -350,7 +324,6 @@ def install_gitlab_issue_fixes() -> None:
     _issues._fetch_project_identity = _fetch_project_identity
     _issues._fetch_discussions = _fetch_discussions
     _issues.gitlab_issue_markdown = _gitlab_issue_markdown
-    _issues._changed_issue_iids = _changed_issue_iids
     setattr(_issues, _MARKER, True)
 
 

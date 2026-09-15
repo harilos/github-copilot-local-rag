@@ -1523,6 +1523,7 @@ def _execute_add(
     progress_callback: ProgressCallback | None,
     persistent_root_identity: Path | None = None,
     initial_database_reflection: bool = False,
+    selected_files: list[str] | None = None,
 ) -> dict[str, Any]:
     key = str(source["local_source_key"])
     privacy_safe_root = (
@@ -1542,6 +1543,11 @@ def _execute_add(
         "--retry-errors",
         "--manager-protocol-v1",
     ]
+    if selected_files is not None:
+        # Explicit upsert-only scope, including an empty retry-only batch.
+        # Unlike folder selection, omission from this list never means delete.
+        arguments.append("--selected-files-only")
+        arguments.extend(f"--selected-file={path}" for path in selected_files)
     if privacy_safe_root:
         arguments.append("--privacy-safe-root")
         for field, option in (("include_paths", "--include-path"), ("exclude_paths", "--exclude-path")):
@@ -1813,7 +1819,13 @@ def _execute_add(
         if result_status == "partial":
             return (
                 errors > 0
-                and completed_files > 0
+                and (
+                    completed_files > 0
+                    or (
+                        selected_files is not None
+                        and int(value.get("searchable_files") or 0) > 0
+                    )
+                )
             )
         return errors > 0 and completed_files == 0
 
@@ -1876,7 +1888,13 @@ def _execute_add(
     valid_partial = (
         result_status == "partial"
         and error_files > 0
-        and completed_files > 0
+        and (
+            completed_files > 0
+            or (
+                selected_files is not None
+                and int(summary.get("searchable_files") or 0) > 0
+            )
+        )
     )
     if (
         result_status == "failure"
@@ -2532,6 +2550,7 @@ def _update_gitlab_issues_source(
     plan = store.plan(source.payload)
     if not state.payload or state.payload.get("status") == "complete":
         initial = new_run_state(plan)
+        initial["gitlab_issues_full_reflection"] = bool(force_full_materialization)
         cutoff = gitlab_issues_updated_after(
             source.payload["fetch"].get("updated_within_days"),
             {},
@@ -2553,6 +2572,10 @@ def _update_gitlab_issues_source(
         )
     else:
         resumed = copy.deepcopy(state.payload)
+        # Keep recovery authoritative even if an earlier batch already made
+        # search artifacts appear ready before this interrupted run resumes.
+        if force_full_materialization:
+            resumed["gitlab_issues_full_reflection"] = True
         resumed["plan_etag"] = plan.plan_etag
         cutoff = gitlab_issues_updated_after(
             source.payload["fetch"].get("updated_within_days"),
@@ -3019,6 +3042,24 @@ def _gitlab_issues_reflect_batch(
 ) -> tuple[StoredJson, StoredJson, dict[str, Any]]:
     work = store.ensure_work_directory(source.payload["local_source_key"])
     validate_managed_work_tree(work)
+    issue_iids = state.payload.get(GITLAB_ISSUE_IDS_STATE_KEY)
+    selected_files = None
+    if isinstance(issue_iids, list) and not state.payload.get("gitlab_issues_full_reflection"):
+        confirmed = int(state.payload.get("indexed_confirmed_count") or 0)
+        fetched = int(state.payload.get("fetched_count") or 0)
+        if not 0 <= confirmed <= fetched <= len(issue_iids):
+            raise SourceManagerError(
+                "GitLab ADD batch has an invalid issue checkpoint",
+                stage="reflect.gitlab_issues_batch",
+            )
+        # The frozen queue is durable across interruption. Include only the
+        # unconfirmed slice; unavailable Issues without local Markdown are
+        # intentionally absent. ADD also retries persisted extraction errors.
+        selected_files = [
+            f"issues/{int(iid)}.md"
+            for iid in issue_iids[confirmed:fetched]
+            if (work / "issues" / f"{int(iid)}.md").is_file()
+        ]
     try:
         add_result = _execute_add(
             db_root=store.db_root,
@@ -3031,6 +3072,7 @@ def _gitlab_issues_reflect_batch(
             initial_database_reflection=bool(
                 state.payload.get("initial_database_reflection")
             ),
+            selected_files=selected_files,
         )
     except Exception as exc:
         if getattr(exc, "code", None) == "DB_BUSY":

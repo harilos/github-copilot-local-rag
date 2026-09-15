@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from source_manager.gitlab_issues import (
     _fetch_project_identity,
     _fetch_inventory,
     _format_timestamp,
+    _local_issue_metadata,
     fetch_gitlab_issues,
     gitlab_token_env,
     gitlab_issues_updated_after,
@@ -825,6 +827,80 @@ class GitLabIssueSourceContracts(unittest.TestCase):
                 updated_after=None,
             ),
         )
+
+    def test_change_detection_reads_local_metadata_once_per_issue(self) -> None:
+        timestamp = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        timestamp_text = _format_timestamp(timestamp)
+        issues = self.work / "issues"
+        issues.mkdir()
+        inventory = []
+        for iid in range(1, 4):
+            (issues / f"{iid}.md").write_text(
+                _marker_markdown(iid, timestamp_text),
+                encoding="utf-8",
+            )
+            inventory.append(
+                GitLabIssueInventoryItem(
+                    iid=iid,
+                    issue_id=10_000 + iid,
+                    updated_at=timestamp,
+                    updated_at_text=timestamp_text,
+                    user_notes_count=1 if iid == 2 else 0,
+                )
+            )
+
+        with mock.patch.object(
+            gitlab_issues_module,
+            "_local_issue_metadata",
+            wraps=_local_issue_metadata,
+        ) as read_metadata:
+            self.assertEqual(
+                [2],
+                _changed_issue_iids(inventory, issues, updated_after=None),
+            )
+        self.assertEqual(
+            [mock.call(issues / f"{iid}.md") for iid in range(1, 4)],
+            read_metadata.call_args_list,
+        )
+
+    def test_local_metadata_stops_at_marker_without_reading_body(self) -> None:
+        class HeaderOnlyReader(io.StringIO):
+            lines_read = 0
+
+            def read(self, *args: Any, **kwargs: Any) -> str:
+                raise AssertionError("must not read the complete Issue body")
+
+            def __next__(self) -> str:
+                self.lines_read += 1
+                if self.lines_read > 3:
+                    raise AssertionError("must stop after the metadata marker")
+                return super().__next__()
+
+        timestamp = "2026-07-30T00:00:00Z"
+        path = self.work / "1.md"
+        path.touch()
+        stream = HeaderOnlyReader(
+            _marker_markdown(1, timestamp, body="large body\n" * 100_000)
+        )
+        with mock.patch.object(Path, "open", return_value=stream):
+            metadata = _local_issue_metadata(path)
+
+        self.assertIsNotNone(metadata)
+        self.assertEqual(1, metadata["iid"])
+        self.assertEqual(3, stream.lines_read)
+        self.assertTrue(stream.closed)
+
+    def test_local_metadata_accepts_legacy_marker_after_long_prefix(self) -> None:
+        path = self.work / "1.md"
+        markdown = _marker_markdown(1, "2026-07-30T00:00:00Z")
+        marker = markdown.splitlines()[2]
+        path.write_bytes(("legacy preamble\r\n" * 5_000 + marker).encode("utf-8"))
+
+        metadata = _local_issue_metadata(path)
+
+        self.assertIsNotNone(metadata)
+        self.assertEqual(1, metadata["iid"])
+        self.assertEqual(10_001, metadata["issue_id"])
 
     def test_updated_after_cutoff_is_utc_and_resume_stable(self) -> None:
         started_at = "2026-07-30T12:34:56Z"
