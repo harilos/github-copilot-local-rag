@@ -24,11 +24,30 @@ from source_manager.source_exclusion import (
     exclusion_signature,
     is_excluded,
     normalize_exclusion_paths,
+    parse_exclusion_input,
+    parse_include_input,
     preview_and_prepare_work,
 )
 
 
 class SourceExclusionTests(unittest.TestCase):
+    def test_path_inputs_preserve_ideographic_comma(self) -> None:
+        for parser in (parse_exclusion_input, parse_include_input):
+            for separator in (",", ";", "；", "\r\n"):
+                with self.subTest(parser=parser.__name__, separator=separator):
+                    self.assertEqual(
+                        ["設計、仕様", "製品、資料"],
+                        parser(f" 設計、仕様 {separator} 製品、資料 "),
+                    )
+
+    def test_exclusions_with_ideographic_comma_match_only_intended_paths(self) -> None:
+        patterns = parse_exclusion_input("設計、仕様/下書き, **/旧、版/*.tmp")
+        self.assertTrue(is_excluded("設計、仕様/下書き/文書.txt", patterns))
+        self.assertTrue(is_excluded("資料/旧、版/文書.tmp", patterns))
+        self.assertFalse(is_excluded("設計/文書.txt", patterns))
+        self.assertFalse(is_excluded("仕様/下書き/文書.txt", patterns))
+        self.assertFalse(is_excluded("版/文書.tmp", patterns))
+
     def test_normalizes_posix_paths_and_empty_is_backward_compatible(self) -> None:
         self.assertEqual([], normalize_exclusion_paths(None))
         self.assertEqual([], normalize_exclusion_paths([]))

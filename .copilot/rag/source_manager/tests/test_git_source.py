@@ -12,10 +12,22 @@ from unittest import mock
 
 from source_manager import execution, networking, providers
 from source_manager.errors import SourceManagerError
-from source_manager.git_source import _git_fetch, git_updated_on_cutoff
+from source_manager.git_source import (
+    _git_fetch,
+    _parse_include_path_input,
+    git_updated_on_cutoff,
+)
 
 
 class GenericGitSourceTests(unittest.TestCase):
+    def test_include_input_preserves_ideographic_comma(self) -> None:
+        for separator in (",", ";", "；", "\r\n"):
+            with self.subTest(separator=separator):
+                self.assertEqual(
+                    ["設計、仕様", "製品、資料"],
+                    _parse_include_path_input(f" 設計、仕様 {separator} 製品、資料 "),
+                )
+
     def test_provider_accepts_gitlab_and_normalizes_scope_and_days(self) -> None:
         value = providers.validate_provider_config(
             "github",

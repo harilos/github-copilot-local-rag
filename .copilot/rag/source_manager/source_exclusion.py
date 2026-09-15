@@ -28,7 +28,7 @@ from software_rag_tool.file_selection import (
 FILE_BASED_SOURCE_TYPES = GIT_SOURCE_TYPES | {"svn", "other"}
 MAX_EXCLUSION_PATHS = 100
 _GLOB_MAGIC = re.compile(r"[*?[]")
-_SPLIT_INPUT = re.compile(r"[,、;；\r\n]+")
+_SPLIT_INPUT = re.compile(r"[,;；\r\n]+")
 
 
 @dataclass(frozen=True)

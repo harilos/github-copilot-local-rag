@@ -1066,7 +1066,7 @@ def _parse_include_path_input(value: Any) -> list[str]:
     text = str(value or "")
     return [
         item.strip()
-        for item in re.split(r"[,、;；\r\n]+", text)
+        for item in re.split(r"[,;；\r\n]+", text)
         if item.strip()
     ]
 
