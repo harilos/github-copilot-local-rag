@@ -1019,11 +1019,14 @@ class GitLabIssueSourceContracts(unittest.TestCase):
         self.assertEqual([PROJECT_LOOKUP_URL], api.urls())
         self.assertFalse((self.work / "issues").exists())
 
-    def test_reflection_callback_runs_for_each_five_and_final_partial_batch(
+    def test_reflection_callback_runs_for_each_fifty_and_final_partial_batch(
         self,
     ) -> None:
         api = _GitLabApi(
-            {1: [_summary(iid) for iid in range(1, 13)]}
+            {
+                1: [_summary(iid) for iid in range(1, 101)],
+                2: [_summary(iid) for iid in range(101, 103)],
+            }
         )
         items: list[tuple[int, int]] = []
         batches: list[tuple[int, int]] = []
@@ -1039,11 +1042,11 @@ class GitLabIssueSourceContracts(unittest.TestCase):
         )
 
         self.assertEqual(
-            [(iid, iid) for iid in range(1, 13)],
+            [(iid, iid) for iid in range(1, 103)],
             items,
         )
-        self.assertEqual([(5, 5), (10, 10), (12, 12)], batches)
-        for iid in range(1, 13):
+        self.assertEqual([(50, 50), (100, 100), (102, 102)], batches)
+        for iid in range(1, 103):
             detail_fragment = f"/issues/{iid}"
             discussion_fragment = f"/issues/{iid}/discussions"
             detail_index = next(
@@ -1057,7 +1060,7 @@ class GitLabIssueSourceContracts(unittest.TestCase):
                 if discussion_fragment in urlsplit(url).path
             )
             self.assertLess(detail_index, discussion_index)
-            if iid < 12:
+            if iid < 102:
                 next_detail_index = next(
                     index
                     for index, url in enumerate(api.urls())
@@ -1144,7 +1147,7 @@ class GitLabIssueSourceContracts(unittest.TestCase):
         self,
     ) -> None:
         api = _GitLabApi(
-            {1: [_summary(iid) for iid in range(1, 7)]},
+            {1: [_summary(iid) for iid in range(1, 53)]},
             detail_errors={
                 1: _http_error(404, "Issue is no longer visible")
             },
@@ -1158,9 +1161,9 @@ class GitLabIssueSourceContracts(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(5, outcome["fetched_this_run"])
+        self.assertEqual(51, outcome["fetched_this_run"])
         self.assertEqual(1, outcome["unavailable_this_run"])
-        self.assertEqual([(6, 6)], batches)
+        self.assertEqual([(51, 51), (52, 52)], batches)
 
     def test_discussion_failure_keeps_previous_complete_markdown_unchanged(
         self,

@@ -184,36 +184,36 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
     def state(self, local_source_key: str) -> dict[str, Any]:
         return self.store.read_state(local_source_key).payload
 
-    def test_initial_seven_issues_reflect_only_each_pending_batch(
+    def test_initial_fifty_two_issues_reflect_only_each_pending_batch(
         self,
     ) -> None:
         registered = self.register()
         key = registered["local_source_key"]
         api = _GitLabApi(
-            {1: [_summary(iid) for iid in range(1, 8)]}
+            {1: [_summary(iid) for iid in range(1, 53)]}
         )
         add = _AddRunner()
 
         result = self.update(key, api, add)
 
         self.assertEqual("updated", result["status"])
-        self.assertEqual(7, result["indexed_confirmed_count"])
+        self.assertEqual(52, result["indexed_confirmed_count"])
         self.assertEqual(
-            [list(range(1, 6)), [6, 7]],
+            [list(range(1, 51)), [51, 52]],
             [call["issue_iids"] for call in add.calls],
         )
-        self.assertEqual(list(range(1, 8)), api.detail_iids())
+        self.assertEqual(list(range(1, 53)), api.detail_iids())
         state = self.state(key)
         self.assertEqual("complete", state["phase"])
         self.assertFalse(state["can_resume"])
         self.assertEqual(
-            list(range(1, 8)),
+            list(range(1, 53)),
             state[GITLAB_ISSUE_IDS_STATE_KEY],
         )
         self.assertNotIn(GITLAB_PROJECT_ID_STATE_KEY, state)
-        self.assertEqual(7, state["indexed_confirmed_count"])
+        self.assertEqual(52, state["indexed_confirmed_count"])
         self.assertEqual(0, state["pending_count"])
-        self.assertEqual(7, result["add_summary"]["searchable_files"])
+        self.assertEqual(52, result["add_summary"]["searchable_files"])
         for call in add.calls:
             self.assertIn("--selected-files-only", call["arguments"])
 
@@ -223,7 +223,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         registered = self.register()
         key = registered["local_source_key"]
         api = _GitLabApi(
-            {1: [_summary(iid) for iid in range(1, 8)]}
+            {1: [_summary(iid) for iid in range(1, 53)]}
         )
         add = _AddRunner(fail_calls={1})
 
@@ -233,18 +233,18 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         interrupted = self.state(key)
         self.assertEqual("reflect", interrupted["phase"])
         self.assertTrue(interrupted["can_resume"])
-        self.assertEqual(5, interrupted["fetched_count"])
+        self.assertEqual(50, interrupted["fetched_count"])
         self.assertEqual(0, interrupted["indexed_confirmed_count"])
-        self.assertEqual(5, interrupted["pending_count"])
+        self.assertEqual(50, interrupted["pending_count"])
         self.assertEqual(
-            list(range(1, 8)),
+            list(range(1, 53)),
             interrupted[GITLAB_ISSUE_IDS_STATE_KEY],
         )
         self.assertEqual(
             PROJECT_ID,
             interrupted[GITLAB_PROJECT_ID_STATE_KEY],
         )
-        self.assertEqual(list(range(1, 6)), api.detail_iids())
+        self.assertEqual(list(range(1, 51)), api.detail_iids())
         self.assertEqual(1, len(api.inventory_urls()))
 
         api.calls.clear()
@@ -252,12 +252,12 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
 
         self.assertEqual("updated", result["status"])
         self.assertEqual([], api.inventory_urls())
-        self.assertEqual([6, 7], api.detail_iids())
+        self.assertEqual([51, 52], api.detail_iids())
         self.assertEqual(
             [
-                list(range(1, 6)),
-                list(range(1, 6)),
-                [6, 7],
+                list(range(1, 51)),
+                list(range(1, 51)),
+                [51, 52],
             ],
             [call["issue_iids"] for call in add.calls],
         )
@@ -265,7 +265,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.assertEqual("complete", final["phase"])
         self.assertFalse(final["can_resume"])
         self.assertNotIn(GITLAB_PROJECT_ID_STATE_KEY, final)
-        self.assertEqual(7, final["indexed_confirmed_count"])
+        self.assertEqual(52, final["indexed_confirmed_count"])
         self.assertEqual(0, final["pending_count"])
 
     def test_partial_add_errors_stay_resumable_and_retry_errors_is_used(
@@ -448,12 +448,12 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         key = self.register()["local_source_key"]
         add = _AddRunner(partial_error_calls={1})
 
-        result = self.update(key, _GitLabApi({1: [_summary(i) for i in range(1, 8)]}), add)
+        result = self.update(key, _GitLabApi({1: [_summary(i) for i in range(1, 53)]}), add)
 
         self.assertEqual("updated", result["status"])
-        self.assertEqual(["issues/6.md", "issues/7.md"], add.calls[-1]["selected_files"])
-        self.assertEqual([1, 6, 7], add.calls[-1]["issue_iids"])
-        self.assertEqual(7, result["add_summary"]["searchable_files"])
+        self.assertEqual(["issues/51.md", "issues/52.md"], add.calls[-1]["selected_files"])
+        self.assertEqual([1, 51, 52], add.calls[-1]["issue_iids"])
+        self.assertEqual(52, result["add_summary"]["searchable_files"])
 
     def test_error_only_resume_keeps_partial_until_the_error_recovers(self) -> None:
         key = self.register()["local_source_key"]
@@ -475,7 +475,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         self.update(key, _GitLabApi({1: [_summary(1)]}), add)
         # Issue 1 is no longer in the remote inventory, but its historical
         # Markdown must still be reflected when recovering missing artifacts.
-        api = _GitLabApi({1: [_summary(i) for i in range(2, 9)]})
+        api = _GitLabApi({1: [_summary(i) for i in range(2, 54)]})
         token = runner_module._FORCE_FULL_MATERIALIZATION.set(True)
         try:
             with self.assertRaisesRegex(SourceManagerError, "ADD failed"):
@@ -487,7 +487,7 @@ class GitLabIssueRunnerContracts(unittest.TestCase):
         result = self.update(key, api, add)
 
         self.assertEqual("updated", result["status"])
-        self.assertEqual(list(range(1, 9)), add.calls[-1]["issue_iids"])
+        self.assertEqual(list(range(1, 54)), add.calls[-1]["issue_iids"])
         for call in add.calls[1:]:
             self.assertNotIn("--selected-files-only", call["arguments"])
 

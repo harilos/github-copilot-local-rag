@@ -20,7 +20,7 @@ from .security import validate_web_url
 GITLAB_ISSUES_CUTOFF_STATE_KEY = "gitlab_issues_updated_after"
 GITLAB_ISSUE_IDS_STATE_KEY = "gitlab_issue_iids"
 GITLAB_PROJECT_ID_STATE_KEY = "gitlab_project_id"
-GITLAB_ISSUES_BATCH_SIZE = 5
+GITLAB_ISSUES_BATCH_SIZE = 50
 _AUTO_ISSUE_PATTERN = r"^issues/(?P<issue_iid>[0-9]+)\.md$"
 _LOCAL_METADATA = re.compile(
     r"(?m)^<!-- local-rag-gitlab-issue: (\{[^\r\n]+\}) -->$"
@@ -315,7 +315,7 @@ def fetch_gitlab_issues(
     no_change_callback: ItemCallback | None = None,
     _force_full_materialization: bool = False,
 ) -> dict[str, Any]:
-    """Fetch Issue details and discussions serially, five Issues per ADD batch."""
+    """Fetch Issue details and discussions serially, fifty Issues per ADD batch."""
 
     project = parse_gitlab_project(
         settings.get("project_url"),

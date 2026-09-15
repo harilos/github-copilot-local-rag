@@ -2544,7 +2544,7 @@ def _update_gitlab_issues_source(
     progress_callback: ProgressCallback | None,
     force_full_materialization: bool,
 ) -> dict[str, Any]:
-    """Fetch GitLab Issues serially and reflect stable batches of five."""
+    """Fetch GitLab Issues serially and reflect stable batches of fifty."""
 
     observability: dict[str, Any] = {}
     plan = store.plan(source.payload)

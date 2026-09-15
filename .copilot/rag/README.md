@@ -194,7 +194,7 @@ GitLab Issue Sources use a machine-local access token with `read_api`
 permission. GitLab fetch settings stored in the DB contain only the
 GitLab/project URLs, an instance-derived environment name, and the update
 window. Open and closed Issues plus Discussions are materialized as Markdown
-and reflected in batches of five.
+and reflected in batches of 50, with any final partial batch reflected as well.
 If an Issue is deleted or becomes invisible to the acquisition account, its
 existing RAG document is retained. Later updates only create or overwrite
 Issues visible to that account. After the first successful ingestion, the
